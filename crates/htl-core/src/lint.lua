@@ -43,8 +43,13 @@ local function walk(root, visit)
       if type(n) ~= "table" or seen[n] then return end
       seen[n] = true
       if is_node(n) then visit(n) end
+      -- Statement lists first, in source order (lints that track "declared, then
+      -- later assigned" depend on it); then the named children.
+      for i = 1, #n do
+         if type(n[i]) == "table" then go(n[i]) end
+      end
       for k, v in pairs(n) do
-         if not SKIP_KEYS[k] and type(v) == "table" then go(v) end
+         if type(k) ~= "number" and not SKIP_KEYS[k] and type(v) == "table" then go(v) end
       end
    end
    go(root)
@@ -363,21 +368,45 @@ local function numeric_literal(exp)
    return nil
 end
 
+-- Does the expression carry a non-integer: a float literal, `/` or `^` (both yield
+-- number in Teal even on integers)?
+local function mixes_number(exp)
+   local hit = false
+   walk(exp, function(n)
+      if n.kind == "number" then hit = true end
+      if n.kind == "op" and n.op and (n.op.op == "/" or n.op.op == "^") then hit = true end
+   end)
+   return hit
+end
+
+-- Only locals that are *later* assigned a number expression are reported: a plain
+-- integer counter (`local i = 1`, `local MASK = 0xff`) never meets a number and needs
+-- no annotation (dogfood: 37 of 37 hits in a 5k-line game were counters).
 local function lint_explicit_number(ast, report)
+   local ints = {} -- name -> declaring var node (later declaration shadows)
    walk(ast, function(n)
-      if n.kind ~= "local_declaration" or not n.vars then return end
-      -- `decltuple` is a tuple type; its member types sit in `.tuple` (one per annotated var).
-      local decl = n.decltuple
-      local annotated = (decl and decl.tuple and #decl.tuple) or 0
-      for i, v in ipairs(n.vars) do
-         if is_node(v) and i > annotated then
-            local exp = n.exps and n.exps[i]
-            local inferred = numeric_literal(exp)
-            if inferred then
-               local other = inferred == "integer" and "number" or "integer"
-               report("explicit-number", v.y, v.x,
-                  "'" .. tostring(v.tk) .. "' is inferred as " .. inferred .. " from its literal; write `local "
-                  .. tostring(v.tk) .. ": " .. inferred .. " = ...` (or `: " .. other .. "`) to fix the numeric type explicitly")
+      if n.kind == "local_declaration" and n.vars then
+         -- `decltuple` is a tuple type; its member types sit in `.tuple` (one per annotated var).
+         local decl = n.decltuple
+         local annotated = (decl and decl.tuple and #decl.tuple) or 0
+         for i, v in ipairs(n.vars) do
+            if is_node(v) then
+               if i > annotated and numeric_literal(n.exps and n.exps[i]) == "integer" then
+                  ints[v.tk] = v
+               else
+                  ints[v.tk] = nil
+               end
+            end
+         end
+      elseif n.kind == "assignment" and n.vars then
+         for i, v in ipairs(n.vars) do
+            if is_node(v) and v.kind == "variable" and ints[v.tk] and n.exps and n.exps[i]
+               and mixes_number(n.exps[i]) then
+               local d = ints[v.tk]
+               ints[v.tk] = nil
+               report("explicit-number", d.y, d.x,
+                  "'" .. tostring(v.tk) .. "' is inferred as integer from its literal but is assigned a number at line "
+                  .. tostring(n.y) .. "; write `local " .. tostring(v.tk) .. ": number = ...` to fix the numeric type explicitly")
             end
          end
       end

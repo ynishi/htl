@@ -283,13 +283,19 @@ function H.type_only_module(module_name, decl_path)
    })
 end
 
--- Declared field names of a record type reachable as `<module>.<Type>` in the shared
--- env (the module must have been required/checked already, e.g. by an expect_type stub).
+-- Declared field names of a record type reachable as `<module>.<Type>`. The declaring
+-- module is loaded into the shared env on first use (its declarations are the same for
+-- every contract dir, unlike the modules held to them, so sharing is right here).
 -- Returns a sorted list, or nil when the type cannot be found.
 function H.record_fields(type_path)
    local module, tname = type_path:match("^([^.]+)%.(.+)$")
    if not module then return nil end
    local mod = H.env.modules and H.env.modules[module]
+   if not mod then
+      tl.check_string(string.format('local m = require("%s")\nreturn m\n', module), H.env,
+         "<record_fields " .. module .. ">")
+      mod = H.env.modules and H.env.modules[module]
+   end
    if not mod then return nil end
    local t = mod
    for seg in tname:gmatch("[^.]+") do
@@ -310,6 +316,13 @@ end
 --   2. with require_fields: keys of the module's returned table literal (also
 --      `X.define({ ... })`) vs the record's declared fields (missing ones).
 -- Returns { errors = {string}, missing = {string} | nil (nil = not decidable) }.
+-- Type-check a stub in a fresh env: the shared env caches module types by name, so a
+-- second `Site` (another contract dir) would be judged by the first one's type.
+function H.check_stub(src, filename)
+   local result = tl.check_string(src, new_env(), filename)
+   return collect_errors(filename, result)
+end
+
 function H.contract_check(filename, modname, type_path, require_fields)
    local module = type_path:match("^([^.]+)%.")
    local out = { errors = {}, missing = nil }
@@ -319,11 +332,8 @@ function H.contract_check(filename, modname, type_path, require_fields)
    end
    local stub = string.format('local %s = require("%s")\nlocal m: %s = require("%s")\nreturn m\n',
       module, module, type_path, modname)
-   local code, info = H.gen_string(stub, "<contract " .. type_path .. " for " .. modname .. ">")
-   if not code then
-      for _, e in ipairs(info.errors) do out.errors[#out.errors + 1] = e end
-      return out
-   end
+   out.errors = H.check_stub(stub, "<contract " .. type_path .. " for " .. modname .. ">")
+   if #out.errors > 0 then return out end
    if not require_fields then return out end
    local declared = H.record_fields(type_path)
    if not declared then return out end
@@ -334,20 +344,51 @@ function H.contract_check(filename, modname, type_path, require_fields)
    fd:close()
    local ast = tl.parse(src, filename, "tl")
    if not ast then return out end
-   local ret
+   local ret, ret_i
    for i = #ast, 1, -1 do
       local s = ast[i]
-      if type(s) == "table" and s.kind == "return" then ret = s break end
+      if type(s) == "table" and s.kind == "return" then ret, ret_i = s, i break end
    end
    if not ret or not ret.exps or not ret.exps[1] then return out end
    local exp = ret.exps[1]
+   local present = {}
+   local function strip_cast(e)   -- `{ ... } as T`
+      if e and e.kind == "op" and e.op and e.op.op == "as" then return e.e1 end
+      return e
+   end
+   exp = strip_cast(exp)
+   -- `return m`: find the table literal `m` was declared / assigned from, and count
+   -- `m.<field> = ...` statements in between as present.
+   if exp.kind == "variable" then
+      local name = exp.tk
+      local found
+      for i = ret_i - 1, 1, -1 do
+         local s = ast[i]
+         if type(s) == "table" and s.vars then
+            for vi, v in ipairs(s.vars) do
+               -- declared names parse as `identifier`, assigned ones as `variable`
+               if (s.kind == "local_declaration" or s.kind == "assignment")
+                  and (v.kind == "variable" or v.kind == "identifier") and v.tk == name
+                  and s.exps and s.exps[vi] then
+                  found = s.exps[vi]
+               elseif s.kind == "assignment" and v.kind == "op" and v.op and v.op.op == "."
+                  and v.e1 and v.e1.kind == "variable" and v.e1.tk == name and v.e2 and v.e2.tk then
+                  present[v.e2.tk] = true
+               end
+            end
+         end
+         if found then break end
+      end
+      if not found then return out end
+      exp = strip_cast(found)
+   end
    -- `return X.define({ ... })` / `return define({ ... })`: look at the single literal argument
    if exp.kind == "op" and exp.op and exp.op.op == "@funcall" and exp.e2 and exp.e2[1]
       and exp.e2[1].kind == "literal_table" and #exp.e2 == 1 then
       exp = exp.e2[1]
    end
+   exp = strip_cast(exp)
    if exp.kind ~= "literal_table" then return out end
-   local present = {}
    for _, item in ipairs(exp) do
       if type(item) == "table" and item.key and item.key.kind == "string" then
          present[(item.key.tk or ""):sub(2, -2)] = true

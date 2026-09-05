@@ -153,7 +153,7 @@ nil-guard on the host side when some fields are optional.
 | `shadow-local` | on | a local / loop var / parameter reusing an enclosing local's name |
 | `no-global` | on | `global` declarations |
 | `no-any` | off | explicit `any` annotations and `as any` casts |
-| `explicit-number` | off | an unannotated local initialized with a numeric literal: `local n = 0` infers `integer`, `0.0` infers `number`, and a later `n = n * 1.5` fails; write `local n: number = 0` |
+| `explicit-number` | off | `local n = 0` (inferred `integer`) that is later assigned a number expression (`n = n * 1.5`, `n = a / b`): names the declaration and the assignment; write `local n: number = 0`. Plain integer counters are not reported |
 | `class-record` | off | a record declaring metamethods (`metamethod __index: Actor` = a class): its metatable is attached by `setmetatable` at run time and is not part of the value, so serialization and the Rust boundary drop it; keep such records out of saved data and host signatures |
 | `require-cycle` | on (project-level) | a loop in the require graph of the files `htl check <dir>` just checked, e.g. `a.tl -> b.tl -> a.tl`. Teal types the back edge as an opaque circular require, so without this the symptom is "cannot index" somewhere else |
 
@@ -176,17 +176,28 @@ strict  = true            # lints fail check/test and include_tl!; false makes t
 [fmt]
 indent = 3
 
+[check]
+paths = ["mods", "~/.cache/tsk/sdk"]   # extra dirs require() resolves from while checking
+
 [[contract]]              # static form of TealResolver::expect_type / require_fields
-dir = "mods"              # relative to htl.toml
+dir = "mods"              # relative to htl.toml; "sites/*" = every subdirectory of sites/
 type = "defs.Mod"         # every module directly under `dir` must return this record
 require_fields = true     # ... with every declared field present in the returned table
+exclude = ["modkit"]      # modules in `dir` not held to it (an SDK the host writes there)
+# module = "Site"         # or: only this module name (in each dir) is held to it
 ```
+
+`[check] paths` is for modules the host supplies at run time from somewhere the
+checker would not look (an SDK cache, a mods dir): the CLI, `include_tl!` and
+`contract_resolvers` all add them, plus the `htl.toml` dir and its `src/`.
 
 A `[[contract]]` adds two lints:
 
 - `contract` — a module under `dir` whose return value is not assignable to `type`, or
   (with `require_fields`) whose returned table literal leaves a declared field out, is
-  reported at `htl check` time instead of at the first `require`.
+  reported at `htl check` time instead of at the first `require`. The literal is found
+  through `return { … }`, `return define({ … })`, `return { … } as T`, and
+  `local m: T = { … } … m.f = … return m`.
 - `contract-unenforced` — a contract is only a guarantee if the host enforces it. When a
   Cargo package is found, `htl check` scans its Rust sources for
   `expect_type("<type>")` (plus `.require_fields()` when required) or for the

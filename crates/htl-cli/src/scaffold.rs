@@ -116,11 +116,15 @@ fn t_htl_toml() -> String {
      # strict  = true   # lints fail check/test and include_tl!; false makes the macro advisory\n\n\
      [fmt]\n\
      indent = 3\n\n\
+     [check]\n\
+     # paths = [\"mods\", \"~/.cache/sdk\"]   # extra dirs require() resolves from while checking\n\n\
      # Contract for a directory of modules (static form of TealResolver::expect_type):\n\
      # [[contract]]\n\
-     # dir = \"mods\"             # relative to this file\n\
+     # dir = \"mods\"             # relative to this file; \"sites/*\" = each subdirectory\n\
      # type = \"defs.Mod\"        # every module under `dir` must return this record\n\
      # require_fields = true    # ... with every declared field present\n\
+     # exclude = [\"modkit\"]     # modules in `dir` not held to it (an SDK the host writes there)\n\
+     # module = \"Site\"          # or: only this module name is held to it\n\
      # The host must enforce it too: htl::pkg::contract_resolvers(root, &config), or\n\
      # TealResolver::new(\"mods\").expect_type(\"defs.Mod\").require_fields() by hand.\n\
      # `htl check` reports `contract-unenforced` when neither appears in the Rust sources.\n"

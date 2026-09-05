@@ -135,6 +135,123 @@ fn unenforced_contract_is_reported_against_host_sources() {
 }
 
 #[test]
+fn contract_lint_reads_annotated_cast_and_field_assignment_forms() {
+    let (root, cfg) = project("forms");
+    // The forms htl's own hint recommends must not switch the static check off.
+    let d = "local defs = require(\"defs\")\n";
+    write(&root.join("mods/annot.tl"), &format!("{d}local m: defs.Mod = {{ name = \"a\" }}\nreturn m\n"));
+    write(&root.join("mods/cast.tl"), &format!("{d}return {{ name = \"c\" }} as defs.Mod\n"));
+    write(&root.join("mods/late.tl"), &format!("{d}local m: defs.Mod = {{ name = \"l\" }}\nm.hp = 2\nreturn m\n"));
+    write(&root.join("mods/reassign.tl"), &format!("{d}local m: defs.Mod\nm = {{ name = \"r\" }}\nreturn m\n"));
+    let h = Htl::new().unwrap();
+    for f in ["annot", "cast", "reassign"] {
+        let l = contract_lints(&h, &root, &cfg, &root.join(format!("mods/{f}.tl"))).unwrap();
+        assert_eq!(l.len(), 1, "{f}: {l:?}");
+        assert!(l[0].contains("lacks declared field(s) of defs.Mod: hp"), "{f}: {}", l[0]);
+    }
+    let late = contract_lints(&h, &root, &cfg, &root.join("mods/late.tl")).unwrap();
+    assert!(late.is_empty(), "`m.hp = 2` counts as present: {late:?}");
+}
+
+#[test]
+fn contract_exclude_glob_dir_and_module_filter() {
+    let root = scratch("glob");
+    write(
+        &root.join("htl.toml"),
+        "[[contract]]\ndir = \"mods\"\ntype = \"defs.Mod\"\nrequire_fields = true\nexclude = [\"modkit\"]\n\n\
+         [[contract]]\ndir = \"sites/*\"\ntype = \"defs.Site\"\nmodule = \"Site\"\n",
+    );
+    write(
+        &root.join("src/defs.tl"),
+        "local record defs\n   record Mod\n      name: string\n      hp: integer\n   end\n   record Site\n      title: string\n   end\nend\nreturn defs\n",
+    );
+    // An SDK the host drops into the contract dir: not a Mod, and must not be held to it.
+    write(&root.join("mods/modkit.tl"), "local record modkit\nend\nfunction modkit.define(t: table): table\n   return t\nend\nreturn modkit\n");
+    write(&root.join("mods/good.tl"), "return { name = \"g\", hp = 1 }\n");
+    write(&root.join("sites/blog/Site.tl"), "return { title = 1 }\n");
+    write(&root.join("sites/blog/helper.tl"), "return { anything = true }\n");
+    write(&root.join("sites/docs/Site.tl"), "return { title = \"docs\" }\n");
+    let (_, cfg) = HtlConfig::find(&root).unwrap().unwrap();
+
+    let dirs = cfg.contract[1].dirs(&root);
+    assert_eq!(dirs, vec![root.join("sites/blog"), root.join("sites/docs")]);
+    assert!(!cfg.contract[0].applies_to("modkit") && !cfg.contract[0].applies_to("defs"));
+    assert!(cfg.contract[1].applies_to("Site") && !cfg.contract[1].applies_to("helper"));
+
+    let h = Htl::new().unwrap();
+    let lint = |rel: &str| contract_lints(&h, &root, &cfg, &root.join(rel)).unwrap();
+    assert!(lint("mods/modkit.tl").is_empty(), "excluded SDK held to contract");
+    assert!(lint("mods/good.tl").is_empty());
+    let blog = lint("sites/blog/Site.tl");
+    assert_eq!(blog.len(), 1, "{blog:?}");
+    assert!(blog[0].contains("does not satisfy contract defs.Site (sites/*)"), "{}", blog[0]);
+    assert!(lint("sites/blog/helper.tl").is_empty(), "module filter must skip helper");
+    assert!(lint("sites/docs/Site.tl").is_empty());
+
+    // Run time: one resolver per matched dir, same exclude / module rules.
+    let mut reg = htl_core::pkg::mlua_pkg::Registry::new();
+    for r in htl_core::pkg::contract_resolvers(&root, &cfg).unwrap() {
+        reg.add(r);
+    }
+    reg.install(h.lua()).unwrap();
+    let kit: mlua::Table = h.lua().load("return require('modkit')").eval().unwrap();
+    assert!(kit.contains_key("define").unwrap(), "SDK served untouched");
+    // Two dirs serve `Site`; the first registered (blog) is rejected, and a rejected
+    // module must fail the require rather than silently fall through to docs.
+    let err = h.lua().load("return require('Site').title").eval::<String>().unwrap_err().to_string();
+    assert!(err.contains("does not satisfy defs.Site"), "{err}");
+    let helper: mlua::Table = h.lua().load("return require('helper')").eval().unwrap();
+    assert!(helper.contains_key("anything").unwrap(), "module filter: helper served untyped");
+}
+
+#[test]
+fn check_paths_make_host_supplied_modules_visible() {
+    let root = scratch("paths");
+    write(&root.join("htl.toml"), "[check]\npaths = [\"sdk\"]\n");
+    write(&root.join("sdk/Tasks.tl"), "local record Tasks\n   run: function(string)\nend\nreturn Tasks\n");
+    write(&root.join("src/use.tl"), "local Tasks = require(\"Tasks\")\nTasks.run(1)\n");
+    let (_, cfg) = HtlConfig::find(&root).unwrap().unwrap();
+    assert_eq!(cfg.search_paths(&root), vec![root.clone(), root.join("src"), root.join("sdk")]);
+
+    let bare = Htl::new().unwrap();
+    bare.add_path(&root.join("src")).unwrap();
+    let ci = bare.check(&root.join("src/use.tl")).unwrap();
+    assert!(ci.errors.iter().any(|e| e.contains("module not found")), "{:?}", ci.errors);
+
+    let h = Htl::new().unwrap();
+    h.apply_config(&root, &cfg).unwrap();
+    let ci = h.check(&root.join("src/use.tl")).unwrap();
+    assert!(ci.errors.iter().any(|e| e.contains("got integer, expected string")), "typed through [check] paths: {:?}", ci.errors);
+}
+
+#[test]
+fn declaration_steps_aside_for_a_preloaded_host_module() {
+    let root = scratch("preload");
+    write(&root.join("mods/host.d.tl"), "local record host\n   twice: function(integer): integer\nend\nreturn host\n");
+    write(&root.join("mods/use.tl"), "local host = require(\"host\")\nreturn host.twice(2)\n");
+
+    let h = Htl::new().unwrap();
+    let mut reg = htl_core::pkg::mlua_pkg::Registry::new();
+    reg.add(htl_core::pkg::TealResolver::new(root.join("mods")).unwrap());
+    reg.install(h.lua()).unwrap();
+
+    // Without an implementation the declaration answers, and says so on first use.
+    let err = h.lua().load("return require('use')").eval::<i64>().unwrap_err().to_string();
+    assert!(err.contains("declaration-only"), "{err}");
+
+    // With the host's implementation in package.preload the declaration steps aside.
+    let h = Htl::new().unwrap();
+    let t = h.lua().create_table().unwrap();
+    t.set("twice", h.lua().create_function(|_, n: i64| Ok(n * 2)).unwrap()).unwrap();
+    h.preload_value("host", t).unwrap();
+    let mut reg = htl_core::pkg::mlua_pkg::Registry::new();
+    reg.add(htl_core::pkg::TealResolver::new(root.join("mods")).unwrap());
+    reg.install(h.lua()).unwrap();
+    let four: i64 = h.lua().load("return require('use')").eval().unwrap();
+    assert_eq!(four, 4);
+}
+
+#[test]
 fn contract_resolvers_enforce_the_same_contract_at_run_time() {
     let (root, cfg) = project("runtime");
     let h = Htl::new().unwrap();
