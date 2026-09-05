@@ -244,7 +244,10 @@ a type error; the message says so).
 
 Runner: `htl test [paths] [--filter substr] [--fail-fast] [-v] [--slow MS]`. Each file
 runs in a fresh state; `-v` prints every test with its time, `--slow 50` only the ones
-over 50 ms, `--fail-fast` stops at the first failure. Any library exposing
+over 50 ms, `--fail-fast` stops at the first failure. Within a state, a module is
+type-checked once: the checker's result is reused by every later `require` and (in
+`htl check`) by every later file whose search path resolves that module name to the
+same file. `HTL_PROFILE=1` prints per-file check / lint / generate times to stderr. Any library exposing
 `run(filter, opts) -> {passed, failed, failures, tests?}` plugs in via `--lib`
 (bring its `.d.tl`); files that use no such library pass if they run to completion.
 
