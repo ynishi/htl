@@ -64,6 +64,51 @@ fn enum_from_required_module_is_covered() {
     );
 }
 
+/// `if c == "quit" then ... return end` is a guard, not a dispatch: no lint.
+#[test]
+fn single_branch_guard_is_not_flagged() {
+    let dir = scratch("guard");
+    write(
+        &dir.join("game.tl"),
+        "local record game\n   enum Command\n      \"move\"\n      \"wait\"\n      \"quit\"\n   end\n   enum State\n      \"dead\"\n      \"playing\"\n      \"won\"\n   end\nend\n\n\
+         function game.act(c: game.Command): boolean\n   if c == \"quit\" then\n      return true\n   end\n   return false\nend\n\n\
+         return game\n",
+    );
+    let lints = lints_of(&dir, "game.tl");
+    assert!(!lints.iter().any(|l| l.contains("enum-exhaustive")), "guard flagged: {lints:?}");
+}
+
+/// The enum is taken from the subject's checked type, not from whichever known enum
+/// happens to contain the literals: a chain over `Command` must name Command, never State.
+#[test]
+fn subject_type_decides_the_enum() {
+    let dir = scratch("subject");
+    write(
+        &dir.join("game.tl"),
+        "local record game\n   enum Command\n      \"move\"\n      \"wait\"\n      \"quit\"\n   end\n   enum State\n      \"dead\"\n      \"playing\"\n      \"won\"\n      \"quit\"\n   end\n   record W\n      state: State\n   end\nend\n\n\
+         function game.act(c: game.Command, w: game.W): boolean\n   if c == \"move\" then\n      return true\n   elseif c == \"quit\" then\n      return false\n   end\n   \
+         if w.state == \"dead\" then\n      return false\n   elseif w.state == \"won\" then\n      return true\n   end\n   return false\nend\n\n\
+         return game\n",
+    );
+    let lints = lints_of(&dir, "game.tl");
+    let cmd = lints.iter().find(|l| l.contains("'c'")).expect("Command chain must be flagged");
+    assert!(cmd.contains("Command") && cmd.contains("wait") && !cmd.contains("State"), "{cmd}");
+    let st = lints.iter().find(|l| l.contains("'w.state'")).expect("State chain must be flagged");
+    assert!(st.contains("State") && st.contains("playing"), "{st}");
+}
+
+/// A chain over a non-enum (string) subject is never an exhaustiveness question.
+#[test]
+fn string_subject_is_not_flagged() {
+    let dir = scratch("string");
+    write(
+        &dir.join("s.tl"),
+        "local enum Kind\n   \"a\"\n   \"b\"\n   \"c\"\nend\n\nlocal function f(s: string): integer\n   if s == \"a\" then\n      return 1\n   elseif s == \"b\" then\n      return 2\n   end\n   return 0\nend\n\nprint(f(\"a\"))\n",
+    );
+    let lints = lints_of(&dir, "s.tl");
+    assert!(!lints.iter().any(|l| l.contains("enum-exhaustive")), "string subject flagged: {lints:?}");
+}
+
 #[test]
 fn exhaustive_chain_stays_quiet() {
     let dir = scratch("quiet");

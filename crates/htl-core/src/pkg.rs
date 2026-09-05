@@ -83,6 +83,12 @@ impl TealResolver {
     /// as `"<module>.<Type>"` (e.g. `"defs.Mod"`, where `defs.tl` / `defs.d.tl` declares
     /// `Mod`). A module that does not satisfy it fails at `require` time even if it never
     /// annotates its own return value.
+    ///
+    /// What this catches is what Teal's record assignability catches: a field of the
+    /// **wrong type** (`hp = "lots"` for `hp: integer`). It does **not** catch a
+    /// **missing** field or an unknown extra field: every Teal record field is nilable,
+    /// so `{ name = "x" }` satisfies `Mod` with `monsters` absent. Guard optional data
+    /// with nil checks on the host side (`mod.monsters or {}`).
     pub fn expect_type(mut self, type_path: impl Into<String>) -> Self {
         self.expect_type = Some(type_path.into());
         self

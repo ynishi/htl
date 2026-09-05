@@ -110,61 +110,77 @@ local function collect_enums(ast)
    return enums
 end
 
--- Flatten `e == "a" or e == "b"` into (subject, {"a","b"}); nil if not that shape.
+-- Flatten `e == "a" or e == "b"` into (subject, {"a","b"}, subject node); nil if not that shape.
 local function literal_tests(exp)
    if not is_node(exp) or exp.kind ~= "op" then return nil end
    local op = exp.op and exp.op.op
    if op == "or" then
-      local s1, l1 = literal_tests(exp.e1)
+      local s1, l1, n1 = literal_tests(exp.e1)
       local s2, l2 = literal_tests(exp.e2)
       if s1 and s2 and s1 == s2 then
          for _, v in ipairs(l2) do l1[#l1 + 1] = v end
-         return s1, l1
+         return s1, l1, n1
       end
       return nil
    end
    if op == "==" then
       local lit = unquote(exp.e2 and exp.e2.tk)
-      local subj = subject_key(exp.e1)
+      local subj, node = subject_key(exp.e1), exp.e1
       if lit == nil then
          lit = unquote(exp.e1 and exp.e1.tk)
-         subj = subject_key(exp.e2)
+         subj, node = subject_key(exp.e2), exp.e2
       end
-      if lit and subj then return subj, { lit } end
+      if lit and subj then return subj, { lit }, node end
    end
    return nil
 end
 
-local function lint_enum_exhaustive(ast, report, extra_enums)
+-- `extra.enums`: name -> enumset the checker resolved (nested in records, required
+-- modules). `extra.subject_enum(y, x, key)`: the checker's type of a subject —
+-- (enumset, name) for an enum, `false` for a known non-enum, nil when unknown.
+local function lint_enum_exhaustive(ast, report, extra)
+   extra = extra or {}
    local enums = collect_enums(ast)
-   -- Enums the checker resolved: nested inside records (`record game  enum Command ... end end`)
-   -- and enums from required modules (`defs.Behavior`). Name -> enumset.
-   for name, set in pairs(extra_enums or {}) do
+   for name, set in pairs(extra.enums or {}) do
       if enums[name] == nil then enums[name] = set end
    end
-   if next(enums) == nil then return end
    walk(ast, function(n)
       if n.kind ~= "if" or not n.if_blocks then return end
-      local subject, seen_lits = nil, {}
+      -- A single `if x == "a" then ... end` is a guard (early return / special case),
+      -- not a dispatch over the enum: only chains with 2+ branches are checked.
+      if #n.if_blocks < 2 then return end
+      local subject, seen_lits, subject_node = nil, {}, nil
       for _, blk in ipairs(n.if_blocks) do
          if not blk.exp then return end -- has `else`: exhaustive by construction
-         local s, lits = literal_tests(blk.exp)
+         local s, lits, node = literal_tests(blk.exp)
          if not s then return end
          if subject and s ~= subject then return end
          subject = s
+         subject_node = subject_node or node
          for _, v in ipairs(lits) do seen_lits[v] = true end
       end
       if not subject then return end
-      -- pick the smallest enum whose value set contains every literal tested
-      local best_name, best_set, best_size
-      for name, set in pairs(enums) do
-         local all, size = true, 0
-         for _ in pairs(set) do size = size + 1 end
-         for v in pairs(seen_lits) do
-            if not set[v] then all = false break end
-         end
-         if all and (best_size == nil or size < best_size) then
-            best_name, best_set, best_size = name, set, size
+
+      local best_name, best_set
+      -- Preferred: the checker's own answer for the subject's type.
+      if extra.subject_enum and subject_node then
+         local set, tname = extra.subject_enum(subject_node.y, subject_node.x, subject)
+         if set == false then return end -- typed, not an enum: nothing to cover
+         if set then best_name, best_set = tname, set end
+      end
+      -- Fallback (type unknown): the smallest known enum containing every literal tested.
+      if not best_set then
+         if next(enums) == nil then return end
+         local best_size
+         for name, set in pairs(enums) do
+            local all, size = true, 0
+            for _ in pairs(set) do size = size + 1 end
+            for v in pairs(seen_lits) do
+               if not set[v] then all = false break end
+            end
+            if all and (best_size == nil or size < best_size) then
+               best_name, best_set, best_size = name, set, size
+            end
          end
       end
       if not best_name then return end
@@ -327,9 +343,9 @@ function L.config(spec)
 end
 
 -- Returns list of { rule, y, x, msg } sorted by position, or nil, err on syntax error.
--- `extra_enums` (name -> enumset) feeds enum-exhaustive with enums the checker
--- resolved beyond this file's top-level declarations.
-function L.run(src, filename, cfg, extra_enums)
+-- `extra` = { enums = name -> enumset, subject_enum = fn(y, x, key) } feeds
+-- enum-exhaustive with what the checker resolved (see prelude.lua).
+function L.run(src, filename, cfg, extra)
    cfg = cfg or L.DEFAULT
    local ast, errs = tl.parse(src, filename, "tl")
    if not ast or #errs > 0 then
@@ -342,7 +358,7 @@ function L.run(src, filename, cfg, extra_enums)
       out[#out + 1] = { rule = rule, y = y or 0, x = x or 0, msg = msg .. " [htl " .. rule .. "]" }
    end
    for _, r in ipairs(RULES) do
-      if cfg[r[1]] then r[2](ast, report, extra_enums) end
+      if cfg[r[1]] then r[2](ast, report, extra) end
    end
    table.sort(out, function(a, b)
       if a.y ~= b.y then return a.y < b.y end

@@ -32,13 +32,51 @@ end
 H.GEN_TARGET = "5.4"
 
 local function new_env()
-   return assert(tl.new_env({
+   local env = assert(tl.new_env({
       defaults = {
          feat_lax = "off",
          gen_compat = "off",
          gen_target = H.GEN_TARGET,
       },
    }), "htl: tl.new_env failed")
+   -- Type report (symbols + resolved types by position): lets lints ask "what is the
+   -- type of this expression" instead of guessing from literals.
+   env.report_types = true
+   return env
+end
+
+-- Resolver for lints: type of a dotted subject (`c` / `w.state`) at (y, x).
+-- Returns (enumset, type name) for an enum, `false` for a known non-enum type,
+-- nil when unknown.
+local function subject_enum_resolver(result, filename)
+   local ok, report = pcall(tl.get_types, result)
+   if not ok or type(report) ~= "table" then return nil end
+   local function deref(id, depth)
+      local t = report.types[id]
+      if t and t.ref and depth < 8 then return deref(t.ref, depth + 1) end
+      return t
+   end
+   return function(y, x, key)
+      local syms = tl.symbols_in_scope(report, y, x, filename)
+      local parts = {}
+      for p in key:gmatch("[^.]+") do parts[#parts + 1] = p end
+      local id = syms[parts[1]]
+      if not id then return nil end
+      local t = deref(id, 0)
+      for i = 2, #parts do
+         if not t or not t.fields then return nil end
+         local fid = t.fields[parts[i]]
+         if not fid then return nil end
+         t = deref(fid, 0)
+      end
+      if not t then return nil end
+      if t.enums then
+         local set = {}
+         for _, v in ipairs(t.enums) do set[v] = true end
+         return set, t.str or "enum"
+      end
+      return false
+   end
 end
 
 H.env = new_env()
@@ -102,7 +140,10 @@ function H.check(filename)
       local fd = io.open(filename, "rb")
       if fd then src = fd:read("a"); fd:close() end
       if src then
-         local found = lint.run(src, filename, H.lint_cfg, checked_enums(result, env))
+         local found = lint.run(src, filename, H.lint_cfg, {
+            enums = checked_enums(result, env),
+            subject_enum = subject_enum_resolver(result, filename),
+         })
          for _, l in ipairs(found or {}) do lints[#lints + 1] = fmt(filename, l) end
       end
    end
