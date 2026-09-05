@@ -85,6 +85,77 @@ local function fmt(filename, e)
    return string.format("%s:%d:%d: %s", e.filename or filename, e.y or 0, e.x or 0, e.msg or "?")
 end
 
+local function norm_path(p)
+   p = tostring(p):gsub("^%./", "")
+   return p:lower()
+end
+
+-- On a case-insensitive filesystem `require("site")` from `Site.tl` finds the requiring
+-- file itself; Teal then reports "no type information for required module" (or a
+-- circular-require shape) with no hint why. Re-resolve the module and say so.
+local function explain_self_require(filename, e)
+   local msg = e.msg or ""
+   local name = msg:match("no type information for required module: '([^']+)'")
+      or msg:match("module not found: '([^']+)'")
+      or msg:match("circular require: '([^']+)'")
+   if not name then return msg end
+   local found, fd = tl.search_module(name, true)
+   if fd then fd:close() end
+   if found and norm_path(found) == norm_path(filename) then
+      return msg .. string.format(
+         " (module '%s' resolved to '%s', the requiring file itself: the filesystem is case-insensitive " ..
+         "and the module name collides with this file's name; rename one of them)", name, found)
+   end
+   return msg
+end
+
+-- Proactive form of the same check: every `require("<literal>")` in the file whose
+-- resolution is the file itself gets its own error at the call site. Teal may swallow
+-- the self-require as a circular require and only complain later ("unknown type
+-- site.Config"), which hides the cause.
+local function self_require_errors(filename, ast)
+   local out, seen = {}, {}
+   local function go(n)
+      if type(n) ~= "table" or seen[n] then return end
+      seen[n] = true
+      if type(n.kind) == "string" and n.kind == "op" and n.op and n.op.op == "@funcall"
+         and type(n.e1) == "table" and n.e1.kind == "variable" and n.e1.tk == "require"
+         and type(n.e2) == "table" and type(n.e2[1]) == "table" and n.e2[1].kind == "string" then
+         local tk = n.e2[1].tk or ""
+         local name = tk:sub(2, -2)
+         local found, fd = tl.search_module(name, true)
+         if fd then fd:close() end
+         if found and norm_path(found) == norm_path(filename) then
+            out[#out + 1] = {
+               y = n.y, x = n.x,
+               msg = string.format(
+                  "require(\"%s\") resolves to '%s', the requiring file itself: the filesystem is " ..
+                  "case-insensitive and the module name collides with this file's name; rename one of them",
+                  name, found),
+            }
+         end
+      end
+      for k, v in pairs(n) do
+         if k ~= "if_parent" and k ~= "type" and k ~= "newtype" and k ~= "decltuple" and k ~= "expected"
+            and type(v) == "table" then go(v) end
+      end
+   end
+   go(ast)
+   return out
+end
+
+local function collect_errors(filename, result)
+   local errors = {}
+   for _, e in ipairs(result.syntax_errors or {}) do errors[#errors + 1] = fmt(filename, e) end
+   if result.ast and #(result.syntax_errors or {}) == 0 then
+      for _, e in ipairs(self_require_errors(filename, result.ast)) do errors[#errors + 1] = fmt(filename, e) end
+   end
+   for _, e in ipairs(result.type_errors or {}) do
+      errors[#errors + 1] = fmt(filename, { filename = e.filename, y = e.y, x = e.x, msg = explain_self_require(filename, e) })
+   end
+   return errors
+end
+
 -- Collect every enum reachable from a tl type object (records nest enums via
 -- `.fields`, typedecls wrap via `.def`). `out[name] = enumset`.
 local function collect_type_enums(t, path, out, seen, depth)
@@ -127,9 +198,7 @@ function H.check(filename)
    if not result then
       return { ok = false, errors = { tostring(err) }, warnings = {} }
    end
-   local errors, warnings = {}, {}
-   for _, e in ipairs(result.syntax_errors or {}) do errors[#errors + 1] = fmt(filename, e) end
-   for _, e in ipairs(result.type_errors or {}) do errors[#errors + 1] = fmt(filename, e) end
+   local errors, warnings = collect_errors(filename, result), {}
    for _, w in ipairs(result.warnings or {}) do warnings[#warnings + 1] = fmt(filename, w) end
    local deps = {}
    for _, fname in pairs(result.dependencies or {}) do deps[#deps + 1] = fname end
@@ -169,9 +238,7 @@ end
 -- sandbox already read the file). Same return shape as H.gen.
 function H.gen_string(src, filename)
    local result = tl.check_string(src, H.env, filename)
-   local errors = {}
-   for _, e in ipairs(result.syntax_errors or {}) do errors[#errors + 1] = fmt(filename, e) end
-   for _, e in ipairs(result.type_errors or {}) do errors[#errors + 1] = fmt(filename, e) end
+   local errors = collect_errors(filename, result)
    local warnings = {}
    for _, w in ipairs(result.warnings or {}) do warnings[#warnings + 1] = fmt(filename, w) end
    local c = { ok = #errors == 0, errors = errors, warnings = warnings, deps = {}, lints = {}, result = result }

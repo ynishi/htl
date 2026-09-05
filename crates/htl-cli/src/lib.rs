@@ -406,7 +406,7 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
         return Ok(match h.run_bundle(&b, args) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("{e}");
+                eprintln!("{}", htl::user_message(&e));
                 ExitCode::FAILURE
             }
         });
@@ -421,7 +421,8 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
     match h.exec(&code, &format!("@{}", file.display()), args) {
         Ok(()) => Ok(ExitCode::SUCCESS),
         Err(e) => {
-            eprintln!("{e}");
+            // Innermost cause, no Lua traceback (`--trace` would be the place to show it).
+            eprintln!("{}", htl::user_message(&e));
             Ok(ExitCode::FAILURE)
         }
     }

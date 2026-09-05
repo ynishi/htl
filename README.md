@@ -103,6 +103,27 @@ A `.tl` that fails its type check is `Some(Err)` in mlua-pkg's terms: it never f
 through to a later resolver. Native modules must be registered *before* the Teal
 resolver and described by a `.d.tl` for the checker.
 
+Teal resolves every `require("literal")` at check time, and htl keeps it that way. When a
+module exists only at run time (the user's `Tasks.tl` that a long-built host loads), the
+same two shapes that TypeScript, Kotlin scripting and Gradle use apply:
+
+- **Declare it** (`declare module` / `.d.ts` in TS terms): ship `Tasks.d.tl` in the host's
+  tree with the contract (`local tsk = require("tsk")  local Tasks: tsk.Tasks  return Tasks`).
+  The build checks the host's scripts against the declaration; at run time a
+  `TealResolver` rooted at the user's project serves the real file.
+- **Hand the user a typed constructor** (`defineConfig` / `satisfies UserConfig` in TS
+  terms): the SDK exports `define: function(t: tsk.Tasks): tsk.Tasks` and the user writes
+  `return tsk.define({ ... })`. Field-level errors with line numbers, no annotation on the
+  user's side, and `expect_type` becomes a belt-and-braces check.
+
+A dynamic `require(name_in_a_variable)` typed as `any` is the escape hatch, like
+GDScript's `load()` or a shorthand `declare module "x"`; use it only when the module name
+itself is unknown until run time.
+
+Errors that come out of running Lua (a host function's `Err`, a Lua `error(...)`) carry
+mlua's `stack traceback:`; `htl::user_message(&err)` returns the innermost cause alone,
+which is what `htl run` / `htl test` print.
+
 For mod / plugin directories, `TealResolver::new("mods")?.expect_type("defs.Mod")` holds
 every served module to a record type: a mod that returns the wrong shape is rejected at
 `require` time even if it never annotates its own return value. It rejects fields of the
@@ -153,6 +174,15 @@ such library pass if they run to completion.
 mlua-pkg's `entry` is a directory, so a consumer's `require("<name>")` looks for
 `<name>/init.tl`. A flat package can instead ship `<name>/<name>.tl` (e.g. `entry = "src"`
 with `src/<name>.tl`); htl resolves that form in the checker and in `TealResolver`.
+
+## Pitfalls the checker now names
+
+- **Case-insensitive filesystems (macOS, Windows)**: `require("site")` from a file
+  called `Site.tl` resolves to that very file. Teal reports it as "no type information
+  for required module"; htl appends that the module resolved to the requiring file
+  itself and that one of the names has to change.
+- **Numeric inference**: `local n = 0` is `integer`, `0.0` is `number`; opt into the
+  `explicit-number` lint to be told where an annotation is missing.
 
 ## What is deliberately not here
 
