@@ -47,6 +47,38 @@ local function fmt(filename, e)
    return string.format("%s:%d:%d: %s", e.filename or filename, e.y or 0, e.x or 0, e.msg or "?")
 end
 
+-- Collect every enum reachable from a tl type object (records nest enums via
+-- `.fields`, typedecls wrap via `.def`). `out[name] = enumset`.
+local function collect_type_enums(t, path, out, seen, depth)
+   if type(t) ~= "table" or seen[t] or depth > 12 then return end
+   seen[t] = true
+   if t.typename == "enum" and t.enumset then
+      out[path] = t.enumset
+   end
+   if t.def then collect_type_enums(t.def, path, out, seen, depth + 1) end
+   if t.fields then
+      for k, v in pairs(t.fields) do
+         collect_type_enums(v, path .. "." .. tostring(k), out, seen, depth + 1)
+      end
+   end
+end
+
+-- Enums the checker knows for one checked file: the file's own types (nested included)
+-- and every module it required (so `defs.Behavior` counts for enum-exhaustive).
+local function checked_enums(result, env)
+   local out, seen = {}, {}
+   for _, node in ipairs(result.ast or {}) do
+      if (node.kind == "local_type" or node.kind == "global_type") and node.value and node.value.newtype then
+         collect_type_enums(node.value.newtype, node.var and node.var.tk or "?", out, seen, 0)
+      end
+   end
+   if result.type then collect_type_enums(result.type, "<module>", out, seen, 0) end
+   for name, mod in pairs(env.modules or {}) do
+      collect_type_enums(mod, name, out, seen, 0)
+   end
+   return out
+end
+
 -- Type-check one file. Returns { ok, errors = {string}, warnings = {string}, result = tl Result }
 -- Uses a fresh env so module names resolved for one file (via its package.path)
 -- never leak into a later file from another directory. `H.gen` keeps the shared
@@ -70,7 +102,7 @@ function H.check(filename)
       local fd = io.open(filename, "rb")
       if fd then src = fd:read("a"); fd:close() end
       if src then
-         local found = lint.run(src, filename, H.lint_cfg)
+         local found = lint.run(src, filename, H.lint_cfg, checked_enums(result, env))
          for _, l in ipairs(found or {}) do lints[#lints + 1] = fmt(filename, l) end
       end
    end

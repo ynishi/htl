@@ -135,8 +135,13 @@ local function literal_tests(exp)
    return nil
 end
 
-local function lint_enum_exhaustive(ast, report)
+local function lint_enum_exhaustive(ast, report, extra_enums)
    local enums = collect_enums(ast)
+   -- Enums the checker resolved: nested inside records (`record game  enum Command ... end end`)
+   -- and enums from required modules (`defs.Behavior`). Name -> enumset.
+   for name, set in pairs(extra_enums or {}) do
+      if enums[name] == nil then enums[name] = set end
+   end
    if next(enums) == nil then return end
    walk(ast, function(n)
       if n.kind ~= "if" or not n.if_blocks then return end
@@ -322,7 +327,9 @@ function L.config(spec)
 end
 
 -- Returns list of { rule, y, x, msg } sorted by position, or nil, err on syntax error.
-function L.run(src, filename, cfg)
+-- `extra_enums` (name -> enumset) feeds enum-exhaustive with enums the checker
+-- resolved beyond this file's top-level declarations.
+function L.run(src, filename, cfg, extra_enums)
    cfg = cfg or L.DEFAULT
    local ast, errs = tl.parse(src, filename, "tl")
    if not ast or #errs > 0 then
@@ -335,7 +342,7 @@ function L.run(src, filename, cfg)
       out[#out + 1] = { rule = rule, y = y or 0, x = x or 0, msg = msg .. " [htl " .. rule .. "]" }
    end
    for _, r in ipairs(RULES) do
-      if cfg[r[1]] then r[2](ast, report) end
+      if cfg[r[1]] then r[2](ast, report, extra_enums) end
    end
    table.sort(out, function(a, b)
       if a.y ~= b.y then return a.y < b.y end
