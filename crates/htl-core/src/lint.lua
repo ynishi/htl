@@ -260,19 +260,37 @@ local function lint_shadow(ast, report)
    local scopes = {}
    local function push() scopes[#scopes + 1] = {} end
    local function pop() scopes[#scopes] = nil end
-   local function declare(name, y, x)
+   -- `module` = the `require("...")` name the outer local was bound to, if any. In a
+   -- growing codebase the typical hit is a new parameter or local taking the name of a
+   -- module required at the top of the file; say so instead of pointing at a line.
+   local function declare(name, y, x, module)
       if type(name) ~= "string" or name == "self" or name == "..." or name:sub(1, 1) == "_" then
          return
       end
       for i = #scopes - 1, 1, -1 do
          local outer = scopes[i][name]
          if outer then
-            report("shadow-local", y, x,
-               "local '" .. name .. "' shadows an outer local declared at line " .. outer)
+            if outer.module then
+               report("shadow-local", y, x,
+                  "local '" .. name .. "' shadows the module '" .. outer.module .. "' required at line "
+                  .. outer.y .. "; inside this scope the module is unreachable, rename the local")
+            else
+               report("shadow-local", y, x,
+                  "local '" .. name .. "' shadows an outer local declared at line " .. outer.y)
+            end
             break
          end
       end
-      scopes[#scopes][name] = y
+      scopes[#scopes][name] = { y = y, module = module }
+   end
+   -- `require("<name>")` in expression position: the module name, else nil.
+   local function required_module(exp)
+      if is_node(exp) and exp.kind == "op" and exp.op and exp.op.op == "@funcall"
+         and is_node(exp.e1) and exp.e1.kind == "variable" and exp.e1.tk == "require"
+         and type(exp.e2) == "table" and is_node(exp.e2[1]) and exp.e2[1].kind == "string" then
+         return unquote(exp.e2[1].tk)
+      end
+      return nil
    end
    local function declare_args(args)
       if type(args) ~= "table" then return end
@@ -302,8 +320,8 @@ local function lint_shadow(ast, report)
          pop()
       elseif k == "local_declaration" then
          visit(n.exps)
-         for _, v in ipairs(n.vars or {}) do
-            if is_node(v) then declare(v.tk, v.y, v.x) end
+         for i, v in ipairs(n.vars or {}) do
+            if is_node(v) then declare(v.tk, v.y, v.x, required_module(n.exps and n.exps[i])) end
          end
       elseif k == "local_function" then
          if is_node(n.name) then declare(n.name.tk, n.name.y, n.name.x) end

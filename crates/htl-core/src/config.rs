@@ -38,6 +38,8 @@ pub struct HtlConfig {
     pub fmt: FmtConfig,
     #[serde(default)]
     pub check: CheckConfig,
+    #[serde(default)]
+    pub build: BuildConfig,
     /// Static counterpart of `TealResolver::expect_type` / `require_fields`: files
     /// directly under `dir` must return `type`; checked by the `contract` lint.
     #[serde(default)]
@@ -94,6 +96,19 @@ pub struct CheckConfig {
     /// from somewhere else (an SDK cache, a mods dir).
     #[serde(default)]
     pub paths: Vec<String>,
+}
+
+/// `[build]`: what `htl build` cannot learn from literal `require`s alone.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildConfig {
+    /// Modules to bundle even though no literal `require` reaches them (targets of a
+    /// dynamic `require(expr)`).
+    #[serde(default)]
+    pub extra: Vec<String>,
+    /// Modules the host provides at run time, besides those declared only by a `.d.tl`.
+    #[serde(default)]
+    pub host: Vec<String>,
 }
 
 impl HtlConfig {
