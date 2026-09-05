@@ -43,6 +43,128 @@ pub fn include_tl_bytes(input: TokenStream) -> TokenStream {
     }
 }
 
+// ------------------------------------------------------------------ include_bundle!
+
+/// `include_bundle!("src/main.tl", host = ["host"], extra = ["modkit"], payload = "source", debug = true)`
+///
+/// Links the entry's `require` closure at `cargo build` (see `htl::link`) and embeds
+/// the encoded bundle as `&'static [u8]`; run it with
+/// `Htl::run_bundle(&Bundle::decode(BUNDLE)?, &args)` after registering host modules.
+/// Every linked file and every declaration the checker read is `include_bytes!`-tracked,
+/// so an edit rebuilds and a Teal type error is a compile error, like `include_tl!`.
+/// `payload` is `"bytecode"` (default, stripped; `debug = true` keeps line info) or
+/// `"source"` (generated Lua: what to use when cross-compiling, since bytecode is
+/// produced by the build machine's Lua).
+#[proc_macro]
+pub fn include_bundle(input: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(input as BundleArgs);
+    match expand_bundle(&args) {
+        Ok(ts) => ts,
+        Err(msg) => quote! { compile_error!(#msg) }.into(),
+    }
+}
+
+struct BundleArgs {
+    entry: String,
+    opts: htl_core::link::LinkOptions,
+}
+
+impl syn::parse::Parse for BundleArgs {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let entry: LitStr = input.parse()?;
+        let mut opts = htl_core::link::LinkOptions::default();
+        while input.peek(Token![,]) {
+            input.parse::<Token![,]>()?;
+            if input.is_empty() {
+                break;
+            }
+            let key: syn::Ident = input.parse()?;
+            input.parse::<Token![=]>()?;
+            match key.to_string().as_str() {
+                "host" => opts.host = parse_str_list(input)?,
+                "extra" => opts.extra = parse_str_list(input)?,
+                "payload" => {
+                    let v: LitStr = input.parse()?;
+                    match v.value().as_str() {
+                        "bytecode" => opts.source = false,
+                        "source" => opts.source = true,
+                        other => return Err(syn::Error::new(v.span(), format!("payload must be \"bytecode\" or \"source\", got {other:?}"))),
+                    }
+                }
+                "debug" => {
+                    let v: syn::LitBool = input.parse()?;
+                    opts.debug = v.value();
+                }
+                other => return Err(syn::Error::new(key.span(), format!("unknown include_bundle! option `{other}` (host, extra, payload, debug)"))),
+            }
+        }
+        Ok(Self { entry: entry.value(), opts })
+    }
+}
+
+fn parse_str_list(input: syn::parse::ParseStream) -> syn::Result<Vec<String>> {
+    let content;
+    syn::bracketed!(content in input);
+    let items: Punctuated<LitStr, Token![,]> = content.parse_terminated(<LitStr as syn::parse::Parse>::parse, Token![,])?;
+    Ok(items.iter().map(|l| l.value()).collect())
+}
+
+#[derive(Debug)]
+struct BundleOut {
+    bytes: Vec<u8>,
+    inputs: Vec<String>,
+}
+
+/// Link `rel` (relative to `manifest_dir`) with the CLI's search paths and `[build]`
+/// settings from `htl.toml` merged into `opts`.
+fn resolve_bundle(manifest_dir: &Path, rel: &str, opts: &htl_core::link::LinkOptions) -> Result<BundleOut, String> {
+    let path = manifest_dir.join(rel);
+    if !path.is_file() {
+        return Err(format!("include_bundle!: no such file: {}", path.display()));
+    }
+    let (h, cfg) = checker_for("include_bundle!", manifest_dir, &path)?;
+    let mut opts = opts.clone();
+    if let Some(c) = &cfg {
+        opts.extra.extend(c.build.extra.iter().cloned());
+        opts.host.extend(c.build.host.iter().cloned());
+    }
+    let linked = htl_core::link::link(&h, &path, &opts).map_err(|e| format!("include_bundle!: {e:#}"))?;
+    for (_, ci) in &linked.checks {
+        for w in &ci.warnings {
+            eprintln!("include_bundle! warning: {w}");
+        }
+    }
+    if !linked.lints.is_empty() {
+        if lenient(&cfg) {
+            for l in &linked.lints {
+                eprintln!("include_bundle! lint: {l}");
+            }
+        } else {
+            return Err(format!("htl lint failed (set HTL_LINT=warn to downgrade):\n{}", linked.lints.join("\n")));
+        }
+    }
+    let inputs: Vec<String> = linked
+        .inputs()
+        .into_iter()
+        .map(|p| if p.is_absolute() { p } else { manifest_dir.join(p) })
+        .filter(|p| p.is_file())
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    let bundle = linked.into_bundle().map_err(|e| format!("include_bundle!: {e:#}"))?;
+    Ok(BundleOut { bytes: bundle.encode(), inputs })
+}
+
+fn expand_bundle(args: &BundleArgs) -> Result<TokenStream, String> {
+    let out = resolve_bundle(&manifest_dir()?, &args.entry, &args.opts)?;
+    let lit = Literal::byte_string(&out.bytes);
+    let inputs = out.inputs;
+    Ok(quote! {{
+        #( const _: &[u8] = include_bytes!(#inputs); )*
+        #lit as &[u8]
+    }}
+    .into())
+}
+
 fn manifest_dir() -> Result<PathBuf, String> {
     std::env::var("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)
@@ -67,42 +189,51 @@ enum Payload {
 /// Check + generate `rel` (relative to `manifest_dir`). Search paths match the CLI:
 /// the file's own directory, the nearest `mlua-pkg.toml` project's vendored deps
 /// (and `target_dir` copies), and the bundled `htl.test` declarations.
-fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Included, String> {
-    let path = manifest_dir.join(rel);
-    if !path.is_file() {
-        return Err(format!("include_tl!: no such file: {}", path.display()));
-    }
-
-    let h = htl_core::Htl::new().map_err(|e| format!("include_tl!: {e:#}"))?;
+/// A checker set up the way the CLI would be for `path`: `htl.toml` lints, the file's
+/// own dir, the crate's `src/`, the mlua-pkg project, `[check] paths`, the test lib.
+/// Never the process cwd (cargo's), which has nothing to do with the script.
+fn checker_for(tag: &str, manifest_dir: &Path, path: &Path) -> Result<(htl_core::Htl, Option<htl_core::config::HtlConfig>), String> {
+    let h = htl_core::Htl::new().map_err(|e| format!("{tag}: {e:#}"))?;
     // htl.toml `[lint]` first, then HTL_LINTS, so the env var wins.
-    let cfg = htl_core::config::HtlConfig::find(&path).map_err(|e| format!("include_tl!: {e:#}"))?;
+    let cfg = htl_core::config::HtlConfig::find(path).map_err(|e| format!("{tag}: {e:#}"))?;
     let cfg_root = cfg.as_ref().map(|(p, _)| htl_core::parent_dir(p));
     let cfg = cfg.map(|(_, c)| c);
     let file_spec = cfg.as_ref().map(|c| c.lint_spec()).unwrap_or_default();
     let env_spec = std::env::var("HTL_LINTS").unwrap_or_default();
     let spec = htl_core::config::join_specs([file_spec.as_str(), env_spec.as_str()]);
     if !spec.is_empty() {
-        h.configure_lints(&spec).map_err(|e| format!("include_tl!: lint spec {spec:?}: {e:#}"))?;
+        h.configure_lints(&spec).map_err(|e| format!("{tag}: lint spec {spec:?}: {e:#}"))?;
     }
-    // Only explicit directories: the process cwd (cargo's) must not leak into module
-    // resolution, or a same-named file there gets picked up and tracked by a path that
-    // is relative to nothing in particular.
-    h.reset_search_path().map_err(|e| format!("include_tl!: {e:#}"))?;
-    h.add_path(&htl_core::parent_dir(&path))
-        .map_err(|e| format!("include_tl!: {e:#}"))?;
-    // The crate's `src/` (where scaffolded `.tl` modules and `.d.tl` live), so scripts kept
-    // elsewhere (e.g. `scripts/`) still resolve them.
+    h.reset_search_path().map_err(|e| format!("{tag}: {e:#}"))?;
+    h.add_path(&htl_core::parent_dir(path)).map_err(|e| format!("{tag}: {e:#}"))?;
     let crate_src = manifest_dir.join("src");
     if crate_src.is_dir() {
-        h.add_path(&crate_src).map_err(|e| format!("include_tl!: {e:#}"))?;
+        h.add_path(&crate_src).map_err(|e| format!("{tag}: {e:#}"))?;
     }
-    if let Some(p) = htl_core::pkg::Project::find(&path) {
-        h.apply_project(&p).map_err(|e| format!("include_tl!: {e:#}"))?;
+    if let Some(p) = htl_core::pkg::Project::find(path) {
+        h.apply_project(&p).map_err(|e| format!("{tag}: {e:#}"))?;
     }
     if let (Some(root), Some(c)) = (&cfg_root, &cfg) {
-        h.apply_config(root, c).map_err(|e| format!("include_tl!: {e:#}"))?;
+        h.apply_config(root, c).map_err(|e| format!("{tag}: {e:#}"))?;
     }
-    h.install_test_lib().map_err(|e| format!("include_tl!: {e:#}"))?;
+    h.install_test_lib().map_err(|e| format!("{tag}: {e:#}"))?;
+    Ok((h, cfg))
+}
+
+/// Lints fail the build unless `HTL_LINT=warn`, else `htl.toml` `strict = false`.
+fn lenient(cfg: &Option<htl_core::config::HtlConfig>) -> bool {
+    match std::env::var("HTL_LINT") {
+        Ok(v) => v == "warn",
+        Err(_) => cfg.as_ref().and_then(|c| c.lint.strict) == Some(false),
+    }
+}
+
+fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Included, String> {
+    let path = manifest_dir.join(rel);
+    if !path.is_file() {
+        return Err(format!("include_tl!: no such file: {}", path.display()));
+    }
+    let (h, cfg) = checker_for("include_tl!", manifest_dir, &path)?;
     let (code, ci) = h.gen_lua(&path).map_err(|e| format!("include_tl!: {e:#}"))?;
 
     for w in &ci.warnings {
@@ -112,12 +243,7 @@ fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Includ
         return Err(format!("Teal type check failed:\n{}", ci.errors.join("\n")));
     };
     if !ci.lints.is_empty() {
-        // HTL_LINT=warn, else htl.toml `strict = false`; the macro's own default is strict.
-        let lenient = match std::env::var("HTL_LINT") {
-            Ok(v) => v == "warn",
-            Err(_) => cfg.as_ref().and_then(|c| c.lint.strict) == Some(false),
-        };
-        if lenient {
+        if lenient(&cfg) {
             for l in &ci.lints {
                 eprintln!("include_tl! lint: {l}");
             }
@@ -458,6 +584,38 @@ mod tests {
 
         write(&root.join("htl.toml"), "[lint]\nenable = [\"no-any\"]\nstrict = false\n");
         resolve_include(&root, "src/main.tl", false).expect("strict = false downgrades lints");
+    }
+
+    /// `include_bundle!`: the closure is linked, host modules are recorded, every input
+    /// is tracked, and a type error anywhere in the closure is a compile error.
+    #[test]
+    fn bundle_links_closure_tracks_inputs_and_fails_on_type_errors() {
+        let root = scratch("bundle");
+        write(&root.join("src/main.tl"), "local util = require(\"util\")\nlocal host = require(\"host\")\nprint(util.twice(host.base()))\n");
+        write(
+            &root.join("src/util.tl"),
+            "local record util\nend\nfunction util.twice(n: integer): integer\n   return n * 2\nend\nreturn util\n",
+        );
+        write(&root.join("src/host.d.tl"), "local record host\n   base: function(): integer\nend\nreturn host\n");
+        write(&root.join("htl.toml"), "[build]\nextra = [\"plugin\"]\n");
+        write(&root.join("src/plugin.tl"), "return { plugged = true }\n");
+
+        let out = resolve_bundle(&root, "src/main.tl", &htl_core::link::LinkOptions::default()).expect("links");
+        let b = htl_core::bundle::Bundle::decode(&out.bytes).unwrap();
+        let names: Vec<&str> = b.modules.iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains(&"main") && names.contains(&"util") && names.contains(&"plugin"), "{names:?}");
+        assert_eq!(b.host_modules, vec!["host".to_string()]);
+        let has = |s: &str| out.inputs.iter().any(|p| p.ends_with(s));
+        assert!(has("src/main.tl") && has("src/util.tl") && has("src/host.d.tl") && has("src/plugin.tl"), "{:?}", out.inputs);
+
+        let src_opts = htl_core::link::LinkOptions { source: true, ..Default::default() };
+        let out = resolve_bundle(&root, "src/main.tl", &src_opts).expect("links as source");
+        let b = htl_core::bundle::Bundle::decode(&out.bytes).unwrap();
+        assert!(b.modules.iter().all(|m| m.kind == htl_core::bundle::Kind::Source));
+
+        write(&root.join("src/util.tl"), "local record util\nend\nfunction util.twice(n: integer): integer\n   return \"no\"\nend\nreturn util\n");
+        let err = resolve_bundle(&root, "src/main.tl", &htl_core::link::LinkOptions::default()).unwrap_err();
+        assert!(err.contains("util.tl") && err.contains("expected integer"), "{err}");
     }
 
     /// Without a project the same script fails: the dep is genuinely not on the path.

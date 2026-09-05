@@ -12,4 +12,4 @@
 pub use htl_core::*;
 
 #[cfg(feature = "macros")]
-pub use htl_macros::{TealRecord, host_module, include_tl, include_tl_bytes};
+pub use htl_macros::{TealRecord, host_module, include_bundle, include_tl, include_tl_bytes};
