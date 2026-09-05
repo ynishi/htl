@@ -122,7 +122,7 @@ fn t_readme(name: &str, m: &str, opts: &Options) -> String {
 fn t_cargo(name: &str) -> String {
     format!(
         "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n# authors / license / repository: fill in yourself\n\n\
-         [dependencies]\nhtl = {{ git = \"https://github.com/ynishi/htl\" }}\nhtl-macros = {{ git = \"https://github.com/ynishi/htl\" }}\nanyhow = \"1\"\n"
+         [dependencies]\nhtl = \"0.1\"\nanyhow = \"1\"\n"
     )
 }
 
@@ -130,7 +130,7 @@ fn t_main_rs(m: &str, lib: bool) -> String {
     let main_const = if lib {
         String::new()
     } else {
-        "use htl_macros::include_tl;\nconst MAIN: &str = include_tl!(\"src/main.tl\");\n".to_string()
+        "use htl::include_tl;\nconst MAIN: &str = include_tl!(\"src/main.tl\");\n".to_string()
     };
     let run = if lib {
         format!("    let g: htl::mlua::Table = h.lua().load(\"return require('{m}').greet('rust')\").eval()?;\n    println!(\"{{}}\", g.get::<String>(\"text\")?);\n")
@@ -140,7 +140,7 @@ fn t_main_rs(m: &str, lib: bool) -> String {
     format!(
         "//! Rust host: the Teal sources are type-checked at `cargo build` and embedded.\n\n\
          use htl::Htl;\n\n\
-         const LIB: &[u8] = htl_macros::include_tl_bytes!(\"src/{m}/init.tl\");\n{main_const}\n\
+         const LIB: &[u8] = htl::include_tl_bytes!(\"src/{m}/init.tl\");\n{main_const}\n\
          fn main() -> anyhow::Result<()> {{\n    let h = Htl::new()?;\n    h.preload_bytes(\"{m}\", LIB)?;\n{run}    Ok(())\n}}\n"
     )
 }

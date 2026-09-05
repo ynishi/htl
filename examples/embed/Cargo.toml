@@ -11,6 +11,5 @@ description = "Example host: Rust binary embedding Teal scripts via include_tl!"
 bad = []
 
 [dependencies]
-htl = { workspace = true }
-htl-macros = { workspace = true }
+htl = { workspace = true, features = ["macros", "pkg"] }
 anyhow = { workspace = true }

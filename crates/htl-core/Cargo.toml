@@ -1,0 +1,24 @@
+[package]
+name = "htl-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Engine of htl (Holistic Typed Lua): Teal check / gen / lint / fmt / test / bundle on an embedded mlua state. Use the `htl` crate."
+readme = "../../README.md"
+keywords = ["lua", "teal", "mlua", "typed", "scripting"]
+categories = ["development-tools", "game-development"]
+include = ["src/**/*", "lua/**/*", "vendor/**/*"]
+
+[features]
+default = ["pkg"]
+# `htl_core::pkg::TealResolver` / `Project` for mlua-pkg's Registry (pulls git2 via mlua-pkg's package manager).
+pkg = ["dep:mlua-pkg"]
+
+[dependencies]
+mlua = { workspace = true }
+mlua-pkg = { workspace = true, optional = true }
+anyhow = { workspace = true }
+walkdir = { workspace = true }

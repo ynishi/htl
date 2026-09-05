@@ -21,6 +21,18 @@ cargo install htl-cli          # binaries: htl, cargo-htl  (so `cargo htl <verb>
 cargo install mlua-pkg         # optional: `htl pkg install` delegates to it
 ```
 
+```toml
+[dependencies]
+htl = "0.1"                    # embedding: engine + proc macros in one import
+```
+
+| crate | role |
+|---|---|
+| `htl` | umbrella: re-exports `htl-core` and (feature `macros`, default on) the proc macros. Depend on this one. |
+| `htl-core` | engine: `Htl`, lints, fmt, bundle, test runner, mlua-pkg resolver |
+| `htl-macros` | `include_tl!` / `include_tl_bytes!` / `TealRecord` / `host_module`; generated code targets `::htl::` |
+| `htl-cli` | the `htl` / `cargo-htl` binaries |
+
 ## CLI
 
 | command | what it does |
@@ -40,8 +52,7 @@ visible to the checker and to `run` / `test` / `build` automatically.
 ## Embedding in Rust
 
 ```rust
-use htl::Htl;
-use htl_macros::{TealRecord, host_module, include_tl, include_tl_bytes};
+use htl::{Htl, TealRecord, host_module, include_tl, include_tl_bytes};
 
 #[derive(TealRecord, Clone)]           // Teal record <-> plain table (IntoLua / FromLua)
 pub struct Point { pub x: f64, pub y: f64 }
