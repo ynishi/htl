@@ -275,9 +275,11 @@ and is refused up front, naming them, if one is missing.
 - A dynamic `require(expr)` cannot be followed: list its targets under `[build] extra`
   in `htl.toml` (or `--extra`). Modules the host provides without a `.d.tl` go under
   `[build] host` (or `--host`).
-- Bundled loaders receive `(modname, "bundle:<name>")` like a file searcher. The
-  bundle's searcher sits right after `package.preload` and before the file searchers:
-  the host's modules win, files on disk do not override the bundle.
+- Bundled modules are installed as `package.preload` entries, the same place a host
+  puts its own (a name the host preloaded first is left alone: the host wins). So
+  everything that defers to preload, a `.d.tl` stepping aside for the implementation
+  or an mlua-pkg resolver over a mods dir, sees bundled modules too, and files on disk
+  do not override the bundle.
 - `htl build <dir>` (the older form) still bundles every `.tl` under a directory.
 
 From Rust, `include_bundle!` does the same at `cargo build` and keeps the guarantee
