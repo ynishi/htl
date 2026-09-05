@@ -349,10 +349,18 @@ function H.check(filename, env, opts)
       local fd = io.open(filename, "rb")
       if fd then src = fd:read("a"); fd:close() end
       if src then
+         local t1 = os.clock()
+         local enums = checked_enums(result, env)
+         prof("enums", filename, t1)
+         t1 = os.clock()
+         local subject = subject_enum_resolver(result, filename)
+         prof("get_types", filename, t1)
+         t1 = os.clock()
          local found = lint.run(src, filename, H.lint_cfg, {
-            enums = checked_enums(result, env),
-            subject_enum = subject_enum_resolver(result, filename),
+            enums = enums,
+            subject_enum = subject,
          })
+         prof("lint.run", filename, t1)
          for _, l in ipairs(found or {}) do lints[#lints + 1] = fmt(filename, l) end
       end
    end

@@ -37,12 +37,17 @@ local function is_node(t)
 end
 
 -- Generic walk over syntax nodes (types are skipped), each table visited once.
-local function walk(root, visit)
-   local seen = {}
+-- The traversal itself is the expensive part (every field of every node table), so the
+-- pre-order node list is computed once per root and replayed for every later walk of
+-- the same root: seven rules walking an 850-line file cost one traversal, not seven.
+local orders = setmetatable({}, { __mode = "k" }) -- root -> { node, node, ... }
+
+local function traverse(root)
+   local order, seen = {}, {}
    local function go(n)
       if type(n) ~= "table" or seen[n] then return end
       seen[n] = true
-      if is_node(n) then visit(n) end
+      if is_node(n) then order[#order + 1] = n end
       -- Statement lists first, in source order (lints that track "declared, then
       -- later assigned" depend on it); then the named children.
       for i = 1, #n do
@@ -53,6 +58,18 @@ local function walk(root, visit)
       end
    end
    go(root)
+   return order
+end
+
+local function walk(root, visit)
+   local order = orders[root]
+   if not order then
+      order = traverse(root)
+      orders[root] = order
+   end
+   for i = 1, #order do
+      visit(order[i])
+   end
 end
 
 local function unquote(tk)
@@ -490,6 +507,11 @@ end
 -- enum-exhaustive with what the checker resolved (see prelude.lua).
 function L.run(src, filename, cfg, extra)
    cfg = cfg or L.DEFAULT
+   -- Always a fresh parse. The checker's AST looks like a free second copy, but the
+   -- checker hangs resolved types off nodes, and through them the declarations of
+   -- *other* files become reachable: `no-any` then reported `any`s from test.d.tl at
+   -- their own positions in every file that required it [measured on a 39-file
+   -- project]. SKIP_KEYS cannot enumerate every such edge; a syntax-only tree can.
    local ast, errs = tl.parse(src, filename, "tl")
    if not ast or #errs > 0 then
       return nil, errs[1] and errs[1].msg or "parse failed"
@@ -500,8 +522,15 @@ function L.run(src, filename, cfg, extra)
       if allows[y] and allows[y][rule] then return end
       out[#out + 1] = { rule = rule, y = y or 0, x = x or 0, msg = msg .. " [htl " .. rule .. "]" }
    end
+   local profile = os.getenv("HTL_PROFILE") ~= nil
    for _, r in ipairs(RULES) do
-      if cfg[r[1]] then r[2](ast, report, extra) end
+      if cfg[r[1]] then
+         local t0 = os.clock()
+         r[2](ast, report, extra)
+         if profile then
+            io.stderr:write(string.format("profile:   rule %-16s %7.1f ms  %s\n", r[1], (os.clock() - t0) * 1000, filename))
+         end
+      end
    end
    table.sort(out, function(a, b)
       if a.y ~= b.y then return a.y < b.y end
