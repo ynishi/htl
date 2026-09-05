@@ -129,6 +129,53 @@ end
 -- Every `require("<literal>")` call site in the file, with where the checker resolves
 -- it: { name, y, x, path } (path nil when unresolved). Feeds the self-require error and
 -- the project-level require-cycle lint.
+-- "wrong number of arguments (given N, expects M)" where the call's last argument is
+-- itself a call: its multiple return values all expanded into arguments. Say so, with
+-- the two idiomatic fixes; the bare count points at the outer call and mystifies.
+local function callee_name(n)
+   if type(n) ~= "table" then return nil end
+   if n.kind == "variable" or n.kind == "identifier" then return n.tk end
+   if n.kind == "op" and n.op and (n.op.op == "." or n.op.op == ":") then
+      local a, b = callee_name(n.e1), callee_name(n.e2)
+      if a and b then return a .. n.op.op .. b end
+   end
+   return nil
+end
+
+local function explain_arity(ast, e, msg)
+   local given, expects = msg:match("^wrong number of arguments %(given (%d+), expects (%d+)%)")
+   if not given or not ast then return msg end
+   given, expects = tonumber(given), tonumber(expects)
+   if given <= expects then return msg end
+   local hit
+   local seen = {}
+   local function go(n)
+      if hit or type(n) ~= "table" or seen[n] then return end
+      seen[n] = true
+      if n.kind == "op" and n.op and (n.op.op == "@funcall" or n.op.op == "@methcall")
+         and n.y == e.y and n.x == e.x and type(n.e2) == "table" then
+         local last = n.e2[#n.e2]
+         if type(last) == "table" and last.kind == "op" and last.op
+            and (last.op.op == "@funcall" or last.op.op == "@methcall") then
+            hit = last
+            return
+         end
+      end
+      for k, v in pairs(n) do
+         if k ~= "y" and k ~= "x" and type(v) == "table" then go(v) end
+      end
+   end
+   go(ast)
+   if not hit then return msg end
+   local name = callee_name(hit.e1)
+   local call = name and (name .. "(...)") or "the last argument"
+   local extra = given - expects
+   return msg .. string.format(
+      ": %s is a call in last position, so all of its return values expand into arguments here (%d extra); " ..
+      "bind them first (`local a, b = %s`) or wrap it in parentheses `(%s)` to keep only the first",
+      call, extra, call, call)
+end
+
 local function require_sites(ast)
    local out, seen = {}, {}
    local function go(n)
@@ -178,8 +225,20 @@ local function collect_errors(filename, result)
    if result.ast and #(result.syntax_errors or {}) == 0 then
       for _, e in ipairs(self_require_errors(filename, result.ast)) do errors[#errors + 1] = fmt(filename, e) end
    end
+   local hinted = {} -- lines where an arity error was explained by a multi-value call
    for _, e in ipairs(result.type_errors or {}) do
-      errors[#errors + 1] = fmt(filename, { filename = e.filename, y = e.y, x = e.x, msg = explain_self_require(filename, e) })
+      local msg = explain_self_require(filename, e)
+      local own = e.filename == nil or e.filename == filename
+      if own then
+         local explained = explain_arity(result.ast, e, msg)
+         if explained ~= msg then hinted[e.y] = true end
+         msg = explained
+      end
+      -- tl follows the arity error with "argument N: got X, expected T (unresolved
+      -- generic)" for the very same call: a consequence, not a second mistake.
+      if not (own and hinted[e.y] and msg:find("(unresolved generic)", 1, true)) then
+         errors[#errors + 1] = fmt(filename, { filename = e.filename, y = e.y, x = e.x, msg = msg })
+      end
    end
    return errors
 end
