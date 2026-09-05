@@ -7,6 +7,6 @@ publish = false
 description = "Example host: .tl modules served through mlua-pkg's Registry via htl::pkg::TealResolver"
 
 [dependencies]
-htl = { workspace = true }
+htl = { workspace = true, features = ["pkg"] }
 mlua-pkg = { workspace = true }
 anyhow = { workspace = true }

@@ -6,19 +6,18 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Holistic Typed Lua: type-check, generate, lint, format and run Teal on an embedded mlua state"
+description = "Holistic Typed Lua: Teal type-checked at cargo build and run on an embedded mlua state (umbrella over htl-core + htl-macros)"
 readme = "../../README.md"
 keywords = ["lua", "teal", "mlua", "typed", "scripting"]
 categories = ["development-tools", "game-development"]
-include = ["src/**/*", "lua/**/*", "vendor/**/*"]
 
 [features]
-default = ["pkg"]
-# `htl::pkg::TealResolver` / `Project` for mlua-pkg's Registry (pulls git2 via mlua-pkg's package manager).
-pkg = ["dep:mlua-pkg"]
+default = ["macros", "pkg"]
+# include_tl! / include_tl_bytes! / TealRecord / host_module
+macros = ["dep:htl-macros"]
+# htl::pkg (mlua-pkg integration)
+pkg = ["htl-core/pkg"]
 
 [dependencies]
-mlua = { workspace = true }
-mlua-pkg = { workspace = true, optional = true }
-anyhow = { workspace = true }
-walkdir = { workspace = true }
+htl-core = { workspace = true }
+htl-macros = { workspace = true, optional = true }

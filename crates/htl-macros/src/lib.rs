@@ -53,11 +53,11 @@ fn expand_include(rel: &str, bytes: bool) -> Result<TokenStream, String> {
         return Err(format!("include_tl!: no such file: {}", path.display()));
     }
 
-    let h = htl::Htl::new().map_err(|e| format!("include_tl!: {e:#}"))?;
+    let h = htl_core::Htl::new().map_err(|e| format!("include_tl!: {e:#}"))?;
     if let Ok(spec) = std::env::var("HTL_LINTS") {
         h.configure_lints(&spec).map_err(|e| format!("include_tl!: HTL_LINTS: {e:#}"))?;
     }
-    h.add_path(&htl::parent_dir(&path))
+    h.add_path(&htl_core::parent_dir(&path))
         .map_err(|e| format!("include_tl!: {e:#}"))?;
     let (code, ci) = h.gen_lua(&path).map_err(|e| format!("include_tl!: {e:#}"))?;
 
@@ -181,7 +181,7 @@ fn parse_teal_attrs(attrs: &[syn::Attribute]) -> Result<TealAttrs, String> {
 
 fn write_dts(rel: &str, text: &str) -> Result<(), String> {
     let path = manifest_dir()?.join(rel);
-    htl::write_if_changed(&path, text).map_err(|e| format!("writing {}: {e}", path.display()))?;
+    htl_core::write_if_changed(&path, text).map_err(|e| format!("writing {}: {e}", path.display()))?;
     Ok(())
 }
 

@@ -15,6 +15,7 @@ categories = ["development-tools", "command-line-utilities"]
 # See src/bin/.
 
 [dependencies]
-htl = { workspace = true }
+# The CLI needs the engine only, not the proc macros.
+htl = { workspace = true, features = ["pkg"] }
 anyhow = { workspace = true }
 clap = { workspace = true }

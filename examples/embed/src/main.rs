@@ -8,8 +8,7 @@
 //!   sees the Rust API with its real signatures as `host.Point`.
 
 use anyhow::Result;
-use htl::Htl;
-use htl_macros::{TealRecord, host_module, include_tl, include_tl_bytes};
+use htl::{Htl, TealRecord, host_module, include_tl, include_tl_bytes};
 use std::time::Instant;
 
 #[derive(TealRecord, Debug, Clone)]
