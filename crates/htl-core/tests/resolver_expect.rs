@@ -55,6 +55,10 @@ fn nonconforming_mod_is_rejected_at_require() {
     let msg = err.to_string();
     assert!(msg.contains("does not satisfy defs.Mod"), "{msg}");
     assert!(msg.contains("hp"), "should point at the offending field: {msg}");
+    assert!(
+        msg.contains("hint: annotate the returned table"),
+        "should tell how to get field-level errors: {msg}"
+    );
 }
 
 #[test]

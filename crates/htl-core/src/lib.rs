@@ -148,6 +148,14 @@ impl Htl {
         out.ok_or_else(|| anyhow!("{}", err.unwrap_or_else(|| "format failed".into())))
     }
 
+    /// Drop Lua's default search path (cwd-relative `./?.lua` etc.) so only directories
+    /// passed to [`add_path`](Self::add_path) are consulted by the checker and `require`.
+    pub fn reset_search_path(&self) -> Result<()> {
+        let f: Function = self.h.get("reset_path")?;
+        f.call::<()>(())?;
+        Ok(())
+    }
+
     /// Prepend `dir/?.tl;dir/?/init.tl` to `package.path` (Teal resolves requires through it).
     pub fn add_path(&self, dir: &Path) -> Result<()> {
         let f: Function = self.h.get("add_path")?;

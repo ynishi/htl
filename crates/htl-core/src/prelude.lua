@@ -248,7 +248,19 @@ end
 -- `?/?.lua` lets a flat package expose its top-level module as `<name>/<name>.tl`
 -- (mlua-pkg's entry is a directory; without init.tl this is how a flat layout resolves).
 function H.add_path(dir)
-   package.path = dir .. "/?.lua;" .. dir .. "/?/init.lua;" .. dir .. "/?/?.lua;" .. package.path
+   local templates = dir .. "/?.lua;" .. dir .. "/?/init.lua;" .. dir .. "/?/?.lua"
+   if package.path == nil or package.path == "" then
+      package.path = templates
+   else
+      package.path = templates .. ";" .. package.path
+   end
+end
+
+-- Drop Lua's default search path (`./?.lua` etc., i.e. cwd-relative resolution) so only
+-- directories given to add_path are consulted. Used by the proc macros, where the cwd
+-- is cargo's and has nothing to do with the script being embedded.
+function H.reset_path()
+   package.path = ""
 end
 
 return H
