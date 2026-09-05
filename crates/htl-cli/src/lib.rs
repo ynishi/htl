@@ -49,6 +49,15 @@ enum Cmd {
         /// Lint rules on top of the defaults, e.g. `+no-any`
         #[arg(long)]
         lint: Option<String>,
+        /// Stop at the first failure (within a file, and across files)
+        #[arg(long)]
+        fail_fast: bool,
+        /// Print every test with its time (default: only failures and files)
+        #[arg(short, long)]
+        verbose: bool,
+        /// Also print tests slower than this many milliseconds
+        #[arg(long, value_name = "MS")]
+        slow: Option<f64>,
     },
     /// Write the `.d.tl` files declared by `#[host_module(dts = ..)]` / `#[teal(dts = ..)]`
     /// in a Rust crate, without building it (check / run / test / build do this automatically)
@@ -136,7 +145,9 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
     match cli.cmd {
         Cmd::Check { paths, strict, lint, list_lints } => cmd_check(&paths, strict, lint.as_deref(), list_lints),
         Cmd::Fmt { paths, check, indent } => cmd_fmt(&paths, check, indent),
-        Cmd::Test { paths, filter, lib, lint } => cmd_test(&paths, filter.as_deref(), &lib, lint.as_deref()),
+        Cmd::Test { paths, filter, lib, lint, fail_fast, verbose, slow } => {
+            cmd_test(&paths, filter.as_deref(), &lib, lint.as_deref(), TestFlags { fail_fast, verbose, slow })
+        }
         Cmd::Pkg { args } => cmd_pkg(&args),
         Cmd::Dts { dir } => cmd_dts(dir.as_deref()),
         Cmd::New { name, lib, embed } => cmd_new(&name, lib, embed),
@@ -257,8 +268,15 @@ fn cmd_pkg(args: &[String]) -> Result<ExitCode> {
     }
 }
 
-fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&str>) -> Result<ExitCode> {
+struct TestFlags {
+    fail_fast: bool,
+    verbose: bool,
+    slow: Option<f64>,
+}
+
+fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&str>, flags: TestFlags) -> Result<ExitCode> {
     let paths = if paths.is_empty() { vec![PathBuf::from(".")] } else { paths.to_vec() };
+    let opts = htl::testing::RunOptions { fail_fast: flags.fail_fast };
     if let Some(first) = paths.first() {
         auto_dts(first)?;
     }
@@ -270,9 +288,11 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
         eprintln!("htl test: no test files found (looked for *_test.tl and tests/**/*.tl)");
         return Ok(ExitCode::FAILURE);
     }
-    let (mut passed, mut failed, mut bad_files) = (0usize, 0usize, 0usize);
+    let (mut passed, mut failed, mut bad_files, mut ran_files) = (0usize, 0usize, 0usize, 0usize);
+    let started = std::time::Instant::now();
     for f in &files {
-        let rep = htl::testing::run_test_file(f, filter, lib, lint)?;
+        let rep = htl::testing::run_test_file(f, filter, lib, lint, &opts)?;
+        ran_files += 1;
         print_checkinfo(&rep.check);
         let tag = if rep.ok() { "ok  " } else { "FAIL" };
         let detail = if !rep.check.ok() {
@@ -284,7 +304,15 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
         } else {
             format!("{} passed, {} failed", rep.passed, rep.failed)
         };
-        eprintln!("{tag} {}  ({detail})", f.display());
+        eprintln!("{tag} {}  ({detail}, {:.0} ms)", f.display(), rep.duration_ms);
+        for tr in &rep.tests {
+            let slow = flags.slow.is_some_and(|ms| tr.ms >= ms);
+            if flags.verbose || slow {
+                let mark = if tr.ok { "ok  " } else { "FAIL" };
+                let note = if slow && !flags.verbose { "  [slow]" } else { "" };
+                eprintln!("      {mark} {}  ({:.1} ms){note}", tr.name, tr.ms);
+            }
+        }
         for m in &rep.failures {
             eprintln!("      - {m}");
         }
@@ -292,14 +320,20 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
         failed += rep.failed;
         if !rep.ok() {
             bad_files += 1;
+            if flags.fail_fast {
+                break;
+            }
         }
     }
+    let skipped = files.len() - ran_files;
     eprintln!(
-        "htl test: {} file(s), {} passed, {} failed, {} file(s) with errors",
-        files.len(),
+        "htl test: {} file(s), {} passed, {} failed, {} file(s) with errors{} ({:.0} ms)",
+        ran_files,
         passed,
         failed,
-        bad_files
+        bad_files,
+        if skipped > 0 { format!(", {skipped} file(s) not run (--fail-fast)") } else { String::new() },
+        started.elapsed().as_secs_f64() * 1000.0
     );
     Ok(if bad_files == 0 { ExitCode::SUCCESS } else { ExitCode::FAILURE })
 }

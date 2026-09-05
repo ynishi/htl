@@ -83,6 +83,38 @@ fn runtime_provided_module_is_declared_by_a_dts() {
 }
 
 /// A host function's `Err` reaches the user as its own text, without Lua's traceback.
+/// `t.expect(f())` where `f` returns two values: Teal reports the arity at `expect`, which
+/// hides that the multi-value call in last position is what expanded. Name it.
+#[test]
+fn multi_value_call_in_last_argument_is_explained() {
+    let dir = scratch("arity");
+    write(
+        &dir.join("m_test.tl"),
+        "local t = require(\"htl.test\")\n\
+         local function can_cast(mana: integer): boolean, string\n   return mana >= 3, \"\"\nend\n\
+         t.describe(\"x\", function()\n   t.it(\"y\", function()\n      t.expect(can_cast(1)):to_equal(false)\n   end)\nend)\n",
+    );
+    let h = Htl::new().unwrap();
+    h.install_test_lib().unwrap();
+    h.add_path(&dir).unwrap();
+    let ci = h.check(&dir.join("m_test.tl")).unwrap();
+    let e = ci.errors.iter().find(|e| e.contains("wrong number of arguments")).expect("arity error");
+    assert!(e.contains("m_test.tl:7:"), "{e}");
+    assert!(e.contains("can_cast(...) is a call in last position"), "{e}");
+    assert!(e.contains("local a, b = can_cast(...)") && e.contains("(can_cast(...))"), "{e}");
+    assert!(
+        !ci.errors.iter().any(|e| e.contains("unresolved generic")),
+        "the follow-on generic error is a consequence of the same call: {:?}",
+        ci.errors
+    );
+
+    // A plain arity mistake gets no such hint.
+    write(&dir.join("plain.tl"), "local function one(a: integer): integer\n   return a\nend\nprint(one(1, 2))\n");
+    let ci = h.check(&dir.join("plain.tl")).unwrap();
+    let e = ci.errors.iter().find(|e| e.contains("wrong number of arguments")).expect("arity error");
+    assert!(!e.contains("last position"), "{e}");
+}
+
 #[test]
 fn user_message_strips_traceback_and_unwraps_host_errors() {
     let h = Htl::new().unwrap();

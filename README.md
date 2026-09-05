@@ -231,9 +231,22 @@ end)
 ```
 
 `expect(x)` is generic, so `t.expect(1 + 1):to_equal("2")` is a *type* error and the
-file is refused before it runs. Any library exposing
-`run(filter) -> {passed, failed, failures}` plugs in via `--lib`; files that use no
-such library pass if they run to completion.
+file is refused before it runs.
+
+The split follows Go / Rust rather than Jest: htl invests in the **runner** and keeps
+the assertion surface small enough to read in one screen. Matchers: `to_equal`,
+`to_not_equal`, `to_be_truthy` / `to_be_falsy` / `to_be_nil`, `to_be_close`,
+`to_be_greater_than` / `to_be_less_than` / `to_be_at_least` / `to_be_at_most`,
+`to_contain` (substring or array element), `to_match` (Lua pattern),
+`to_have_length`, `to_error`. A function returning two values is asserted with
+`t.expect_all(f()):to_equal(false, "no door")` (`t.expect(f())` is a 2-argument call and
+a type error; the message says so).
+
+Runner: `htl test [paths] [--filter substr] [--fail-fast] [-v] [--slow MS]`. Each file
+runs in a fresh state; `-v` prints every test with its time, `--slow 50` only the ones
+over 50 ms, `--fail-fast` stops at the first failure. Any library exposing
+`run(filter, opts) -> {passed, failed, failures, tests?}` plugs in via `--lib`
+(bring its `.d.tl`); files that use no such library pass if they run to completion.
 
 ## Layout of a project (`htl new`)
 
@@ -258,6 +271,10 @@ with `src/<name>.tl`); htl resolves that form in the checker and in `TealResolve
   itself and that one of the names has to change.
 - **Numeric inference**: `local n = 0` is `integer`, `0.0` is `number`; opt into the
   `explicit-number` lint to be told where an annotation is missing.
+- **Multi-value call in last position**: `t.expect(can_cast(x))` with `can_cast`
+  returning `boolean, string` is a 2-argument call, and Teal reports "wrong number of
+  arguments" at `expect`. htl names the expanding call and the two fixes (bind first,
+  or parenthesize to keep the first value).
 
 ## What is deliberately not here
 

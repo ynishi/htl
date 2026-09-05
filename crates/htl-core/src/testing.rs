@@ -47,6 +47,25 @@ pub struct FileReport {
     pub failures: Vec<String>,
     /// `true` when no test library was used and the verdict is file-level.
     pub file_level: bool,
+    /// Per-test outcomes when the library reports them (`htl.test` does).
+    pub tests: Vec<TestResult>,
+    /// Wall time for the whole file: check, load, and every test.
+    pub duration_ms: f64,
+}
+
+/// One test's outcome, as reported by the assertion library.
+#[derive(Debug, Clone, Default)]
+pub struct TestResult {
+    pub name: String,
+    pub ok: bool,
+    pub ms: f64,
+}
+
+/// Runner options passed through to the library's `run(filter, opts)`.
+#[derive(Debug, Clone, Default)]
+pub struct RunOptions {
+    /// Stop at the first failing test in a file.
+    pub fail_fast: bool,
 }
 
 impl FileReport {
@@ -95,7 +114,26 @@ pub fn discover_tests(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
 
 /// Run one test file in a fresh state. `lib` is the assertion library module to
 /// consult for `run(filter)` after the file executed (default: `htl.test`).
-pub fn run_test_file(path: &Path, filter: Option<&str>, lib: &str, lint_spec: Option<&str>) -> Result<FileReport> {
+pub fn run_test_file(
+    path: &Path,
+    filter: Option<&str>,
+    lib: &str,
+    lint_spec: Option<&str>,
+    opts: &RunOptions,
+) -> Result<FileReport> {
+    let started = std::time::Instant::now();
+    let mut rep = run_test_file_inner(path, filter, lib, lint_spec, opts)?;
+    rep.duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+    Ok(rep)
+}
+
+fn run_test_file_inner(
+    path: &Path,
+    filter: Option<&str>,
+    lib: &str,
+    lint_spec: Option<&str>,
+    opts: &RunOptions,
+) -> Result<FileReport> {
     let mut rep = FileReport { path: path.to_path_buf(), ..Default::default() };
     let h = Htl::new()?;
     if let Some(spec) = lint_spec {
@@ -135,11 +173,23 @@ pub fn run_test_file(path: &Path, filter: Option<&str>, lib: &str, lint_spec: Op
     match loaded.get::<Value>(lib)? {
         Value::Table(t) => {
             let run: Function = t.get("run")?;
-            let report: Table = run.call(filter)?;
+            let lua_opts = h.lua().create_table()?;
+            lua_opts.set("fail_fast", opts.fail_fast)?;
+            let report: Table = run.call((filter, lua_opts))?;
             rep.passed = report.get::<Option<usize>>("passed")?.unwrap_or(0);
             rep.failed = report.get::<Option<usize>>("failed")?.unwrap_or(0);
             if let Ok(f) = report.get::<Table>("failures") {
                 rep.failures = f.sequence_values::<String>().collect::<mlua::Result<_>>()?;
+            }
+            if let Ok(tests) = report.get::<Table>("tests") {
+                for tr in tests.sequence_values::<Table>() {
+                    let tr = tr?;
+                    rep.tests.push(TestResult {
+                        name: tr.get::<Option<String>>("name")?.unwrap_or_default(),
+                        ok: tr.get::<Option<bool>>("ok")?.unwrap_or(false),
+                        ms: tr.get::<Option<f64>>("ms")?.unwrap_or(0.0),
+                    });
+                }
             }
         }
         _ => {
