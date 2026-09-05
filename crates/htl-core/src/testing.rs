@@ -119,7 +119,7 @@ pub fn run_test_file(path: &Path, filter: Option<&str>, lib: &str, lint_spec: Op
     rep.check = check;
     let Some(code) = code else { return Ok(rep) };
     if let Err(e) = h.exec(&code, &format!("@{}", path.display()), &[]) {
-        rep.error = Some(e.to_string());
+        rep.error = Some(crate::user_message(&e));
         return Ok(rep);
     }
 

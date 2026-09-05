@@ -319,6 +319,35 @@ fn path_str(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
+/// A user-facing message for an error that came out of running Lua: the innermost
+/// cause without Lua's `stack traceback:` block. A host function's `Err(e)` surfaces
+/// as `e`'s own text; a Lua `error("msg")` surfaces as `file:line: msg`.
+///
+/// ```text
+/// sgen: content/no-date.md: front matter: 'date' is required
+/// ```
+/// instead of that line followed by `stack traceback: [C]: in method 'pages' ...`.
+pub fn user_message(err: &anyhow::Error) -> String {
+    fn from_mlua(e: &mlua::Error) -> String {
+        match e {
+            mlua::Error::CallbackError { cause, .. } => from_mlua(cause),
+            mlua::Error::ExternalError(ext) => ext.to_string(),
+            mlua::Error::WithContext { cause, .. } => from_mlua(cause),
+            other => strip_traceback(&other.to_string()),
+        }
+    }
+    if let Some(e) = err.downcast_ref::<mlua::Error>() {
+        return from_mlua(e);
+    }
+    strip_traceback(&format!("{err:#}"))
+}
+
+/// Remove a trailing Lua `stack traceback:` section from an error text.
+pub fn strip_traceback(text: &str) -> String {
+    let cut = text.find("\nstack traceback:").unwrap_or(text.len());
+    text[..cut].trim_end().to_string()
+}
+
 /// Write `text` to `path` only if the content differs. Returns `true` when written.
 /// Used by the derive macros to emit `.d.tl` files without churning cargo's fingerprints.
 pub fn write_if_changed(path: &Path, text: &str) -> std::io::Result<bool> {
