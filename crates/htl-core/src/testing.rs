@@ -56,7 +56,8 @@ impl FileReport {
 }
 
 /// `*_test.tl` anywhere, plus every `.tl` under a directory named `tests`.
-/// Explicit file paths are always included. Skips `target/`, `.git/`, `node_modules/`.
+/// Explicit file paths are always included. Does not enter [`crate::SKIP_DIRS`],
+/// dot-directories or the project's mlua-pkg dir (dependencies' tests are theirs).
 pub fn discover_tests(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for p in paths {
@@ -64,10 +65,12 @@ pub fn discover_tests(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
             out.push(p.clone());
             continue;
         }
-        let walker = walkdir::WalkDir::new(p).sort_by_file_name().into_iter().filter_entry(|e| {
-            let n = e.file_name().to_string_lossy();
-            !(e.file_type().is_dir() && (n == "target" || n == ".git" || n == "node_modules"))
-        });
+        let extra = crate::project_skip_dirs(p);
+        let root = p.clone();
+        let walker = walkdir::WalkDir::new(p)
+            .sort_by_file_name()
+            .into_iter()
+            .filter_entry(move |e| e.path() == root || !crate::is_skipped_dir(e.path(), &extra));
         for e in walker {
             let e = e?;
             let path = e.path();
