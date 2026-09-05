@@ -33,6 +33,8 @@ pub struct TealResolver {
     root: Option<PathBuf>,
     path_added: AtomicBool,
     module_separator: char,
+    /// `"defs.Mod"`: every module served by this resolver must be assignable to that type.
+    expect_type: Option<String>,
 }
 
 impl TealResolver {
@@ -44,6 +46,7 @@ impl TealResolver {
             root: Some(root),
             path_added: AtomicBool::new(false),
             module_separator: '.',
+            expect_type: None,
         })
     }
 
@@ -55,6 +58,7 @@ impl TealResolver {
             root: Some(root),
             path_added: AtomicBool::new(false),
             module_separator: '.',
+            expect_type: None,
         })
     }
 
@@ -66,12 +70,48 @@ impl TealResolver {
             root,
             path_added: AtomicBool::new(false),
             module_separator: '.',
+            expect_type: None,
         }
     }
 
     pub fn with_module_separator(mut self, sep: char) -> Self {
         self.module_separator = sep;
         self
+    }
+
+    /// Require every `.tl` module served here to be assignable to `type_path`, written
+    /// as `"<module>.<Type>"` (e.g. `"defs.Mod"`, where `defs.tl` / `defs.d.tl` declares
+    /// `Mod`). A module that does not satisfy it fails at `require` time even if it never
+    /// annotates its own return value.
+    pub fn expect_type(mut self, type_path: impl Into<String>) -> Self {
+        self.expect_type = Some(type_path.into());
+        self
+    }
+
+    /// Check `local m: <T> = require("<name>")` against the checker; `None` when it holds.
+    fn expectation_errors(&self, h: &Table, name: &str) -> mlua::Result<Option<Vec<String>>> {
+        let Some(tp) = &self.expect_type else { return Ok(None) };
+        let (module, _) = tp.split_once('.').ok_or_else(|| {
+            mlua::Error::external(format!(
+                "TealResolver::expect_type: expected \"<module>.<Type>\", got {tp:?}"
+            ))
+        })?;
+        // The module that declares the type is not itself held to it.
+        if name == module {
+            return Ok(None);
+        }
+        let stub = format!(
+            "local {module} = require(\"{module}\")\nlocal m: {tp} = require(\"{name}\")\nreturn m\n"
+        );
+        let gen_fn: Function = h.get("gen_string")?;
+        let (code, info): (Option<String>, Table) =
+            gen_fn.call((stub.as_str(), format!("<expect {tp} for module '{name}'>")))?;
+        if code.is_some() {
+            return Ok(None);
+        }
+        let errors: Table = info.get("errors")?;
+        let msgs: Vec<String> = errors.sequence_values::<String>().collect::<mlua::Result<_>>()?;
+        Ok(Some(msgs))
     }
 
     fn prelude(lua: &Lua) -> mlua::Result<Table> {
@@ -115,6 +155,13 @@ impl TealResolver {
                 errors: msgs,
             }));
         };
+        if let Some(errs) = self.expectation_errors(h, name)? {
+            return Err(mlua::Error::external(TealResolveError::Expectation {
+                module: name.to_string(),
+                expected: self.expect_type.clone().unwrap_or_default(),
+                errors: errs,
+            }));
+        }
         let chunk = lua
             .load(code)
             .set_name(format!("@{}", resolved.display()))
@@ -257,6 +304,9 @@ impl crate::Htl {
 #[derive(Debug)]
 pub enum TealResolveError {
     TypeCheck { module: String, errors: Vec<String> },
+    /// The module type-checks on its own but is not assignable to the resolver's
+    /// [`expect_type`](TealResolver::expect_type).
+    Expectation { module: String, expected: String, errors: Vec<String> },
     Read { module: String, source: ReadError },
 }
 
@@ -265,6 +315,13 @@ impl std::fmt::Display for TealResolveError {
         match self {
             Self::TypeCheck { module, errors } => {
                 write!(f, "Teal type check failed for module '{module}':")?;
+                for e in errors {
+                    write!(f, "\n  {e}")?;
+                }
+                Ok(())
+            }
+            Self::Expectation { module, expected, errors } => {
+                write!(f, "module '{module}' does not satisfy {expected}:")?;
                 for e in errors {
                     write!(f, "\n  {e}")?;
                 }

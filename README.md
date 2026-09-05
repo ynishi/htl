@@ -103,12 +103,16 @@ A `.tl` that fails its type check is `Some(Err)` in mlua-pkg's terms: it never f
 through to a later resolver. Native modules must be registered *before* the Teal
 resolver and described by a `.d.tl` for the checker.
 
+For mod / plugin directories, `TealResolver::new("mods")?.expect_type("defs.Mod")` holds
+every served module to a record type: a mod that returns the wrong shape is rejected at
+`require` time even if it never annotates its own return value.
+
 ## Lints (`htl check`, `include_tl!`)
 
 | rule | default | catches |
 |---|---|---|
 | `nil-index` | on | `t[k].x`, `t[k]:m()`, `t[k]()`, `t[k][j]` — Teal types a map/array lookup as `V`, not `V \| nil` |
-| `enum-exhaustive` | on | `if e == "a" ... elseif e == "b" ... end` over an enum with a value left unhandled and no `else` |
+| `enum-exhaustive` | on | `if e == "a" ... elseif e == "b" ... end` over an enum with a value left unhandled and no `else`; enums nested in records and enums from required modules count |
 | `shadow-local` | on | a local / loop var / parameter reusing an enclosing local's name |
 | `no-global` | on | `global` declarations |
 | `no-any` | off | explicit `any` annotations and `as any` casts |
