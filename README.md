@@ -139,8 +139,10 @@ which is what `htl run` / `htl test` print.
 For mod / plugin directories, `TealResolver::new("mods")?.expect_type("defs.Mod")` holds
 every served module to a record type: a mod that returns the wrong shape is rejected at
 `require` time even if it never annotates its own return value. It rejects fields of the
-wrong *type*; it does not reject *missing* fields (every Teal record field is nilable), so
-nil-guard optional data on the host side.
+wrong *type*; on its own it does not reject *missing* fields (every Teal record field is
+nilable). Chain `.require_fields()` for contracts where every declared field is mandatory:
+the module is then rejected at `require` naming the nil fields. Keep the default and
+nil-guard on the host side when some fields are optional.
 
 ## Lints (`htl check`, `include_tl!`)
 
@@ -152,6 +154,7 @@ nil-guard optional data on the host side.
 | `no-global` | on | `global` declarations |
 | `no-any` | off | explicit `any` annotations and `as any` casts |
 | `explicit-number` | off | an unannotated local initialized with a numeric literal: `local n = 0` infers `integer`, `0.0` infers `number`, and a later `n = n * 1.5` fails; write `local n: number = 0` |
+| `class-record` | off | a record declaring metamethods (`metamethod __index: Actor` = a class): its metatable is attached by `setmetatable` at run time and is not part of the value, so serialization and the Rust boundary drop it; keep such records out of saved data and host signatures |
 | `require-cycle` | on (project-level) | a loop in the require graph of the files `htl check <dir>` just checked, e.g. `a.tl -> b.tl -> a.tl`. Teal types the back edge as an opaque circular require, so without this the symptom is "cannot index" somewhere else |
 
 Silence one occurrence with a trailing `-- htl: allow(nil-index)`. `include_tl!`

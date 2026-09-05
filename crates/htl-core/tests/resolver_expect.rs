@@ -61,6 +61,45 @@ fn nonconforming_mod_is_rejected_at_require() {
     );
 }
 
+fn setup_strict() -> (PathBuf, Htl) {
+    let dir = scratch("strict");
+    write(
+        &dir.join("defs.tl"),
+        "local record defs\n   record Mod\n      name: string\n      hp: integer\n      monsters: {string}\n   end\nend\nreturn defs\n",
+    );
+    write(&dir.join("full.tl"), "return { name = \"swarm\", hp = 3, monsters = { \"bat\" } }\n");
+    write(&dir.join("partial.tl"), "return { name = \"quiet\" }\n");
+    let h = Htl::new().unwrap();
+    let mut reg = Registry::new();
+    reg.add(TealResolver::new(&dir).unwrap().expect_type("defs.Mod").require_fields());
+    reg.install(h.lua()).unwrap();
+    (dir, h)
+}
+
+/// `require_fields`: a mod that type-checks but leaves declared fields nil is rejected.
+#[test]
+fn require_fields_rejects_missing_fields_at_require() {
+    let (_dir, h) = setup_strict();
+    let err = h.lua().load("return require('partial').name").eval::<String>().unwrap_err().to_string();
+    assert!(err.contains("missing required field(s) of defs.Mod: hp, monsters"), "{err}");
+}
+
+#[test]
+fn require_fields_accepts_complete_mod() {
+    let (_dir, h) = setup_strict();
+    let hp: i64 = h.lua().load("return require('full').hp").eval().unwrap();
+    assert_eq!(hp, 3);
+}
+
+/// Without `require_fields`, the partial mod still passes (Teal fields are nilable).
+#[test]
+fn without_require_fields_partial_passes() {
+    let (_dir, h) = setup();
+    write(&_dir.join("partial.tl"), "return { name = \"quiet\" }\n");
+    let name: String = h.lua().load("return require('partial').name").eval().unwrap();
+    assert_eq!(name, "quiet");
+}
+
 #[test]
 fn defs_itself_still_resolves() {
     // `defs.tl` is served by the same resolver; it must not be held to `defs.Mod`

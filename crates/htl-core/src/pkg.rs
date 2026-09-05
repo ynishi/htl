@@ -35,6 +35,8 @@ pub struct TealResolver {
     module_separator: char,
     /// `"defs.Mod"`: every module served by this resolver must be assignable to that type.
     expect_type: Option<String>,
+    /// With `expect_type`: every declared field of the record must be non-nil at run time.
+    require_fields: bool,
 }
 
 impl TealResolver {
@@ -47,6 +49,7 @@ impl TealResolver {
             path_added: AtomicBool::new(false),
             module_separator: '.',
             expect_type: None,
+            require_fields: false,
         })
     }
 
@@ -59,6 +62,7 @@ impl TealResolver {
             path_added: AtomicBool::new(false),
             module_separator: '.',
             expect_type: None,
+            require_fields: false,
         })
     }
 
@@ -71,6 +75,7 @@ impl TealResolver {
             path_added: AtomicBool::new(false),
             module_separator: '.',
             expect_type: None,
+            require_fields: false,
         }
     }
 
@@ -85,13 +90,47 @@ impl TealResolver {
     /// annotates its own return value.
     ///
     /// What this catches is what Teal's record assignability catches: a field of the
-    /// **wrong type** (`hp = "lots"` for `hp: integer`). It does **not** catch a
-    /// **missing** field or an unknown extra field: every Teal record field is nilable,
-    /// so `{ name = "x" }` satisfies `Mod` with `monsters` absent. Guard optional data
-    /// with nil checks on the host side (`mod.monsters or {}`).
+    /// **wrong type** (`hp = "lots"` for `hp: integer`). On its own it does **not** catch
+    /// a **missing** field: every Teal record field is nilable, so `{ name = "x" }`
+    /// satisfies `Mod` with `monsters` absent. Add [`require_fields`](Self::require_fields)
+    /// to reject that at run time, or nil-guard optional data on the host side.
     pub fn expect_type(mut self, type_path: impl Into<String>) -> Self {
         self.expect_type = Some(type_path.into());
         self
+    }
+
+    /// With [`expect_type`](Self::expect_type): after the type check, every field the
+    /// record declares must be present (non-nil) in the loaded module, or the `require`
+    /// fails naming the missing fields. Use for contracts where every field is mandatory;
+    /// contracts with optional fields should keep the default and nil-guard instead.
+    pub fn require_fields(mut self) -> Self {
+        self.require_fields = true;
+        self
+    }
+
+    /// Declared fields of the expected record that are nil in `value`.
+    fn missing_fields(&self, h: &Table, value: &Value) -> mlua::Result<Vec<String>> {
+        let (Some(tp), true) = (&self.expect_type, self.require_fields) else { return Ok(Vec::new()) };
+        let f: Function = h.get("record_fields")?;
+        let names: Option<Vec<String>> = f
+            .call::<Option<Table>>(tp.as_str())?
+            .map(|t| t.sequence_values::<String>().collect::<mlua::Result<_>>())
+            .transpose()?;
+        let Some(names) = names else {
+            return Err(mlua::Error::external(format!(
+                "TealResolver::require_fields: record type {tp:?} not found by the checker"
+            )));
+        };
+        let Value::Table(t) = value else {
+            return Ok(names); // not a table at all: everything is missing
+        };
+        let mut missing = Vec::new();
+        for n in names {
+            if matches!(t.get::<Value>(n.as_str())?, Value::Nil) {
+                missing.push(n);
+            }
+        }
+        Ok(missing)
     }
 
     /// Check `local m: <T> = require("<name>")` against the checker; `None` when it holds.
@@ -313,6 +352,8 @@ pub enum TealResolveError {
     /// The module type-checks on its own but is not assignable to the resolver's
     /// [`expect_type`](TealResolver::expect_type).
     Expectation { module: String, expected: String, errors: Vec<String> },
+    /// [`require_fields`](TealResolver::require_fields): declared fields absent at run time.
+    MissingFields { module: String, expected: String, fields: Vec<String> },
     Read { module: String, source: ReadError },
 }
 
@@ -337,6 +378,11 @@ impl std::fmt::Display for TealResolveError {
                      to get field-level errors with line numbers"
                 )
             }
+            Self::MissingFields { module, expected, fields } => write!(
+                f,
+                "module '{module}' is missing required field(s) of {expected}: {} (every field of that record must be non-nil)",
+                fields.join(", ")
+            ),
             Self::Read { module, source } => write!(f, "reading module '{module}': {source}"),
         }
     }
@@ -379,7 +425,21 @@ impl Resolver for TealResolver {
                                 .and_then(|f| f.call::<Value>((name, file.resolved_path.to_string_lossy().as_ref()))),
                         );
                     }
-                    return Some(self.load_teal(lua, &h, &file.content, &file.resolved_path, name));
+                    let loaded = match self.load_teal(lua, &h, &file.content, &file.resolved_path, name) {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    match self.missing_fields(&h, &loaded) {
+                        Ok(m) if m.is_empty() => return Some(Ok(loaded)),
+                        Ok(missing) => {
+                            return Some(Err(mlua::Error::external(TealResolveError::MissingFields {
+                                module: name.to_string(),
+                                expected: self.expect_type.clone().unwrap_or_default(),
+                                fields: missing,
+                            })));
+                        }
+                        Err(e) => return Some(Err(e)),
+                    }
                 }
                 Ok(None) => continue,
                 Err(source) => {
