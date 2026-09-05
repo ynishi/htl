@@ -75,9 +75,9 @@ fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Includ
 
     let h = htl_core::Htl::new().map_err(|e| format!("include_tl!: {e:#}"))?;
     // htl.toml `[lint]` first, then HTL_LINTS, so the env var wins.
-    let cfg = htl_core::config::HtlConfig::find(&path)
-        .map_err(|e| format!("include_tl!: {e:#}"))?
-        .map(|(_, c)| c);
+    let cfg = htl_core::config::HtlConfig::find(&path).map_err(|e| format!("include_tl!: {e:#}"))?;
+    let cfg_root = cfg.as_ref().map(|(p, _)| htl_core::parent_dir(p));
+    let cfg = cfg.map(|(_, c)| c);
     let file_spec = cfg.as_ref().map(|c| c.lint_spec()).unwrap_or_default();
     let env_spec = std::env::var("HTL_LINTS").unwrap_or_default();
     let spec = htl_core::config::join_specs([file_spec.as_str(), env_spec.as_str()]);
@@ -98,6 +98,9 @@ fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Includ
     }
     if let Some(p) = htl_core::pkg::Project::find(&path) {
         h.apply_project(&p).map_err(|e| format!("include_tl!: {e:#}"))?;
+    }
+    if let (Some(root), Some(c)) = (&cfg_root, &cfg) {
+        h.apply_config(root, c).map_err(|e| format!("include_tl!: {e:#}"))?;
     }
     h.install_test_lib().map_err(|e| format!("include_tl!: {e:#}"))?;
     let (code, ci) = h.gen_lua(&path).map_err(|e| format!("include_tl!: {e:#}"))?;

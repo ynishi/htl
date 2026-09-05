@@ -108,6 +108,9 @@ pub fn run_test_file(path: &Path, filter: Option<&str>, lib: &str, lint_spec: Op
     if let Some(p) = crate::pkg::Project::find(path) {
         h.apply_project(&p)?;
     }
+    if let Some((cfg_path, cfg)) = crate::config::HtlConfig::find(path)? {
+        h.apply_config(&parent_dir(&cfg_path), &cfg)?;
+    }
     // tests/foo_test.tl commonly requires modules from the project root or src/.
     if dir.file_name().is_some_and(|n| n == "tests")
         && let Some(root) = dir.parent()

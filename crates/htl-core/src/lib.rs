@@ -75,6 +75,15 @@ pub struct ContractResult {
 }
 
 impl Htl {
+    /// Make an `htl.toml` project's dirs visible to the checker: `root`, `root/src` and
+    /// `[check] paths`. `root` is the directory holding `htl.toml`.
+    pub fn apply_config(&self, root: &Path, cfg: &config::HtlConfig) -> Result<()> {
+        for p in cfg.search_paths(root) {
+            self.add_path(&p)?;
+        }
+        Ok(())
+    }
+
     /// Static form of `TealResolver::expect_type` / `require_fields` for one module file:
     /// `modname` is what a `require` would say (its stem), `type_path` is `"defs.Mod"`.
     pub fn contract_check(&self, file: &Path, modname: &str, type_path: &str, require_fields: bool) -> Result<ContractResult> {
@@ -104,19 +113,19 @@ pub fn contract_lints(h: &Htl, root: &Path, cfg: &config::HtlConfig, file: &Path
     if !is_tl_source(&file_abs) {
         return Ok(out);
     }
+    let modname = file_abs.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
     for c in &cfg.contract {
-        let dir = canon(&root.join(&c.dir));
-        if file_abs.parent() != Some(dir.as_path()) {
+        let Some(dir) = c.dirs(root).into_iter().map(|d| canon(&d)).find(|d| file_abs.parent() == Some(d.as_path()))
+        else {
+            continue;
+        };
+        if !c.applies_to(&modname) {
             continue;
         }
-        let modname = file_abs.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
         // Same visibility as `TealResolver::for_contract`: the contract dir, plus the
-        // project root and its `src/` (where `defs.tl` normally lives).
+        // project root, its `src/` and `[check] paths`.
         h.add_path(&dir)?;
-        h.add_path(root)?;
-        if root.join("src").is_dir() {
-            h.add_path(&root.join("src"))?;
-        }
+        h.apply_config(root, cfg)?;
         let r = h.contract_check(&file_abs, &modname, &c.type_path, c.require_fields)?;
         for e in &r.errors {
             // The stub's own "<contract ...>:L:C: " prefix says nothing useful; keep the message.
@@ -174,19 +183,26 @@ pub fn contract_enforcement_lints(cfg: &config::HtlConfig, cfg_path: &Path, carg
     }
     let by_config = sources.contains("contract_resolvers(") || sources.contains("for_contract(");
     for c in &cfg.contract {
+        // A contract with nothing under it is not enforced by anyone; the dir may be
+        // populated later (glob dirs especially), so say nothing about the host.
+        if c.dirs(root_of(cfg_path)).is_empty() {
+            continue;
+        }
         let by_hand = sources.contains(&format!("expect_type(\"{}\")", c.type_path));
         let want_fields = if c.require_fields { ".require_fields()" } else { "" };
         if !(by_config || by_hand) {
+            let by_hand_hint = if c.dir.contains('*') {
+                String::new() // one resolver per matched dir: not a one-liner by hand
+            } else {
+                format!("add TealResolver::new(\"{}\").expect_type(\"{}\"){} in the Rust host, or ", c.dir, c.type_path, want_fields)
+            };
             out.push(format!(
-                "{}:1:1: contract `{}` -> {} is declared but the host does not enforce it: add \
-                 TealResolver::new(\"{}\").expect_type(\"{}\"){} in the Rust host, or build resolvers with \
+                "{}:1:1: contract `{}` -> {} is declared but the host does not enforce it: {}build resolvers with \
                  htl::pkg::contract_resolvers(root, &config) [htl contract-unenforced]",
                 cfg_path.display(),
                 c.dir,
                 c.type_path,
-                c.dir,
-                c.type_path,
-                want_fields
+                by_hand_hint
             ));
         } else if c.require_fields && !by_config && !sources.contains("require_fields()") {
             out.push(format!(
@@ -199,6 +215,10 @@ pub fn contract_enforcement_lints(cfg: &config::HtlConfig, cfg_path: &Path, carg
         }
     }
     out
+}
+
+fn root_of(cfg_path: &Path) -> &Path {
+    cfg_path.parent().unwrap_or(Path::new("."))
 }
 
 /// Cycles in the require graph of a set of checked files, one message per cycle,

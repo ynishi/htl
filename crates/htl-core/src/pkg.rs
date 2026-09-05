@@ -39,6 +39,10 @@ pub struct TealResolver {
     require_fields: bool,
     /// Extra dirs the checker may search for `require`s (e.g. where `defs.tl` lives).
     checker_paths: Vec<PathBuf>,
+    /// Module names served here that `expect_type` / `require_fields` skip.
+    exclude: Vec<String>,
+    /// When set, `expect_type` / `require_fields` apply to this module name only.
+    only_module: Option<String>,
 }
 
 impl TealResolver {
@@ -53,6 +57,8 @@ impl TealResolver {
             expect_type: None,
             require_fields: false,
             checker_paths: Vec::new(),
+            exclude: Vec::new(),
+            only_module: None,
         })
     }
 
@@ -67,6 +73,8 @@ impl TealResolver {
             expect_type: None,
             require_fields: false,
             checker_paths: Vec::new(),
+            exclude: Vec::new(),
+            only_module: None,
         })
     }
 
@@ -81,6 +89,8 @@ impl TealResolver {
             expect_type: None,
             require_fields: false,
             checker_paths: Vec::new(),
+            exclude: Vec::new(),
+            only_module: None,
         }
     }
 
@@ -121,15 +131,48 @@ impl TealResolver {
         self
     }
 
-    /// Resolver for one `[[contract]]` of `htl.toml`: serves `<root>/<dir>` with
-    /// `expect_type(type)` (and `require_fields()` when set), with `root` and
-    /// `root/src` visible to the checker. `root` is the directory holding `htl.toml`.
-    /// The `contract-unenforced` lint of `htl check` recognises this call.
-    pub fn for_contract(root: &Path, c: &crate::config::Contract) -> Result<Self, InitError> {
-        let mut r = Self::new_symlink_aware(root.join(&c.dir))?
+    /// Modules (by `require` name) served here that are *not* held to `expect_type` /
+    /// `require_fields`: an SDK the host writes into the same dir, for instance. The
+    /// module that declares the expected type is always exempt.
+    pub fn exclude_modules(mut self, names: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.exclude.extend(names.into_iter().map(Into::into));
+        self
+    }
+
+    /// Hold only this module name to `expect_type` / `require_fields`; everything else
+    /// served here is type-checked as usual but not against the contract.
+    pub fn only_module(mut self, name: impl Into<String>) -> Self {
+        self.only_module = Some(name.into());
+        self
+    }
+
+    /// Does the contract (`expect_type` / `require_fields`) apply to `name`?
+    fn held(&self, name: &str) -> bool {
+        if self.expect_type.is_none() || self.exclude.iter().any(|e| e == name) {
+            return false;
+        }
+        self.only_module.as_deref().is_none_or(|m| m == name)
+    }
+
+    /// Resolvers for one `[[contract]]` of `htl.toml`: one per concrete contract dir
+    /// (a `dir` with `*` expands to every subdirectory), each with `expect_type(type)`
+    /// (and `require_fields()` when set), the contract's `exclude` / `module`, and
+    /// `root` + `root/src` visible to the checker. `root` is the directory holding
+    /// `htl.toml`. The `contract-unenforced` lint of `htl check` recognises this call.
+    pub fn for_contract(root: &Path, c: &crate::config::Contract) -> Result<Vec<Self>, InitError> {
+        c.dirs(root).into_iter().map(|d| Self::for_contract_dir(root, &d, c)).collect()
+    }
+
+    /// One resolver for the concrete contract directory `dir` (see [`for_contract`](Self::for_contract)).
+    pub fn for_contract_dir(root: &Path, dir: &Path, c: &crate::config::Contract) -> Result<Self, InitError> {
+        let mut r = Self::new_symlink_aware(dir)?
             .expect_type(c.type_path.clone())
+            .exclude_modules(c.exclude.iter().cloned())
             .with_checker_path(root)
             .with_checker_path(root.join("src"));
+        if let Some(m) = &c.module {
+            r = r.only_module(m.clone());
+        }
         if c.require_fields {
             r = r.require_fields();
         }
@@ -176,15 +219,12 @@ impl TealResolver {
         let stub = format!(
             "local {module} = require(\"{module}\")\nlocal m: {tp} = require(\"{name}\")\nreturn m\n"
         );
-        let gen_fn: Function = h.get("gen_string")?;
-        let (code, info): (Option<String>, Table) =
-            gen_fn.call((stub.as_str(), format!("<expect {tp} for module '{name}'>")))?;
-        if code.is_some() {
-            return Ok(None);
-        }
-        let errors: Table = info.get("errors")?;
+        // Fresh checker env per stub: several resolvers may serve a module of the same
+        // name (one per contract dir) and must not share a cached type for it.
+        let check: Function = h.get("check_stub")?;
+        let errors: Table = check.call((stub.as_str(), format!("<expect {tp} for module '{name}'>")))?;
         let msgs: Vec<String> = errors.sequence_values::<String>().collect::<mlua::Result<_>>()?;
-        Ok(Some(msgs))
+        Ok(if msgs.is_empty() { None } else { Some(msgs) })
     }
 
     fn prelude(lua: &Lua) -> mlua::Result<Table> {
@@ -233,7 +273,9 @@ impl TealResolver {
                 errors: msgs,
             }));
         };
-        if let Some(errs) = self.expectation_errors(h, name)? {
+        if self.held(name)
+            && let Some(errs) = self.expectation_errors(h, name)?
+        {
             return Err(mlua::Error::external(TealResolveError::Expectation {
                 module: name.to_string(),
                 expected: self.expect_type.clone().unwrap_or_default(),
@@ -364,7 +406,16 @@ impl Project {
 /// directory holding `htl.toml` (the path [`HtlConfig::find`](crate::config::HtlConfig::find)
 /// returns, minus the file name). Add them to a `Registry` before the plain resolvers.
 pub fn contract_resolvers(root: &Path, cfg: &crate::config::HtlConfig) -> Result<Vec<TealResolver>, InitError> {
-    cfg.contract.iter().map(|c| TealResolver::for_contract(root, c)).collect()
+    let mut out = Vec::new();
+    for c in &cfg.contract {
+        for mut r in TealResolver::for_contract(root, c)? {
+            for p in cfg.search_paths(root) {
+                r = r.with_checker_path(p);
+            }
+            out.push(r);
+        }
+    }
+    Ok(out)
 }
 
 impl crate::Htl {
@@ -431,6 +482,13 @@ impl std::fmt::Display for TealResolveError {
 
 impl std::error::Error for TealResolveError {}
 
+/// Is `name` registered in `package.preload` (host-provided implementation)?
+fn preloaded(lua: &Lua, name: &str) -> mlua::Result<bool> {
+    let package: Table = lua.globals().get("package")?;
+    let preload: Table = package.get("preload")?;
+    Ok(!matches!(preload.get::<Value>(name)?, Value::Nil))
+}
+
 impl Resolver for TealResolver {
     fn resolve(&self, lua: &Lua, name: &str) -> Option<mlua::Result<Value>> {
         let relative = name.replace(self.module_separator, "/");
@@ -459,6 +517,14 @@ impl Resolver for TealResolver {
                         if self.has_lua_sibling(&relative) {
                             return None;
                         }
+                        // ... or that the host registered in `package.preload` (a Rust
+                        // `#[host_module]`, `Htl::preload_value`). The Registry's searcher
+                        // runs *before* Lua's preload searcher, so this is the only chance.
+                        match preloaded(lua, name) {
+                            Ok(true) => return None,
+                            Ok(false) => {}
+                            Err(e) => return Some(Err(e)),
+                        }
                         // Declaration-only module: nothing to run. Hand require a table whose
                         // lookups explain that the implementation lives elsewhere.
                         return Some(
@@ -470,6 +536,9 @@ impl Resolver for TealResolver {
                         Ok(v) => v,
                         Err(e) => return Some(Err(e)),
                     };
+                    if !self.held(name) {
+                        return Some(Ok(loaded));
+                    }
                     match self.missing_fields(&h, &loaded) {
                         Ok(m) if m.is_empty() => return Some(Ok(loaded)),
                         Ok(missing) => {

@@ -370,6 +370,9 @@ fn cmd_check(paths: &[PathBuf], strict: bool, lint: Option<&str>, list_lints: bo
         auto_dts(first)?;
         apply_project(&h, first)?;
     }
+    if let Some((root, _, c)) = &cfg {
+        h.apply_config(root, c)?;
+    }
     // `*_test.tl` under the checked tree require("htl.test"): make its types visible.
     h.install_test_lib()?;
     let files = htl::collect_tl(&paths)?;
