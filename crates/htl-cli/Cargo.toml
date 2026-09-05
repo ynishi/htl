@@ -16,6 +16,6 @@ categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
 # The CLI needs the engine only, not the proc macros.
-htl = { workspace = true, features = ["pkg"] }
+htl = { workspace = true, features = ["pkg", "dts"] }
 anyhow = { workspace = true }
 clap = { workspace = true }

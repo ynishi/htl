@@ -163,7 +163,7 @@ checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
 name = "embed"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "htl",
@@ -241,7 +241,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "htl"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "htl-core",
  "htl-macros",
@@ -249,7 +249,7 @@ dependencies = [
 
 [[package]]
 name = "htl-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -258,17 +258,18 @@ dependencies = [
 
 [[package]]
 name = "htl-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "mlua",
  "mlua-pkg",
+ "syn 2.0.119",
  "walkdir",
 ]
 
 [[package]]
 name = "htl-macros"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "htl-core",
  "proc-macro2",
@@ -675,7 +676,7 @@ dependencies = [
 
 [[package]]
 name = "resolver"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "htl",

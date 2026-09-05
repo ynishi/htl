@@ -274,9 +274,12 @@ impl std::error::Error for TealResolveError {}
 impl Resolver for TealResolver {
     fn resolve(&self, lua: &Lua, name: &str) -> Option<mlua::Result<Value>> {
         let relative = name.replace(self.module_separator, "/");
+        // Flat packages: `<name>/<name>.tl` stands in for `<name>/init.tl`.
+        let last = relative.rsplit('/').next().unwrap_or(&relative).to_string();
         let candidates = [
             (format!("{relative}.tl"), false),
             (format!("{relative}/init.tl"), false),
+            (format!("{relative}/{last}.tl"), false),
             (format!("{relative}.d.tl"), true),
         ];
         let h = match Self::prelude(lua) {
