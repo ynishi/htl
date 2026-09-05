@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 pub mod bundle;
 pub mod config;
+pub mod link;
 #[cfg(feature = "dts")]
 pub mod dts;
 #[cfg(feature = "pkg")]
@@ -669,55 +670,120 @@ impl Htl {
 
     /// Compile Lua source to stripped bytecode (Lua 5.4 format of this build).
     pub fn compile(&self, name: &str, lua_src: &str) -> Result<Vec<u8>> {
+        self.compile_with(name, lua_src, true)
+    }
+
+    /// Compile to bytecode; `strip` drops debug info (line numbers, local and upvalue
+    /// names, and the chunk name: tracebacks then show the name given at load).
+    pub fn compile_with(&self, name: &str, lua_src: &str, strip: bool) -> Result<Vec<u8>> {
         let f = self
             .lua
             .load(lua_src)
             .set_name(format!("={name}"))
             .into_function()
             .with_context(|| format!("compiling generated Lua for {name}"))?;
-        Ok(f.dump(true))
+        Ok(f.dump(strip))
+    }
+
+    /// The Lua bytecode header this state produces (signature, version, format,
+    /// `LUAC_DATA`, sizes of Instruction / Integer / Number, endianness probes): what
+    /// another state must match to load this state's bytecode. Lua's own version byte
+    /// is the same for every 5.4.x, so bundles carry this instead.
+    pub fn fingerprint(&self) -> Result<Vec<u8>> {
+        let bc = self.compile_with("fp", "return 0", true)?;
+        // 4 signature + 1 version + 1 format + 6 LUAC_DATA + 3 sizes + 8 LUAC_INT + 8 LUAC_NUM
+        Ok(bc.iter().take(31).copied().collect())
+    }
+
+    /// Literal `require`s of a plain Lua source, resolved through the checker's path.
+    pub fn lua_requires(&self, src: &str, file: &Path) -> Result<Vec<RequireSite>> {
+        let f: Function = self.h.get("lua_requires")?;
+        let t: Table = f.call((src, path_str(file)))?;
+        read_requires(&t)
+    }
+
+    /// Where `require(name)` resolves for the checker (`.tl`, `.d.tl` or `.lua`), and
+    /// where a plain `.lua` implementation sits on the path (a `.d.tl` may only be
+    /// typing it). Either may be `None`.
+    pub fn resolve_module(&self, name: &str) -> Result<(Option<PathBuf>, Option<PathBuf>)> {
+        let f: Function = self.h.get("resolve_module")?;
+        let (found, lua): (Option<String>, Option<String>) = f.call(name)?;
+        Ok((found.map(PathBuf::from), lua.map(PathBuf::from)))
     }
 
     /// Install a searcher serving modules from a bundle.
     pub fn install_bundle(&self, b: &bundle::Bundle) -> Result<()> {
+        // Bytecode from a Lua that disagrees with ours would fail with "bad binary
+        // format" somewhere inside the first require; say what differs instead.
+        if b.modules.iter().any(|m| m.kind == bundle::Kind::Bytecode) && !b.fingerprint.is_empty() {
+            let mine = self.fingerprint()?;
+            if mine != b.fingerprint {
+                bail!(
+                    "bundle bytecode was compiled for {} but this host runs {}; rebuild the bundle here, \
+                     or build it with --source",
+                    bundle::describe_fingerprint(&b.fingerprint),
+                    bundle::describe_fingerprint(&mine)
+                );
+            }
+        }
+        // Host-provided modules must already be registered, or the program's first
+        // require of them fails with a message that points at the wrong place.
+        let package: Table = self.lua.globals().get("package")?;
+        let preload: Table = package.get("preload")?;
+        let loaded: Table = package.get("loaded")?;
+        let missing: Vec<&String> = b
+            .host_modules
+            .iter()
+            .filter(|n| {
+                matches!(preload.get::<Value>(n.as_str()), Ok(Value::Nil))
+                    && matches!(loaded.get::<Value>(n.as_str()), Ok(Value::Nil))
+            })
+            .collect();
+        if !missing.is_empty() {
+            bail!(
+                "bundle expects host-provided module(s) {} (declared only by a .d.tl or [build] host at link \
+                 time): register them with preload / preload_value / htl_preload before running",
+                missing.iter().map(|m| format!("'{m}'")).collect::<Vec<_>>().join(", ")
+            );
+        }
         let modules = b.modules.clone();
         let searcher = self.lua.create_function(move |lua, name: String| {
-            match modules.iter().find(|(n, _)| *n == name) {
-                Some((_, bc)) => {
-                    let f = lua
-                        .load(bc.as_slice())
-                        .set_name(format!("={name}"))
-                        .set_mode(ChunkMode::Binary)
-                        .into_function()?;
-                    Ok(Value::Function(f))
+            match modules.iter().find(|m| m.name == name) {
+                Some(m) => {
+                    let chunk = lua.load(m.payload.as_slice()).set_name(format!("={name}"));
+                    let f = match m.kind {
+                        bundle::Kind::Bytecode => chunk.set_mode(ChunkMode::Binary).into_function()?,
+                        bundle::Kind::Source => chunk.set_mode(ChunkMode::Text).into_function()?,
+                    };
+                    // Like a file searcher: the loader gets (modname, origin).
+                    Ok((Value::Function(f), Value::String(lua.create_string(format!("bundle:{name}"))?)))
                 }
-                None => Ok(Value::String(
-                    lua.create_string(format!("\n\tno bundled module '{name}'"))?,
+                None => Ok((
+                    Value::String(lua.create_string(format!("\n\tno bundled module '{name}'"))?),
+                    Value::Nil,
                 )),
             }
         })?;
-        let package: Table = self.lua.globals().get("package")?;
         let searchers: Table = package.get("searchers")?;
+        // Right after `preload` (the host's modules), before the file searchers: a
+        // bundle is the program, not a hint; files on disk do not override it.
         searchers.raw_insert(2, searcher)?;
         Ok(())
     }
 
     /// Install the bundle and run its entry module with `...` = args.
     pub fn run_bundle(&self, b: &bundle::Bundle, args: &[String]) -> Result<()> {
-        let entry_bc = b
-            .modules
-            .iter()
-            .find(|(n, _)| *n == b.entry)
-            .map(|(_, bc)| bc.clone())
+        let entry = b
+            .module(&b.entry)
+            .cloned()
             .ok_or_else(|| anyhow!("entry module '{}' not in bundle", b.entry))?;
         self.install_bundle(b)?;
         self.set_arg(&b.entry, args)?;
-        let main: Function = self
-            .lua
-            .load(entry_bc.as_slice())
-            .set_name(format!("={}", b.entry))
-            .set_mode(ChunkMode::Binary)
-            .into_function()?;
+        let chunk = self.lua.load(entry.payload.as_slice()).set_name(format!("={}", b.entry));
+        let main: Function = match entry.kind {
+            bundle::Kind::Bytecode => chunk.set_mode(ChunkMode::Binary).into_function()?,
+            bundle::Kind::Source => chunk.set_mode(ChunkMode::Text).into_function()?,
+        };
         let va: Variadic<String> = args.iter().cloned().collect();
         main.call::<()>(va)?;
         Ok(())
@@ -783,18 +849,10 @@ fn read_checkinfo(t: &Table) -> Result<CheckInfo> {
         let inner: Table = t.get(key)?;
         Ok(inner.sequence_values::<String>().collect::<mlua::Result<_>>()?)
     };
-    let mut requires = Vec::new();
-    if let Ok(list) = t.get::<Table>("requires") {
-        for r in list.sequence_values::<Table>() {
-            let r = r?;
-            requires.push(RequireSite {
-                module: r.get::<String>("name")?,
-                path: r.get::<Option<String>>("path")?.map(PathBuf::from),
-                line: r.get::<Option<usize>>("y")?.unwrap_or(0),
-                col: r.get::<Option<usize>>("x")?.unwrap_or(0),
-            });
-        }
-    }
+    let requires = match t.get::<Table>("requires") {
+        Ok(list) => read_requires(&list)?,
+        Err(_) => Vec::new(),
+    };
     Ok(CheckInfo {
         errors: seq("errors")?,
         warnings: seq("warnings")?,
@@ -802,6 +860,20 @@ fn read_checkinfo(t: &Table) -> Result<CheckInfo> {
         lints: seq("lints")?,
         requires,
     })
+}
+
+fn read_requires(list: &Table) -> Result<Vec<RequireSite>> {
+    let mut requires = Vec::new();
+    for r in list.sequence_values::<Table>() {
+        let r = r?;
+        requires.push(RequireSite {
+            module: r.get::<String>("name")?,
+            path: r.get::<Option<String>>("path")?.map(PathBuf::from),
+            line: r.get::<Option<usize>>("y")?.unwrap_or(0),
+            col: r.get::<Option<usize>>("x")?.unwrap_or(0),
+        });
+    }
+    Ok(requires)
 }
 
 /// `true` for `foo.tl` but not `foo.d.tl`.

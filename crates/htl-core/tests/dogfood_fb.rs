@@ -144,6 +144,29 @@ fn forward_reference_gets_the_declaration_line() {
     assert!(!e.contains("defined at line"), "{e}");
 }
 
+/// A parameter named like a required module: the message names the module and the
+/// require line, not just "an outer local".
+#[test]
+fn shadowing_a_required_module_is_named_as_such() {
+    let dir = scratch("shadow-mod");
+    write(&dir.join("bestiary.tl"), "local record bestiary\nend\nfunction bestiary.note()\nend\nreturn bestiary\n");
+    write(
+        &dir.join("world.tl"),
+        "local bestiary = require(\"bestiary\")\nlocal record world\nend\n\
+         function world.new(seed: integer, bestiary: {string}): integer\n   return seed + #bestiary\nend\n\
+         local count = 0\nfunction world.tick()\n   local count = 1\n   print(count)\nend\n\
+         print(bestiary)\nreturn world\n",
+    );
+    let h = Htl::new().unwrap();
+    h.add_path(&dir).unwrap();
+    let ci = h.check(&dir.join("world.tl")).unwrap();
+    let shadows: Vec<&String> = ci.lints.iter().filter(|l| l.contains("shadow-local")).collect();
+    assert_eq!(shadows.len(), 2, "{shadows:?}");
+    assert!(shadows[0].contains("world.tl:4:"), "{}", shadows[0]);
+    assert!(shadows[0].contains("shadows the module 'bestiary' required at line 1"), "{}", shadows[0]);
+    assert!(shadows[1].contains("shadows an outer local declared at line 7"), "plain locals keep the old wording: {}", shadows[1]);
+}
+
 #[test]
 fn user_message_strips_traceback_and_unwraps_host_errors() {
     let h = Htl::new().unwrap();

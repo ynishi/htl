@@ -551,6 +551,24 @@ end
 -- Returns { errors = {string}, missing = {string} | nil (nil = not decidable) }.
 -- Type-check a stub in a fresh env: the shared env caches module types by name, so a
 -- second `Site` (another contract dir) would be judged by the first one's type.
+-- Literal `require`s of a plain Lua file (a vendored dependency), resolved like the
+-- checker resolves them. Parsed with tl in Lua mode; a file tl cannot parse yields
+-- no sites (its requires are then the host's to declare).
+function H.lua_requires(src, filename)
+   local ast, errs = tl.parse(src, filename, "lua")
+   if not ast or (errs and #errs > 0) then return {} end
+   return require_sites(ast)
+end
+
+-- Where `require(name)` would resolve for the checker (`.tl` / `.d.tl` / `.lua`), and
+-- where a plain `.lua` implementation sits on the path, if any. Both may be nil.
+function H.resolve_module(name)
+   local found, fd = tl.search_module(name, true)
+   if fd then fd:close() end
+   local lua_path = package.searchpath(name, package.path)
+   return found, lua_path
+end
+
 function H.check_stub(src, filename)
    local result = tl.check_string(src, new_env(), filename)
    return collect_errors(filename, result, src)
@@ -651,11 +669,11 @@ local function resolve_for_require(module_name)
       local dfound, dfd = tl.search_module(module_name, true)
       if dfound and dfound:match("%.d%.tl$") then
          dfd:close()
-         local lua_path = dfound:gsub("%.d%.tl$", ".lua")
-         local init_path = dfound:gsub("%.d%.tl$", "/init.lua")
-         local lf = io.open(lua_path, "rb") or io.open(init_path, "rb")
-         if lf then
-            lf:close()
+         -- A `.lua` implementation anywhere on the path (a vendored dependency next to
+         -- its declaration, or declared from `src/` and implemented elsewhere) is served
+         -- by Lua's own searcher; the declaration only typed it.
+         local lua_path = package.searchpath(module_name, package.path)
+         if lua_path then
             return "yield", "\n\ttype-only '" .. dfound .. "' (implementation served by the .lua searcher)"
          end
          return "type_only", dfound

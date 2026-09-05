@@ -43,7 +43,7 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 | `htl test [paths] [--filter s] [--lib mod]` | `*_test.tl` and `tests/**/*.tl`, one isolated state per file |
 | `htl fmt [paths] [--check] [--indent N]` | whitespace formatter (indentation from the syntax tree, blank lines, trailing space) |
 | `htl gen <file.tl> [-o out.lua]` | readable Lua, the escape hatch out of htl |
-| `htl build <dir> -o app.hb [--entry main]` | stripped-bytecode bundle of a module tree |
+| `htl build <entry.tl> -o app.hb [--debug] [--source] [--extra a,b] [--host x,y]` | link the entry's `require` closure into one bundle (see Bundles) |
 | `htl pkg <args>` | passthrough to `mlua-pkg` at the nearest `mlua-pkg.toml` root |
 | `htl dts [dir]` | write the `.d.tl` files declared by `#[host_module]` / `#[derive(TealRecord)]` from Rust source, no build needed (`check` / `run` / `test` / `build` do this automatically when inside a crate) |
 
@@ -150,7 +150,7 @@ nil-guard on the host side when some fields are optional.
 |---|---|---|
 | `nil-index` | on | `t[k].x`, `t[k]:m()`, `t[k]()`, `t[k][j]` — Teal types a map/array lookup as `V`, not `V \| nil` |
 | `enum-exhaustive` | on | `if e == "a" ... elseif e == "b" ... end` over an enum with a value left unhandled and no `else`; enums nested in records and enums from required modules count |
-| `shadow-local` | on | a local / loop var / parameter reusing an enclosing local's name |
+| `shadow-local` | on | a local / loop var / parameter reusing an enclosing local's name; when that outer local is a `require`d module the message says which module and where it was required |
 | `no-global` | on | `global` declarations |
 | `no-any` | off | explicit `any` annotations and `as any` casts |
 | `explicit-number` | off | `local n = 0` (inferred `integer`) that is later assigned a number expression (`n = n * 1.5`, `n = a / b`): names the declaration and the assignment; write `local n: number = 0`. Plain integer counters are not reported |
@@ -242,9 +242,10 @@ the assertion surface small enough to read in one screen. Matchers: `to_equal`,
 `t.expect_all(f()):to_equal(false, "no door")` (`t.expect(f())` is a 2-argument call and
 a type error; the message says so).
 
-Runner: `htl test [paths] [--filter substr] [--fail-fast] [-v] [--slow MS]`. Each file
-runs in a fresh state; `-v` prints every test with its time, `--slow 50` only the ones
-over 50 ms, `--fail-fast` stops at the first failure. The run has one checker
+Runner: `htl test [paths] [--filter substr] [--fail-fast] [-v | -q] [--slow MS]`. Each
+file runs in a fresh state; `-v` prints every test with its time, `-q` only failures
+(with their details), errors and the summary line, `--slow 50` the tests over 50 ms,
+`--fail-fast` stops at the first failure. The run has one checker
 (`htl::testing::TestSession`) and one fresh program state per file: globals,
 `package.loaded` and module state never cross files, while a module is type-checked
 and generated once and served to every file whose search path resolves that name to
@@ -252,6 +253,32 @@ the same file (`Htl::with_checker` is the same split for hosts that run many
 programs). `HTL_PROFILE=1` prints per-phase and per-file timings to stderr. Any library exposing
 `run(filter, opts) -> {passed, failed, failures, tests?}` plugs in via `--lib`
 (bring its `.d.tl`); files that use no such library pass if they run to completion.
+
+## Bundles (`htl build`)
+
+`htl build src/main.tl -o app.hb` follows `require("<literal>")` from the entry and
+links everything it reaches into one file: `.tl` modules type-checked and generated,
+plain `.lua` modules (vendored dependencies) as they are. A `require` that resolves only
+to a `.d.tl` is recorded as **host-provided** (a Rust `#[host_module]`, a `preload`);
+any other unresolved `require` is a build error, so "module not found" happens here
+and not on the first `require` at the user's machine. `htl run app.hb` runs it; a host
+does `Htl::run_bundle(&Bundle::decode(bytes)?, &args)` after registering its modules,
+and is refused up front, naming them, if one is missing.
+
+- Payload is stripped Lua 5.4 bytecode by default. `--debug` keeps line numbers and
+  local names (tracebacks with lines; module names survive stripping since the loader
+  supplies them). `--source` stores generated Lua instead: larger and readable, but
+  loads on any Lua build.
+- The bundle carries the compiling Lua's bytecode header (version, instruction /
+  integer / number sizes, endianness). Lua's own version byte is `0x54` for every
+  5.4.x, so this is what `install_bundle` checks, with a readable message on mismatch.
+- A dynamic `require(expr)` cannot be followed: list its targets under `[build] extra`
+  in `htl.toml` (or `--extra`). Modules the host provides without a `.d.tl` go under
+  `[build] host` (or `--host`).
+- Bundled loaders receive `(modname, "bundle:<name>")` like a file searcher. The
+  bundle's searcher sits right after `package.preload` and before the file searchers:
+  the host's modules win, files on disk do not override the bundle.
+- `htl build <dir>` (the older form) still bundles every `.tl` under a directory.
 
 ## Layout of a project (`htl new`)
 

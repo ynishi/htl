@@ -55,6 +55,9 @@ enum Cmd {
         /// Print every test with its time (default: only failures and files)
         #[arg(short, long)]
         verbose: bool,
+        /// Only failures (with details), errors, and the summary line; no per-file `ok` lines
+        #[arg(short, long, conflicts_with = "verbose")]
+        quiet: bool,
         /// Also print tests slower than this many milliseconds
         #[arg(long, value_name = "MS")]
         slow: Option<f64>,
@@ -113,11 +116,26 @@ enum Cmd {
     },
     /// Compile a directory of .tl into a stripped-bytecode bundle
     Build {
-        dir: PathBuf,
+        /// Entry `.tl` file: it and everything it requires are bundled (a directory
+        /// bundles every `.tl` under it, the older snapshot form)
+        entry: PathBuf,
         #[arg(short, long, default_value = "app.hb")]
         out: PathBuf,
+        /// Entry module name when `entry` is a directory
         #[arg(short, long, default_value = "main")]
-        entry: String,
+        main: String,
+        /// Keep debug info (line numbers, local names) in the bytecode
+        #[arg(long)]
+        debug: bool,
+        /// Store generated Lua source instead of bytecode (loads on any Lua build)
+        #[arg(long)]
+        source: bool,
+        /// Modules to bundle that only a dynamic require reaches (also `[build] extra`)
+        #[arg(long, value_delimiter = ',')]
+        extra: Vec<String>,
+        /// Modules the host provides (also `[build] host`; `.d.tl`-only modules are implied)
+        #[arg(long, value_delimiter = ',')]
+        host: Vec<String>,
     },
 }
 
@@ -145,8 +163,8 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
     match cli.cmd {
         Cmd::Check { paths, strict, lint, list_lints } => cmd_check(&paths, strict, lint.as_deref(), list_lints),
         Cmd::Fmt { paths, check, indent } => cmd_fmt(&paths, check, indent),
-        Cmd::Test { paths, filter, lib, lint, fail_fast, verbose, slow } => {
-            cmd_test(&paths, filter.as_deref(), &lib, lint.as_deref(), TestFlags { fail_fast, verbose, slow })
+        Cmd::Test { paths, filter, lib, lint, fail_fast, verbose, quiet, slow } => {
+            cmd_test(&paths, filter.as_deref(), &lib, lint.as_deref(), TestFlags { fail_fast, verbose, quiet, slow })
         }
         Cmd::Pkg { args } => cmd_pkg(&args),
         Cmd::Dts { dir } => cmd_dts(dir.as_deref()),
@@ -154,7 +172,9 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
         Cmd::Init { dir, lib, embed } => cmd_init(dir.as_deref(), lib, embed),
         Cmd::Gen { file, out } => cmd_gen(&file, out.as_deref()),
         Cmd::Run { file, args } => cmd_run(&file, &args),
-        Cmd::Build { dir, out, entry } => cmd_build(&dir, &out, &entry),
+        Cmd::Build { entry, out, main, debug, source, extra, host } => {
+            cmd_build(&entry, &out, &main, htl::link::LinkOptions { debug, source, extra, host })
+        }
     }
 }
 
@@ -271,6 +291,7 @@ fn cmd_pkg(args: &[String]) -> Result<ExitCode> {
 struct TestFlags {
     fail_fast: bool,
     verbose: bool,
+    quiet: bool,
     slow: Option<f64>,
 }
 
@@ -306,10 +327,19 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
         } else {
             format!("{} passed, {} failed", rep.passed, rep.failed)
         };
-        eprintln!("{tag} {}  ({detail}, {:.0} ms)", f.display(), rep.duration_ms);
+        // Quiet: a passing file is silence; failures, errors and slow tests still show.
+        let show_file = !flags.quiet || !rep.ok();
+        if show_file {
+            eprintln!("{tag} {}  ({detail}, {:.0} ms)", f.display(), rep.duration_ms);
+        }
         for tr in &rep.tests {
             let slow = flags.slow.is_some_and(|ms| tr.ms >= ms);
             if flags.verbose || slow {
+                if flags.quiet && !show_file {
+                    // The file line was skipped: name the file with the slow test.
+                    eprintln!("slow {}  {}  ({:.1} ms)", f.display(), tr.name, tr.ms);
+                    continue;
+                }
                 let mark = if tr.ok { "ok  " } else { "FAIL" };
                 let note = if slow && !flags.verbose { "  [slow]" } else { "" };
                 eprintln!("      {mark} {}  ({:.1} ms){note}", tr.name, tr.ms);
@@ -508,13 +538,54 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
     }
 }
 
-fn cmd_build(dir: &Path, out: &Path, entry: &str) -> Result<ExitCode> {
+fn cmd_build(entry: &Path, out: &Path, main: &str, mut opts: htl::link::LinkOptions) -> Result<ExitCode> {
     let h = Htl::new()?;
+    auto_dts(entry)?;
+    apply_project(&h, entry)?;
+    if let Some((root, _, cfg)) = load_config(entry)? {
+        h.apply_config(&root, &cfg)?;
+        opts.extra.extend(cfg.build.extra.iter().cloned());
+        opts.host.extend(cfg.build.host.iter().cloned());
+    }
+    if entry.is_dir() {
+        return cmd_build_dir(&h, entry, out, main, &opts);
+    }
+    h.add_layout_paths(entry)?;
+    let linked = htl::link::link(&h, entry, &opts)?;
+    for (_, c) in &linked.checks {
+        print_checkinfo(c);
+    }
+    let n_err = linked.errors.len();
+    for e in linked.errors.iter().filter(|e| e.contains("is not on the search path")) {
+        eprintln!("error: {e}");
+    }
+    if n_err > 0 {
+        eprintln!("htl build: {n_err} error(s), bundle not written");
+        return Ok(ExitCode::FAILURE);
+    }
+    let buf = linked.bundle.encode();
+    fs::write(out, &buf).with_context(|| format!("writing {}", out.display()))?;
+    let typed = linked.modules.iter().filter(|m| m.typed).count();
+    eprintln!(
+        "htl build: {} module(s) ({typed} typed, {} lua) -> {} ({} bytes{}{})",
+        linked.modules.len(),
+        linked.modules.len() - typed,
+        out.display(),
+        buf.len(),
+        if opts.source { ", source" } else { ", bytecode" },
+        if opts.debug { " with debug info" } else { "" }
+    );
+    if !linked.host_modules.is_empty() {
+        eprintln!("htl build: host must provide: {}", linked.host_modules.join(", "));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The older form: every `.tl` under a directory, module names from their paths.
+fn cmd_build_dir(h: &Htl, dir: &Path, out: &Path, entry: &str, opts: &htl::link::LinkOptions) -> Result<ExitCode> {
     h.add_path(dir)?;
-    auto_dts(dir)?;
-    apply_project(&h, dir)?;
     let files = htl::collect_tl(&[dir.to_path_buf()])?;
-    let mut b = Bundle { entry: entry.to_string(), modules: Vec::new() };
+    let mut b = Bundle { entry: entry.to_string(), htl_version: env!("CARGO_PKG_VERSION").into(), ..Default::default() };
     let mut n_err = 0usize;
     for f in &files {
         let name = htl::module_name(dir, f)?;
@@ -522,14 +593,22 @@ fn cmd_build(dir: &Path, out: &Path, entry: &str) -> Result<ExitCode> {
         print_checkinfo(&c);
         n_err += c.errors.len();
         let Some(code) = code else { continue };
-        b.modules.push((name.clone(), h.compile(&name, &code)?));
+        let (kind, payload) = if opts.source {
+            (htl::bundle::Kind::Source, code.into_bytes())
+        } else {
+            (htl::bundle::Kind::Bytecode, h.compile_with(&name, &code, !opts.debug)?)
+        };
+        b.modules.push(htl::bundle::Module { name, kind, payload });
     }
     if n_err > 0 {
         eprintln!("htl build: {n_err} error(s), bundle not written");
         return Ok(ExitCode::FAILURE);
     }
-    if !b.modules.iter().any(|(n, _)| n == entry) {
+    if b.module(entry).is_none() {
         bail!("entry module '{entry}' not found among {} module(s)", b.modules.len());
+    }
+    if !opts.source {
+        b.fingerprint = h.fingerprint()?;
     }
     let buf = b.encode();
     fs::write(out, &buf).with_context(|| format!("writing {}", out.display()))?;
