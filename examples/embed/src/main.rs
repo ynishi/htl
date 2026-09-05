@@ -87,6 +87,10 @@ impl Store {
 const MAIN: &str = include_tl!("scripts/main.tl");
 const UTIL: &[u8] = include_tl_bytes!("scripts/util.tl");
 
+// The same program as one linked bundle: main + util, with `host` and `store` recorded
+// as host-provided (they resolve only to `.d.tl`). Run with `--bundle`.
+const BUNDLE: &[u8] = htl::include_bundle!("scripts/main.tl");
+
 // `cargo build -p embed --features bad` -> Teal type error surfaces as a Rust compile error.
 #[cfg(feature = "bad")]
 const BAD: &str = include_tl!("scripts/bad.tl");
@@ -95,9 +99,15 @@ fn main() -> Result<()> {
     let h = Htl::new()?;
     Host { started: Instant::now() }.htl_preload(&h)?;
     Store { dir: std::env::temp_dir() }.htl_preload(&h)?;
-    h.preload_bytes("util", UTIL)?;
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--bundle") {
+        args.remove(0);
+        // Everything but the host modules comes from the bundle; util is not preloaded.
+        h.run_bundle(&htl::bundle::Bundle::decode(BUNDLE)?, &args)?;
+        return Ok(());
+    }
+    h.preload_bytes("util", UTIL)?;
     h.exec(MAIN, "=main.tl", &args)?;
     Ok(())
 }

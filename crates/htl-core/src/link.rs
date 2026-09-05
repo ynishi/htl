@@ -36,13 +36,55 @@ pub struct LinkedModule {
 
 #[derive(Debug, Default)]
 pub struct Linked {
-    pub bundle: Bundle,
+    bundle: Bundle,
     pub modules: Vec<LinkedModule>,
     pub host_modules: Vec<String>,
-    /// Type errors, lints and unresolved requires; the bundle is only meaningful when empty.
+    /// Type errors and unresolved requires. A module with a type error is *absent* from
+    /// the bundle, so the bundle is only handed out ([`bundle`](Self::bundle)) when this
+    /// is empty: a program missing a module dies at its first `require`, far from here.
     pub errors: Vec<String>,
     pub lints: Vec<String>,
     pub checks: Vec<(PathBuf, CheckInfo)>,
+}
+
+impl Linked {
+    /// `true` when every module linked cleanly (lints are not errors here).
+    pub fn ok(&self) -> bool {
+        self.errors.is_empty()
+    }
+
+    /// The bundle, or every error that makes it incomplete.
+    pub fn bundle(&self) -> Result<&Bundle> {
+        if self.errors.is_empty() {
+            Ok(&self.bundle)
+        } else {
+            Err(self.error())
+        }
+    }
+
+    pub fn into_bundle(self) -> Result<Bundle> {
+        if self.errors.is_empty() {
+            Ok(self.bundle)
+        } else {
+            Err(self.error())
+        }
+    }
+
+    fn error(&self) -> anyhow::Error {
+        anyhow::anyhow!("link failed with {} error(s):\n  {}", self.errors.len(), self.errors.join("\n  "))
+    }
+
+    /// Every file the bundle was built from (entry, modules, and what the checker read
+    /// for them, e.g. `.d.tl`s): what a build script or macro should watch for changes.
+    pub fn inputs(&self) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = self.modules.iter().map(|m| m.path.clone()).collect();
+        for (_, ci) in &self.checks {
+            out.extend(ci.deps.iter().cloned());
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
 }
 
 /// Link `entry` (a `.tl` file) and everything it requires. The checker's search path

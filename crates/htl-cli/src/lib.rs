@@ -563,7 +563,7 @@ fn cmd_build(entry: &Path, out: &Path, main: &str, mut opts: htl::link::LinkOpti
         eprintln!("htl build: {n_err} error(s), bundle not written");
         return Ok(ExitCode::FAILURE);
     }
-    let buf = linked.bundle.encode();
+    let buf = linked.bundle()?.encode();
     fs::write(out, &buf).with_context(|| format!("writing {}", out.display()))?;
     let typed = linked.modules.iter().filter(|m| m.typed).count();
     eprintln!(

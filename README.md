@@ -280,6 +280,26 @@ and is refused up front, naming them, if one is missing.
   the host's modules win, files on disk do not override the bundle.
 - `htl build <dir>` (the older form) still bundles every `.tl` under a directory.
 
+From Rust, `include_bundle!` does the same at `cargo build` and keeps the guarantee
+`include_tl!` gives a single file: every linked `.tl` / `.lua` / `.d.tl` is tracked,
+so an edit rebuilds, and a Teal type error anywhere in the closure fails the build.
+
+```rust
+const BUNDLE: &[u8] = htl::include_bundle!("src/main.tl", host = ["host"], extra = ["modkit"]);
+// payload = "source" for cross-compiling (bytecode is produced by the build machine's
+// Lua); debug = true keeps line numbers. [build] extra / host in htl.toml are merged in.
+Host { .. }.htl_preload(&h)?;
+h.run_bundle(&htl::bundle::Bundle::decode(BUNDLE)?, &args)?;
+```
+
+Doing the same from a `build.rs` with `htl::link::link` works too: take the bundle
+through `Linked::bundle()` / `into_bundle()` (an `Err` lists every type error; `link`
+itself returns `Ok` so the whole list can be shown, and never hands out a bundle with
+a module missing), and emit `cargo:rerun-if-changed=<file>` for each of
+`Linked::inputs()`. Name files, not the directory: cargo compares the mtime of the
+path it is given, and editing a file inside a directory does not change the
+directory's.
+
 ## Layout of a project (`htl new`)
 
 ```text
