@@ -157,8 +157,10 @@ end
 
 -- tl.search_module rewrites the ".lua" suffix of each package.path template to
 -- ".tl" / ".d.tl" / ".lua" in turn, so templates must end in ".lua".
+-- `?/?.lua` lets a flat package expose its top-level module as `<name>/<name>.tl`
+-- (mlua-pkg's entry is a directory; without init.tl this is how a flat layout resolves).
 function H.add_path(dir)
-   package.path = dir .. "/?.lua;" .. dir .. "/?/init.lua;" .. package.path
+   package.path = dir .. "/?.lua;" .. dir .. "/?/init.lua;" .. dir .. "/?/?.lua;" .. package.path
 end
 
 return H

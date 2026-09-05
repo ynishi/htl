@@ -189,6 +189,19 @@ function F.format(src, filename, opts)
    local prot = protected_lines(src)
    local lines = split_lines(src)
 
+   -- Block terminators count as closers too: `end)` closes a callback argument.
+   local CLOSERS = { [")"] = true, ["}"] = true, ["end"] = true, ["until"] = true }
+   -- A line is inside a bracket span when strictly between its start and end lines, or on
+   -- the end line but not starting with the closer (`   c)` is still an argument line).
+   local function in_bracket(s, L)
+      if L <= s.y1 then return false end
+      if L < s.y2 then return true end
+      if L > s.y2 then return false end
+      local toks = by_line[L]
+      local first = toks and toks[1] and toks[1].tk
+      return not (first and CLOSERS[first])
+   end
+
    local function base_depth(L, firstX)
       -- Blocks: (y2, x2) is the end of the terminating token (`end` / `elseif` /
       -- `else` / `until`), so the terminator's line is never part of the body.
@@ -204,7 +217,7 @@ function F.format(src, filename, opts)
       -- not two: `f("x", function()` ... `end)`).
       local bracket_lines = {}
       for _, s in ipairs(spans) do
-         if s.kind ~= "block" and L > s.y1 and L < s.y2 then
+         if s.kind ~= "block" and in_bracket(s, L) then
             local shadowed = false
             if s.kind == "paren" then
                for _, b in ipairs(blocks) do

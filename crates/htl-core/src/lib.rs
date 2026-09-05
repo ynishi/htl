@@ -16,6 +16,8 @@ use mlua::{Function, Lua, Table, Value, Variadic};
 use std::path::{Path, PathBuf};
 
 pub mod bundle;
+#[cfg(feature = "dts")]
+pub mod dts;
 #[cfg(feature = "pkg")]
 pub mod pkg;
 pub mod teal;

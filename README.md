@@ -45,6 +45,7 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 | `htl gen <file.tl> [-o out.lua]` | readable Lua, the escape hatch out of htl |
 | `htl build <dir> -o app.hb [--entry main]` | stripped-bytecode bundle of a module tree |
 | `htl pkg <args>` | passthrough to `mlua-pkg` at the nearest `mlua-pkg.toml` root |
+| `htl dts [dir]` | write the `.d.tl` files declared by `#[host_module]` / `#[derive(TealRecord)]` from Rust source, no build needed (`check` / `run` / `test` / `build` do this automatically when inside a crate) |
 
 `mlua-pkg.toml` is detected by walking up from the file: vendored deps become
 visible to the checker and to `run` / `test` / `build` automatically.
@@ -142,14 +143,19 @@ such library pass if they run to completion.
 └── tests/<mod>_test.tl
 ```
 
+mlua-pkg's `entry` is a directory, so a consumer's `require("<name>")` looks for
+`<name>/init.tl`. A flat package can instead ship `<name>/<name>.tl` (e.g. `entry = "src"`
+with `src/<name>.tl`); htl resolves that form in the checker and in `TealResolver`.
+
 ## What is deliberately not here
 
 - No Teal fork: `tl.lua` is vendored verbatim (0.24.8, MIT) and swapped as a file.
 - No token-level formatting: `htl fmt` recomputes indentation and whitespace only.
 - No Luau: PUC Lua 5.4 / LuaJIT via mlua features; bundles are bound to the Lua
   generation of the `htl` that built them.
-- `.d.tl` files are written by the attribute macros at expansion time (source order
-  within one file); a `cargo htl dts` step is the cleaner future home for that.
+- `.d.tl` files come from Rust source syntactically (`htl dts`, and the macros at
+  expansion time write the same text). There is no reflection on types: a field of
+  type `Foo` is declared as `Foo` and it is on you that a Teal `Foo` exists.
 
 ## License
 

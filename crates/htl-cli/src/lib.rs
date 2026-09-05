@@ -50,6 +50,12 @@ enum Cmd {
         #[arg(long)]
         lint: Option<String>,
     },
+    /// Write the `.d.tl` files declared by `#[host_module(dts = ..)]` / `#[teal(dts = ..)]`
+    /// in a Rust crate, without building it (check / run / test / build do this automatically)
+    Dts {
+        /// Crate root or any path inside it (default: current directory)
+        dir: Option<PathBuf>,
+    },
     /// Create a new Teal project directory
     New {
         name: String,
@@ -132,6 +138,7 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
         Cmd::Fmt { paths, check, indent } => cmd_fmt(&paths, check, indent),
         Cmd::Test { paths, filter, lib, lint } => cmd_test(&paths, filter.as_deref(), &lib, lint.as_deref()),
         Cmd::Pkg { args } => cmd_pkg(&args),
+        Cmd::Dts { dir } => cmd_dts(dir.as_deref()),
         Cmd::New { name, lib, embed } => cmd_new(&name, lib, embed),
         Cmd::Init { dir, lib, embed } => cmd_init(dir.as_deref(), lib, embed),
         Cmd::Gen { file, out } => cmd_gen(&file, out.as_deref()),
@@ -150,6 +157,39 @@ fn print_checkinfo(c: &CheckInfo) {
     for e in &c.errors {
         eprintln!("error: {e}");
     }
+}
+
+/// If `start` is inside a Rust crate, (re)generate the `.d.tl` files its
+/// `#[host_module]` / `#[derive(TealRecord)]` declare, so the checker sees Rust-side
+/// modules before any `cargo build`. Quiet unless something was written.
+fn auto_dts(start: &Path) -> Result<()> {
+    let Some(root) = htl::dts::find_cargo_package_root(start) else { return Ok(()) };
+    let results = htl::dts::generate_crate(&root).map_err(|e| anyhow::anyhow!("htl dts: {e}"))?;
+    for (target, written) in results {
+        if written {
+            eprintln!("dts: wrote {}", target.strip_prefix(&root).unwrap_or(&target).display());
+        }
+    }
+    Ok(())
+}
+
+fn cmd_dts(dir: Option<&Path>) -> Result<ExitCode> {
+    let start = match dir {
+        Some(d) => d.to_path_buf(),
+        None => std::env::current_dir()?,
+    };
+    let Some(root) = htl::dts::find_cargo_package_root(&start) else {
+        bail!("no Cargo.toml with a [package] section found at or above {}", start.display());
+    };
+    let results = htl::dts::generate_crate(&root).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut written = 0usize;
+    for (target, w) in &results {
+        let rel = target.strip_prefix(&root).unwrap_or(target).display();
+        eprintln!("  {} {}", if *w { "wrote    " } else { "unchanged" }, rel);
+        written += usize::from(*w);
+    }
+    eprintln!("htl dts: {} declaration(s) from {}, {} written", results.len(), root.display(), written);
+    Ok(ExitCode::SUCCESS)
 }
 
 /// If `start` is inside an `mlua-pkg.toml` project, expose its vendored deps to the
@@ -219,6 +259,9 @@ fn cmd_pkg(args: &[String]) -> Result<ExitCode> {
 
 fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&str>) -> Result<ExitCode> {
     let paths = if paths.is_empty() { vec![PathBuf::from(".")] } else { paths.to_vec() };
+    if let Some(first) = paths.first() {
+        auto_dts(first)?;
+    }
     let files = htl::testing::discover_tests(&paths)?;
     if files.is_empty() {
         eprintln!("htl test: no test files found (looked for *_test.tl and tests/**/*.tl)");
@@ -307,6 +350,7 @@ fn cmd_check(paths: &[PathBuf], strict: bool, lint: Option<&str>, list_lints: bo
         h.configure_lints(spec)?;
     }
     if let Some(first) = paths.first() {
+        auto_dts(first)?;
         apply_project(&h, first)?;
     }
     // `*_test.tl` under the checked tree require("htl.test"): make its types visible.
@@ -336,6 +380,7 @@ fn cmd_check(paths: &[PathBuf], strict: bool, lint: Option<&str>, list_lints: bo
 fn cmd_gen(file: &Path, out: Option<&Path>) -> Result<ExitCode> {
     let h = Htl::new()?;
     h.add_path(&htl::parent_dir(file))?;
+    auto_dts(file)?;
     apply_project(&h, file)?;
     let (code, c) = h.gen_lua(file)?;
     print_checkinfo(&c);
@@ -353,6 +398,7 @@ fn cmd_gen(file: &Path, out: Option<&Path>) -> Result<ExitCode> {
 fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
     let bytes = fs::read(file).with_context(|| format!("reading {}", file.display()))?;
     let h = Htl::new()?;
+    auto_dts(file)?;
     apply_project(&h, file)?;
     h.install_test_lib()?;
     if Bundle::is_bundle(&bytes) {
@@ -384,6 +430,7 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
 fn cmd_build(dir: &Path, out: &Path, entry: &str) -> Result<ExitCode> {
     let h = Htl::new()?;
     h.add_path(dir)?;
+    auto_dts(dir)?;
     apply_project(&h, dir)?;
     let files = htl::collect_tl(&[dir.to_path_buf()])?;
     let mut b = Bundle { entry: entry.to_string(), modules: Vec::new() };

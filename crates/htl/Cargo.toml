@@ -17,6 +17,8 @@ default = ["macros", "pkg"]
 macros = ["dep:htl-macros"]
 # htl::pkg (mlua-pkg integration)
 pkg = ["htl-core/pkg"]
+# htl::dts (.d.tl generation from Rust source; `htl dts`)
+dts = ["htl-core/dts"]
 
 [dependencies]
 htl-core = { workspace = true }

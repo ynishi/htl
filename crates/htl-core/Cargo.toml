@@ -16,9 +16,13 @@ include = ["src/**/*", "lua/**/*", "vendor/**/*"]
 default = ["pkg"]
 # `htl_core::pkg::TealResolver` / `Project` for mlua-pkg's Registry (pulls git2 via mlua-pkg's package manager).
 pkg = ["dep:mlua-pkg"]
+# `htl_core::dts`: `.d.tl` generation from Rust source (`#[host_module]` / `#[derive(TealRecord)]`),
+# shared by the proc macros and `htl dts`.
+dts = ["dep:syn"]
 
 [dependencies]
 mlua = { workspace = true }
 mlua-pkg = { workspace = true, optional = true }
 anyhow = { workspace = true }
 walkdir = { workspace = true }
+syn = { version = "2", features = ["full"], optional = true }
