@@ -1,0 +1,6 @@
+/target
+.claude/
+workspace/
+.mlua-pkgs/
+.worktrees/
+*.hb

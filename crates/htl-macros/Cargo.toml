@@ -1,0 +1,21 @@
+[package]
+name = "htl-macros"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Proc macros for htl: include_tl! / include_tl_bytes! (Teal checked at cargo build), TealRecord, host_module"
+readme = "../../README.md"
+keywords = ["lua", "teal", "mlua", "proc-macro"]
+categories = ["development-tools::procedural-macro-helpers"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+htl = { workspace = true }
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
