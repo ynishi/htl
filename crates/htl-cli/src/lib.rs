@@ -290,8 +290,10 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
     }
     let (mut passed, mut failed, mut bad_files, mut ran_files) = (0usize, 0usize, 0usize, 0usize);
     let started = std::time::Instant::now();
+    // One checker for the run; each file still gets a fresh program state.
+    let session = htl::testing::TestSession::new(lint, lib, filter, opts)?;
     for f in &files {
-        let rep = htl::testing::run_test_file(f, filter, lib, lint, &opts)?;
+        let rep = session.run_file(f)?;
         ran_files += 1;
         print_checkinfo(&rep.check);
         let tag = if rep.ok() { "ok  " } else { "FAIL" };

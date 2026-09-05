@@ -244,10 +244,12 @@ a type error; the message says so).
 
 Runner: `htl test [paths] [--filter substr] [--fail-fast] [-v] [--slow MS]`. Each file
 runs in a fresh state; `-v` prints every test with its time, `--slow 50` only the ones
-over 50 ms, `--fail-fast` stops at the first failure. Within a state, a module is
-type-checked once: the checker's result is reused by every later `require` and (in
-`htl check`) by every later file whose search path resolves that module name to the
-same file. `HTL_PROFILE=1` prints per-file check / lint / generate times to stderr. Any library exposing
+over 50 ms, `--fail-fast` stops at the first failure. The run has one checker
+(`htl::testing::TestSession`) and one fresh program state per file: globals,
+`package.loaded` and module state never cross files, while a module is type-checked
+and generated once and served to every file whose search path resolves that name to
+the same file (`Htl::with_checker` is the same split for hosts that run many
+programs). `HTL_PROFILE=1` prints per-phase and per-file timings to stderr. Any library exposing
 `run(filter, opts) -> {passed, failed, failures, tests?}` plugs in via `--lib`
 (bring its `.d.tl`); files that use no such library pass if they run to completion.
 
@@ -274,6 +276,12 @@ with `src/<name>.tl`); htl resolves that form in the checker and in `TealResolve
   itself and that one of the names has to change.
 - **Numeric inference**: `local n = 0` is `integer`, `0.0` is `number`; opt into the
   `explicit-number` lint to be told where an annotation is missing.
+- **Forward references**: `function world.tick` calling `world.observe` that is
+  defined further down is "invalid key 'observe' in record 'world'", because Teal adds
+  a record's fields in source order. htl names the later definition and hands over the
+  line to paste into the record (`observe: function(w: World, what: string)`), which
+  also makes the record the module's declared API; moving the definition up is the
+  other fix.
 - **Multi-value call in last position**: `t.expect(can_cast(x))` with `can_cast`
   returning `boolean, string` is a 2-argument call, and Teal reports "wrong number of
   arguments" at `expect`. htl names the expanding call and the two fixes (bind first,

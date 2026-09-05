@@ -121,24 +121,54 @@ pub fn run_test_file(
     lint_spec: Option<&str>,
     opts: &RunOptions,
 ) -> Result<FileReport> {
-    let started = std::time::Instant::now();
-    let mut rep = run_test_file_inner(path, filter, lib, lint_spec, opts)?;
-    rep.duration_ms = started.elapsed().as_secs_f64() * 1000.0;
-    Ok(rep)
+    TestSession::new(lint_spec, lib, filter, opts.clone())?.run_file(path)
 }
 
-fn run_test_file_inner(
-    path: &Path,
-    filter: Option<&str>,
-    lib: &str,
-    lint_spec: Option<&str>,
-    opts: &RunOptions,
-) -> Result<FileReport> {
-    let mut rep = FileReport { path: path.to_path_buf(), ..Default::default() };
-    let h = Htl::new()?;
-    if let Some(spec) = lint_spec {
-        h.configure_lints(spec)?;
+/// One checker for a whole run: every test file gets its own fresh program state
+/// (globals, `package.loaded`, module state), but modules are type-checked and
+/// generated once and served to every file from the checker's store.
+pub struct TestSession {
+    checker: Htl,
+    lib: String,
+    filter: Option<String>,
+    opts: RunOptions,
+}
+
+impl TestSession {
+    pub fn new(lint_spec: Option<&str>, lib: &str, filter: Option<&str>, opts: RunOptions) -> Result<Self> {
+        let checker = Htl::new()?;
+        if let Some(spec) = lint_spec {
+            checker.configure_lints(spec)?;
+        }
+        Ok(Self { checker, lib: lib.to_string(), filter: filter.map(String::from), opts })
     }
+
+    /// Run one file in a fresh program state borrowing the session's checker. The
+    /// checker's search path is restored afterwards so files do not see each other's
+    /// directories.
+    pub fn run_file(&self, path: &Path) -> Result<FileReport> {
+        let started = std::time::Instant::now();
+        let saved = self.checker.search_path()?;
+        let h = Htl::with_checker(&self.checker)?;
+        let out = run_in(&h, path, self.filter.as_deref(), &self.lib, &self.opts);
+        self.checker.set_search_path(&saved)?;
+        let mut rep = out?;
+        rep.duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+        Ok(rep)
+    }
+}
+
+fn run_in(h: &Htl, path: &Path, filter: Option<&str>, lib: &str, opts: &RunOptions) -> Result<FileReport> {
+    let mut rep = FileReport { path: path.to_path_buf(), ..Default::default() };
+    let profile = std::env::var_os("HTL_PROFILE").is_some();
+    let mut t0 = std::time::Instant::now();
+    let phase = |label: &str, t0: &mut std::time::Instant| {
+        if profile {
+            eprintln!("profile: {label:<8} {:7.1} ms  {}", t0.elapsed().as_secs_f64() * 1000.0, path.display());
+        }
+        *t0 = std::time::Instant::now();
+    };
+    phase("state", &mut t0);
     h.install_test_lib()?;
     let dir = parent_dir(path);
     h.add_path(&dir)?;
@@ -158,14 +188,17 @@ fn run_test_file_inner(
     }
     h.install_searcher()?;
     h.set_arg(&path.to_string_lossy(), &[])?;
+    phase("setup", &mut t0);
 
     let (code, check) = h.gen_lua(path)?;
+    phase("gen_lua", &mut t0);
     rep.check = check;
     let Some(code) = code else { return Ok(rep) };
     if let Err(e) = h.exec(&code, &format!("@{}", path.display()), &[]) {
         rep.error = Some(crate::user_message(&e));
         return Ok(rep);
     }
+    phase("exec", &mut t0);
 
     // Did the file load the assertion library? Then ask it for the verdict.
     let package: Table = h.lua().globals().get("package")?;
@@ -176,6 +209,7 @@ fn run_test_file_inner(
             let lua_opts = h.lua().create_table()?;
             lua_opts.set("fail_fast", opts.fail_fast)?;
             let report: Table = run.call((filter, lua_opts))?;
+            phase("run", &mut t0);
             rep.passed = report.get::<Option<usize>>("passed")?.unwrap_or(0);
             rep.failed = report.get::<Option<usize>>("failed")?.unwrap_or(0);
             if let Ok(f) = report.get::<Table>("failures") {

@@ -115,6 +115,35 @@ fn multi_value_call_in_last_argument_is_explained() {
     assert!(!e.contains("last position"), "{e}");
 }
 
+/// `function world.observe` defined below its first use: Teal reports "invalid key";
+/// htl names the later definition and hands over the record declaration line.
+#[test]
+fn forward_reference_gets_the_declaration_line() {
+    let dir = scratch("fwd");
+    write(
+        &dir.join("world.tl"),
+        "local record world\n   record W\n      hp: integer\n   end\nend\n\n\
+         function world.tick(w: world.W): boolean\n   world.observe(w, \"tick\")\n   return world:alive(w)\nend\n\n\
+         function world.observe(w: world.W,\n                       what: string) -- log it\n   print(w.hp, what)\nend\n\n\
+         function world:alive(w: world.W): boolean\n   return w.hp > 0\nend\n\nreturn world\n",
+    );
+    let h = Htl::new().unwrap();
+    h.add_path(&dir).unwrap();
+    let ci = h.check(&dir.join("world.tl")).unwrap();
+    let observe = ci.errors.iter().find(|e| e.contains("'observe'")).expect("forward ref error");
+    assert!(observe.contains("`world.observe` is defined at line 12, after this use"), "{observe}");
+    assert!(observe.contains("`observe: function(w: world.W, what: string)`"), "multi-line header joined, comment dropped: {observe}");
+    assert!(observe.contains("move the definition above line 8"), "{observe}");
+    let alive = ci.errors.iter().find(|e| e.contains("'alive'")).expect("forward ref error");
+    assert!(alive.contains("`alive: function(self: world, w: world.W): boolean`"), "method form: {alive}");
+
+    // A genuinely unknown field gets no such hint.
+    write(&dir.join("typo.tl"), "local record m\nend\nfunction m.f()\n   m.g()\nend\nreturn m\n");
+    let ci = h.check(&dir.join("typo.tl")).unwrap();
+    let e = ci.errors.iter().find(|e| e.contains("'g'")).expect("error");
+    assert!(!e.contains("defined at line"), "{e}");
+}
+
 #[test]
 fn user_message_strips_traceback_and_unwraps_host_errors() {
     let h = Htl::new().unwrap();
