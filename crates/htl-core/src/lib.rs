@@ -47,6 +47,115 @@ pub struct CheckInfo {
     /// htl lint findings (`nil-index`, `enum-exhaustive`). Advisory unless the caller
     /// promotes them (`htl check --strict`, `include_tl!`).
     pub lints: Vec<String>,
+    /// Every `require("<literal>")` in the file and where the checker resolved it.
+    /// Input to [`require_cycles`].
+    pub requires: Vec<RequireSite>,
+}
+
+/// One literal `require` call in a checked file.
+#[derive(Debug, Clone)]
+pub struct RequireSite {
+    pub module: String,
+    /// Resolved file, `None` when the checker could not find it.
+    pub path: Option<PathBuf>,
+    pub line: usize,
+    pub col: usize,
+}
+
+/// Cycles in the require graph of a set of checked files, one message per cycle,
+/// anchored at the first edge's call site. Teal types a circular require as an opaque
+/// `circular_require`, so a cycle shows up elsewhere as "cannot index" errors; naming
+/// the loop is the useful part. Files outside `infos` are treated as leaves.
+pub fn require_cycles(infos: &[(PathBuf, CheckInfo)]) -> Vec<String> {
+    use std::collections::{HashMap, HashSet};
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let mut edges: HashMap<PathBuf, Vec<(PathBuf, &RequireSite)>> = HashMap::new();
+    let mut display: HashMap<PathBuf, PathBuf> = HashMap::new();
+    for (file, ci) in infos {
+        let from = canon(file);
+        display.insert(from.clone(), file.clone());
+        let list = edges.entry(from).or_default();
+        for r in &ci.requires {
+            if let Some(p) = &r.path {
+                list.push((canon(p), r));
+            }
+        }
+    }
+    let nodes: Vec<PathBuf> = {
+        let mut v: Vec<PathBuf> = edges.keys().cloned().collect();
+        v.sort();
+        v
+    };
+    let mut out = Vec::new();
+    let mut reported: HashSet<Vec<PathBuf>> = HashSet::new();
+    let mut state: HashMap<PathBuf, u8> = HashMap::new(); // 1 = on stack, 2 = done
+    let mut stack: Vec<(PathBuf, Option<&RequireSite>)> = Vec::new();
+
+    fn dfs<'a>(
+        node: PathBuf,
+        edges: &HashMap<PathBuf, Vec<(PathBuf, &'a RequireSite)>>,
+        state: &mut HashMap<PathBuf, u8>,
+        stack: &mut Vec<(PathBuf, Option<&'a RequireSite>)>,
+        reported: &mut HashSet<Vec<PathBuf>>,
+        display: &HashMap<PathBuf, PathBuf>,
+        out: &mut Vec<String>,
+    ) {
+        state.insert(node.clone(), 1);
+        if let Some(list) = edges.get(&node) {
+            for (to, site) in list {
+                match state.get(to).copied() {
+                    Some(1) => {
+                        // back edge: cycle = stack from `to` .. node, then back to `to`
+                        let start = stack.iter().position(|(n, _)| n == to).unwrap_or(0);
+                        let mut members: Vec<PathBuf> =
+                            stack[start..].iter().map(|(n, _)| n.clone()).chain(std::iter::once(node.clone())).collect();
+                        members.dedup();
+                        let mut key = members.clone();
+                        key.sort();
+                        if reported.insert(key) {
+                            let name = |p: &PathBuf| {
+                                display
+                                    .get(p)
+                                    .unwrap_or(p)
+                                    .file_name()
+                                    .map(|s| s.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| p.display().to_string())
+                            };
+                            let chain: Vec<String> = members.iter().map(name).chain(std::iter::once(name(to))).collect();
+                            let first_file = display.get(&members[0]).cloned().unwrap_or_else(|| members[0].clone());
+                            // anchor: the edge leaving the cycle's first member
+                            let anchor = stack.get(start + 1).and_then(|(_, s)| *s).unwrap_or(site);
+                            out.push(format!(
+                                "{}:{}:{}: require cycle: {} (Teal types the back edge as an opaque circular require; \
+                                 break it by moving shared types into a module both sides require) [htl require-cycle]",
+                                first_file.display(),
+                                anchor.line,
+                                anchor.col,
+                                chain.join(" -> ")
+                            ));
+                        }
+                    }
+                    Some(2) => {}
+                    _ => {
+                        stack.push((to.clone(), Some(site)));
+                        dfs(to.clone(), edges, state, stack, reported, display, out);
+                        stack.pop();
+                    }
+                }
+            }
+        }
+        state.insert(node, 2);
+    }
+
+    for n in nodes {
+        if !state.contains_key(&n) {
+            stack.push((n.clone(), None));
+            dfs(n, &edges, &mut state, &mut stack, &mut reported, &display, &mut out);
+            stack.pop();
+        }
+    }
+    out.sort();
+    out
 }
 
 impl CheckInfo {
@@ -153,6 +262,24 @@ impl Htl {
     pub fn reset_search_path(&self) -> Result<()> {
         let f: Function = self.h.get("reset_path")?;
         f.call::<()>(())?;
+        Ok(())
+    }
+
+    /// Search paths implied by where `file` sits in the scaffold layout: its own
+    /// directory, and for a file under `tests/` also the project root and `<root>/src`
+    /// (the test runner's rule, so `htl check tests` sees what `htl test` sees).
+    pub fn add_layout_paths(&self, file: &Path) -> Result<()> {
+        let dir = parent_dir(file);
+        self.add_path(&dir)?;
+        if dir.file_name().is_some_and(|n| n == "tests")
+            && let Some(root) = dir.parent()
+        {
+            self.add_path(root)?;
+            let src = root.join("src");
+            if src.is_dir() {
+                self.add_path(&src)?;
+            }
+        }
         Ok(())
     }
 
@@ -374,11 +501,24 @@ fn read_checkinfo(t: &Table) -> Result<CheckInfo> {
         let inner: Table = t.get(key)?;
         Ok(inner.sequence_values::<String>().collect::<mlua::Result<_>>()?)
     };
+    let mut requires = Vec::new();
+    if let Ok(list) = t.get::<Table>("requires") {
+        for r in list.sequence_values::<Table>() {
+            let r = r?;
+            requires.push(RequireSite {
+                module: r.get::<String>("name")?,
+                path: r.get::<Option<String>>("path")?.map(PathBuf::from),
+                line: r.get::<Option<usize>>("y")?.unwrap_or(0),
+                col: r.get::<Option<usize>>("x")?.unwrap_or(0),
+            });
+        }
+    }
     Ok(CheckInfo {
         errors: seq("errors")?,
         warnings: seq("warnings")?,
         deps: seq("deps")?.into_iter().map(PathBuf::from).collect(),
         lints: seq("lints")?,
+        requires,
     })
 }
 

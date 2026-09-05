@@ -62,6 +62,26 @@ impl Host {
     }
 }
 
+/// Same idea with `errors = "return"`: `Result` comes back Lua-style as `value, err`
+/// (`true, nil` / `nil, "message"` for unit) instead of raising.
+pub struct Store {
+    dir: std::path::PathBuf,
+}
+
+#[host_module(name = "store", dts = "scripts/store.d.tl", errors = "return")]
+impl Store {
+    pub fn write(&self, name: &str, text: &str) -> Result<(), std::io::Error> {
+        if name.contains('/') {
+            return Err(std::io::Error::other(format!("invalid name: {name}")));
+        }
+        std::fs::write(self.dir.join(name), text)
+    }
+
+    pub fn read(&self, name: &str) -> Result<String, std::io::Error> {
+        std::fs::read_to_string(self.dir.join(name))
+    }
+}
+
 // The `.d.tl` above is written when `#[host_module]` expands, which happens before
 // `include_tl!` below is expanded (same file, source order).
 const MAIN: &str = include_tl!("scripts/main.tl");
@@ -74,6 +94,7 @@ const BAD: &str = include_tl!("scripts/bad.tl");
 fn main() -> Result<()> {
     let h = Htl::new()?;
     Host { started: Instant::now() }.htl_preload(&h)?;
+    Store { dir: std::env::temp_dir() }.htl_preload(&h)?;
     h.preload_bytes("util", UTIL)?;
 
     let args: Vec<String> = std::env::args().skip(1).collect();

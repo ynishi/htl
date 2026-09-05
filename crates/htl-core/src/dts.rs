@@ -89,6 +89,19 @@ pub struct TealAttrs {
     pub uses: Vec<String>,
     /// Record types (structs in the same source file) nested inside the module record.
     pub records: Vec<String>,
+    /// How `Result<T, E>` returns reach Lua: `"raise"` (default; `Err` becomes a Lua
+    /// error) or `"return"` (`T, string` / `boolean, string` in the `io.open` style).
+    pub errors: Option<String>,
+}
+
+/// How a `#[host_module]` maps `Result<T, E>` returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrMode {
+    /// `Err(e)` raises a Lua error; Teal sees `function(...): T`.
+    Raise,
+    /// `Ok(v)` -> `v` (or `true` for unit), `Err(e)` -> `nil, tostring(e)`;
+    /// Teal sees `function(...): T, string` (`boolean, string` for unit).
+    Return,
 }
 
 fn lit_str(l: &Lit) -> Result<String, String> {
@@ -124,6 +137,13 @@ pub fn parse_attr_metas(metas: impl IntoIterator<Item = Meta>) -> Result<TealAtt
             ("dts", Expr::Lit(l)) => out.dts = Some(lit_str(&l.lit)?),
             ("uses", Expr::Array(arr)) => out.uses = type_list(arr, "uses")?,
             ("records", Expr::Array(arr)) => out.records = type_list(arr, "records")?,
+            ("errors", Expr::Lit(l)) => {
+                let v = lit_str(&l.lit)?;
+                if v != "raise" && v != "return" {
+                    return Err(format!("`errors` must be \"raise\" or \"return\", got {v:?}"));
+                }
+                out.errors = Some(v);
+            }
             (k, _) => return Err(format!("unknown or malformed attribute `{k}`")),
         }
     }
@@ -288,8 +308,11 @@ pub struct HostMethod {
     /// `None` = associated fn (no `self`), `Some(false)` = `&self`, `Some(true)` = `&mut self`.
     pub receiver: Option<bool>,
     pub params: Vec<HostParam>,
+    /// Teal type of the success value (`T` of `Result<T, E>`, or the plain return); empty for unit.
     pub ret_teal: String,
     pub ret_is_result: bool,
+    /// The success value is `()` (nothing to hand back but "it worked").
+    pub ret_is_unit: bool,
 }
 
 #[derive(Clone)]
@@ -299,6 +322,7 @@ pub struct HostDecl {
     pub decl: String,
     pub methods: Vec<HostMethod>,
     pub attrs: TealAttrs,
+    pub err_mode: ErrMode,
 }
 
 /// Declaration + wrapper plan for a `#[host_module]` impl block. `file_items` (the
@@ -309,6 +333,10 @@ pub fn host_decl(imp: &ItemImpl, attrs: TealAttrs, file_items: Option<&[Item]>) 
         _ => return Err("host_module: impl target must be a plain type".into()),
     };
     let module = attrs.name.clone().unwrap_or_else(|| type_name.to_lowercase());
+    let err_mode = match attrs.errors.as_deref() {
+        Some("return") => ErrMode::Return,
+        _ => ErrMode::Raise,
+    };
 
     let mut decl = uses_header(&attrs.uses);
     decl.push_str(&format!("local record {module}\n"));
@@ -364,13 +392,21 @@ pub fn host_decl(imp: &ItemImpl, attrs: TealAttrs, file_items: Option<&[Item]>) 
             ReturnType::Default => (String::new(), false),
             ReturnType::Type(_, t) => (teal_type(t, &module)?, is_result(t)),
         };
-        let ret_suffix = if ret_teal.is_empty() { String::new() } else { format!(": {ret_teal}") };
+        let ret_is_unit = ret_teal.is_empty();
+        // Teal-side return: `Result` in return mode becomes `T, string` (`boolean, string`
+        // for unit), the Lua `value, err` convention; otherwise just `T`.
+        let teal_ret = if ret_is_result && err_mode == ErrMode::Return {
+            if ret_is_unit { "boolean, string".to_string() } else { format!("{ret_teal}, string") }
+        } else {
+            ret_teal.clone()
+        };
+        let ret_suffix = if teal_ret.is_empty() { String::new() } else { format!(": {teal_ret}") };
         decl.push_str(&format!("   {fname}: function({}){ret_suffix}\n", teal_params.join(", ")));
-        methods.push(HostMethod { name: fname, receiver, params, ret_teal, ret_is_result });
+        methods.push(HostMethod { name: fname, receiver, params, ret_teal, ret_is_result, ret_is_unit });
     }
     decl.push_str(&format!("end\n\nreturn {module}\n"));
 
-    Ok(HostDecl { type_name, module, decl, methods, attrs })
+    Ok(HostDecl { type_name, module, decl, methods, attrs, err_mode })
 }
 
 // ---------------------------------------------------------------- file scanning (`htl dts`)
