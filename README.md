@@ -118,6 +118,7 @@ nil-guard optional data on the host side.
 | `shadow-local` | on | a local / loop var / parameter reusing an enclosing local's name |
 | `no-global` | on | `global` declarations |
 | `no-any` | off | explicit `any` annotations and `as any` casts |
+| `explicit-number` | off | an unannotated local initialized with a numeric literal: `local n = 0` infers `integer`, `0.0` infers `number`, and a later `n = n * 1.5` fails; write `local n: number = 0` |
 
 Silence one occurrence with a trailing `-- htl: allow(nil-index)`. `include_tl!`
 treats lints as errors (`HTL_LINT=warn` downgrades, `HTL_LINTS=+no-any,-shadow-local`
