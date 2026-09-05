@@ -279,19 +279,72 @@ end
 -- Uses a fresh env so module names resolved for one file (via its package.path)
 -- never leak into a later file from another directory. `H.gen` keeps the shared
 -- env: it serves one program (run / build / include_tl!) where sharing is wanted.
-function H.check(filename)
-   local env = new_env() -- bind first: assert() would also pass its message along as `fd`
+local PROFILE = os.getenv("HTL_PROFILE") ~= nil
+local function prof(label, filename, t0)
+   if PROFILE then
+      io.stderr:write(string.format("profile: %-8s %7.1f ms  %s\n", label, (os.clock() - t0) * 1000, filename))
+   end
+end
+
+-- Checked-module store, shared by every fresh env in this state. A fresh env per file
+-- exists so that module *names* resolve under that file's own search path and never
+-- leak from another directory; the store keeps that guarantee by seeding an env only
+-- with entries whose name still resolves to the very same file here. What is shared is
+-- the result of checking a file, which does not depend on who required it.
+local store = {} -- module name -> { filename, type, result }
+
+local function store_from(env)
+   for name, ty in pairs(env.modules) do
+      local fname = env.module_filenames[name]
+      local result = fname and env.loaded[fname]
+      -- skip the placeholder tl leaves while a module is being checked (circular requires)
+      if result and result.type == ty then
+         store[name] = { filename = fname, type = ty, result = result }
+      end
+   end
+end
+
+local function seed_env(env)
+   for name, e in pairs(store) do
+      if env.modules[name] == nil then
+         local found, fd = tl.search_module(name, true)
+         if fd then fd:close() end
+         if found == e.filename then
+            env.modules[name] = e.type
+            env.module_filenames[name] = e.filename
+            env.loaded[e.filename] = e.result
+         end
+      end
+   end
+end
+
+function H.reset_store()
+   store = {}
+end
+
+-- opts.lints = false skips the lint pass (runtime `require` of an already type-checked
+-- module: nobody reads lints there, and the pass costs more than the check itself).
+-- opts.seed = false checks with a cold env (no store).
+function H.check(filename, env, opts)
+   opts = opts or {}
+   local fresh = env == nil
+   env = env or new_env() -- bind first: assert() would also pass its message along as `fd`
+   local t0 = os.clock()
+   if fresh and opts.seed ~= false then seed_env(env) end
    local result, err = tl.check_file(filename, env)
+   prof("check", filename, t0)
+   if result then store_from(env) end
    if not result then
       return { ok = false, errors = { tostring(err) }, warnings = {} }
    end
+   t0 = os.clock()
    local errors, warnings = collect_errors(filename, result), {}
    for _, w in ipairs(result.warnings or {}) do warnings[#warnings + 1] = fmt(filename, w) end
    local deps = {}
    for _, fname in pairs(result.dependencies or {}) do deps[#deps + 1] = fname end
    table.sort(deps)
    local lints = {}
-   if result.ast and #(result.syntax_errors or {}) == 0 then
+   if opts.lints ~= false and result.ast and #(result.syntax_errors or {}) == 0 then
       local src
       local fd = io.open(filename, "rb")
       if fd then src = fd:read("a"); fd:close() end
@@ -304,18 +357,26 @@ function H.check(filename)
       end
    end
    local requires = {}
-   if result.ast then requires = require_sites(result.ast) end
+   -- require sites feed the project-level require-cycle lint: same gate as the lints.
+   if opts.lints ~= false and result.ast then requires = require_sites(result.ast) end
+   prof("lint+req", filename, t0)
    return { ok = #errors == 0, errors = errors, warnings = warnings, deps = deps, lints = lints,
       requires = requires, result = result }
 end
 
 -- Type-check + generate Lua source. Returns code, checkinfo (code is nil on failure).
-function H.gen(filename)
-   local c = H.check(filename)
+-- Type-check + generate Lua for one program. Uses the shared env on purpose: a module
+-- already checked while checking its requirer (or an earlier `require`) is served from
+-- `env.modules` instead of being checked again with all of its dependencies. Measured
+-- on a 7k-line project: a test file went from 5.0 s to the cost of one `htl check`.
+function H.gen(filename, opts)
+   local c = H.check(filename, H.env, opts)
    if not c.ok then
       return nil, c
    end
+   local t0 = os.clock()
    local code, gerr = tl.generate(c.result.ast, H.GEN_TARGET)
+   prof("generate", filename, t0)
    if not code then
       c.ok = false
       c.errors = { filename .. ": generate failed: " .. tostring(gerr) }
@@ -504,7 +565,8 @@ local function strict_searcher(module_name)
       return "\n\tno .tl module '" .. module_name .. "' on package.path"
    end
    fd:close()
-   local code, c = H.gen(found)
+   -- Type errors are fatal here; lints are the CLI's business (`htl check`), not require's.
+   local code, c = H.gen(found, { lints = false })
    if not code then
       error(table.concat(c.errors, "\n"), 0)
    end
