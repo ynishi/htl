@@ -137,6 +137,10 @@ pub struct Project {
     pub lockfile: PathBuf,
     pub pkgs_dir: PathBuf,
     pub vendored: PathBuf,
+    /// Parent directories of `target_dir` deps (physically vendored copies declared in
+    /// the manifest, e.g. `target_dir = "lua/lshape"` -> `<root>/lua`), so
+    /// `require("lshape")` resolves to `<root>/lua/lshape/init.*` like a vendored dep.
+    pub target_dirs: Vec<PathBuf>,
 }
 
 pub const MANIFEST_NAME: &str = "mlua-pkg.toml";
@@ -167,12 +171,28 @@ impl Project {
             _ if root.join("target").is_dir() => root.join("target").join("mlua-pkgs"),
             _ => root.join(".mlua-pkgs"),
         };
+        let manifest = root.join(MANIFEST_NAME);
+        // `target_dir` deps: collect the parent of each declared copy target. A manifest
+        // that fails to parse contributes nothing here (mlua-pkg itself reports it).
+        let mut target_dirs: Vec<PathBuf> = Vec::new();
+        if let Ok(m) = mlua_pkg::manifest::Manifest::from_path(&manifest) {
+            for dep in m.deps.values() {
+                if let Some(td) = &dep.target_dir {
+                    let abs = root.join(td);
+                    let parent = abs.parent().map(Path::to_path_buf).unwrap_or_else(|| root.to_path_buf());
+                    if !target_dirs.contains(&parent) {
+                        target_dirs.push(parent);
+                    }
+                }
+            }
+        }
         Self {
             root: root.to_path_buf(),
-            manifest: root.join(MANIFEST_NAME),
+            manifest,
             lockfile: root.join(LOCKFILE_NAME),
             vendored: pkgs_dir.join("vendored"),
             pkgs_dir,
+            target_dirs,
         }
     }
 
@@ -204,6 +224,12 @@ impl Project {
         let mut reg = mlua_pkg::Registry::new();
         reg.add(self.teal_resolver()?);
         reg.add(self.vendored_resolver()?);
+        for d in &self.target_dirs {
+            if d.is_dir() {
+                reg.add(TealResolver::new(d)?);
+                reg.add(mlua_pkg::resolvers::FsResolver::new(d)?);
+            }
+        }
         Ok(reg)
     }
 }
@@ -214,6 +240,9 @@ impl crate::Htl {
     pub fn apply_project(&self, p: &Project) -> anyhow::Result<()> {
         let _ = std::fs::create_dir_all(&p.vendored);
         self.add_path(&p.vendored)?;
+        for d in &p.target_dirs {
+            self.add_path(d)?;
+        }
         Ok(())
     }
 }

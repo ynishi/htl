@@ -16,7 +16,7 @@ proc-macro = true
 
 [dependencies]
 # Runs the Teal checker at expansion time. Generated code targets `::htl::` (the umbrella).
-htl-core = { workspace = true }
+htl-core = { workspace = true, features = ["pkg"] }
 syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"

@@ -14,7 +14,7 @@ mod ty;
 use proc_macro::TokenStream;
 use proc_macro2::Literal;
 use quote::{format_ident, quote};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use syn::punctuated::Punctuated;
 use syn::{
     Data, DeriveInput, Expr, FnArg, ImplItem, ItemImpl, Lit, LitStr, Meta, Pat, ReturnType, Token,
@@ -47,8 +47,26 @@ fn manifest_dir() -> Result<PathBuf, String> {
         .map_err(|_| "CARGO_MANIFEST_DIR is not set".to_string())
 }
 
-fn expand_include(rel: &str, bytes: bool) -> Result<TokenStream, String> {
-    let path = manifest_dir()?.join(rel);
+/// What `include_tl!` / `include_tl_bytes!` embed, computed without proc-macro types so
+/// it can be unit-tested.
+#[derive(Debug)]
+struct Included {
+    main_abs: String,
+    deps: Vec<String>,
+    payload: Payload,
+}
+
+#[derive(Debug)]
+enum Payload {
+    Source(String),
+    Bytes(Vec<u8>),
+}
+
+/// Check + generate `rel` (relative to `manifest_dir`). Search paths match the CLI:
+/// the file's own directory, the nearest `mlua-pkg.toml` project's vendored deps
+/// (and `target_dir` copies), and the bundled `htl.test` declarations.
+fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Included, String> {
+    let path = manifest_dir.join(rel);
     if !path.is_file() {
         return Err(format!("include_tl!: no such file: {}", path.display()));
     }
@@ -59,6 +77,10 @@ fn expand_include(rel: &str, bytes: bool) -> Result<TokenStream, String> {
     }
     h.add_path(&htl_core::parent_dir(&path))
         .map_err(|e| format!("include_tl!: {e:#}"))?;
+    if let Some(p) = htl_core::pkg::Project::find(&path) {
+        h.apply_project(&p).map_err(|e| format!("include_tl!: {e:#}"))?;
+    }
+    h.install_test_lib().map_err(|e| format!("include_tl!: {e:#}"))?;
     let (code, ci) = h.gen_lua(&path).map_err(|e| format!("include_tl!: {e:#}"))?;
 
     for w in &ci.warnings {
@@ -97,10 +119,24 @@ fn expand_include(rel: &str, bytes: bool) -> Result<TokenStream, String> {
         let bc = h
             .compile(&name, &code)
             .map_err(|e| format!("include_tl_bytes!: {e:#}"))?;
-        let lit = Literal::byte_string(&bc);
-        quote! { #lit as &[u8] }
+        Payload::Bytes(bc)
     } else {
-        quote! { #code }
+        Payload::Source(code)
+    };
+
+    Ok(Included { main_abs, deps, payload })
+}
+
+fn expand_include(rel: &str, bytes: bool) -> Result<TokenStream, String> {
+    let inc = resolve_include(&manifest_dir()?, rel, bytes)?;
+    let main_abs = inc.main_abs;
+    let deps = inc.deps;
+    let payload = match inc.payload {
+        Payload::Bytes(bc) => {
+            let lit = Literal::byte_string(&bc);
+            quote! { #lit as &[u8] }
+        }
+        Payload::Source(code) => quote! { #code },
     };
 
     Ok(quote! {{
@@ -109,6 +145,85 @@ fn expand_include(rel: &str, bytes: bool) -> Result<TokenStream, String> {
         #payload
     }}
     .into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "htl-macros-test-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write(path: &Path, text: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    /// The macro must see the same tree as the CLI: a module vendored by mlua-pkg
+    /// (`.mlua-pkgs/vendored/<name>/init.tl`) resolves from a script under the project.
+    #[test]
+    fn include_resolves_vendored_dep_from_mlua_pkg_project() {
+        let root = scratch("vendored");
+        write(&root.join("mlua-pkg.toml"), "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[deps]\n");
+        write(
+            &root.join(".mlua-pkgs/vendored/mathx/init.tl"),
+            "local record mathx\nend\nfunction mathx.twice(n: number): number\n   return n * 2\nend\nreturn mathx\n",
+        );
+        write(
+            &root.join("scripts/main.tl"),
+            "local mathx = require(\"mathx\")\nprint(mathx.twice(21))\n",
+        );
+
+        let inc = resolve_include(&root, "scripts/main.tl", false).expect("vendored dep must resolve");
+        assert!(inc.main_abs.ends_with("scripts/main.tl"));
+        assert!(
+            inc.deps.iter().any(|d| d.ends_with("vendored/mathx/init.tl")),
+            "dep must be tracked for rebuilds: {:?}",
+            inc.deps
+        );
+        match inc.payload {
+            Payload::Source(code) => assert!(code.contains("require(\"mathx\")")),
+            Payload::Bytes(_) => panic!("expected source"),
+        }
+    }
+
+    /// `target_dir` deps (physically vendored under the manifest) resolve too.
+    #[test]
+    fn include_resolves_target_dir_dep() {
+        let root = scratch("targetdir");
+        write(
+            &root.join("mlua-pkg.toml"),
+            "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[deps]\nmathx = { git = \"https://example.invalid/mathx\", tag = \"v1\", target_dir = \"lua/mathx\" }\n",
+        );
+        write(
+            &root.join("lua/mathx/init.tl"),
+            "local record mathx\nend\nfunction mathx.twice(n: number): number\n   return n * 2\nend\nreturn mathx\n",
+        );
+        write(&root.join("src/main.tl"), "local mathx = require(\"mathx\")\nprint(mathx.twice(1))\n");
+
+        let inc = resolve_include(&root, "src/main.tl", true).expect("target_dir dep must resolve");
+        assert!(matches!(inc.payload, Payload::Bytes(ref b) if !b.is_empty()));
+    }
+
+    /// Without a project the same script fails: the dep is genuinely not on the path.
+    #[test]
+    fn include_without_project_does_not_see_vendored_dir() {
+        let root = scratch("noproject");
+        write(&root.join(".mlua-pkgs/vendored/mathx/init.tl"), "return {}\n");
+        write(&root.join("scripts/main.tl"), "local mathx = require(\"mathx\")\nprint(mathx)\n");
+        let err = resolve_include(&root, "scripts/main.tl", false).unwrap_err();
+        assert!(err.contains("module not found: 'mathx'"), "{err}");
+    }
 }
 
 // ------------------------------------------------------------------ shared attr parsing
