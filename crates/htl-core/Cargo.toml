@@ -26,3 +26,5 @@ mlua-pkg = { workspace = true, optional = true }
 anyhow = { workspace = true }
 walkdir = { workspace = true }
 syn = { version = "2", features = ["full"], optional = true }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"

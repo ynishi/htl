@@ -37,6 +37,8 @@ pub struct TealResolver {
     expect_type: Option<String>,
     /// With `expect_type`: every declared field of the record must be non-nil at run time.
     require_fields: bool,
+    /// Extra dirs the checker may search for `require`s (e.g. where `defs.tl` lives).
+    checker_paths: Vec<PathBuf>,
 }
 
 impl TealResolver {
@@ -50,6 +52,7 @@ impl TealResolver {
             module_separator: '.',
             expect_type: None,
             require_fields: false,
+            checker_paths: Vec::new(),
         })
     }
 
@@ -63,6 +66,7 @@ impl TealResolver {
             module_separator: '.',
             expect_type: None,
             require_fields: false,
+            checker_paths: Vec::new(),
         })
     }
 
@@ -76,6 +80,7 @@ impl TealResolver {
             module_separator: '.',
             expect_type: None,
             require_fields: false,
+            checker_paths: Vec::new(),
         }
     }
 
@@ -106,6 +111,29 @@ impl TealResolver {
     pub fn require_fields(mut self) -> Self {
         self.require_fields = true;
         self
+    }
+
+    /// Let the Teal checker also search `dir` when resolving `require`s inside served
+    /// modules (and the module named by `expect_type`). The sandbox root is always
+    /// searched; add the project `src/` here when `defs.tl` lives there.
+    pub fn with_checker_path(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.checker_paths.push(dir.into());
+        self
+    }
+
+    /// Resolver for one `[[contract]]` of `htl.toml`: serves `<root>/<dir>` with
+    /// `expect_type(type)` (and `require_fields()` when set), with `root` and
+    /// `root/src` visible to the checker. `root` is the directory holding `htl.toml`.
+    /// The `contract-unenforced` lint of `htl check` recognises this call.
+    pub fn for_contract(root: &Path, c: &crate::config::Contract) -> Result<Self, InitError> {
+        let mut r = Self::new_symlink_aware(root.join(&c.dir))?
+            .expect_type(c.type_path.clone())
+            .with_checker_path(root)
+            .with_checker_path(root.join("src"));
+        if c.require_fields {
+            r = r.require_fields();
+        }
+        Ok(r)
     }
 
     /// Declared fields of the expected record that are nil in `value`.
@@ -172,9 +200,14 @@ impl TealResolver {
         if self.path_added.swap(true, Ordering::Relaxed) {
             return Ok(());
         }
+        let f: Function = h.get("add_path")?;
         if let Some(root) = &self.root {
-            let f: Function = h.get("add_path")?;
             f.call::<()>(root.to_string_lossy().as_ref())?;
+        }
+        for p in &self.checker_paths {
+            if p.is_dir() {
+                f.call::<()>(p.to_string_lossy().as_ref())?;
+            }
         }
         let _ = lua;
         Ok(())
@@ -324,6 +357,14 @@ impl Project {
         }
         Ok(reg)
     }
+}
+
+/// One [`TealResolver`] per `[[contract]]` in `htl.toml`, in declaration order, so the
+/// host and `htl check` enforce the same contracts from the same source. `root` is the
+/// directory holding `htl.toml` (the path [`HtlConfig::find`](crate::config::HtlConfig::find)
+/// returns, minus the file name). Add them to a `Registry` before the plain resolvers.
+pub fn contract_resolvers(root: &Path, cfg: &crate::config::HtlConfig) -> Result<Vec<TealResolver>, InitError> {
+    cfg.contract.iter().map(|c| TealResolver::for_contract(root, c)).collect()
 }
 
 impl crate::Htl {

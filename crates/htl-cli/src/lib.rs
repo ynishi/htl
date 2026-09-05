@@ -86,9 +86,9 @@ enum Cmd {
         /// Do not write; exit 1 if any file would change
         #[arg(long)]
         check: bool,
-        /// Indent width in spaces
-        #[arg(long, default_value_t = 3)]
-        indent: usize,
+        /// Indent width in spaces (default: `[fmt] indent` in htl.toml, else 3)
+        #[arg(long)]
+        indent: Option<usize>,
     },
     /// Emit readable Lua for one .tl file (escape hatch)
     Gen {
@@ -262,6 +262,9 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
     if let Some(first) = paths.first() {
         auto_dts(first)?;
     }
+    let file_spec = load_config(&paths[0])?.map(|(_, _, c)| c.lint_spec()).unwrap_or_default();
+    let spec = htl::config::join_specs([file_spec.as_str(), lint.unwrap_or("")]);
+    let lint = if spec.is_empty() { None } else { Some(spec.as_str()) };
     let files = htl::testing::discover_tests(&paths)?;
     if files.is_empty() {
         eprintln!("htl test: no test files found (looked for *_test.tl and tests/**/*.tl)");
@@ -301,8 +304,17 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
     Ok(if bad_files == 0 { ExitCode::SUCCESS } else { ExitCode::FAILURE })
 }
 
-fn cmd_fmt(paths: &[PathBuf], check: bool, indent: usize) -> Result<ExitCode> {
+/// Nearest `htl.toml` above the first path: `(dir holding it, path, config)`.
+fn load_config(first: &Path) -> Result<Option<(PathBuf, PathBuf, htl::config::HtlConfig)>> {
+    Ok(htl::config::HtlConfig::find(first)?.map(|(p, c)| (htl::parent_dir(&p), p, c)))
+}
+
+fn cmd_fmt(paths: &[PathBuf], check: bool, indent: Option<usize>) -> Result<ExitCode> {
     let paths = if paths.is_empty() { vec![PathBuf::from(".")] } else { paths.to_vec() };
+    let cfg = load_config(&paths[0])?;
+    let indent = indent
+        .or_else(|| cfg.as_ref().and_then(|(_, _, c)| c.fmt.indent))
+        .unwrap_or(3);
     let h = Htl::new()?;
     let files = htl::collect_tl(&paths)?;
     let (mut changed, mut failed) = (0usize, 0usize);
@@ -346,9 +358,14 @@ fn cmd_check(paths: &[PathBuf], strict: bool, lint: Option<&str>, list_lints: bo
         }
         return Ok(ExitCode::SUCCESS);
     }
-    if let Some(spec) = lint {
-        h.configure_lints(spec)?;
+    // htl.toml first, then --lint, so the flag wins; `strict` from the file unless flagged.
+    let cfg = load_config(&paths[0])?;
+    let file_spec = cfg.as_ref().map(|(_, _, c)| c.lint_spec()).unwrap_or_default();
+    let spec = htl::config::join_specs([file_spec.as_str(), lint.unwrap_or("")]);
+    if !spec.is_empty() {
+        h.configure_lints(&spec)?;
     }
+    let strict = strict || cfg.as_ref().and_then(|(_, _, c)| c.lint.strict).unwrap_or(false);
     if let Some(first) = paths.first() {
         auto_dts(first)?;
         apply_project(&h, first)?;
@@ -365,12 +382,29 @@ fn cmd_check(paths: &[PathBuf], strict: bool, lint: Option<&str>, list_lints: bo
         n_err += c.errors.len();
         n_warn += c.warnings.len();
         n_lint += c.lints.len();
+        // `[[contract]]`: static expect_type / require_fields for files under each dir.
+        if let Some((root, _, cfg)) = &cfg
+            && c.ok()
+        {
+            for l in htl::contract_lints(&h, root, cfg, f)? {
+                eprintln!("lint: {l}");
+                n_lint += 1;
+            }
+        }
         infos.push((f.clone(), c));
     }
     // Project-level: cycles in the require graph of the files just checked.
     for cyc in htl::require_cycles(&infos) {
         eprintln!("lint: {cyc}");
         n_lint += 1;
+    }
+    // A contract the host never enforces is documentation, not a guarantee.
+    if let Some((_, cfg_path, cfg)) = &cfg {
+        let cargo_root = htl::dts::find_cargo_package_root(&paths[0]);
+        for l in htl::contract_enforcement_lints(cfg, cfg_path, cargo_root.as_deref()) {
+            eprintln!("lint: {l}");
+            n_lint += 1;
+        }
     }
     eprintln!(
         "htl check: {} file(s), {} error(s), {} warning(s), {} lint(s){}",

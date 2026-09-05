@@ -16,6 +16,7 @@ use mlua::{Function, Lua, Table, Value, Variadic};
 use std::path::{Path, PathBuf};
 
 pub mod bundle;
+pub mod config;
 #[cfg(feature = "dts")]
 pub mod dts;
 #[cfg(feature = "pkg")]
@@ -60,6 +61,144 @@ pub struct RequireSite {
     pub path: Option<PathBuf>,
     pub line: usize,
     pub col: usize,
+}
+
+/// Result of a static contract check (see [`Htl::contract_check`]).
+#[derive(Debug, Clone, Default)]
+pub struct ContractResult {
+    /// Type errors from `local m: <T> = require("<mod>")`.
+    pub errors: Vec<String>,
+    /// Declared fields absent from the module's returned table literal; `None` when the
+    /// return value is not a literal (not decidable statically).
+    pub missing: Option<Vec<String>>,
+    pub missing_at: (usize, usize),
+}
+
+impl Htl {
+    /// Static form of `TealResolver::expect_type` / `require_fields` for one module file:
+    /// `modname` is what a `require` would say (its stem), `type_path` is `"defs.Mod"`.
+    pub fn contract_check(&self, file: &Path, modname: &str, type_path: &str, require_fields: bool) -> Result<ContractResult> {
+        let f: Function = self.h.get("contract_check")?;
+        let t: Table = f.call((path_str(file), modname, type_path, require_fields))?;
+        let errors: Table = t.get("errors")?;
+        let errors = errors.sequence_values::<String>().collect::<mlua::Result<_>>()?;
+        let missing = match t.get::<Option<Table>>("missing")? {
+            Some(m) => Some(m.sequence_values::<String>().collect::<mlua::Result<Vec<_>>>()?),
+            None => None,
+        };
+        let missing_at = (
+            t.get::<Option<usize>>("missing_y")?.unwrap_or(1),
+            t.get::<Option<usize>>("missing_x")?.unwrap_or(1),
+        );
+        Ok(ContractResult { errors, missing, missing_at })
+    }
+}
+
+/// `contract` lint for one file: when `file` sits directly under a `[[contract]]` dir
+/// of `cfg` (relative to `root`, the directory holding `htl.toml`), check it against
+/// that contract statically. Returns lint lines (empty when no contract applies).
+pub fn contract_lints(h: &Htl, root: &Path, cfg: &config::HtlConfig, file: &Path) -> Result<Vec<String>> {
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let file_abs = canon(file);
+    let mut out = Vec::new();
+    if !is_tl_source(&file_abs) {
+        return Ok(out);
+    }
+    for c in &cfg.contract {
+        let dir = canon(&root.join(&c.dir));
+        if file_abs.parent() != Some(dir.as_path()) {
+            continue;
+        }
+        let modname = file_abs.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        // Same visibility as `TealResolver::for_contract`: the contract dir, plus the
+        // project root and its `src/` (where `defs.tl` normally lives).
+        h.add_path(&dir)?;
+        h.add_path(root)?;
+        if root.join("src").is_dir() {
+            h.add_path(&root.join("src"))?;
+        }
+        let r = h.contract_check(&file_abs, &modname, &c.type_path, c.require_fields)?;
+        for e in &r.errors {
+            // The stub's own "<contract ...>:L:C: " prefix says nothing useful; keep the message.
+            let msg = e.splitn(4, ':').last().unwrap_or(e).trim();
+            out.push(format!(
+                "{}:1:1: does not satisfy contract {} ({}): {msg} [htl contract]",
+                file.display(),
+                c.type_path,
+                c.dir
+            ));
+        }
+        if let Some(missing) = &r.missing
+            && !missing.is_empty()
+        {
+            out.push(format!(
+                "{}:{}:{}: returned table lacks declared field(s) of {}: {} [htl contract]",
+                file.display(),
+                r.missing_at.0,
+                r.missing_at.1,
+                c.type_path,
+                missing.join(", ")
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// `contract-unenforced` lint: a `[[contract]]` in `htl.toml` only becomes a run-time
+/// guarantee when the host builds its resolver with it. Scan the host crate's Rust
+/// sources (under `cargo_root`) for `expect_type("<type>")` (plus `require_fields()` when
+/// required) or for the config-driven `contract_resolvers(` / `for_contract(` helpers.
+/// No host crate (`cargo_root` = None) means a script-only project: nothing to enforce.
+pub fn contract_enforcement_lints(cfg: &config::HtlConfig, cfg_path: &Path, cargo_root: Option<&Path>) -> Vec<String> {
+    let mut out = Vec::new();
+    if cfg.contract.is_empty() {
+        return out;
+    }
+    let Some(root) = cargo_root else { return out };
+    let mut sources = String::new();
+    for sub in ["src", "examples", "tests", "benches"] {
+        let dir = root.join(sub);
+        if !dir.is_dir() {
+            continue;
+        }
+        for e in walkdir::WalkDir::new(&dir).into_iter().flatten() {
+            let p = e.path();
+            if p.is_file()
+                && p.extension().and_then(|s| s.to_str()) == Some("rs")
+                && let Ok(t) = std::fs::read_to_string(p)
+            {
+                sources.push_str(&t);
+                sources.push('\n');
+            }
+        }
+    }
+    let by_config = sources.contains("contract_resolvers(") || sources.contains("for_contract(");
+    for c in &cfg.contract {
+        let by_hand = sources.contains(&format!("expect_type(\"{}\")", c.type_path));
+        let want_fields = if c.require_fields { ".require_fields()" } else { "" };
+        if !(by_config || by_hand) {
+            out.push(format!(
+                "{}:1:1: contract `{}` -> {} is declared but the host does not enforce it: add \
+                 TealResolver::new(\"{}\").expect_type(\"{}\"){} in the Rust host, or build resolvers with \
+                 htl::pkg::contract_resolvers(root, &config) [htl contract-unenforced]",
+                cfg_path.display(),
+                c.dir,
+                c.type_path,
+                c.dir,
+                c.type_path,
+                want_fields
+            ));
+        } else if c.require_fields && !by_config && !sources.contains("require_fields()") {
+            out.push(format!(
+                "{}:1:1: contract `{}` -> {} has require_fields = true but the host never calls .require_fields(): \
+                 missing fields will pass at run time [htl contract-unenforced]",
+                cfg_path.display(),
+                c.dir,
+                c.type_path
+            ));
+        }
+    }
+    out
 }
 
 /// Cycles in the require graph of a set of checked files, one message per cycle,
