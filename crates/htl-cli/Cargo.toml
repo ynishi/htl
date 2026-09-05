@@ -1,0 +1,20 @@
+[package]
+name = "htl-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "htl command line (also `cargo htl`): check / run / test / fmt / build / pkg / new for Teal projects"
+readme = "../../README.md"
+keywords = ["lua", "teal", "cli", "cargo-subcommand"]
+categories = ["development-tools", "command-line-utilities"]
+
+# Two bins share src/lib.rs: `htl` and `cargo-htl` (so `cargo htl <verb>` works).
+# See src/bin/.
+
+[dependencies]
+htl = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }

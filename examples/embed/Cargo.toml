@@ -1,0 +1,16 @@
+[package]
+name = "embed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Example host: Rust binary embedding Teal scripts via include_tl!"
+
+[features]
+# `cargo build -p embed --features bad` demonstrates a Teal type error failing the Rust build.
+bad = []
+
+[dependencies]
+htl = { workspace = true }
+htl-macros = { workspace = true }
+anyhow = { workspace = true }
