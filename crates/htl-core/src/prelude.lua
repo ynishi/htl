@@ -176,6 +176,62 @@ local function explain_arity(ast, e, msg)
       call, extra, call, call)
 end
 
+-- The `(args): rets` part of the function header starting at source line `y`, as
+-- written (headers may span lines; a trailing comment is dropped).
+local function header_sig(src, y)
+   local lines, i = {}, 0
+   for line in (src .. "\n"):gmatch("([^\n]*)\n") do
+      i = i + 1
+      if i >= y then lines[#lines + 1] = line end
+      if i >= y + 12 then break end
+   end
+   local text = table.concat(lines, "\n")
+   local p = text:find("(", 1, true)
+   if not p then return nil end
+   local depth, q = 0, p
+   while q <= #text do
+      local ch = text:sub(q, q)
+      if ch == "(" then
+         depth = depth + 1
+      elseif ch == ")" then
+         depth = depth - 1
+         if depth == 0 then break end
+      end
+      q = q + 1
+   end
+   if depth ~= 0 then return nil end
+   local sig = text:sub(p, q)
+   local rets = text:sub(q + 1):match("^[ \t]*(:[^\n]*)")
+   if rets then
+      rets = rets:gsub("%s*%-%-.*$", ""):gsub("%s+return%s.*$", ""):gsub("%s+end%s*$", "")
+      sig = sig .. rets
+   end
+   return (sig:gsub("%s+", " "):gsub("%( ", "("):gsub(" %)", ")"))
+end
+
+-- "invalid key 'X' in record 'M'" where `function M.X(...)` is defined further down
+-- the same file: Teal adds a record's fields in source order, so the use came too
+-- early. Say so, and hand over the declaration line that makes the order irrelevant.
+local function explain_forward_ref(ast, src, e, msg)
+   local key, rec = msg:match("^invalid key '([%w_]+)' in record '([%w_]+)'")
+   if not key or not ast or not src then return msg end
+   for _, s in ipairs(ast) do
+      if type(s) == "table" and s.kind == "record_function" and s.fn_owner and s.name
+         and s.fn_owner.tk == rec and s.name.tk == key and s.y and s.y > (e.y or 0) then
+         local sig = header_sig(src, s.y) or "(...)"
+         if s.is_method then
+            sig = sig:gsub("^%(%s*%)", "(self: " .. rec .. ")", 1):gsub("^%(", "(self: " .. rec .. ", ", 1)
+         end
+         return msg .. string.format(
+            ": `%s.%s` is defined at line %d, after this use, and Teal adds a record's fields in " ..
+            "source order. Declare it up front inside `record %s`: `%s: function%s` -- or move the " ..
+            "definition above line %d",
+            rec, key, s.y, rec, key, sig, e.y or 0)
+      end
+   end
+   return msg
+end
+
 local function require_sites(ast)
    local out, seen = {}, {}
    local function go(n)
@@ -219,11 +275,33 @@ local function self_require_errors(filename, ast)
    return out
 end
 
-local function collect_errors(filename, result)
+local function collect_errors(filename, result, src)
+   -- A result served again from the env cache (every runtime `require` of a module
+   -- already checked) would otherwise re-walk its AST for require sites and re-resolve
+   -- each one on disk: ~11 ms per module, ~1.4 s over a 261-test run [measured].
+   if result.htl_errors and result.htl_errors_for == filename then
+      return result.htl_errors
+   end
    local errors = {}
+   result.htl_errors, result.htl_errors_for = errors, filename
    for _, e in ipairs(result.syntax_errors or {}) do errors[#errors + 1] = fmt(filename, e) end
    if result.ast and #(result.syntax_errors or {}) == 0 then
-      for _, e in ipairs(self_require_errors(filename, result.ast)) do errors[#errors + 1] = fmt(filename, e) end
+      -- Cheap text prefilter: only when some `require("<name>")` in the source resolves
+      -- to this very file is the AST walked for exact positions. The walk costs tens of
+      -- ms on a large module and it ran for every module a program required [measured].
+      if not src then
+         local fd = io.open(filename, "rb")
+         if fd then src = fd:read("a"); fd:close() end
+      end
+      local suspicious = false
+      for name in (src or ""):gmatch("require%s*%(?%s*[\"']([^\"']+)[\"']") do
+         local found, fd = tl.search_module(name, true)
+         if fd then fd:close() end
+         if found and norm_path(found) == norm_path(filename) then suspicious = true break end
+      end
+      if suspicious then
+         for _, e in ipairs(self_require_errors(filename, result.ast)) do errors[#errors + 1] = fmt(filename, e) end
+      end
    end
    local hinted = {} -- lines where an arity error was explained by a multi-value call
    for _, e in ipairs(result.type_errors or {}) do
@@ -232,7 +310,7 @@ local function collect_errors(filename, result)
       if own then
          local explained = explain_arity(result.ast, e, msg)
          if explained ~= msg then hinted[e.y] = true end
-         msg = explained
+         msg = explain_forward_ref(result.ast, src, e, explained)
       end
       -- tl follows the arity error with "argument N: got X, expected T (unresolved
       -- generic)" for the very same call: a consequence, not a second mistake.
@@ -327,10 +405,14 @@ end
 -- opts.seed = false checks with a cold env (no store).
 function H.check(filename, env, opts)
    opts = opts or {}
-   local fresh = env == nil
    env = env or new_env() -- bind first: assert() would also pass its message along as `fd`
    local t0 = os.clock()
-   if fresh and opts.seed ~= false then seed_env(env) end
+   -- Seed on first use of an env (not at creation): by now the caller has set up the
+   -- search path this program resolves through, which is what the seed validates against.
+   if not env.htl_seeded then
+      env.htl_seeded = true
+      if opts.seed ~= false then seed_env(env) end
+   end
    local result, err = tl.check_file(filename, env)
    prof("check", filename, t0)
    if result then store_from(env) end
@@ -382,9 +464,15 @@ function H.gen(filename, opts)
    if not c.ok then
       return nil, c
    end
+   -- Generated once per checked result: the result object is what the env cache (and
+   -- the store behind it) hands back, so the code rides along with it.
+   if c.result.htl_code then
+      return c.result.htl_code, c
+   end
    local t0 = os.clock()
    local code, gerr = tl.generate(c.result.ast, H.GEN_TARGET)
    prof("generate", filename, t0)
+   if code then c.result.htl_code = code end
    if not code then
       c.ok = false
       c.errors = { filename .. ": generate failed: " .. tostring(gerr) }
@@ -397,7 +485,7 @@ end
 -- sandbox already read the file). Same return shape as H.gen.
 function H.gen_string(src, filename)
    local result = tl.check_string(src, H.env, filename)
-   local errors = collect_errors(filename, result)
+   local errors = collect_errors(filename, result, src)
    local warnings = {}
    for _, w in ipairs(result.warnings or {}) do warnings[#warnings + 1] = fmt(filename, w) end
    local c = { ok = #errors == 0, errors = errors, warnings = warnings, deps = {}, lints = {}, result = result }
@@ -465,7 +553,7 @@ end
 -- second `Site` (another contract dir) would be judged by the first one's type.
 function H.check_stub(src, filename)
    local result = tl.check_string(src, new_env(), filename)
-   return collect_errors(filename, result)
+   return collect_errors(filename, result, src)
 end
 
 function H.contract_check(filename, modname, type_path, require_fields)
@@ -549,13 +637,17 @@ function H.contract_check(filename, modname, type_path, require_fields)
    return out
 end
 
--- Strict searcher: unlike tl.loader(), type errors are fatal at require time.
-local function strict_searcher(module_name)
+-- What a runtime `require` should do for `module_name`, as data (so a runtime state
+-- living elsewhere can ask the same question, see Htl::with_checker):
+--   "code", code, found   generated Lua for a type-checked .tl
+--   "type_only", dfound   declaration-only module (`name.d.tl`, no .lua behind it):
+--                         hand require a table that explains itself on first use
+--   "yield", msg          a .lua sibling exists: step aside for Lua's own searcher
+--   "missing", msg        nothing on package.path
+-- Type errors raise: unlike tl.loader(), they are fatal at require time.
+local function resolve_for_require(module_name)
    local found, fd = tl.search_module(module_name, false)
    if not found then
-      -- Declaration-only module (`name.d.tl` with no `.lua` behind it): hand
-      -- require an empty table so type-only requires do not fail at runtime.
-      -- If a `.lua` exists, step aside for Lua's own searcher.
       local dfound, dfd = tl.search_module(module_name, true)
       if dfound and dfound:match("%.d%.tl$") then
          dfd:close()
@@ -564,31 +656,58 @@ local function strict_searcher(module_name)
          local lf = io.open(lua_path, "rb") or io.open(init_path, "rb")
          if lf then
             lf:close()
-            return "\n\ttype-only '" .. dfound .. "' (implementation served by the .lua searcher)"
+            return "yield", "\n\ttype-only '" .. dfound .. "' (implementation served by the .lua searcher)"
          end
-         return function() return H.type_only_module(module_name, dfound) end, dfound
+         return "type_only", dfound
       elseif dfd then
          dfd:close()
       end
-      return "\n\tno .tl module '" .. module_name .. "' on package.path"
+      return "missing", "\n\tno .tl module '" .. module_name .. "' on package.path"
    end
    fd:close()
-   -- Type errors are fatal here; lints are the CLI's business (`htl check`), not require's.
+   -- Lints are the CLI's business (`htl check`), not require's.
    local code, c = H.gen(found, { lints = false })
    if not code then
       error(table.concat(c.errors, "\n"), 0)
    end
-   local chunk, lerr = load(code, "@" .. found, "t")
-   if not chunk then
-      error("htl: generated Lua failed to load: " .. tostring(lerr), 0)
+   return "code", code, found
+end
+
+H.gen_for_require = resolve_for_require
+
+-- Strict searcher for a state that hosts its own checker.
+local function strict_searcher(module_name)
+   local kind, a, b = resolve_for_require(module_name)
+   if kind == "code" then
+      local chunk, lerr = load(a, "@" .. b, "t")
+      if not chunk then
+         error("htl: generated Lua failed to load: " .. tostring(lerr), 0)
+      end
+      return function(modname)
+         return chunk(modname, b)
+      end, b
+   elseif kind == "type_only" then
+      return function() return H.type_only_module(module_name, a) end, a
    end
-   return function(modname)
-      return chunk(modname, found)
-   end, found
+   return a
 end
 
 function H.install_searcher()
    table.insert(package.searchers, 2, strict_searcher)
+end
+
+function H.get_path()
+   return package.path
+end
+
+function H.set_path(p)
+   package.path = p
+end
+
+-- Start serving a new program (one per test file when the checker is shared): fresh
+-- module-name resolution for it, seeded from the store so nothing is checked twice.
+function H.begin_program()
+   H.env = new_env() -- seeded on its first check, once the program's paths are set
 end
 
 -- tl.search_module rewrites the ".lua" suffix of each package.path template to

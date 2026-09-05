@@ -82,6 +82,46 @@ fn fail_fast_stops_after_the_first_failure_in_a_file() {
 }
 
 #[test]
+fn session_shares_the_checker_but_not_program_state() {
+    use htl_core::testing::TestSession;
+    let dir = scratch("session");
+    // Module with state: a counter that survives only within one program state.
+    write(
+        &dir.join("src/counter.tl"),
+        "local record counter\n   n: integer\nend\ncounter.n = 0\nfunction counter.bump(): integer\n   counter.n = counter.n + 1\n   return counter.n\nend\nreturn counter\n",
+    );
+    write(
+        &dir.join("tests/a_test.tl"),
+        "local t = require(\"htl.test\")\nlocal counter = require(\"counter\")\n\
+         t.it(\"bumps from a fresh module\", function()\n   t.expect(counter.bump()):to_equal(1)\n   t.expect(counter.bump()):to_equal(2)\nend)\n\
+         global LEAK: integer = 42\n",
+    );
+    write(
+        &dir.join("tests/b_test.tl"),
+        "local t = require(\"htl.test\")\nlocal counter = require(\"counter\")\n\
+         local g = _G as {string: any}\n\
+         t.it(\"sees a fresh module and no globals from a\", function()\n   t.expect(counter.bump()):to_equal(1)\n   t.expect(g[\"LEAK\"]):to_be_nil()\nend)\n",
+    );
+    let session = TestSession::new(None, "htl.test", None, RunOptions::default()).unwrap();
+    let a = session.run_file(&dir.join("tests/a_test.tl")).unwrap();
+    assert!(a.check.ok() && a.error.is_none() && a.failed == 0, "{:?} {:?} {:?}", a.check.errors, a.error, a.failures);
+    let b = session.run_file(&dir.join("tests/b_test.tl")).unwrap();
+    assert!(b.check.ok() && b.error.is_none(), "{:?} {:?}", b.check.errors, b.error);
+    assert_eq!((b.passed, b.failed), (1, 0), "{:?}", b.failures);
+
+    // A type error in a file is still that file's, and a module with a type error
+    // still fails at require in a later file.
+    write(&dir.join("tests/c_test.tl"), "local t = require(\"htl.test\")\nlocal n: integer = \"x\"\nprint(n)\n");
+    let c = session.run_file(&dir.join("tests/c_test.tl")).unwrap();
+    assert!(!c.check.ok());
+    write(&dir.join("src/bad.tl"), "local record bad\nend\nfunction bad.f(): integer\n   return \"s\"\nend\nreturn bad\n");
+    write(&dir.join("tests/d_test.tl"), "local t = require(\"htl.test\")\nlocal bad = require(\"bad\")\nt.it(\"x\", function() t.expect(bad.f()):to_equal(1) end)\n");
+    let d = session.run_file(&dir.join("tests/d_test.tl")).unwrap();
+    let msg = format!("{:?} {:?}", d.check.errors, d.error);
+    assert!(msg.contains("expected integer"), "bad's own error must surface: {msg}");
+}
+
+#[test]
 fn a_library_without_tests_field_still_reports() {
     // The runner contract only requires passed / failed / failures.
     let dir = scratch("minimal-lib");

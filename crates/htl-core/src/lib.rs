@@ -333,9 +333,71 @@ impl CheckInfo {
 
 /// An mlua state with the Teal compiler loaded.
 pub struct Htl {
+    /// The program's state: `require`, preloads, `exec`, bundles.
     lua: Lua,
+    /// The prelude table (checker API). Lives in `lua` unless this is a split state
+    /// made by [`with_checker`](Self::with_checker), where it belongs to the checker.
     h: Table,
+    /// `true` when the checker is another Lua state (`with_checker`).
+    split: bool,
 }
+
+/// Checker prelude of another state, kept in a runtime state's app data so the
+/// mlua-pkg resolvers find their checker (`Htl::with_checker`).
+pub(crate) struct CheckerHandle(pub(crate) Table);
+
+const RUNTIME_REGISTRY_KEY: &str = "htl.runtime";
+
+/// The part of the prelude a runtime state needs when its checker lives elsewhere:
+/// the strict searcher (asking the checker through `gen`), the declaration-only
+/// module, and `package.path` bookkeeping.
+const RUNTIME_PRELUDE: &str = r#"
+local R = {}
+
+function R.type_only_module(module_name, decl_path)
+   return setmetatable({}, {
+      __index = function(_, key)
+         error(string.format(
+            "module '%s' is declaration-only here (%s): '%s' has no implementation on this path. " ..
+            "It must be provided by the host program (e.g. a Rust #[host_module] via cargo run) " ..
+            "or by a .tl/.lua module with that name.",
+            module_name, decl_path, tostring(key)), 2)
+      end,
+   })
+end
+
+-- gen(name) -> kind, a, b  (see resolve_for_require in the checker prelude)
+function R.install_searcher(gen)
+   table.insert(package.searchers, 2, function(module_name)
+      local kind, a, b = gen(module_name)
+      if kind == "code" then
+         local chunk, lerr = load(a, "@" .. b, "t")
+         if not chunk then
+            error("htl: generated Lua failed to load: " .. tostring(lerr), 0)
+         end
+         return function(modname) return chunk(modname, b) end, b
+      elseif kind == "type_only" then
+         return function() return R.type_only_module(module_name, a) end, a
+      end
+      return a
+   end)
+end
+
+function R.add_path(dir)
+   local templates = dir .. "/?.lua;" .. dir .. "/?/init.lua;" .. dir .. "/?/?.lua"
+   if package.path == nil or package.path == "" then
+      package.path = templates
+   else
+      package.path = templates .. ";" .. package.path
+   end
+end
+
+function R.reset_path()
+   package.path = ""
+end
+
+return R
+"#;
 
 impl Htl {
     /// New state. Uses `Lua::unsafe_new` so stripped bytecode bundles can be loaded.
@@ -343,6 +405,44 @@ impl Htl {
         // SAFETY: we accept binary chunks only from bundles we produced ourselves.
         let lua = unsafe { Lua::unsafe_new() };
         Self::from_lua(lua)
+    }
+
+    /// A fresh program state that borrows `checker`'s compiler instead of loading its
+    /// own: modules `checker` has already type-checked and generated are served from
+    /// its store, so a run of many programs (the test runner: one state per file)
+    /// checks each module once. The program state itself is as isolated as
+    /// [`new`](Self::new): nothing but the checker is shared. The checker starts a new
+    /// program env for this state (module-name resolution is per program).
+    pub fn with_checker(checker: &Htl) -> Result<Self> {
+        // SAFETY: as in `new`.
+        let lua = unsafe { Lua::unsafe_new() };
+        let r: Table = lua
+            .load(RUNTIME_PRELUDE)
+            .set_name("=htl-runtime")
+            .eval()
+            .context("loading htl runtime prelude")?;
+        lua.set_named_registry_value(RUNTIME_REGISTRY_KEY, r)?;
+        lua.set_app_data(CheckerHandle(checker.h.clone()));
+        let begin: Function = checker.h.get("begin_program")?;
+        begin.call::<()>(())?;
+        Ok(Self { lua, h: checker.h.clone(), split: true })
+    }
+
+    fn runtime(&self) -> Result<Table> {
+        Ok(self.lua.named_registry_value::<Table>(RUNTIME_REGISTRY_KEY)?)
+    }
+
+    /// The checker's `package.path` (what `require` inside `.tl` resolves through).
+    pub fn search_path(&self) -> Result<String> {
+        let f: Function = self.h.get("get_path")?;
+        Ok(f.call(())?)
+    }
+
+    /// Restore a checker `package.path` taken with [`search_path`](Self::search_path).
+    pub fn set_search_path(&self, path: &str) -> Result<()> {
+        let f: Function = self.h.get("set_path")?;
+        f.call::<()>(path)?;
+        Ok(())
     }
 
     /// Attach the Teal compiler to an existing Lua state (the host's own `Lua`).
@@ -373,7 +473,7 @@ impl Htl {
             .eval()
             .context("loading htl prelude")?;
         lua.set_named_registry_value(PRELUDE_REGISTRY_KEY, h.clone())?;
-        Ok(Self { lua, h })
+        Ok(Self { lua, h, split: false })
     }
 
     pub fn lua(&self) -> &Lua {
@@ -424,6 +524,10 @@ impl Htl {
     pub fn reset_search_path(&self) -> Result<()> {
         let f: Function = self.h.get("reset_path")?;
         f.call::<()>(())?;
+        if self.split {
+            let f: Function = self.runtime()?.get("reset_path")?;
+            f.call::<()>(())?;
+        }
         Ok(())
     }
 
@@ -449,11 +553,27 @@ impl Htl {
     pub fn add_path(&self, dir: &Path) -> Result<()> {
         let f: Function = self.h.get("add_path")?;
         f.call::<()>(path_str(dir))?;
+        if self.split {
+            // The program state resolves plain `.lua` (and `.d.tl` siblings) itself.
+            let f: Function = self.runtime()?.get("add_path")?;
+            f.call::<()>(path_str(dir))?;
+        }
         Ok(())
     }
 
     /// Install the strict `.tl` searcher: `require` of a `.tl` with type errors fails.
     pub fn install_searcher(&self) -> Result<()> {
+        if self.split {
+            // The searcher runs in the program state and asks the checker for code.
+            let gen_fn: Function = self.h.get("gen_for_require")?;
+            let bridge = self.lua.create_function(move |_, name: String| {
+                let (kind, a, b): (String, Option<String>, Option<String>) = gen_fn.call(name)?;
+                Ok((kind, a, b))
+            })?;
+            let f: Function = self.runtime()?.get("install_searcher")?;
+            f.call::<()>(bridge)?;
+            return Ok(());
+        }
         let f: Function = self.h.get("install_searcher")?;
         f.call::<()>(())?;
         Ok(())

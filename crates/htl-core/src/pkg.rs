@@ -228,10 +228,16 @@ impl TealResolver {
     }
 
     fn prelude(lua: &Lua) -> mlua::Result<Table> {
-        lua.named_registry_value::<Table>(PRELUDE_REGISTRY_KEY)
-            .map_err(|_| mlua::Error::external(
-                "htl::pkg::TealResolver: this Lua has no htl prelude (create it with Htl::new / Htl::from_lua)",
-            ))
+        if let Ok(t) = lua.named_registry_value::<Table>(PRELUDE_REGISTRY_KEY) {
+            return Ok(t);
+        }
+        // A runtime state whose checker lives in another Lua (`Htl::with_checker`).
+        if let Some(c) = lua.app_data_ref::<crate::CheckerHandle>() {
+            return Ok(c.0.clone());
+        }
+        Err(mlua::Error::external(
+            "htl::pkg::TealResolver: this Lua has no htl prelude (create it with Htl::new / Htl::from_lua)",
+        ))
     }
 
     /// The checker resolves `require`s inside `.tl` via `package.path`; make sure the
