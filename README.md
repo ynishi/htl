@@ -105,7 +105,9 @@ resolver and described by a `.d.tl` for the checker.
 
 For mod / plugin directories, `TealResolver::new("mods")?.expect_type("defs.Mod")` holds
 every served module to a record type: a mod that returns the wrong shape is rejected at
-`require` time even if it never annotates its own return value.
+`require` time even if it never annotates its own return value. It rejects fields of the
+wrong *type*; it does not reject *missing* fields (every Teal record field is nilable), so
+nil-guard optional data on the host side.
 
 ## Lints (`htl check`, `include_tl!`)
 
