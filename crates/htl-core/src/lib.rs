@@ -388,12 +388,61 @@ pub fn is_tl_source(p: &Path) -> bool {
     p.is_file() && name.ends_with(".tl") && !name.ends_with(".d.tl")
 }
 
-/// Collect `.tl` sources from files and directories (sorted, recursive).
+/// Directories never descended into when collecting sources under a root: build output,
+/// installed packages, VCS and tool state. A root passed explicitly is always walked.
+pub const SKIP_DIRS: &[&str] = &["target", "node_modules", ".mlua-pkgs", ".git"];
+
+/// `true` for a directory entry that source collection should not enter: a name in
+/// [`SKIP_DIRS`], any dot-directory, or the project's mlua-pkg directory (`pkgs_dir`,
+/// which `MLUA_PKG_DIR` can move somewhere unremarkable).
+pub fn is_skipped_dir(path: &Path, extra: &[PathBuf]) -> bool {
+    if !path.is_dir() {
+        return false;
+    }
+    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    if SKIP_DIRS.contains(&name) || (name.starts_with('.') && name.len() > 1) {
+        return true;
+    }
+    extra.iter().any(|e| same_dir(path, e))
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
+/// Extra directories to skip below `root`: the mlua-pkg package dir when `root` is
+/// inside an `mlua-pkg.toml` project (its vendored / cached sources are dependencies,
+/// not the project's own files).
+#[cfg(feature = "pkg")]
+pub fn project_skip_dirs(root: &Path) -> Vec<PathBuf> {
+    match pkg::Project::find(root) {
+        Some(p) => vec![p.pkgs_dir],
+        None => Vec::new(),
+    }
+}
+
+#[cfg(not(feature = "pkg"))]
+pub fn project_skip_dirs(_root: &Path) -> Vec<PathBuf> {
+    Vec::new()
+}
+
+/// Collect `.tl` sources from files and directories (sorted, recursive). Directories in
+/// [`SKIP_DIRS`], dot-directories and the project's package dir are not entered unless
+/// given as a root themselves.
 pub fn collect_tl(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for p in paths {
         if p.is_dir() {
-            for e in walkdir::WalkDir::new(p).sort_by_file_name() {
+            let extra = project_skip_dirs(p);
+            let root = p.clone();
+            let walker = walkdir::WalkDir::new(p)
+                .sort_by_file_name()
+                .into_iter()
+                .filter_entry(move |e| e.path() == root || !is_skipped_dir(e.path(), &extra));
+            for e in walker {
                 let e = e?;
                 if is_tl_source(e.path()) {
                     out.push(e.path().to_path_buf());

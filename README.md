@@ -48,7 +48,11 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 | `htl dts [dir]` | write the `.d.tl` files declared by `#[host_module]` / `#[derive(TealRecord)]` from Rust source, no build needed (`check` / `run` / `test` / `build` do this automatically when inside a crate) |
 
 `mlua-pkg.toml` is detected by walking up from the file: vendored deps become
-visible to the checker and to `run` / `test` / `build` automatically.
+visible to the checker and to `run` / `test` / `build` automatically. When a
+directory is given, `check` / `fmt` / `build` / `test` walk the project's own files only:
+`target/`, `node_modules/`, `.mlua-pkgs/` (or wherever `MLUA_PKG_DIR` points) and any
+dot-directory are not entered, so dependencies' sources and tests stay theirs. A
+directory passed explicitly is always walked.
 
 ## Embedding in Rust
 
