@@ -181,7 +181,10 @@ pub fn contract_enforcement_lints(cfg: &config::HtlConfig, cfg_path: &Path, carg
             }
         }
     }
-    let by_config = sources.contains("contract_resolvers(") || sources.contains("for_contract(");
+    // `for_contract_dir(` does not contain `for_contract(` as a substring: list it.
+    let by_config = ["contract_resolvers(", "for_contract(", "for_contract_dir("]
+        .iter()
+        .any(|api| sources.contains(api));
     for c in &cfg.contract {
         // A contract with nothing under it is not enforced by anyone; the dir may be
         // populated later (glob dirs especially), so say nothing about the host.

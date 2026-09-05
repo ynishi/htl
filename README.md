@@ -191,6 +191,12 @@ exclude = ["modkit"]      # modules in `dir` not held to it (an SDK the host wri
 checker would not look (an SDK cache, a mods dir): the CLI, `include_tl!` and
 `contract_resolvers` all add them, plus the `htl.toml` dir and its `src/`.
 
+Source beats declaration: when both `defs.tl` and a `defs.d.tl` are reachable, the
+checker reads the `.tl`, wherever the two sit on the path (Teal's own order is `.d.tl`
+first). So a `.d.tl` a host writes out for external script authors never shadows the
+source it was made from inside the repo, and a check that runs before the host has
+rewritten it still sees the current types.
+
 A `[[contract]]` adds two lints:
 
 - `contract` — a module under `dir` whose return value is not assignable to `type`, or
