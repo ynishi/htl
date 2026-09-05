@@ -746,28 +746,29 @@ impl Htl {
                 missing.iter().map(|m| format!("'{m}'")).collect::<Vec<_>>().join(", ")
             );
         }
-        let modules = b.modules.clone();
-        let searcher = self.lua.create_function(move |lua, name: String| {
-            match modules.iter().find(|m| m.name == name) {
-                Some(m) => {
-                    let chunk = lua.load(m.payload.as_slice()).set_name(format!("={name}"));
-                    let f = match m.kind {
-                        bundle::Kind::Bytecode => chunk.set_mode(ChunkMode::Binary).into_function()?,
-                        bundle::Kind::Source => chunk.set_mode(ChunkMode::Text).into_function()?,
-                    };
-                    // Like a file searcher: the loader gets (modname, origin).
-                    Ok((Value::Function(f), Value::String(lua.create_string(format!("bundle:{name}"))?)))
-                }
-                None => Ok((
-                    Value::String(lua.create_string(format!("\n\tno bundled module '{name}'"))?),
-                    Value::Nil,
-                )),
+        // Bundled modules become `package.preload` entries: the same place a host puts
+        // its own modules, so everything that already defers to preload (a `.d.tl`
+        // stepping aside for the implementation, mlua-pkg resolvers ahead of Lua's
+        // searchers) sees them without knowing about bundles. A name the host preloaded
+        // first is left alone: the host wins. Loaders get (modname, ":preload:") as
+        // Lua's preload searcher passes them.
+        for m in &b.modules {
+            if !matches!(preload.get::<Value>(m.name.as_str())?, Value::Nil) {
+                continue;
             }
-        })?;
-        let searchers: Table = package.get("searchers")?;
-        // Right after `preload` (the host's modules), before the file searchers: a
-        // bundle is the program, not a hint; files on disk do not override it.
-        searchers.raw_insert(2, searcher)?;
+            let payload = m.payload.clone();
+            let kind = m.kind;
+            let name = m.name.clone();
+            let loader = self.lua.create_function(move |lua, (modname, origin): (String, Value)| {
+                let chunk = lua.load(payload.as_slice()).set_name(format!("={name}"));
+                let f = match kind {
+                    bundle::Kind::Bytecode => chunk.set_mode(ChunkMode::Binary).into_function()?,
+                    bundle::Kind::Source => chunk.set_mode(ChunkMode::Text).into_function()?,
+                };
+                f.call::<Value>((modname, origin))
+            })?;
+            preload.set(m.name.as_str(), loader)?;
+        }
         Ok(())
     }
 

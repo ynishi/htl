@@ -155,8 +155,49 @@ fn bundle_runs_with_host_module_and_refuses_without() {
     assert_eq!((name.as_str(), origin.as_str()), ("x", "y"));
     let v: i64 = r.lua().load("return require('util').twice(21)").eval().unwrap();
     assert_eq!(v, 42, "util -> vendored mathx.lua, both from the bundle");
-    let origin: String = r.lua().load("return select(2, package.searchers[2]('util'))").eval().unwrap();
-    assert_eq!(origin, "bundle:util");
+    // Served through package.preload, so the loader sees Lua's own preload origin.
+    let has: bool = r.lua().load("return package.preload['util'] ~= nil").eval().unwrap();
+    assert!(has);
+}
+
+/// The dogfood regression: mods loaded through a `TealResolver` over `mods/` found
+/// `mods/modkit.d.tl` and, with the implementation living in the bundle (served by a
+/// searcher), stopped at the declaration. Bundled modules are preload entries now, so
+/// the declaration steps aside for them exactly as for a host module.
+#[test]
+fn declaration_steps_aside_for_a_bundled_module() {
+    let root = project("decl-bundle");
+    // The SDK the mods use: declared in mods/, implemented in src/ and bundled via `extra`.
+    write(&root.join("src/modkit.tl"), "local record modkit\nend\nfunction modkit.define(n: integer): integer\n   return n + 1\nend\nreturn modkit\n");
+    write(&root.join("mods/modkit.d.tl"), "local record modkit\n   define: function(integer): integer\nend\nreturn modkit\n");
+    write(&root.join("mods/deepwood.tl"), "local modkit = require(\"modkit\")\nreturn { n = modkit.define(41) }\n");
+    let h = checker(&root);
+    let opts = LinkOptions { extra: vec!["modkit".into()], ..Default::default() };
+    let linked = link(&h, &root.join("src/main.tl"), &opts).unwrap();
+    assert!(linked.ok(), "{:?}", linked.errors);
+
+    let r = Htl::new().unwrap();
+    let t = r.lua().create_table().unwrap();
+    t.set("base", r.lua().create_function(|_, ()| Ok(1)).unwrap()).unwrap();
+    r.preload_value("host", t).unwrap();
+    r.install_bundle(linked.bundle().unwrap()).unwrap();
+    let mut reg = htl_core::pkg::mlua_pkg::Registry::new();
+    reg.add(htl_core::pkg::TealResolver::new(root.join("mods")).unwrap());
+    reg.install(r.lua()).unwrap();
+    let n: i64 = r.lua().load("return require('deepwood').n").eval().unwrap();
+    assert_eq!(n, 42, "modkit.d.tl in mods/ yields to the bundled modkit");
+
+    // A host preload of the same name is not overwritten by the bundle.
+    let r2 = Htl::new().unwrap();
+    let t = r2.lua().create_table().unwrap();
+    t.set("twice", r2.lua().create_function(|_, n: i64| Ok(n * 100)).unwrap()).unwrap();
+    r2.preload_value("util", t).unwrap();
+    let t = r2.lua().create_table().unwrap();
+    t.set("base", r2.lua().create_function(|_, ()| Ok(1)).unwrap()).unwrap();
+    r2.preload_value("host", t).unwrap();
+    r2.install_bundle(linked.bundle().unwrap()).unwrap();
+    let v: i64 = r2.lua().load("return require('util').twice(1)").eval().unwrap();
+    assert_eq!(v, 100, "host wins over the bundle");
 }
 
 #[test]
