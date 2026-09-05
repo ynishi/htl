@@ -283,6 +283,28 @@ function H.type_only_module(module_name, decl_path)
    })
 end
 
+-- Declared field names of a record type reachable as `<module>.<Type>` in the shared
+-- env (the module must have been required/checked already, e.g. by an expect_type stub).
+-- Returns a sorted list, or nil when the type cannot be found.
+function H.record_fields(type_path)
+   local module, tname = type_path:match("^([^.]+)%.(.+)$")
+   if not module then return nil end
+   local mod = H.env.modules and H.env.modules[module]
+   if not mod then return nil end
+   local t = mod
+   for seg in tname:gmatch("[^.]+") do
+      if t.def then t = t.def end
+      if not (t.fields and t.fields[seg]) then return nil end
+      t = t.fields[seg]
+   end
+   if t.def then t = t.def end
+   if not t.fields then return nil end
+   local names = {}
+   for k in pairs(t.fields) do names[#names + 1] = k end
+   table.sort(names)
+   return names
+end
+
 -- Strict searcher: unlike tl.loader(), type errors are fatal at require time.
 local function strict_searcher(module_name)
    local found, fd = tl.search_module(module_name, false)

@@ -12,6 +12,8 @@
 --   no-any           explicit `any` in annotations or `as any` casts.   [off by default]
 --   explicit-number  unannotated local initialized with a numeric literal (`local n = 0`
 --                    infers integer, `0.0` infers number); ask for the annotation. [off]
+--   class-record     record declaring metamethods (a class): its metatable is not part of
+--                    the value, so serialization and the Rust boundary drop it.     [off]
 --
 -- Suppress per line with a trailing comment:  -- htl: allow(nil-index, shadow-local)
 
@@ -25,6 +27,7 @@ L.DEFAULT = {
    ["no-global"] = true,
    ["no-any"] = false,
    ["explicit-number"] = false,
+   ["class-record"] = false,
 }
 
 local SKIP_KEYS = { if_parent = true, type = true, newtype = true, decltuple = true, expected = true }
@@ -381,6 +384,46 @@ local function lint_explicit_number(ast, report)
    end)
 end
 
+---------------------------------------------------------------- class-record
+
+-- A record that declares metamethods (`metamethod __index: Actor`, `__call`, ...) is a
+-- class in disguise: its behaviour lives in a metatable that `setmetatable` attaches at
+-- run time. That metatable is not part of the value, so it is lost when the table is
+-- serialized (`pairs` never sees it) or converted at the Rust boundary (`TealRecord`
+-- copies fields). Opt-in inventory of such records for projects that keep boundary and
+-- saved types as plain data.
+local function record_meta_walk(t, name, node, report, seen, depth)
+   if type(t) ~= "table" or seen[t] or depth > 12 then return end
+   seen[t] = true
+   if t.def then record_meta_walk(t.def, name, node, report, seen, depth + 1) return end
+   if t.typename == "record" or t.typename == "interface" then
+      local metas = {}
+      for _, m in ipairs(t.meta_field_order or {}) do metas[#metas + 1] = m end
+      if #metas == 0 and t.meta_fields then
+         for m in pairs(t.meta_fields) do metas[#metas + 1] = m end
+         table.sort(metas)
+      end
+      if #metas > 0 then
+         report("class-record", t.y or node.y, t.x or node.x,
+            "record " .. name .. " declares metamethod(s) " .. table.concat(metas, ", ")
+            .. ": its behaviour lives in a metatable that serialization and the Rust boundary do not carry; "
+            .. "keep it out of saved data and host signatures, or make it a plain data record")
+      end
+      for fname, ft in pairs(t.fields or {}) do
+         record_meta_walk(ft, name .. "." .. fname, node, report, seen, depth + 1)
+      end
+   end
+end
+
+local function lint_class_record(ast, report)
+   local seen = {}
+   walk(ast, function(n)
+      if (n.kind == "local_type" or n.kind == "global_type") and is_node(n.value) and n.value.newtype then
+         record_meta_walk(n.value.newtype, n.var and n.var.tk or "?", n, report, seen, 0)
+      end
+   end)
+end
+
 ---------------------------------------------------------------- entry
 
 local RULES = {
@@ -390,6 +433,7 @@ local RULES = {
    { "no-global", lint_no_global },
    { "no-any", lint_no_any },
    { "explicit-number", lint_explicit_number },
+   { "class-record", lint_class_record },
 }
 
 function L.rule_names()
