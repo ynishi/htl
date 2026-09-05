@@ -10,6 +10,8 @@
 --                    enclosing scope.
 --   no-global        `global` declarations (prefer locals + module return).
 --   no-any           explicit `any` in annotations or `as any` casts.   [off by default]
+--   explicit-number  unannotated local initialized with a numeric literal (`local n = 0`
+--                    infers integer, `0.0` infers number); ask for the annotation. [off]
 --
 -- Suppress per line with a trailing comment:  -- htl: allow(nil-index, shadow-local)
 
@@ -22,6 +24,7 @@ L.DEFAULT = {
    ["shadow-local"] = true,
    ["no-global"] = true,
    ["no-any"] = false,
+   ["explicit-number"] = false,
 }
 
 local SKIP_KEYS = { if_parent = true, type = true, newtype = true, decltuple = true, expected = true }
@@ -312,6 +315,43 @@ local function lint_no_any(ast, report)
    go(ast)
 end
 
+---------------------------------------------------------------- explicit-number
+
+-- Numeric literal used as an unannotated local's initializer: Teal infers `integer`
+-- from `0` and `number` from `0.0`, and a later `total = total + w * h` then fails with
+-- "got number, expected integer". Ask for the annotation up front.
+local function numeric_literal(exp)
+   if not is_node(exp) then return nil end
+   if exp.kind == "integer" then return "integer" end
+   if exp.kind == "number" then return "number" end
+   -- unary minus on a literal (`-1`)
+   if exp.kind == "op" and exp.op and exp.op.op == "-" and exp.e2 == nil then
+      return numeric_literal(exp.e1)
+   end
+   return nil
+end
+
+local function lint_explicit_number(ast, report)
+   walk(ast, function(n)
+      if n.kind ~= "local_declaration" or not n.vars then return end
+      -- `decltuple` is a tuple type; its member types sit in `.tuple` (one per annotated var).
+      local decl = n.decltuple
+      local annotated = (decl and decl.tuple and #decl.tuple) or 0
+      for i, v in ipairs(n.vars) do
+         if is_node(v) and i > annotated then
+            local exp = n.exps and n.exps[i]
+            local inferred = numeric_literal(exp)
+            if inferred then
+               local other = inferred == "integer" and "number" or "integer"
+               report("explicit-number", v.y, v.x,
+                  "'" .. tostring(v.tk) .. "' is inferred as " .. inferred .. " from its literal; write `local "
+                  .. tostring(v.tk) .. ": " .. inferred .. " = ...` (or `: " .. other .. "`) to fix the numeric type explicitly")
+            end
+         end
+      end
+   end)
+end
+
 ---------------------------------------------------------------- entry
 
 local RULES = {
@@ -320,6 +360,7 @@ local RULES = {
    { "shadow-local", lint_shadow },
    { "no-global", lint_no_global },
    { "no-any", lint_no_any },
+   { "explicit-number", lint_explicit_number },
 }
 
 function L.rule_names()
