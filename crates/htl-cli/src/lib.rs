@@ -357,13 +357,20 @@ fn cmd_check(paths: &[PathBuf], strict: bool, lint: Option<&str>, list_lints: bo
     h.install_test_lib()?;
     let files = htl::collect_tl(&paths)?;
     let (mut n_err, mut n_warn, mut n_lint) = (0usize, 0usize, 0usize);
+    let mut infos: Vec<(PathBuf, CheckInfo)> = Vec::with_capacity(files.len());
     for f in &files {
-        h.add_path(&htl::parent_dir(f))?;
+        h.add_layout_paths(f)?;
         let c = h.check(f)?;
         print_checkinfo(&c);
         n_err += c.errors.len();
         n_warn += c.warnings.len();
         n_lint += c.lints.len();
+        infos.push((f.clone(), c));
+    }
+    // Project-level: cycles in the require graph of the files just checked.
+    for cyc in htl::require_cycles(&infos) {
+        eprintln!("lint: {cyc}");
+        n_lint += 1;
     }
     eprintln!(
         "htl check: {} file(s), {} error(s), {} warning(s), {} lint(s){}",
@@ -379,7 +386,7 @@ fn cmd_check(paths: &[PathBuf], strict: bool, lint: Option<&str>, list_lints: bo
 
 fn cmd_gen(file: &Path, out: Option<&Path>) -> Result<ExitCode> {
     let h = Htl::new()?;
-    h.add_path(&htl::parent_dir(file))?;
+    h.add_layout_paths(file)?;
     auto_dts(file)?;
     apply_project(&h, file)?;
     let (code, c) = h.gen_lua(file)?;
@@ -412,7 +419,7 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
         });
     }
     // Check first so lints/warnings are visible before the script runs.
-    h.add_path(&htl::parent_dir(file))?;
+    h.add_layout_paths(file)?;
     h.install_searcher()?;
     h.set_arg(&file.to_string_lossy(), args)?;
     let (code, c) = h.gen_lua(file)?;

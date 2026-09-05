@@ -52,7 +52,9 @@ visible to the checker and to `run` / `test` / `build` automatically. When a
 directory is given, `check` / `fmt` / `build` / `test` walk the project's own files only:
 `target/`, `node_modules/`, `.mlua-pkgs/` (or wherever `MLUA_PKG_DIR` points) and any
 dot-directory are not entered, so dependencies' sources and tests stay theirs. A
-directory passed explicitly is always walked.
+directory passed explicitly is always walked. Files under `tests/` are checked with the
+project root and `src/` on the search path, the same as `htl test`, so `htl check tests`
+and `htl test` agree.
 
 ## Embedding in Rust
 
@@ -83,6 +85,12 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 ```
+
+`Result<T, E>` returns raise a Lua error on `Err` by default. With
+`#[host_module(name = "store", errors = "return")]` they come back Lua-style instead:
+`Ok(v)` -> `v, nil`, `Ok(())` -> `true, nil`, `Err(e)` -> `nil, tostring(e)`, and the
+`.d.tl` says `function(...): T, string` (`boolean, string` for unit), so
+`local ok, err = store:write(name, text)` needs no `pcall`.
 
 `#[host_module]` turns the plain `impl` into a `mlua::UserData` impl and writes
 `scripts/host.d.tl` when it expands, so `scripts/main.tl` sees
@@ -144,6 +152,7 @@ nil-guard optional data on the host side.
 | `no-global` | on | `global` declarations |
 | `no-any` | off | explicit `any` annotations and `as any` casts |
 | `explicit-number` | off | an unannotated local initialized with a numeric literal: `local n = 0` infers `integer`, `0.0` infers `number`, and a later `n = n * 1.5` fails; write `local n: number = 0` |
+| `require-cycle` | on (project-level) | a loop in the require graph of the files `htl check <dir>` just checked, e.g. `a.tl -> b.tl -> a.tl`. Teal types the back edge as an opaque circular require, so without this the symptom is "cannot index" somewhere else |
 
 Silence one occurrence with a trailing `-- htl: allow(nil-index)`. `include_tl!`
 treats lints as errors (`HTL_LINT=warn` downgrades, `HTL_LINTS=+no-any,-shadow-local`

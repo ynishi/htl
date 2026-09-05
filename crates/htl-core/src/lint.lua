@@ -141,17 +141,46 @@ end
 -- `extra.enums`: name -> enumset the checker resolved (nested in records, required
 -- modules). `extra.subject_enum(y, x, key)`: the checker's type of a subject —
 -- (enumset, name) for an enum, `false` for a known non-enum, nil when unknown.
+-- `if` statements that have statements after them in their block: when every branch
+-- ends in `return`, what follows is the implicit `else`, not a missing branch.
+local function mark_fallthrough(ast)
+   local has_next = {}
+   walk(ast, function(n)
+      if n.kind ~= "statements" then return end
+      for i = 1, #n - 1 do
+         local s = n[i]
+         if is_node(s) and s.kind == "if" then has_next[s] = true end
+      end
+   end)
+   return has_next
+end
+
+local function ends_in_return(body)
+   if type(body) ~= "table" or #body == 0 then return false end
+   local last = body[#body]
+   return is_node(last) and last.kind == "return"
+end
+
 local function lint_enum_exhaustive(ast, report, extra)
    extra = extra or {}
    local enums = collect_enums(ast)
    for name, set in pairs(extra.enums or {}) do
       if enums[name] == nil then enums[name] = set end
    end
+   local has_next = mark_fallthrough(ast)
    walk(ast, function(n)
       if n.kind ~= "if" or not n.if_blocks then return end
       -- A single `if x == "a" then ... end` is a guard (early return / special case),
       -- not a dispatch over the enum: only chains with 2+ branches are checked.
       if #n.if_blocks < 2 then return end
+      -- All branches return and code follows: the fallthrough is the `else`.
+      if has_next[n] then
+         local all_return = true
+         for _, blk in ipairs(n.if_blocks) do
+            if not ends_in_return(blk.body) then all_return = false break end
+         end
+         if all_return then return end
+      end
       local subject, seen_lits, subject_node = nil, {}, nil
       for _, blk in ipairs(n.if_blocks) do
          if not blk.exp then return end -- has `else`: exhaustive by construction

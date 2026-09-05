@@ -109,11 +109,10 @@ local function explain_self_require(filename, e)
    return msg
 end
 
--- Proactive form of the same check: every `require("<literal>")` in the file whose
--- resolution is the file itself gets its own error at the call site. Teal may swallow
--- the self-require as a circular require and only complain later ("unknown type
--- site.Config"), which hides the cause.
-local function self_require_errors(filename, ast)
+-- Every `require("<literal>")` call site in the file, with where the checker resolves
+-- it: { name, y, x, path } (path nil when unresolved). Feeds the self-require error and
+-- the project-level require-cycle lint.
+local function require_sites(ast)
    local out, seen = {}, {}
    local function go(n)
       if type(n) ~= "table" or seen[n] then return end
@@ -125,15 +124,7 @@ local function self_require_errors(filename, ast)
          local name = tk:sub(2, -2)
          local found, fd = tl.search_module(name, true)
          if fd then fd:close() end
-         if found and norm_path(found) == norm_path(filename) then
-            out[#out + 1] = {
-               y = n.y, x = n.x,
-               msg = string.format(
-                  "require(\"%s\") resolves to '%s', the requiring file itself: the filesystem is " ..
-                  "case-insensitive and the module name collides with this file's name; rename one of them",
-                  name, found),
-            }
-         end
+         out[#out + 1] = { name = name, y = n.y, x = n.x, path = found }
       end
       for k, v in pairs(n) do
          if k ~= "if_parent" and k ~= "type" and k ~= "newtype" and k ~= "decltuple" and k ~= "expected"
@@ -141,6 +132,26 @@ local function self_require_errors(filename, ast)
       end
    end
    go(ast)
+   return out
+end
+
+-- Proactive form of the same check: every `require("<literal>")` in the file whose
+-- resolution is the file itself gets its own error at the call site. Teal may swallow
+-- the self-require as a circular require and only complain later ("unknown type
+-- site.Config"), which hides the cause.
+local function self_require_errors(filename, ast)
+   local out = {}
+   for _, r in ipairs(require_sites(ast)) do
+      if r.path and norm_path(r.path) == norm_path(filename) then
+         out[#out + 1] = {
+            y = r.y, x = r.x,
+            msg = string.format(
+               "require(\"%s\") resolves to '%s', the requiring file itself: the filesystem is " ..
+               "case-insensitive and the module name collides with this file's name; rename one of them",
+               r.name, r.path),
+         }
+      end
+   end
    return out
 end
 
@@ -216,7 +227,10 @@ function H.check(filename)
          for _, l in ipairs(found or {}) do lints[#lints + 1] = fmt(filename, l) end
       end
    end
-   return { ok = #errors == 0, errors = errors, warnings = warnings, deps = deps, lints = lints, result = result }
+   local requires = {}
+   if result.ast then requires = require_sites(result.ast) end
+   return { ok = #errors == 0, errors = errors, warnings = warnings, deps = deps, lints = lints,
+      requires = requires, result = result }
 end
 
 -- Type-check + generate Lua source. Returns code, checkinfo (code is nil on failure).

@@ -275,11 +275,26 @@ fn expand_host_module(metas: Punctuated<Meta, Token![,]>, imp: &ItemImpl) -> Res
             })
             .collect();
         let call_args = quote! { #( #call_exprs ),* };
-        let body = match (m.receiver, m.ret_is_result) {
-            (Some(_), false) => quote! { ::htl::mlua::Result::Ok(this.#fname(#call_args)) },
-            (Some(_), true) => quote! { this.#fname(#call_args).map_err(::htl::mlua::Error::external) },
-            (None, false) => quote! { ::htl::mlua::Result::Ok(<#self_ty>::#fname(#call_args)) },
-            (None, true) => quote! { <#self_ty>::#fname(#call_args).map_err(::htl::mlua::Error::external) },
+        let call = match m.receiver {
+            Some(_) => quote! { this.#fname(#call_args) },
+            None => quote! { <#self_ty>::#fname(#call_args) },
+        };
+        let body = match (m.ret_is_result, hd.err_mode) {
+            (false, _) => quote! { ::htl::mlua::Result::Ok(#call) },
+            (true, dts::ErrMode::Raise) => quote! { #call.map_err(::htl::mlua::Error::external) },
+            // `value, err` convention: Ok(v) -> (v, nil); Ok(()) -> (true, nil); Err(e) -> (nil, e).
+            (true, dts::ErrMode::Return) if m.ret_is_unit => quote! {
+                match #call {
+                    Ok(()) => ::htl::mlua::Result::Ok((Some(true), None::<String>)),
+                    Err(e) => ::htl::mlua::Result::Ok((None::<bool>, Some(e.to_string()))),
+                }
+            },
+            (true, dts::ErrMode::Return) => quote! {
+                match #call {
+                    Ok(v) => ::htl::mlua::Result::Ok((Some(v), None::<String>)),
+                    Err(e) => ::htl::mlua::Result::Ok((None, Some(e.to_string()))),
+                }
+            },
         };
         let pat = quote! { (#( #arg_pats, )*): (#( #arg_tys, )*) };
         registrations.push(match m.receiver {

@@ -19,5 +19,14 @@ print("host.parse_int('42'):", host.parse_int(" 42 "))
 local ok, err = pcall(host.parse_int, "nope")
 print("host.parse_int('nope') ->", ok, err)
 
+-- errors = "return": `value, err` instead of raising
+local store = require("store")
+local wrote, werr = store:write("htl-embed-demo.txt", "hello")
+print("store:write ->", wrote, werr)
+local text, rerr = store:read("htl-embed-demo.txt")
+print("store:read ->", text, rerr)
+local bad, berr = store:write("no/slash", "x")
+print("store:write bad ->", bad, berr)
+
 local args: {string} = { ... }
 print("args:", #args, table.concat(args, " "))

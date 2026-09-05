@@ -86,8 +86,8 @@ fn subject_type_decides_the_enum() {
     write(
         &dir.join("game.tl"),
         "local record game\n   enum Command\n      \"move\"\n      \"wait\"\n      \"quit\"\n   end\n   enum State\n      \"dead\"\n      \"playing\"\n      \"won\"\n      \"quit\"\n   end\n   record W\n      state: State\n   end\nend\n\n\
-         function game.act(c: game.Command, w: game.W): boolean\n   if c == \"move\" then\n      return true\n   elseif c == \"quit\" then\n      return false\n   end\n   \
-         if w.state == \"dead\" then\n      return false\n   elseif w.state == \"won\" then\n      return true\n   end\n   return false\nend\n\n\
+         function game.act(c: game.Command, w: game.W): boolean\n   local r = false\n   if c == \"move\" then\n      r = true\n   elseif c == \"quit\" then\n      r = false\n   end\n   \
+         if w.state == \"dead\" then\n      r = false\n   elseif w.state == \"won\" then\n      r = true\n   end\n   return r\nend\n\n\
          return game\n",
     );
     let lints = lints_of(&dir, "game.tl");
@@ -107,6 +107,24 @@ fn string_subject_is_not_flagged() {
     );
     let lints = lints_of(&dir, "s.tl");
     assert!(!lints.iter().any(|l| l.contains("enum-exhaustive")), "string subject flagged: {lints:?}");
+}
+
+/// Every branch returns and code follows: the fallthrough is the `else`, no lint.
+/// The same chain as the last statement of its block (no fallthrough) is still flagged.
+#[test]
+fn all_return_chain_with_fallthrough_is_exhaustive() {
+    let dir = scratch("fallthrough");
+    write(
+        &dir.join("e.tl"),
+        "local enum Slot\n   \"weapon\"\n   \"armor\"\n   \"ring\"\nend\n\n\
+         local function bonus(s: Slot): integer\n   if s == \"weapon\" then\n      return 2\n   elseif s == \"armor\" then\n      return 1\n   end\n   return 0\nend\n\n\
+         local function name(s: Slot): string\n   local out = \"?\"\n   if s == \"weapon\" then\n      out = \"w\"\n   elseif s == \"armor\" then\n      out = \"a\"\n   end\n   return out\nend\n\n\
+         print(bonus(\"ring\"), name(\"ring\"))\n",
+    );
+    let lints = lints_of(&dir, "e.tl");
+    let hits: Vec<&String> = lints.iter().filter(|l| l.contains("enum-exhaustive")).collect();
+    assert_eq!(hits.len(), 1, "only the assigning chain (no return) is a real gap: {lints:?}");
+    assert!(hits[0].contains("e.tl:18:"), "{}", hits[0]);
 }
 
 #[test]
