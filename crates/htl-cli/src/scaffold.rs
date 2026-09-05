@@ -45,6 +45,7 @@ pub fn scaffold(dir: &Path, name: &str, opts: &Options, must_be_new: bool) -> Re
     let m = module_ident(name);
     let mut files: Vec<(PathBuf, String)> = vec![
         (dir.join("mlua-pkg.toml"), t_manifest(name, &m)),
+        (dir.join("htl.toml"), t_htl_toml()),
         (dir.join("src").join(&m).join("init.tl"), t_module(&m)),
         (dir.join("tests").join(format!("{m}_test.tl")), t_test(&m)),
         (dir.join(".gitignore"), t_gitignore(opts.embed)),
@@ -104,6 +105,26 @@ fn t_test(m: &str) -> String {
          t.describe(\"{m}.greet\", function()\n   t.it(\"greets by name\", function()\n      \
          t.expect({m}.greet(\"teal\")):to_equal({{ who = \"teal\", text = \"hello, teal\" }})\n   end)\nend)\n"
     )
+}
+
+fn t_htl_toml() -> String {
+    "# htl project settings (htl check / htl test / htl fmt / include_tl! all read this).\n\
+     # Command-line flags and HTL_LINTS / HTL_LINT override it.\n\n\
+     [lint]\n\
+     # enable  = [\"class-record\", \"explicit-number\"]   # opt-in rules (htl check --list-lints)\n\
+     # disable = [\"shadow-local\"]\n\
+     # strict  = true   # lints fail check/test and include_tl!; false makes the macro advisory\n\n\
+     [fmt]\n\
+     indent = 3\n\n\
+     # Contract for a directory of modules (static form of TealResolver::expect_type):\n\
+     # [[contract]]\n\
+     # dir = \"mods\"             # relative to this file\n\
+     # type = \"defs.Mod\"        # every module under `dir` must return this record\n\
+     # require_fields = true    # ... with every declared field present\n\
+     # The host must enforce it too: htl::pkg::contract_resolvers(root, &config), or\n\
+     # TealResolver::new(\"mods\").expect_type(\"defs.Mod\").require_fields() by hand.\n\
+     # `htl check` reports `contract-unenforced` when neither appears in the Rust sources.\n"
+        .to_string()
 }
 
 fn t_gitignore(embed: bool) -> String {

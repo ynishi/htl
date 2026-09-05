@@ -305,6 +305,64 @@ function H.record_fields(type_path)
    return names
 end
 
+-- Static contract check for one module file (the `contract` lint):
+--   1. `local m: <type_path> = require("<modname>")` through the checker (type errors),
+--   2. with require_fields: keys of the module's returned table literal (also
+--      `X.define({ ... })`) vs the record's declared fields (missing ones).
+-- Returns { errors = {string}, missing = {string} | nil (nil = not decidable) }.
+function H.contract_check(filename, modname, type_path, require_fields)
+   local module = type_path:match("^([^.]+)%.")
+   local out = { errors = {}, missing = nil }
+   if not module then
+      out.errors[1] = "contract type must be written as <module>.<Type>: " .. tostring(type_path)
+      return out
+   end
+   local stub = string.format('local %s = require("%s")\nlocal m: %s = require("%s")\nreturn m\n',
+      module, module, type_path, modname)
+   local code, info = H.gen_string(stub, "<contract " .. type_path .. " for " .. modname .. ">")
+   if not code then
+      for _, e in ipairs(info.errors) do out.errors[#out.errors + 1] = e end
+      return out
+   end
+   if not require_fields then return out end
+   local declared = H.record_fields(type_path)
+   if not declared then return out end
+   -- Keys of the returned table literal, if the module ends in one.
+   local fd = io.open(filename, "rb")
+   if not fd then return out end
+   local src = fd:read("a")
+   fd:close()
+   local ast = tl.parse(src, filename, "tl")
+   if not ast then return out end
+   local ret
+   for i = #ast, 1, -1 do
+      local s = ast[i]
+      if type(s) == "table" and s.kind == "return" then ret = s break end
+   end
+   if not ret or not ret.exps or not ret.exps[1] then return out end
+   local exp = ret.exps[1]
+   -- `return X.define({ ... })` / `return define({ ... })`: look at the single literal argument
+   if exp.kind == "op" and exp.op and exp.op.op == "@funcall" and exp.e2 and exp.e2[1]
+      and exp.e2[1].kind == "literal_table" and #exp.e2 == 1 then
+      exp = exp.e2[1]
+   end
+   if exp.kind ~= "literal_table" then return out end
+   local present = {}
+   for _, item in ipairs(exp) do
+      if type(item) == "table" and item.key and item.key.kind == "string" then
+         present[(item.key.tk or ""):sub(2, -2)] = true
+      elseif type(item) == "table" and item.key and item.key.kind == "identifier" then
+         present[item.key.tk] = true
+      end
+   end
+   out.missing = {}
+   for _, f in ipairs(declared) do
+      if not present[f] then out.missing[#out.missing + 1] = f end
+   end
+   out.missing_y, out.missing_x = ret.y, ret.x
+   return out
+end
+
 -- Strict searcher: unlike tl.loader(), type errors are fatal at require time.
 local function strict_searcher(module_name)
    local found, fd = tl.search_module(module_name, false)

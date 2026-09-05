@@ -74,8 +74,15 @@ fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Includ
     }
 
     let h = htl_core::Htl::new().map_err(|e| format!("include_tl!: {e:#}"))?;
-    if let Ok(spec) = std::env::var("HTL_LINTS") {
-        h.configure_lints(&spec).map_err(|e| format!("include_tl!: HTL_LINTS: {e:#}"))?;
+    // htl.toml `[lint]` first, then HTL_LINTS, so the env var wins.
+    let cfg = htl_core::config::HtlConfig::find(&path)
+        .map_err(|e| format!("include_tl!: {e:#}"))?
+        .map(|(_, c)| c);
+    let file_spec = cfg.as_ref().map(|c| c.lint_spec()).unwrap_or_default();
+    let env_spec = std::env::var("HTL_LINTS").unwrap_or_default();
+    let spec = htl_core::config::join_specs([file_spec.as_str(), env_spec.as_str()]);
+    if !spec.is_empty() {
+        h.configure_lints(&spec).map_err(|e| format!("include_tl!: lint spec {spec:?}: {e:#}"))?;
     }
     // Only explicit directories: the process cwd (cargo's) must not leak into module
     // resolution, or a same-named file there gets picked up and tracked by a path that
@@ -102,7 +109,11 @@ fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Includ
         return Err(format!("Teal type check failed:\n{}", ci.errors.join("\n")));
     };
     if !ci.lints.is_empty() {
-        let lenient = std::env::var("HTL_LINT").map(|v| v == "warn").unwrap_or(false);
+        // HTL_LINT=warn, else htl.toml `strict = false`; the macro's own default is strict.
+        let lenient = match std::env::var("HTL_LINT") {
+            Ok(v) => v == "warn",
+            Err(_) => cfg.as_ref().and_then(|c| c.lint.strict) == Some(false),
+        };
         if lenient {
             for l in &ci.lints {
                 eprintln!("include_tl! lint: {l}");
@@ -427,6 +438,23 @@ mod tests {
 
         let err = out.unwrap_err();
         assert!(err.contains("module not found: 'Tasks'"), "cwd decoy must not resolve: {err}");
+    }
+
+    /// `htl.toml` drives the macro too: `[lint] enable` turns a rule on, and
+    /// `strict = false` makes its findings advisory instead of a compile error.
+    #[test]
+    fn include_reads_htl_toml_lint_settings() {
+        let root = scratch("htl-toml");
+        // `no-any` is off by default; the script only trips when htl.toml enables it.
+        write(&root.join("src/main.tl"), "local x: any = 1\nprint(x)\n");
+        resolve_include(&root, "src/main.tl", false).expect("no-any is off by default");
+
+        write(&root.join("htl.toml"), "[lint]\nenable = [\"no-any\"]\n");
+        let err = resolve_include(&root, "src/main.tl", false).unwrap_err();
+        assert!(err.contains("htl lint failed") && err.contains("no-any"), "{err}");
+
+        write(&root.join("htl.toml"), "[lint]\nenable = [\"no-any\"]\nstrict = false\n");
+        resolve_include(&root, "src/main.tl", false).expect("strict = false downgrades lints");
     }
 
     /// Without a project the same script fails: the dep is genuinely not on the path.

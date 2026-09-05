@@ -161,6 +161,47 @@ Silence one occurrence with a trailing `-- htl: allow(nil-index)`. `include_tl!`
 treats lints as errors (`HTL_LINT=warn` downgrades, `HTL_LINTS=+no-any,-shadow-local`
 configures).
 
+## Project config (`htl.toml`)
+
+`htl check` / `htl test` / `htl fmt` / `include_tl!` all read the nearest `htl.toml`
+above the file, so the CLI and the build agree. Flags and `HTL_LINTS` / `HTL_LINT`
+override it (`htl new` writes a commented one).
+
+```toml
+[lint]
+enable  = ["class-record", "explicit-number"]
+disable = ["shadow-local"]
+strict  = true            # lints fail check/test and include_tl!; false makes the macro advisory
+
+[fmt]
+indent = 3
+
+[[contract]]              # static form of TealResolver::expect_type / require_fields
+dir = "mods"              # relative to htl.toml
+type = "defs.Mod"         # every module directly under `dir` must return this record
+require_fields = true     # ... with every declared field present in the returned table
+```
+
+A `[[contract]]` adds two lints:
+
+- `contract` — a module under `dir` whose return value is not assignable to `type`, or
+  (with `require_fields`) whose returned table literal leaves a declared field out, is
+  reported at `htl check` time instead of at the first `require`.
+- `contract-unenforced` — a contract is only a guarantee if the host enforces it. When a
+  Cargo package is found, `htl check` scans its Rust sources for
+  `expect_type("<type>")` (plus `.require_fields()` when required) or for the
+  config-driven helpers below, and otherwise tells you what to add.
+
+Hosts get resolvers from the same file, so the two cannot drift:
+
+```rust
+let (path, cfg) = htl::config::HtlConfig::find(Path::new("."))?.expect("htl.toml");
+let mut reg = mlua_pkg::Registry::new();
+for r in htl::pkg::contract_resolvers(&htl::parent_dir(&path), &cfg)? {
+    reg.add(r); // TealResolver for <root>/mods with expect_type("defs.Mod").require_fields()
+}
+```
+
 ## Tests
 
 ```lua
@@ -182,6 +223,7 @@ such library pass if they run to completion.
 ```text
 <name>/
 ├── mlua-pkg.toml          [package] entry = "src/<mod>"  → consumers require("<name>")
+├── htl.toml               [lint] / [fmt] / [[contract]] shared by the CLI and include_tl!
 ├── src/<mod>/init.tl      the module (require("<mod>") from src/ and tests/)
 ├── src/main.tl            entry script
 └── tests/<mod>_test.tl
