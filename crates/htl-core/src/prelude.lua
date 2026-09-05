@@ -6,6 +6,23 @@ local lint = require("htl.lint")
 local fmt_mod = require("htl.fmt")
 local H = {}
 
+-- Source beats declaration. tl's own search order is `.d.tl` across the whole path
+-- first, then `.tl`, so a stale `mods/defs.d.tl` written by a host would shadow the
+-- `src/defs.tl` it was made from wherever the two sit on the path. htl's run-time
+-- searchers already try `.tl` before `.d.tl`; make the checker agree, so a declaration
+-- is what you check against only when no source of that module is reachable.
+-- (`require_module` looks `tl.search_module` up on each call, so wrapping it works.)
+do
+   local tl_search = tl.search_module
+   tl.search_module = function(module_name, search_all)
+      local found, fd, tried = tl_search(module_name, false) -- `.tl` only
+      if found or not search_all then
+         return found, fd, tried
+      end
+      return tl_search(module_name, true) -- `.d.tl`, then `.lua`
+   end
+end
+
 H.lint_cfg = lint.DEFAULT
 
 -- `+rule,-rule,...` on top of the defaults. Returns nil, err on unknown rule.

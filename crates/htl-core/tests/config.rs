@@ -129,6 +129,9 @@ fn unenforced_contract_is_reported_against_host_sources() {
 
     let by_config = host("for r in htl::pkg::contract_resolvers(&root, &cfg)? { reg.add(r); }\n");
     assert!(by_config.is_empty(), "{by_config:?}");
+    // A host that picks one contract dir at a time (a site chosen on the command line).
+    let one_dir = host("reg.add(TealResolver::for_contract_dir(&root, &site_dir, &cfg.contract[0])?);\n");
+    assert!(one_dir.is_empty(), "{one_dir:?}");
 
     // No host crate at all: a script-only project has nothing to enforce.
     assert!(contract_enforcement_lints(&cfg, &cfg_path, None).is_empty());
@@ -222,6 +225,39 @@ fn check_paths_make_host_supplied_modules_visible() {
     h.apply_config(&root, &cfg).unwrap();
     let ci = h.check(&root.join("src/use.tl")).unwrap();
     assert!(ci.errors.iter().any(|e| e.contains("got integer, expected string")), "typed through [check] paths: {:?}", ci.errors);
+}
+
+#[test]
+fn source_beats_a_stale_declaration_wherever_it_sits_on_the_path() {
+    let root = scratch("stale-decl");
+    write(&root.join("htl.toml"), "[check]\npaths = [\"mods\"]\n");
+    // The source gained `items`; the declaration the host wrote last run has not.
+    write(
+        &root.join("src/defs.tl"),
+        "local record defs\n   record Mod\n      name: string\n      items: {string}\n   end\nend\nreturn defs\n",
+    );
+    write(&root.join("mods/defs.d.tl"), "local record defs\n   record Mod\n      name: string\n   end\nend\nreturn defs\n");
+    write(&root.join("mods/x.tl"), "local defs = require(\"defs\")\nlocal m: defs.Mod = { name = \"x\", items = {} }\nreturn m\n");
+    let (_, cfg) = HtlConfig::find(&root).unwrap().unwrap();
+
+    // Both dirs on the path, in either order: the checker must read src/defs.tl.
+    for order in [["src", "mods"], ["mods", "src"]] {
+        let h = Htl::new().unwrap();
+        for d in order {
+            h.add_path(&root.join(d)).unwrap();
+        }
+        let ci = h.check(&root.join("mods/x.tl")).unwrap();
+        assert!(ci.ok(), "path order {order:?}: {:?}", ci.errors);
+    }
+    let h = Htl::new().unwrap();
+    h.apply_config(&root, &cfg).unwrap();
+    assert!(h.check(&root.join("mods/x.tl")).unwrap().ok());
+
+    // Only the declaration reachable (an external mod author's checkout): it is used.
+    let h = Htl::new().unwrap();
+    h.add_path(&root.join("mods")).unwrap();
+    let ci = h.check(&root.join("mods/x.tl")).unwrap();
+    assert!(ci.errors.iter().any(|e| e.contains("items")), "stale decl in use: {:?}", ci.errors);
 }
 
 #[test]
