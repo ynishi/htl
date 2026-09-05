@@ -79,6 +79,12 @@ fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Includ
     }
     h.add_path(&htl_core::parent_dir(&path))
         .map_err(|e| format!("include_tl!: {e:#}"))?;
+    // The crate's `src/` (where scaffolded `.tl` modules and `.d.tl` live), so scripts kept
+    // elsewhere (e.g. `scripts/`) still resolve them.
+    let crate_src = manifest_dir.join("src");
+    if crate_src.is_dir() {
+        h.add_path(&crate_src).map_err(|e| format!("include_tl!: {e:#}"))?;
+    }
     if let Some(p) = htl_core::pkg::Project::find(&path) {
         h.apply_project(&p).map_err(|e| format!("include_tl!: {e:#}"))?;
     }

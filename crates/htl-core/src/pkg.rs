@@ -243,6 +243,12 @@ impl crate::Htl {
         for d in &p.target_dirs {
             self.add_path(d)?;
         }
+        // The project's own modules: `<root>/src` (the scaffold layout) so a script anywhere
+        // in the project resolves them the same way `tests/` does.
+        let src = p.root.join("src");
+        if src.is_dir() {
+            self.add_path(&src)?;
+        }
         Ok(())
     }
 }
@@ -299,8 +305,12 @@ impl Resolver for TealResolver {
                         if self.has_lua_sibling(&relative) {
                             return None;
                         }
-                        // Declaration-only module: nothing to run, give require a table.
-                        return Some(lua.create_table().map(Value::Table));
+                        // Declaration-only module: nothing to run. Hand require a table whose
+                        // lookups explain that the implementation lives elsewhere.
+                        return Some(
+                            h.get::<Function>("type_only_module")
+                                .and_then(|f| f.call::<Value>((name, file.resolved_path.to_string_lossy().as_ref()))),
+                        );
                     }
                     return Some(self.load_teal(lua, &h, &file.content, &file.resolved_path, name));
                 }

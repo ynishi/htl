@@ -114,6 +114,21 @@ function H.gen_string(src, filename)
    return code, c
 end
 
+-- Value handed to `require` for a declaration-only module (`name.d.tl` with no
+-- implementation on the path). Indexing it explains what is missing instead of the
+-- bare "attempt to call a nil value" that would surface otherwise.
+function H.type_only_module(module_name, decl_path)
+   return setmetatable({}, {
+      __index = function(_, key)
+         error(string.format(
+            "module '%s' is declaration-only here (%s): '%s' has no implementation on this path. " ..
+            "It must be provided by the host program (e.g. a Rust #[host_module] via cargo run) " ..
+            "or by a .tl/.lua module with that name.",
+            module_name, decl_path, tostring(key)), 2)
+      end,
+   })
+end
+
 -- Strict searcher: unlike tl.loader(), type errors are fatal at require time.
 local function strict_searcher(module_name)
    local found, fd = tl.search_module(module_name, false)
@@ -131,7 +146,7 @@ local function strict_searcher(module_name)
             lf:close()
             return "\n\ttype-only '" .. dfound .. "' (implementation served by the .lua searcher)"
          end
-         return function() return {} end, dfound
+         return function() return H.type_only_module(module_name, dfound) end, dfound
       elseif dfd then
          dfd:close()
       end

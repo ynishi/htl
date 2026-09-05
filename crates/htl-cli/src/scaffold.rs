@@ -11,7 +11,9 @@
 //! ├── tests/<mod>_test.tl    htl.test sample
 //! ├── .gitignore
 //! ├── README.md
-//! └── Cargo.toml + src/main.rs   Rust host embedding the scripts (only with --embed)
+//! └── Cargo.toml + src/main.rs   Rust host (only with --embed): #[host_module] exposing
+//!                                `host` to Teal (declaration -> src/host.d.tl), scripts
+//!                                embedded with include_tl! / include_tl_bytes!
 //! ```
 
 use anyhow::{Context, Result, bail};
@@ -49,7 +51,7 @@ pub fn scaffold(dir: &Path, name: &str, opts: &Options, must_be_new: bool) -> Re
         (dir.join("README.md"), t_readme(name, &m, opts)),
     ];
     if !opts.lib {
-        files.push((dir.join("src").join("main.tl"), t_main(&m)));
+        files.push((dir.join("src").join("main.tl"), t_main(&m, opts.embed)));
     }
     if opts.embed {
         files.push((dir.join("Cargo.toml"), t_cargo(name)));
@@ -84,10 +86,16 @@ fn t_module(m: &str) -> String {
     )
 }
 
-fn t_main(m: &str) -> String {
-    format!(
-        "local {m} = require(\"{m}\")\n\nlocal g = {m}.greet(arg and arg[1] or \"teal\")\nprint(g.text)\n"
-    )
+fn t_main(m: &str, embed: bool) -> String {
+    if embed {
+        format!(
+            "local {m} = require(\"{m}\")\nlocal host = require(\"host\") -- Rust side, see src/main.rs (types: src/host.d.tl)\n\n\
+             local g = {m}.greet(arg and arg[1] or \"teal\")\nprint(g.text)\n\n\
+             print(host:greet(g.who))\nlocal p: host.Point = host:scale({{ x = 1, y = 2 }}, 3)\nprint(\"scaled:\", p.x, p.y)\n"
+        )
+    } else {
+        format!("local {m} = require(\"{m}\")\n\nlocal g = {m}.greet(arg and arg[1] or \"teal\")\nprint(g.text)\n")
+    }
 }
 
 fn t_test(m: &str) -> String {
@@ -108,14 +116,31 @@ fn t_gitignore(embed: bool) -> String {
 
 fn t_readme(name: &str, m: &str, opts: &Options) -> String {
     let mut s = format!("# {name}\n\nTeal project managed with [htl](https://github.com/ynishi/htl).\n\n```sh\nhtl check .            # type-check + lints\n");
-    if !opts.lib {
+    if !opts.lib && !opts.embed {
         s.push_str("htl run src/main.tl    # run the entry script\n");
     }
     s.push_str("htl test               # tests/*_test.tl via htl.test\nhtl fmt .              # whitespace formatter\nhtl pkg install        # fetch [deps] from mlua-pkg.toml\n");
     if opts.embed {
         s.push_str("cargo run              # Rust host with the scripts embedded (type-checked at build)\n");
+        if !opts.lib {
+            s.push_str("                       # (src/main.tl requires the Rust `host`, so `htl run` cannot run it)\n");
+        }
     }
-    s.push_str(&format!("```\n\nModule: `src/{m}/init.tl` (`require(\"{m}\")`). Consumers depending on this package get it as `require(\"{name}\")`.\n"));
+    s.push_str(&format!(
+        "```\n\nModule: `src/{m}/init.tl` (`require(\"{m}\")` from `src/` and `tests/`).\n\n\
+         `mlua-pkg.toml` `entry = \"src/{m}\"` only matters to *consumers* that depend on this\n\
+         package through mlua-pkg: they get it as `require(\"{name}\")`. "
+    ));
+    if opts.embed {
+        s.push_str(
+            "The Rust host in `src/main.rs`\nembeds the scripts directly and does not use it.\n\n\
+             `src/host.d.tl` is generated from `#[host_module]` in `src/main.rs`: `cargo build` writes it,\n\
+             and so does `htl dts` / `htl check` without building, so the Teal side always sees the\n\
+             current Rust signatures.\n",
+        );
+    } else {
+        s.push_str("Ignore it if nobody depends on this package.\n");
+    }
     s
 }
 
@@ -130,7 +155,12 @@ fn t_main_rs(m: &str, lib: bool) -> String {
     let main_const = if lib {
         String::new()
     } else {
-        "use htl::include_tl;\nconst MAIN: &str = include_tl!(\"src/main.tl\");\n".to_string()
+        "const MAIN: &str = include_tl!(\"src/main.tl\");\n".to_string()
+    };
+    let use_line = if lib {
+        "use htl::{Htl, TealRecord, host_module};\n"
+    } else {
+        "use htl::{Htl, TealRecord, host_module, include_tl};\n"
     };
     let run = if lib {
         format!("    let g: htl::mlua::Table = h.lua().load(\"return require('{m}').greet('rust')\").eval()?;\n    println!(\"{{}}\", g.get::<String>(\"text\")?);\n")
@@ -139,8 +169,20 @@ fn t_main_rs(m: &str, lib: bool) -> String {
     };
     format!(
         "//! Rust host: the Teal sources are type-checked at `cargo build` and embedded.\n\n\
-         use htl::Htl;\n\n\
+         {use_line}\n\
+         /// Crosses the Rust <-> Teal boundary as a plain table (`host.Point` on the Teal side).\n\
+         #[derive(TealRecord, Clone)]\npub struct Point {{\n    pub x: f64,\n    pub y: f64,\n}}\n\n\
+         pub struct Host;\n\n\
+         /// Exposed to Teal as `require(\"host\")`. Its declaration is written to `src/host.d.tl`\n\
+         /// by this macro at build time, and by `htl dts` / `htl check` without building.\n\
+         #[host_module(name = \"host\", dts = \"src/host.d.tl\", records = [Point])]\n\
+         impl Host {{\n\
+         \x20   pub fn greet(&self, who: &str) -> String {{\n        format!(\"hello from Rust, {{who}}\")\n    }}\n\n\
+         \x20   pub fn scale(&self, p: Point, k: f64) -> Point {{\n        Point {{ x: p.x * k, y: p.y * k }}\n    }}\n\
+         }}\n\n\
+         // Teal sources, checked at build. Keep these after `#[host_module]` (same file, source order)\n\
+         // so the declaration exists when they are checked.\n\
          const LIB: &[u8] = htl::include_tl_bytes!(\"src/{m}/init.tl\");\n{main_const}\n\
-         fn main() -> anyhow::Result<()> {{\n    let h = Htl::new()?;\n    h.preload_bytes(\"{m}\", LIB)?;\n{run}    Ok(())\n}}\n"
+         fn main() -> anyhow::Result<()> {{\n    let h = Htl::new()?;\n    Host.htl_preload(&h)?;\n    h.preload_bytes(\"{m}\", LIB)?;\n{run}    Ok(())\n}}\n"
     )
 }
