@@ -331,7 +331,11 @@ impl std::fmt::Display for TealResolveError {
                 for e in errors {
                     write!(f, "\n  {e}")?;
                 }
-                Ok(())
+                write!(
+                    f,
+                    "\n  hint: annotate the returned table in the module (`local m: {expected} = {{ ... }}  return m`) \
+                     to get field-level errors with line numbers"
+                )
             }
             Self::Read { module, source } => write!(f, "reading module '{module}': {source}"),
         }

@@ -77,6 +77,10 @@ fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Includ
     if let Ok(spec) = std::env::var("HTL_LINTS") {
         h.configure_lints(&spec).map_err(|e| format!("include_tl!: HTL_LINTS: {e:#}"))?;
     }
+    // Only explicit directories: the process cwd (cargo's) must not leak into module
+    // resolution, or a same-named file there gets picked up and tracked by a path that
+    // is relative to nothing in particular.
+    h.reset_search_path().map_err(|e| format!("include_tl!: {e:#}"))?;
     h.add_path(&htl_core::parent_dir(&path))
         .map_err(|e| format!("include_tl!: {e:#}"))?;
     // The crate's `src/` (where scaffolded `.tl` modules and `.d.tl` live), so scripts kept
@@ -112,10 +116,16 @@ fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Includ
     }
 
     let main_abs = path.to_string_lossy().into_owned();
+    // `include_str!` resolves relative to the *Rust* source file, so every tracked dep
+    // must be absolute. Drop anything that does not exist as a file (nothing to track).
     let deps: Vec<String> = ci
         .deps
         .iter()
-        .map(|d| d.to_string_lossy().into_owned())
+        .filter_map(|d| {
+            let p = if d.is_absolute() { d.clone() } else { manifest_dir.join(d) };
+            let p = std::fs::canonicalize(&p).unwrap_or(p);
+            p.is_file().then(|| p.to_string_lossy().into_owned())
+        })
         .collect();
 
     let payload = if bytes {
@@ -344,6 +354,11 @@ mod tests {
             "dep must be tracked for rebuilds: {:?}",
             inc.deps
         );
+        assert!(
+            inc.deps.iter().all(|d| Path::new(d).is_absolute()),
+            "tracked deps must be absolute for include_str!: {:?}",
+            inc.deps
+        );
         match inc.payload {
             Payload::Source(code) => assert!(code.contains("require(\"mathx\")")),
             Payload::Bytes(_) => panic!("expected source"),
@@ -379,6 +394,24 @@ mod tests {
         );
         write(&root.join("src/main.tl"), "local mathx = require(\"mathx\")\nprint(mathx.twice(1))\n");
         resolve_include(&root, "src/main.tl", false).expect("flat package must resolve");
+    }
+
+    /// The process cwd (cargo's, during a build) must not take part in resolution: a
+    /// same-named module sitting there is neither picked up nor tracked by a relative path.
+    #[test]
+    fn include_ignores_modules_in_the_process_cwd() {
+        let decoy = scratch("cwd-decoy");
+        write(&decoy.join("Tasks.tl"), "local record Tasks\nend\nreturn Tasks\n");
+        let root = scratch("cwd-crate");
+        write(&root.join("src/main.tl"), "local ok, t = pcall(require, \"Tasks\")\nprint(ok, t)\n");
+
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&decoy).unwrap();
+        let out = resolve_include(&root, "src/main.tl", false);
+        std::env::set_current_dir(prev).unwrap();
+
+        let err = out.unwrap_err();
+        assert!(err.contains("module not found: 'Tasks'"), "cwd decoy must not resolve: {err}");
     }
 
     /// Without a project the same script fails: the dep is genuinely not on the path.
