@@ -18,6 +18,25 @@ enum Format {
     Json,
 }
 
+/// How `htl check` grains its cache. Separate from whether it caches at all, which is
+/// `--no-cache`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
+enum CacheModeArg {
+    /// One entry per module: an edit costs that module and what depends on it
+    PerModule,
+    /// One entry per run: any edit re-checks everything, a run with no edits reads one file
+    WholeRun,
+}
+
+impl From<CacheModeArg> for cache::Mode {
+    fn from(m: CacheModeArg) -> Self {
+        match m {
+            CacheModeArg::PerModule => cache::Mode::PerModule,
+            CacheModeArg::WholeRun => cache::Mode::WholeRun,
+        }
+    }
+}
+
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use htl::bundle::Bundle;
@@ -53,6 +72,9 @@ enum Cmd {
         /// Check even if an identical run is cached, and do not store this one
         #[arg(long)]
         no_cache: bool,
+        /// How the cache is grained; overrides `[cache] mode` in htl.toml
+        #[arg(long, value_enum)]
+        cache_mode: Option<CacheModeArg>,
     },
     /// Run tests: `*_test.tl` and `tests/**/*.tl`, one isolated state per file
     Test {
@@ -218,9 +240,15 @@ pub fn run() -> ExitCode {
 
 fn real_main(cli: Cli) -> Result<ExitCode> {
     match cli.cmd {
-        Cmd::Check { paths, strict, lint, list_lints, format, no_cache } => {
-            cmd_check(&paths, strict, lint.as_deref(), list_lints, format == Format::Json, !no_cache)
-        }
+        Cmd::Check { paths, strict, lint, list_lints, format, no_cache, cache_mode } => cmd_check(
+            &paths,
+            strict,
+            lint.as_deref(),
+            list_lints,
+            format == Format::Json,
+            !no_cache,
+            cache_mode.map(Into::into),
+        ),
         Cmd::Fmt { paths, check, indent } => cmd_fmt(&paths, check, indent),
         Cmd::Test { paths, filter, lib, lint, fail_fast, verbose, quiet, slow, update, coverage, coverage_lines, format } => {
             cmd_test(
@@ -818,6 +846,7 @@ fn cmd_check(
     list_lints: bool,
     json: bool,
     use_cache: bool,
+    cache_mode: Option<cache::Mode>,
 ) -> Result<ExitCode> {
     let mut sink = report::Sink::new(json);
     let paths = if paths.is_empty() { vec![PathBuf::from(".")] } else { paths.to_vec() };
@@ -847,7 +876,20 @@ fn cmd_check(
         .as_ref()
         .map(|(r, _, _)| r.clone())
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let store = cache::Cache::open(&root, use_cache);
+    // The flag wins over the config, and the config over the default. Whether to cache at
+    // all is the separate `--no-cache`.
+    let mode = cache_mode
+        .or_else(|| {
+            cfg.as_ref().and_then(|(_, _, c)| c.cache.mode.as_deref()).map(|m| {
+                cache::Mode::parse(m)
+                    .unwrap_or_else(|| {
+                        eprintln!("htl check: unknown [cache] mode {m:?}, using per-module");
+                        cache::Mode::PerModule
+                    })
+            })
+        })
+        .unwrap_or_default();
+    let store = cache::Cache::open(&root, use_cache, mode);
 
     // The lint selection is part of what a module reports, so it is part of every key.
     let file_spec = cfg.as_ref().map(|(_, _, c)| c.lint_spec()).unwrap_or_default();
@@ -856,8 +898,11 @@ fn cmd_check(
     // Look every module up before checking any of them, so that a run where nothing moved
     // never builds a checker at all.
     let keys: Vec<cache::Key> = files.iter().map(|f| cache::module_key(f, Some(&spec))).collect();
-    let hits: Vec<Option<cache::Module>> =
-        keys.iter().map(|k| store.as_ref().and_then(|c| c.lookup(k))).collect();
+    let run_key = cache::run_key(&files, Some(&spec));
+    let hits: Vec<Option<cache::Module>> = match &store {
+        Some(c) => c.lookup_all(&keys, &run_key, files.len()),
+        None => vec![None; files.len()],
+    };
     let to_check = hits.iter().filter(|h| h.is_none()).count();
 
     let h = if to_check > 0 { Some(build_checker(&cfg, &paths, &spec)?) } else { None };
@@ -865,6 +910,7 @@ fn cmd_check(
 
     let (mut n_err, mut n_warn, mut n_lint) = (0usize, 0usize, 0usize);
     let mut infos: Vec<(PathBuf, CheckInfo)> = Vec::with_capacity(files.len());
+    let mut modules: Vec<cache::Module> = Vec::with_capacity(files.len());
     for ((f, key), hit) in files.iter().zip(&keys).zip(hits) {
         let m = match hit {
             Some(m) => {
@@ -874,8 +920,12 @@ fn cmd_check(
             None => {
                 let h = h.as_ref().expect("a module missed, so a checker was built");
                 let m = check_one(h, &mut sink, f, &cfg)?;
-                if let Some(c) = &store {
-                    c.store(key, f, &cfg_inputs, &search_dirs(f, &root, &cfg), &m);
+                // Per-module entries are written as each one is checked; a whole-run entry
+                // cannot be written until the walk is done, so it happens below.
+                if let Some(c) = &store
+                    && c.mode() == cache::Mode::PerModule
+                {
+                    c.store_module(key, f, &cfg_inputs, &search_dirs(f, &root, &cfg), &m);
                 }
                 m
             }
@@ -884,6 +934,16 @@ fn cmd_check(
         n_warn += m.warnings;
         n_lint += m.lints;
         infos.push((f.clone(), requires_only(&m)));
+        modules.push(m);
+    }
+    // One entry for the walk. Nothing to write when everything replayed: the entry that was
+    // read is the entry that would be written.
+    if let Some(c) = &store
+        && c.mode() == cache::Mode::WholeRun
+        && to_check > 0
+    {
+        let dirs: Vec<PathBuf> = files.iter().flat_map(|f| search_dirs(f, &root, &cfg)).collect();
+        c.store_run(&run_key, &files, &cfg_inputs, &dirs, &modules);
     }
     // Project-level: cycles in the require graph of the files just checked.
     for cyc in htl::require_cycles(&infos) {

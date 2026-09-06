@@ -38,7 +38,7 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 | command | what it does |
 |---|---|
 | `htl new <name>` / `htl init [dir]` | scaffold: `mlua-pkg.toml`, `src/<mod>/init.tl`, `src/main.tl`, `tests/`, README (`--lib`, `--embed` for a Rust host) |
-| `htl check [paths] [--strict] [--lint +rule,-rule] [--no-cache]` | type-check; htl lints as `lint:` (advisory, `--strict` fails on them); a run whose inputs are unchanged is replayed from `.htl/` (see Caching) |
+| `htl check [paths] [--strict] [--lint +rule,-rule] [--no-cache] [--cache-mode per-module\|whole-run]` | type-check; htl lints as `lint:` (advisory, `--strict` fails on them); what has not changed is replayed from `.htl/` (see Caching) |
 | `htl run <file.tl \| app.hb> [args]` | check then execute; `require` of a `.tl` with type errors fails |
 | `htl test [paths] [--filter s] [--lib mod]` | `*_test.tl` and `tests/**/*.tl`, one isolated state per file |
 | `htl fmt [paths] [--check] [--indent N]` | whitespace formatter (indentation from the syntax tree, blank lines, trailing space) |
@@ -58,17 +58,37 @@ and `htl test` agree.
 
 ## Caching
 
-`htl check` stores what each module reported under `.htl/cache/` at the project root and
-replays the ones whose inputs have not moved. The summary says how many: `[cached]` when
-every module came from the store and no checker was built at all, `[36/48 cached]` when
-some did, and nothing when none did. `--format json` carries the same as
-`summary.cached` and `summary.replayed`. `htl init` puts `.htl/` in `.gitignore`; add it
-by hand in an existing project.
+`htl check` stores what it worked out under `.htl/cache/` at the project root and replays
+whatever has not moved. The summary says how much: `[cached]` when everything came from the
+store and no checker was built at all, `[36/48 cached]` when some of it did, and nothing
+when none did. `--format json` carries the same as `summary.cached` and `summary.replayed`.
+`htl init` puts `.htl/` in `.gitignore`; add it by hand in an existing project.
 
-On a few thousand lines of Teal a cold check is around a second, replaying everything is a
-few dozen milliseconds, and editing one module costs that module, whatever requires it, and
-whatever those pull in — the checker's store starts empty, so a module being re-checked
-re-checks its dependencies too.
+There are two separate controls. **Whether to cache** is `--no-cache`, which neither reads
+nor writes. **How the cache is grained** is `--cache-mode`, or `[cache] mode` in `htl.toml`
+with the flag overriding it:
+
+| mode | entry | an edit costs |
+|---|---|---|
+| `per-module` (default) | one per module | that module, whatever requires it, and what those pull in |
+| `whole-run` | one for the walk | the whole walk, wherever the edit landed |
+
+Measured on a 57-module project of about 14,000 lines, release build, wall clock:
+
+| | per-module | whole-run |
+|---|---|---|
+| cold (`--no-cache`) | 1.81 s | 1.81 s |
+| nothing edited | 0.018 s | 0.017 s |
+| a module nothing requires | 0.33 s | 1.75 s |
+| a module 10 others require | 0.81 s | 1.75 s |
+| the type module 32 others require | 1.74 s | 1.75 s |
+
+**What per-module saves depends entirely on where the edit lands.** Editing a leaf is a
+hundredfold; editing the module at the bottom of the dependency graph saves nothing at all,
+because everything above it has to be checked again anyway. Neither mode is slower than a
+cold check. `whole-run` keeps one entry per invocation rather than one per module, which is
+the reason to reach for it if the number of files in `.htl/` becomes a problem before
+eviction lands.
 
 An entry is used only when the module and everything it required still hash the same, every
 directory a `require` could resolve in holds the same modules, and the binary that wrote the
@@ -81,8 +101,8 @@ Flags are part of the key when they change what a module reports and not when th
 change the verdict: `--lint` gets its own entries, `--strict` reuses them and differs in the
 exit code alone.
 
-`--no-cache` neither reads nor writes, and `HTL_CACHE_DEBUG=1` prints why a module was not
-replayed. `htl test` is not cached: a test has to run whatever its types say.
+`HTL_CACHE_DEBUG=1` prints why something was not replayed. `htl test` is not cached: a test
+has to run whatever its types say.
 
 ## Embedding in Rust
 

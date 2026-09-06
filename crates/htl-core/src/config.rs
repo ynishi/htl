@@ -42,10 +42,23 @@ pub struct HtlConfig {
     pub build: BuildConfig,
     #[serde(default)]
     pub fix: FixConfig,
+    #[serde(default)]
+    pub cache: CacheConfig,
     /// Static counterpart of `TealResolver::expect_type` / `require_fields`: files
     /// directly under `dir` must return `type`; checked by the `contract` lint.
     #[serde(default)]
     pub contract: Vec<Contract>,
+}
+
+/// `[cache]` — how `htl check` reuses what it already worked out.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheConfig {
+    /// `"per-module"` (the default) or `"whole-run"`. Which one is faster depends on where
+    /// edits land in the dependency graph; the CLI's `--cache-mode` overrides this, and
+    /// `--no-cache` turns the cache off entirely, which is a separate question from how it
+    /// is grained.
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -161,6 +161,43 @@ struct Entry {
     module: Module,
 }
 
+/// One entry holding the whole walk, for `Mode::WholeRun`.
+#[derive(Serialize, Deserialize, Debug)]
+struct RunEntry {
+    stamp: Stamp,
+    inputs: Vec<Input>,
+    probes: Vec<Probe>,
+    /// One per file in the walk, in walk order. A different count means the walk itself
+    /// changed, which is a miss before any hash is compared.
+    modules: Vec<Module>,
+}
+
+/// How much of a run one entry covers.
+///
+/// The two are a real trade rather than one being a refinement of the other, and which
+/// wins depends on where in the dependency graph the edit lands — see the Caching section
+/// of the README. `PerModule` is the default because editing is the common case.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub enum Mode {
+    /// One entry per module. An edit costs the module, its dependents, and what those pull
+    /// in; everything else replays.
+    #[default]
+    PerModule,
+    /// One entry for the walk. Any edit anywhere re-checks everything, but a run where
+    /// nothing moved reads one file instead of one per module.
+    WholeRun,
+}
+
+impl Mode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "per-module" => Some(Mode::PerModule),
+            "whole-run" => Some(Mode::WholeRun),
+            _ => None,
+        }
+    }
+}
+
 /// The identity of one module under one invocation: same key, same question.
 #[derive(Debug, Clone)]
 pub struct Key(String);
@@ -223,6 +260,23 @@ pub fn module_key(spelling: &Path, lint: Option<&str>) -> Key {
     Key(h.finalize().to_hex().to_string())
 }
 
+/// The key for the walk as a whole, under `Mode::WholeRun`.
+///
+/// Every file's spelling goes in, in order: a walk that visits a different set, or the same
+/// set named differently, is a different run and prints different text.
+pub fn run_key(files: &[PathBuf], lint: Option<&str>) -> Key {
+    let mut h = blake3::Hasher::new();
+    h.update(b"htl-run\0");
+    for f in files {
+        h.update(f.to_string_lossy().as_bytes());
+        h.update(b"\0");
+    }
+    h.update(lint.unwrap_or("").as_bytes());
+    h.update(b"\0");
+    h.update(cwd().as_bytes());
+    Key(h.finalize().to_hex().to_string())
+}
+
 /// The working directory, resolved once. This is called for every module in the walk, and
 /// resolving it means a `canonicalize` syscall — doing that per module is a measurable part
 /// of a run that replays everything and does nothing else.
@@ -234,6 +288,7 @@ fn cwd() -> &'static str {
 /// A store rooted at a project.
 pub struct Cache {
     dir: PathBuf,
+    mode: Mode,
     /// Content hashes taken during this run, by normalized path.
     ///
     /// Entries overlap heavily: every module in a project tends to require the same few
@@ -249,13 +304,14 @@ pub struct Cache {
 impl Cache {
     /// `None` when the caller turned caching off, or when this build cannot identify
     /// itself well enough to be sure an entry is its own.
-    pub fn open(root: &Path, enabled: bool) -> Option<Self> {
+    pub fn open(root: &Path, enabled: bool, mode: Mode) -> Option<Self> {
         if !enabled {
             return None;
         }
         Stamp::current()?;
         Some(Self {
             dir: root.join(DIR),
+            mode,
             hashes: RefCell::new(HashMap::new()),
             dirs: RefCell::new(HashMap::new()),
         })
@@ -286,75 +342,142 @@ impl Cache {
         self.dir.join(format!("{}.json", key.0))
     }
 
-    /// What the module reported last time, if every input and probe still matches.
-    pub fn lookup(&self, key: &Key) -> Option<Module> {
-        let raw = std::fs::read_to_string(self.entry_path(key)).ok()?;
-        let entry: Entry = match serde_json::from_str(&raw) {
-            Ok(e) => e,
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    /// A truncated or hand-edited entry is a miss, not a crash.
+    fn parse<T: serde::de::DeserializeOwned>(raw: &str) -> Option<T> {
+        match serde_json::from_str(raw) {
+            Ok(e) => Some(e),
             Err(e) => {
-                // A truncated or hand-edited entry is a miss, not a crash.
                 miss(&format!("unreadable entry: {e}"));
-                return None;
+                None
             }
-        };
-        let stamp = Stamp::current()?;
-        if entry.stamp != stamp {
-            miss("written by a different build");
-            return None;
         }
-        for i in &entry.inputs {
+    }
+
+    /// Whether an entry still describes the world: written by this build, every file it read
+    /// unchanged, every directory it could have resolved in holding the same modules.
+    fn still_valid(&self, stamp: &Stamp, inputs: &[Input], probes: &[Probe]) -> bool {
+        let Some(current) = Stamp::current() else { return false };
+        if *stamp != current {
+            miss("written by a different build");
+            return false;
+        }
+        for i in inputs {
             match self.hash_of(&i.path) {
                 Some(h) if h == i.hash => {}
                 Some(_) => {
                     miss(&format!("changed: {}", i.path));
-                    return None;
+                    return false;
                 }
                 None => {
                     miss(&format!("gone: {}", i.path));
-                    return None;
+                    return false;
                 }
             }
         }
-        for p in &entry.probes {
+        for p in probes {
             if self.dir_names_of(&p.dir) != p.names {
                 miss(&format!("directory contents changed: {}", p.dir));
-                return None;
+                return false;
             }
         }
-        Some(entry.module)
+        true
     }
 
-    /// Record what a module reported. Best-effort: a store that cannot be written leaves
-    /// the next run to do the work again, which is slow rather than wrong.
-    pub fn store(&self, key: &Key, file: &Path, extra_inputs: &[PathBuf], dirs: &[PathBuf], module: &Module) {
-        let Some(stamp) = Stamp::current() else { return };
+    /// What each file in the walk reported last time; `None` where it has to be checked.
+    ///
+    /// Under `WholeRun` this is all-or-nothing by construction: one entry covers the walk,
+    /// so a single changed input means every module is checked.
+    pub fn lookup_all(&self, keys: &[Key], run: &Key, files: usize) -> Vec<Option<Module>> {
+        match self.mode {
+            Mode::PerModule => keys.iter().map(|k| self.lookup(k)).collect(),
+            Mode::WholeRun => match self.lookup_run(run, files) {
+                Some(ms) => ms.into_iter().map(Some).collect(),
+                None => vec![None; files],
+            },
+        }
+    }
 
-        // The module, what it required, and the config that shaped the search — hashed once
-        // each, so a dependency reached twice is compared once.
-        let mut paths: Vec<String> = std::iter::once(normal(file))
-            .chain(module.deps.iter().cloned())
-            .chain(extra_inputs.iter().map(|p| normal(p)))
-            .collect();
+    /// What the module reported last time, if every input and probe still matches.
+    fn lookup(&self, key: &Key) -> Option<Module> {
+        let raw = std::fs::read_to_string(self.entry_path(key)).ok()?;
+        let entry: Entry = Self::parse(&raw)?;
+        self.still_valid(&entry.stamp, &entry.inputs, &entry.probes).then_some(entry.module)
+    }
+
+    fn lookup_run(&self, key: &Key, files: usize) -> Option<Vec<Module>> {
+        let raw = std::fs::read_to_string(self.entry_path(key)).ok()?;
+        let entry: RunEntry = Self::parse(&raw)?;
+        if entry.modules.len() != files {
+            miss("the walk visits a different number of files");
+            return None;
+        }
+        self.still_valid(&entry.stamp, &entry.inputs, &entry.probes).then_some(entry.modules)
+    }
+
+    /// Hash every path an entry has to compare next time, once each: a dependency reached
+    /// from two modules is compared once. `None` if anything is unreadable, which drops the
+    /// entry rather than storing one that would hit wrongly.
+    fn inputs_for(&self, paths: impl Iterator<Item = String>) -> Option<Vec<Input>> {
+        let mut paths: Vec<String> = paths.collect();
         paths.sort();
         paths.dedup();
         let mut inputs = Vec::with_capacity(paths.len());
         for p in paths {
-            let Some(hash) = self.hash_of(&p) else { return };
-            inputs.push(Input { path: p, hash });
+            inputs.push(Input { path: p.clone(), hash: self.hash_of(&p)? });
         }
+        Some(inputs)
+    }
 
+    fn probes_for(&self, dirs: &[PathBuf]) -> Vec<Probe> {
         let mut dirs: Vec<String> = dirs.iter().map(|p| normal(p)).collect();
         dirs.sort();
         dirs.dedup();
-        let probes = dirs
-            .into_iter()
+        dirs.into_iter()
             .map(|d| {
                 let names = self.dir_names_of(&d);
                 Probe { dir: d, names }
             })
-            .collect();
+            .collect()
+    }
 
-        let entry = Entry { stamp, inputs, probes, module: module.clone() };
+    /// Record what one module reported. Best-effort: a store that cannot be written leaves
+    /// the next run to do the work again, which is slow rather than wrong.
+    pub fn store_module(&self, key: &Key, file: &Path, extra_inputs: &[PathBuf], dirs: &[PathBuf], module: &Module) {
+        let Some(stamp) = Stamp::current() else { return };
+        let paths = std::iter::once(normal(file))
+            .chain(module.deps.iter().cloned())
+            .chain(extra_inputs.iter().map(|p| normal(p)));
+        let Some(inputs) = self.inputs_for(paths) else { return };
+        let entry = Entry { stamp, inputs, probes: self.probes_for(dirs), module: module.clone() };
+        if let Err(e) = self.write(key, &entry)
+            && debugging()
+        {
+            eprintln!("htl cache: not stored ({e})");
+        }
+    }
+
+    /// Record the whole walk as one entry. Its inputs are the union of every module's, so
+    /// any edit anywhere misses — which is the behaviour this mode is chosen for.
+    pub fn store_run(
+        &self,
+        key: &Key,
+        files: &[PathBuf],
+        extra_inputs: &[PathBuf],
+        dirs: &[PathBuf],
+        modules: &[Module],
+    ) {
+        let Some(stamp) = Stamp::current() else { return };
+        let paths = files
+            .iter()
+            .map(|f| normal(f))
+            .chain(modules.iter().flat_map(|m| m.deps.iter().cloned()))
+            .chain(extra_inputs.iter().map(|p| normal(p)));
+        let Some(inputs) = self.inputs_for(paths) else { return };
+        let entry = RunEntry { stamp, inputs, probes: self.probes_for(dirs), modules: modules.to_vec() };
         if let Err(e) = self.write(key, &entry)
             && debugging()
         {
@@ -366,7 +489,7 @@ impl Cache {
     /// filesystem htl runs on that rename is atomic, so a concurrent reader sees either the
     /// previous entry or this one, never half of this one. ccache relies on exactly this
     /// and takes no locks at all.
-    fn write(&self, key: &Key, entry: &Entry) -> Result<()> {
+    fn write<T: Serialize>(&self, key: &Key, entry: &T) -> Result<()> {
         std::fs::create_dir_all(&self.dir)?;
         let final_path = self.entry_path(key);
         let tmp = self.dir.join(format!(".{}.{}.tmp", key.0, std::process::id()));

@@ -136,6 +136,21 @@ fn bench_cli(c: &mut Criterion) {
         })
     });
 
+    // The other granularity, for the same two cases. It should match per-module when
+    // nothing moved and match a cold run when anything did — which is the whole of the
+    // difference between them, and the reason the mode is a choice rather than a default
+    // nobody can change.
+    let whole = &["--cache-mode", "whole-run"];
+    check(&root, whole);
+    g.bench_function("cached/whole-run", |b| b.iter(|| check(&root, whole)));
+    g.bench_function("one-edited/whole-run", |b| {
+        b.iter(|| {
+            salt += 1;
+            write(&root.join("src/core_0.tl"), &core_source(0, salt));
+            check(&root, whole);
+        })
+    });
+
     g.finish();
 }
 
