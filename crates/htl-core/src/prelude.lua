@@ -654,6 +654,36 @@ local EXEC_KINDS = {
    record_function = true, op = true,
 }
 
+-- The named functions of a file, alongside the ranges: { name, y, last }, where the
+-- body is what lies strictly between the two. Both ends are left out because defining
+-- a function runs both of them: for a function nothing ever calls, the hook still
+-- reports its `function` line (the closure is built there) and its `end` line (the
+-- result is stored there). Measured on Lua 5.4: a never-called `function m.f()` at
+-- 12..15 comes back as lines 12 and 15 hit, 13 and 14 not. A function with nothing
+-- between its two lines therefore has no body to judge, and is left out.
+local FN_KINDS = { local_function = true, global_function = true, record_function = true }
+
+local function owner_name(n)
+   if type(n) ~= "table" then return nil end
+   if n.tk then return n.tk end
+   if n.kind == "op" and n.op and n.op.op == "." then
+      local a, b = owner_name(n.e1), owner_name(n.e2)
+      if a and b then return a .. "." .. b end
+   end
+   return nil
+end
+
+-- `f`, `M.f`, `M:f` -- as the source writes it, so the report names something the
+-- reader can search for.
+local function function_name(n)
+   local base = n.name and n.name.tk
+   if not base then return nil end
+   if n.kind ~= "record_function" then return base end
+   local owner = owner_name(n.fn_owner)
+   if not owner then return base end
+   return owner .. (n.is_method and ":" or ".") .. base
+end
+
 function H.executable_ranges(filename)
    local fd = io.open(filename, "rb")
    if not fd then return nil end
@@ -662,10 +692,18 @@ function H.executable_ranges(filename)
    local ast, errs = tl.parse(src, filename, "tl")
    if not ast or (errs and #errs > 0) then return nil end
    local ranges = {}
+   local funcs = {}
    local seen = {}
    local function go(n)
       if type(n) ~= "table" or seen[n] then return end
       seen[n] = true
+      if FN_KINDS[n.kind] and n.y then
+         local last = n.yend or n.y
+         local name = function_name(n)
+         if name and last > n.y + 1 then
+            funcs[#funcs + 1] = { name = name, y = n.y, last = last }
+         end
+      end
       if n.kind == "statements" then
          for i, s in ipairs(n) do
             if type(s) == "table" and s.kind and EXEC_KINDS[s.kind] and s.y then
@@ -689,7 +727,8 @@ function H.executable_ranges(filename)
    end
    go(ast)
    table.sort(ranges, function(a, b) return a[1] < b[1] end)
-   return ranges
+   table.sort(funcs, function(a, b) return a.y < b.y end)
+   return ranges, funcs
 end
 
 function H.check_stub(src, filename)

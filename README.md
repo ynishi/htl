@@ -332,9 +332,20 @@ file is an error.
 
 Coverage: `htl test --coverage` prints, per `.tl` module the tests' checks depended on,
 how many of its statements ran (`executed/all  %`), and a total; a module no test
-reached shows `0/n`. `--coverage-lines` adds the unexecuted line ranges. Statements
-are counted from the `.tl` syntax tree and matched against Lua's line hook (Teal keeps
-line numbers when it generates Lua), so the numbers are `.tl` lines. The hook slows
+reached shows `0/n`. Under a module it names the functions nothing entered, since the
+percentage says how much was missed and not what:
+
+```text
+coverage: src/combat.tl      124/181   68.4%
+          never ran: resolve_counter (61), flee_path (130)
+```
+
+`--coverage-lines` adds the unexecuted line ranges under those. Statements are counted
+from the `.tl` syntax tree and matched against Lua's line hook (Teal keeps line numbers
+when it generates Lua), so the numbers are `.tl` lines. A function counts as entered
+when a line strictly between its `function` and its `end` ran: defining a function runs
+both of those lines, so neither says anything about calls. A function with nothing in
+between — written on one line, or with an empty body — is not reported. The hook slows
 the run, and code that runs inside a coroutine the program creates is not seen.
 
 Runner: `htl test [paths] [--filter substr] [--fail-fast] [-v | -q] [--slow MS]
@@ -387,7 +398,8 @@ added, not renamed.
   failures, tests: [{ name, ok, ms }], duration_ms, snapshots_written,
   snapshots_updated }], summary: { files, files_run, passed, failed, files_with_errors,
   duration_ms, ok }, coverage?: { modules: [{ path, executed, total, unexecuted:
-  [[first, last]] }], executed, total } }` (`coverage` with `--coverage`).
+  [[first, last]], never_ran?: [{ name, line }] }], executed, total } }` (`coverage`
+  with `--coverage`; `never_ran` is absent when every function of the module ran).
 
 GitHub Actions annotations from a check, for instance:
 
