@@ -3,4 +3,5 @@
 workspace/
 .mlua-pkgs/
 .worktrees/
+.htl/
 *.hb

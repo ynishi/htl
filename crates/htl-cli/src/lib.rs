@@ -567,8 +567,14 @@ fn coverage_report(
     sources.extend(hits.keys().cloned());
     let cwd = std::env::current_dir().unwrap_or_default();
     let (mut tot_exec, mut tot_all) = (0usize, 0usize);
-    // (module, executed, all, unexecuted ranges)
-    type Row = (String, usize, usize, Vec<(usize, usize)>);
+    // (module, executed, all, unexecuted ranges, functions that never ran)
+    type Row = (
+        String,
+        usize,
+        usize,
+        Vec<(usize, usize)>,
+        Vec<report::NeverRan>,
+    );
     let mut rows: Vec<Row> = Vec::new();
     for src in &sources {
         let name = src.to_string_lossy();
@@ -579,7 +585,7 @@ fn coverage_report(
         {
             continue;
         }
-        let ranges = checker.executable_ranges(src)?;
+        let (ranges, funcs) = checker.coverage_spans(src)?;
         if ranges.is_empty() {
             continue;
         }
@@ -594,6 +600,16 @@ fn coverage_report(
                 missed.push((a, b));
             }
         }
+        // The body only. Defining a function runs its `function` line and its `end`
+        // line, so both are silent about whether anything ever entered it.
+        let never_ran = funcs
+            .into_iter()
+            .filter(|f| ran.range(f.line + 1..=f.last - 1).next().is_none())
+            .map(|f| report::NeverRan {
+                name: f.name,
+                line: f.line,
+            })
+            .collect();
         tot_exec += executed;
         tot_all += ranges.len();
         let shown = src
@@ -601,19 +617,20 @@ fn coverage_report(
             .unwrap_or(src)
             .to_string_lossy()
             .into_owned();
-        rows.push((shown, executed, ranges.len(), missed));
+        rows.push((shown, executed, ranges.len(), missed, never_ran));
     }
     Ok(report::CoverageReport {
         modules: rows
             .into_iter()
-            .map(
-                |(path, executed, total, unexecuted)| report::CoverageModule {
+            .map(|(path, executed, total, unexecuted, never_ran)| {
+                report::CoverageModule {
                     path,
                     executed,
                     total,
                     unexecuted,
-                },
-            )
+                    never_ran,
+                }
+            })
             .collect(),
         executed: tot_exec,
         total: tot_all,
@@ -636,6 +653,14 @@ fn print_coverage(cov: &report::CoverageReport, with_lines: bool) {
             m.total,
             100.0 * m.executed as f64 / m.total as f64
         );
+        if !m.never_ran.is_empty() {
+            let names: Vec<String> = m
+                .never_ran
+                .iter()
+                .map(|f| format!("{} ({})", f.name, f.line))
+                .collect();
+            eprintln!("          never ran: {}", names.join(", "));
+        }
         if with_lines && !m.unexecuted.is_empty() {
             let spans: Vec<String> = m
                 .unexecuted

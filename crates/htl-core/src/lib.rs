@@ -108,6 +108,27 @@ pub struct RequireSite {
     pub col: usize,
 }
 
+/// A named function of a `.tl` file, for coverage (see [`Htl::coverage_spans`]).
+///
+/// The body is `line + 1 ..= last - 1`, strictly between the two: defining a function
+/// runs both ends of it, so neither says whether the function was ever entered. A
+/// never-called `function m.f()` spanning lines 12..15 comes back from the line hook
+/// with 12 and 15 executed and 13, 14 not. Functions with nothing in between (one
+/// line, or an empty body) have no such span and are not reported at all.
+#[derive(Debug, Clone)]
+pub struct FunctionSpan {
+    /// As the source writes it: `f`, `M.f`, `M:f`.
+    pub name: String,
+    /// The line the function is declared on.
+    pub line: usize,
+    /// The line its `end` is on. Always at least `line + 2`.
+    pub last: usize,
+}
+
+/// What one parse gives a coverage report: the statement ranges, and the functions
+/// those ranges sit in. See [`Htl::coverage_spans`].
+pub type CoverageSpans = (Vec<(usize, usize)>, Vec<FunctionSpan>);
+
 /// Result of a static contract check (see [`Htl::contract_check`]).
 #[derive(Debug, Clone, Default)]
 pub struct ContractResult {
@@ -655,15 +676,35 @@ impl Htl {
     /// report counts as executable. A statement counts as executed when any line of its
     /// range ran (Lua attributes a multi-line statement's instructions to several lines).
     pub fn executable_ranges(&self, file: &Path) -> Result<Vec<(usize, usize)>> {
+        Ok(self.coverage_spans(file)?.0)
+    }
+
+    /// The statement ranges of [`executable_ranges`](Self::executable_ranges) and the
+    /// file's named functions, from one parse: a coverage report wants both, and the
+    /// second is what lets it say *which function* the missed statements belong to.
+    pub fn coverage_spans(&self, file: &Path) -> Result<CoverageSpans> {
         let f: Function = self.h.get("executable_ranges")?;
-        let t: Option<Table> = f.call(path_str(file))?;
-        let Some(t) = t else { return Ok(Vec::new()) };
+        let (ranges, funcs): (Option<Table>, Option<Table>) = f.call(path_str(file))?;
+        let Some(ranges) = ranges else {
+            return Ok((Vec::new(), Vec::new()));
+        };
         let mut out = Vec::new();
-        for r in t.sequence_values::<Table>() {
+        for r in ranges.sequence_values::<Table>() {
             let r = r?;
             out.push((r.get::<usize>(1)?, r.get::<usize>(2)?));
         }
-        Ok(out)
+        let mut fns = Vec::new();
+        if let Some(funcs) = funcs {
+            for f in funcs.sequence_values::<Table>() {
+                let f = f?;
+                fns.push(FunctionSpan {
+                    name: f.get("name")?,
+                    line: f.get("y")?,
+                    last: f.get("last")?,
+                });
+            }
+        }
+        Ok((out, fns))
     }
 
     /// The checker's `package.path` (what `require` inside `.tl` resolves through).
