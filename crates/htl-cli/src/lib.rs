@@ -35,6 +35,17 @@ enum CacheCmd {
         /// A path inside the project; the store is found beside its htl.toml
         path: Option<PathBuf>,
     },
+    /// Report what the store holds
+    Status {
+        /// A path inside the project; the store is found beside its htl.toml
+        path: Option<PathBuf>,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+        /// List every entry rather than counting them by kind
+        #[arg(long)]
+        entries: bool,
+    },
 }
 
 impl From<CacheModeArg> for cache::Mode {
@@ -50,6 +61,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use htl::bundle::Bundle;
 use htl::{CheckInfo, Htl};
+use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -84,6 +96,9 @@ enum Cmd {
         /// How the cache is grained; overrides `[cache] mode` in htl.toml
         #[arg(long, value_enum)]
         cache_mode: Option<CacheModeArg>,
+        /// Say why the cache was not used, and what this run did with it
+        #[arg(long)]
+        explain_cache: bool,
     },
     /// Run tests: `*_test.tl` and `tests/**/*.tl`, one isolated state per file
     Test {
@@ -124,6 +139,9 @@ enum Cmd {
         /// Check and generate every file even if a cached form is available, and store none
         #[arg(long)]
         no_cache: bool,
+        /// Say why the cache was not used, and what this run did with it
+        #[arg(long)]
+        explain_cache: bool,
     },
     /// Apply the fixes diagnostics carry (safe ones by default; see README, "Fixing")
     Fix {
@@ -257,28 +275,36 @@ pub fn run() -> ExitCode {
 
 fn real_main(cli: Cli) -> Result<ExitCode> {
     match cli.cmd {
-        Cmd::Check { paths, strict, lint, list_lints, format, no_cache, cache_mode } => cmd_check(
-            &paths,
-            strict,
-            lint.as_deref(),
-            list_lints,
-            format == Format::Json,
-            !no_cache,
-            cache_mode.map(Into::into),
-        ),
+        Cmd::Check { paths, strict, lint, list_lints, format, no_cache, cache_mode, explain_cache } => {
+            cmd_check(
+                &paths,
+                lint.as_deref(),
+                CheckFlags {
+                    strict,
+                    list_lints,
+                    json: format == Format::Json,
+                    use_cache: !no_cache,
+                    cache_mode: cache_mode.map(Into::into),
+                    explain: explain_cache,
+                },
+            )
+        }
         Cmd::Fmt { paths, check, indent } => cmd_fmt(&paths, check, indent),
-        Cmd::Test { paths, filter, lib, lint, fail_fast, verbose, quiet, slow, update, coverage, coverage_lines, format, no_cache } => {
+        Cmd::Test { paths, filter, lib, lint, fail_fast, verbose, quiet, slow, update, coverage, coverage_lines, format, no_cache, explain_cache } => {
             cmd_test(
                 &paths,
                 filter.as_deref(),
                 &lib,
                 lint.as_deref(),
-                TestFlags { fail_fast, verbose, quiet, slow, update, coverage, coverage_lines, json: format == Format::Json, no_cache },
+                TestFlags { fail_fast, verbose, quiet, slow, update, coverage, coverage_lines, json: format == Format::Json, no_cache, explain: explain_cache },
             )
         }
         Cmd::Pkg { args } => cmd_pkg(&args),
         Cmd::Cache { cmd } => match cmd {
             CacheCmd::Clear { path } => cmd_cache_clear(path.as_deref()),
+            CacheCmd::Status { path, format, entries } => {
+                cmd_cache_status(path.as_deref(), format == Format::Json, entries)
+            }
         },
         Cmd::Dts { dir } => cmd_dts(dir.as_deref()),
         Cmd::New { name, lib, embed } => cmd_new(&name, lib, embed),
@@ -414,6 +440,16 @@ fn cmd_pkg(args: &[String]) -> Result<ExitCode> {
     }
 }
 
+/// What `htl check` was asked for, beyond the paths and the lint selection.
+struct CheckFlags {
+    strict: bool,
+    list_lints: bool,
+    json: bool,
+    use_cache: bool,
+    cache_mode: Option<cache::Mode>,
+    explain: bool,
+}
+
 struct TestFlags {
     fail_fast: bool,
     verbose: bool,
@@ -424,6 +460,7 @@ struct TestFlags {
     coverage_lines: bool,
     json: bool,
     no_cache: bool,
+    explain: bool,
 }
 
 /// Coverage over the run: every `.tl` the test files' checks depended on (so a module
@@ -544,13 +581,27 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
         .as_ref()
         .map(|(r, _, _)| r.clone())
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let store = cache::Cache::open(&root, !flags.no_cache, cache::Mode::PerModule);
+    // Test entries are always per-module: a whole-run entry over test files would mean one
+    // edit anywhere re-checks every suite, which is the trade `htl check` offers because a
+    // check is one answer. A test run is many.
+    let opts = cache_options(!flags.no_cache, Some(cache::Mode::PerModule), &cfg, flags.explain);
+    let store = cache::Cache::open(&root, opts);
     let keys: Vec<cache::Key> = files.iter().map(|f| cache::gen_key(f, lint)).collect();
     let cfg_inputs: Vec<PathBuf> = cfg.iter().map(|(_, p, _)| p.clone()).collect();
 
     let mut sink = report::Sink::new(flags.json);
     let mut json_files: Vec<report::TestFile> = Vec::new();
     let mut replayed = 0usize;
+    let harvest = store.as_ref().map(|c| Harvest {
+        store: c,
+        session: &session,
+        cfg_inputs: &cfg_inputs,
+        root: &root,
+        cfg: &cfg,
+        lint,
+        opts,
+        done: RefCell::new(Default::default()),
+    });
     for (f, key) in files.iter().zip(&keys) {
         // A hit needs both halves: the Lua to run, and what checking it said. An entry
         // missing either is no use, so it is a miss rather than a partial replay.
@@ -563,10 +614,14 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
                 replayed += 1;
                 let check = check_from_json(m.check.as_ref().expect("filtered above"));
                 let code = m.code.as_deref().expect("filtered above");
-                session.run_file_with(f, Some((code, &check)))?.0
+                // Without these, every module this file requires is checked and generated
+                // while it runs — the work skipping `gen_lua` was supposed to avoid.
+                let pre =
+                    store.as_ref().map(|c| preloads_for(c, m, lint, opts)).unwrap_or_default();
+                session.run_file_with(f, Some((code, &check)), &pre)?.0
             }
             None => {
-                let (rep, code) = session.run_file_with(f, None)?;
+                let (rep, code) = session.run_file_with(f, None, &[])?;
                 // Only when there is code: a file that failed to check has nothing to run,
                 // and storing that would replay an empty run as if it were a result.
                 if let (Some(c), Some(code)) = (&store, code) {
@@ -581,6 +636,11 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
                         check: Some(check_json(&rep.check)),
                     };
                     c.store_module(key, f, &cfg_inputs, &search_dirs(f, &root, &cfg), &m);
+                    // And the modules it reached, so the next run can preload them. The
+                    // checker's store is warm here, so this generates rather than re-checks.
+                    if let Some(h) = &harvest {
+                        harvest_modules(h, &rep.check, f);
+                    }
                 }
                 rep
             }
@@ -655,6 +715,7 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
         None
     };
     let skipped = files.len() - ran_files;
+    explain_cache(store.as_ref(), opts);
     let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
     if flags.json {
         report::emit(&report::TestReport {
@@ -910,15 +971,8 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
 /// A module that misses re-checks its dependencies as part of its own check, since the
 /// checker's store starts empty. So an edit costs the edited module, whatever depends on
 /// it, and whatever those pull in — less than the project, more than the minimum.
-fn cmd_check(
-    paths: &[PathBuf],
-    strict: bool,
-    lint: Option<&str>,
-    list_lints: bool,
-    json: bool,
-    use_cache: bool,
-    cache_mode: Option<cache::Mode>,
-) -> Result<ExitCode> {
+fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result<ExitCode> {
+    let CheckFlags { list_lints, json, use_cache, cache_mode, explain, .. } = flags;
     let mut sink = report::Sink::new(json);
     let paths = if paths.is_empty() { vec![PathBuf::from(".")] } else { paths.to_vec() };
     // Listing the rules reports nothing about the project and shares nothing with a run.
@@ -931,7 +985,7 @@ fn cmd_check(
     }
     // htl.toml first, then --lint, so the flag wins; `strict` from the file unless flagged.
     let cfg = load_config(&paths[0])?;
-    let strict = strict || cfg.as_ref().and_then(|(_, _, c)| c.lint.strict).unwrap_or(false);
+    let strict = flags.strict || cfg.as_ref().and_then(|(_, _, c)| c.lint.strict).unwrap_or(false);
     // `.d.tl` written from Rust source is an input to the check, so it is regenerated
     // before anything hashes the tree: a hit computed over stale declarations would be a
     // hit on a different question from the one being asked.
@@ -947,20 +1001,8 @@ fn cmd_check(
         .as_ref()
         .map(|(r, _, _)| r.clone())
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    // The flag wins over the config, and the config over the default. Whether to cache at
-    // all is the separate `--no-cache`.
-    let mode = cache_mode
-        .or_else(|| {
-            cfg.as_ref().and_then(|(_, _, c)| c.cache.mode.as_deref()).map(|m| {
-                cache::Mode::parse(m)
-                    .unwrap_or_else(|| {
-                        eprintln!("htl check: unknown [cache] mode {m:?}, using per-module");
-                        cache::Mode::PerModule
-                    })
-            })
-        })
-        .unwrap_or_default();
-    let store = cache::Cache::open(&root, use_cache, mode);
+    let opts = cache_options(use_cache, cache_mode, &cfg, explain);
+    let store = cache::Cache::open(&root, opts);
 
     // The lint selection is part of what a module reports, so it is part of every key.
     let file_spec = cfg.as_ref().map(|(_, _, c)| c.lint_spec()).unwrap_or_default();
@@ -1037,6 +1079,7 @@ fn cmd_check(
         };
         c.sweep(&keep, files.len());
     }
+    explain_cache(store.as_ref(), opts);
 
     let replayed = files.len() - to_check;
     let fail = report_check(&mut sink, json, files.len(), (n_err, n_warn, n_lint), strict, replayed)?;
@@ -1068,6 +1111,125 @@ fn cmd_cache_clear(path: Option<&Path>) -> Result<ExitCode> {
     fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
     eprintln!("htl cache: removed {n} {} from {}", if n == 1 { "entry" } else { "entries" }, dir.display());
     Ok(ExitCode::SUCCESS)
+}
+
+/// The store's settings for this run: the flag, then the config, then the environment.
+///
+/// **This is the only place any of them is read.** `cache.rs` takes what this decided, so a
+/// run's behaviour is settled in one function rather than wherever each value happens to be
+/// wanted — which is what makes it possible to see, from the code, what a given invocation
+/// will do.
+///
+/// `HTL_CACHE_DEBUG` is the same switch as `--explain-cache`, for turning it on without
+/// editing a command line. `HTL_CACHE_MAX_ENTRIES` has no flag: its only caller is the test
+/// suite, which cannot reach a few hundred entries by honest means.
+fn cache_options(
+    enabled: bool,
+    mode: Option<cache::Mode>,
+    cfg: &Option<(PathBuf, PathBuf, htl::config::HtlConfig)>,
+    explain: bool,
+) -> cache::Options {
+    let mode = mode
+        .or_else(|| {
+            cfg.as_ref().and_then(|(_, _, c)| c.cache.mode.as_deref()).map(|m| {
+                cache::Mode::parse(m).unwrap_or_else(|| {
+                    eprintln!("htl: unknown [cache] mode {m:?}, using per-module");
+                    cache::Mode::PerModule
+                })
+            })
+        })
+        .unwrap_or_default();
+    cache::Options {
+        enabled,
+        mode,
+        explain: explain || std::env::var_os("HTL_CACHE_DEBUG").is_some(),
+        max_entries: std::env::var_os("HTL_CACHE_MAX_ENTRIES")
+            .and_then(|v| v.to_str().and_then(|s| s.parse().ok())),
+    }
+}
+
+/// Say what the run did with the store, when asked. One line, at the end, from the store's
+/// own counters.
+fn explain_cache(store: Option<&cache::Cache>, opts: cache::Options) {
+    if let Some(c) = store
+        && opts.explain
+        && let Some(line) = c.stats().summary(opts.mode)
+    {
+        eprintln!("{line}");
+    }
+}
+
+/// The project root a cache command works on: beside `htl.toml`, or the working directory.
+fn cache_root(path: Option<&Path>) -> Result<PathBuf> {
+    let start = path.unwrap_or(Path::new("."));
+    Ok(load_config(start)?
+        .map(|(r, _, _)| r)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))))
+}
+
+/// Say what the store holds.
+///
+/// Answers "what is stored", not "what would be reused": an entry listed here can still miss
+/// on the next run because a file it recorded has changed. The two are different questions
+/// and conflating them would make this command lie in the more dangerous direction.
+fn cmd_cache_status(path: Option<&Path>, json: bool, list_entries: bool) -> Result<ExitCode> {
+    let c = cache::describe(&cache_root(path)?);
+    if json {
+        report::emit(&c)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    if c.entries.is_empty() {
+        println!("htl cache: empty ({})", c.dir);
+        return Ok(ExitCode::SUCCESS);
+    }
+    let mut by_kind: std::collections::BTreeMap<&str, (usize, u64)> = Default::default();
+    for e in &c.entries {
+        let slot = by_kind.entry(e.kind.as_str()).or_default();
+        slot.0 += 1;
+        slot.1 += e.bytes;
+    }
+    println!("htl cache: {} entries, {} at {}", c.entries.len(), human_bytes(c.bytes), c.dir);
+    for (kind, (n, bytes)) in &by_kind {
+        let what = match *kind {
+            cache::CHECK => "checked modules",
+            cache::GEN => "checked and generated (htl test)",
+            cache::RUN => "whole runs",
+            _ => "entries this build cannot read",
+        };
+        println!("  {n:>5} {what} ({})", human_bytes(*bytes));
+    }
+    if let (Some(min), Some(max)) =
+        (c.entries.iter().map(|e| e.age_secs).min(), c.entries.iter().map(|e| e.age_secs).max())
+    {
+        println!("  last used between {} and {} ago", human_age(min), human_age(max));
+    }
+    if list_entries {
+        println!();
+        for e in &c.entries {
+            println!("  {:<6} {:>8}  {}", e.kind, human_bytes(e.bytes), e.subjects.join(", "));
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn human_bytes(n: u64) -> String {
+    if n >= 1 << 20 {
+        format!("{:.1} MB", n as f64 / (1u64 << 20) as f64)
+    } else if n >= 1 << 10 {
+        format!("{:.0} KB", n as f64 / (1u64 << 10) as f64)
+    } else {
+        format!("{n} B")
+    }
+}
+
+fn human_age(secs: u64) -> String {
+    match secs {
+        s if s < 90 => format!("{s}s"),
+        s if s < 5400 => format!("{}m", s / 60),
+        s if s < 172_800 => format!("{}h", s / 3600),
+        s => format!("{}d", s / 86_400),
+    }
 }
 
 /// A checker set up the way a check of these paths needs it: the lint selection, the
@@ -1137,6 +1299,145 @@ fn check_one(
         code: None,
         check: None,
     })
+}
+
+/// The `(name, file)` pairs an entry's requires resolved to.
+fn resolved_requires(requires: &[cache::RequireJson]) -> Vec<(String, PathBuf)> {
+    requires
+        .iter()
+        .filter_map(|r| r.path.as_ref().map(|p| (r.module.clone(), PathBuf::from(p))))
+        .collect()
+}
+
+/// What a harvest works with, gathered so the call site reads as one thing.
+struct Harvest<'a> {
+    store: &'a cache::Cache,
+    session: &'a htl::testing::TestSession,
+    cfg_inputs: &'a [PathBuf],
+    root: &'a Path,
+    cfg: &'a Option<(PathBuf, PathBuf, htl::config::HtlConfig)>,
+    lint: Option<&'a str>,
+    opts: cache::Options,
+    /// Modules already harvested by an earlier file in this run. Test files overlap heavily,
+    /// and generating one twice writes the same entry twice.
+    done: RefCell<std::collections::HashSet<PathBuf>>,
+}
+
+/// Generate and store every module a checked test file reached, transitively.
+///
+/// Called after a miss, when the checker's store holds everything the check just walked, so
+/// each `gen_lua` here generates rather than re-checks. The point is the next run: with these
+/// stored, a replayed test file can preload what it requires instead of the searcher checking
+/// and generating each module mid-execution.
+///
+/// Best-effort throughout. A module that fails to generate is one the next run will generate
+/// itself, which is what happens today.
+fn harvest_modules(h: &Harvest<'_>, check: &CheckInfo, test_file: &Path) {
+    let Harvest { store, session, cfg_inputs, root, cfg, lint, opts, done } = h;
+    let (lint, opts) = (*lint, *opts);
+    let done = &mut *done.borrow_mut();
+    // The run put the search path back before returning, so `src/` is no longer on it and
+    // every `require` would resolve to nothing — which is silent: the names come back with
+    // no path, `resolved_requires` drops them, and the closure stops one level in. Put the
+    // file's own layout back for the duration.
+    let saved = session.checker().search_path().ok();
+    let _ = session.checker().add_layout_paths(test_file);
+
+    let mut queue = resolved_requires(&requires_json(check));
+    let (mut stored, mut skipped) = (0usize, 0usize);
+    while let Some((_, path)) = queue.pop() {
+        // `done` spans the whole run, not this file. Test files share their modules — on a
+        // 27-file suite the closures overlapped enough to generate and store 171 times for
+        // 55 distinct modules — and generating one twice writes the same entry twice.
+        if !done.insert(path.clone()) {
+            continue;
+        }
+        // Nor is there anything to do for one another run already stored and that still
+        // holds. Checking that costs a few hashes against a generate.
+        if let Some(m) = store.lookup(&cache::gen_key(&path, lint))
+            && m.code.is_some()
+        {
+            queue.extend(resolved_requires(&m.requires));
+            continue;
+        }
+        let Ok((Some(code), c)) = session.checker().gen_lua(&path) else {
+            skipped += 1;
+            continue;
+        };
+        // `gen_lua` comes back without requires for a module the checker already has in its
+        // store — it serves the generated code and does not walk the AST again. The requires
+        // are what the next run's closure is built from, so ask for them separately; the
+        // check is served from the same store and costs almost nothing.
+        let c = if c.requires.is_empty() {
+            session.checker().check(&path).unwrap_or(c)
+        } else {
+            c
+        };
+        stored += 1;
+        let m = cache::Module {
+            diagnostics: Vec::new(),
+            errors: c.errors.len(),
+            warnings: c.warnings.len(),
+            lints: c.lints.len(),
+            deps: c.deps.iter().map(|p| cache::normal(p)).collect(),
+            requires: requires_json(&c),
+            code: Some(code),
+            check: Some(check_json(&c)),
+        };
+        queue.extend(resolved_requires(&m.requires));
+        store.store_module(
+            &cache::gen_key(&path, lint),
+            &path,
+            cfg_inputs,
+            &search_dirs(&path, root, cfg),
+            &m,
+        );
+    }
+    if let Some(s) = saved {
+        let _ = session.checker().set_search_path(&s);
+    }
+    if opts.explain {
+        eprintln!("htl cache: harvested {stored} modules, {skipped} could not be generated");
+    }
+}
+
+/// What a replayed test file should have in front of the searcher: every module it requires,
+/// transitively, that the store still holds a valid entry for.
+///
+/// A module the store does not have is simply absent from the list and loads the usual way.
+/// Falling back is always correct — it is what happens without any of this — so a partial
+/// answer here costs time and never correctness.
+fn preloads_for(
+    store: &cache::Cache,
+    entry: &cache::Module,
+    lint: Option<&str>,
+    opts: cache::Options,
+) -> Vec<(String, String, PathBuf)> {
+    let mut out = Vec::new();
+    let mut queue = resolved_requires(&entry.requires);
+    let mut seen: std::collections::HashSet<PathBuf> = Default::default();
+    let mut absent = 0usize;
+    while let Some((name, path)) = queue.pop() {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let Some(m) = store.lookup(&cache::gen_key(&path, lint)) else {
+            absent += 1;
+            continue;
+        };
+        let Some(code) = m.code.clone() else { continue };
+        queue.extend(resolved_requires(&m.requires));
+        out.push((name, code, path));
+    }
+    if opts.explain {
+        let names: Vec<&str> = out.iter().map(|(n, _, _)| n.as_str()).collect();
+        eprintln!(
+            "htl cache: preloading {} [{}], {absent} not in the store",
+            out.len(),
+            names.join(" ")
+        );
+    }
+    out
 }
 
 /// What a test file's check reported, in the form an entry stores it.

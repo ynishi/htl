@@ -120,6 +120,38 @@ fn editing_a_module_a_test_requires_misses_for_that_test() {
     );
 }
 
+/// A preloaded module must never be a stale one. The whole store exists to make "generated
+/// earlier" and "generated now" the same thing; if it ever stops being true, a test asserts
+/// against code that is no longer there.
+#[test]
+fn a_module_edited_between_runs_is_not_served_from_a_preload() {
+    let root = project("stale");
+    assert_eq!(passed(&test_run(&root, &[])), 2);
+    assert_eq!(replayed(&test_run(&root, &[])), 2);
+
+    // `add` now returns something the assertion does not expect. If a preload served the old
+    // generated Lua, the test would keep passing and the cache would be lying.
+    write(
+        &root.join("src/adder.tl"),
+        "local record adder\nend\nfunction adder.add(a: integer, b: integer): integer\n   return 99\nend\nreturn adder\n",
+    );
+    let v = test_run(&root, &[]);
+    assert_eq!(v["summary"]["failed"], 1, "the edited module must reach the test: {v}");
+}
+
+/// The test library is put into `package.preload` by the runner. Generated Lua for a module
+/// of the same name is a different thing, and displacing it makes every test quietly stop
+/// counting — which is how this was found.
+#[test]
+fn preloading_never_displaces_what_the_runner_installed() {
+    let root = project("no-displace");
+    let first = test_run(&root, &[]);
+    assert_eq!(passed(&first), 2);
+    let second = test_run(&root, &[]);
+    assert_eq!(replayed(&second), 2, "this run preloads");
+    assert_eq!(passed(&second), 2, "and the assertion library still reports its results");
+}
+
 #[test]
 fn no_cache_neither_reads_nor_writes() {
     let root = project("off");

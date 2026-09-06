@@ -168,7 +168,7 @@ impl TestSession {
     /// checker's search path is restored afterwards so files do not see each other's
     /// directories.
     pub fn run_file(&self, path: &Path) -> Result<FileReport> {
-        self.run_file_with(path, None).map(|(rep, _)| rep)
+        self.run_file_with(path, None, &[]).map(|(rep, _)| rep)
     }
 
     /// Run one file, reusing Lua the caller generated earlier.
@@ -183,17 +183,32 @@ impl TestSession {
     ///
     /// Returns the report and, when this call generated the Lua rather than being handed it,
     /// that Lua — so a caller keeping a cache has something to keep.
+    /// `preload` is `(module name, its generated Lua, the file it came from)` for modules
+    /// this file will require. Each one goes in front of the searcher, so requiring it does
+    /// not check and generate it during the run. A module not in the list still loads the
+    /// usual way; the list is an optimisation, never a restriction on what can be required.
     pub fn run_file_with(
         &self,
         path: &Path,
         generated: Option<(&str, &CheckInfo)>,
+        preload: &[(String, String, PathBuf)],
     ) -> Result<(FileReport, Option<String>)> {
         let started = std::time::Instant::now();
         let saved = self.checker.search_path()?;
         let h = Htl::with_checker(&self.checker)?;
         let mut code = None;
-        let out =
-            run_in(&h, path, self.filter.as_deref(), &self.lib, &self.opts, generated, &mut code);
+        let out = run_in(
+            &h,
+            path,
+            RunIn {
+                filter: self.filter.as_deref(),
+                lib: &self.lib,
+                opts: &self.opts,
+                generated,
+                preload,
+            },
+            &mut code,
+        );
         self.checker.set_search_path(&saved)?;
         let mut rep = out?;
         rep.duration_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -201,15 +216,24 @@ impl TestSession {
     }
 }
 
+/// What one file's run needs from its session, and what the caller already has for it.
+struct RunIn<'a> {
+    filter: Option<&'a str>,
+    lib: &'a str,
+    opts: &'a RunOptions,
+    /// Lua and diagnostics from an earlier run, when the caller kept them.
+    generated: Option<(&'a str, &'a CheckInfo)>,
+    /// Modules to put in front of the searcher before the file executes.
+    preload: &'a [(String, String, PathBuf)],
+}
+
 fn run_in(
     h: &Htl,
     path: &Path,
-    filter: Option<&str>,
-    lib: &str,
-    opts: &RunOptions,
-    generated: Option<(&str, &CheckInfo)>,
+    r: RunIn<'_>,
     out_code: &mut Option<String>,
 ) -> Result<FileReport> {
+    let RunIn { filter, lib, opts, generated, preload } = r;
     let mut rep = FileReport { path: path.to_path_buf(), ..Default::default() };
     let profile = std::env::var_os("HTL_PROFILE").is_some();
     let mut t0 = std::time::Instant::now();
@@ -238,6 +262,10 @@ fn run_in(
         h.add_path(&root.join("src"))?;
     }
     h.install_searcher()?;
+    // Before the searcher gets a chance to be asked. Position 1 beats position 2.
+    for (name, code, from) in preload {
+        h.preload_generated(name, code, from)?;
+    }
     h.set_arg(&path.to_string_lossy(), &[])?;
     phase("setup", &mut t0);
 

@@ -428,6 +428,25 @@ function R.install_searcher(gen)
    end)
 end
 
+-- Put already-generated Lua in front of the searcher for one module name.
+--
+-- `package.preload` is searcher position 1 and R.install_searcher puts htl's at 2, so a
+-- preloaded module is never asked of the searcher — which is the point: asking would check
+-- and generate it again. Loaded the same way the searcher would have loaded it, so the
+-- module sees the same chunk name and the same arguments.
+function R.preload_generated(module_name, code, filename)
+   -- Never displace what is already there. The test library and anything a host preloads are
+   -- put in package.preload by whoever owns them, and Lua generated from a `.tl` of the same
+   -- name is not the same module: preloading over `htl.test` gives the file a stand-in whose
+   -- `run()` reports nothing, and every test silently stops counting.
+   if package.preload[module_name] ~= nil then return end
+   local chunk, lerr = load(code, "@" .. filename, "t")
+   if not chunk then
+      error("htl: cached Lua failed to load: " .. tostring(lerr), 0)
+   end
+   package.preload[module_name] = function(modname) return chunk(modname, filename) end
+end
+
 function R.add_path(dir)
    local templates = dir .. "/?.lua;" .. dir .. "/?/init.lua;" .. dir .. "/?/?.lua"
    if package.path == nil or package.path == "" then
@@ -520,6 +539,24 @@ impl Htl {
 
     fn runtime(&self) -> Result<Table> {
         Ok(self.lua.named_registry_value::<Table>(RUNTIME_REGISTRY_KEY)?)
+    }
+
+    /// Put Lua this checker generated for a `.tl` module in front of the searcher, in a
+    /// program state.
+    ///
+    /// Distinct from [`preload`](Self::preload), which registers a source string as a module:
+    /// this loads the way the searcher would have, so the module sees the same chunk name and
+    /// the same arguments as if it had been generated during the run.
+    ///
+    /// Without it, a `require` in running code asks the searcher, which checks and generates
+    /// the module then and there. With it, the module is already present. The two are the
+    /// same thing only if `code` is what this checker would generate now — the caller's
+    /// promise, and the reason anything serving this has to invalidate on the module's own
+    /// content.
+    pub fn preload_generated(&self, name: &str, code: &str, file: &Path) -> Result<()> {
+        let f: Function = self.runtime()?.get("preload_generated")?;
+        f.call::<()>((name, code, path_str(file)))?;
+        Ok(())
     }
 
     /// Start recording which lines of which chunk run in the program state (a state
