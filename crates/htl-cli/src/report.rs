@@ -193,9 +193,12 @@ pub struct CheckSummary {
     pub strict: bool,
     /// What the exit code says: no errors, and under `strict` no warnings or lints.
     pub ok: bool,
-    /// Replayed from the run cache rather than checked. The diagnostics are the same
-    /// either way; this says that no checker ran to produce them.
+    /// Every module came from the cache, so no checker was built. The diagnostics are the
+    /// same either way; this says nothing ran to produce them.
     pub cached: bool,
+    /// How many of `files` were replayed rather than checked. `cached` is this reaching
+    /// `files`; between the two you can tell a wholly cached run from a mostly cached one.
+    pub replayed: usize,
 }
 
 #[derive(Serialize, Debug)]

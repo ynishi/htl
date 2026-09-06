@@ -74,9 +74,11 @@ fn a_second_run_reports_exactly_what_the_first_reported() {
         "the fixture must produce diagnostics or this test proves nothing"
     );
 
-    // Everything but the flag that says where it came from.
-    v1["summary"]["cached"] = false.into();
-    v2["summary"]["cached"] = false.into();
+    // Everything but the two fields that say where the answer came from.
+    for v in [&mut v1, &mut v2] {
+        v["summary"]["cached"] = false.into();
+        v["summary"]["replayed"] = 0.into();
+    }
     assert_eq!(v1, v2, "a cached run reports what the run it replaces reported");
 }
 
@@ -129,13 +131,23 @@ fn changing_the_config_misses() {
     assert!(!was_cached(&check(&root)), "the config shapes the report and is part of the inputs");
 }
 
+/// A flag belongs in the key when it changes what a module *reports*, and not when it only
+/// changes what the run concludes. `--strict` decides the exit code from diagnostics that
+/// are the same either way, so its modules are reusable; `--lint` changes which lints run,
+/// so they are not.
 #[test]
-fn a_flag_that_changes_the_report_gets_its_own_entry() {
+fn a_flag_is_in_the_key_only_when_it_changes_what_a_module_reports() {
     let root = project("flags");
     assert!(!was_cached(&check(&root)));
+    assert!(was_cached(&check(&root)));
+
     let (_, stdout, _) = htl(&["check", "src", "--format", "json", "--strict"], &root);
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert!(!was_cached(&v), "--strict asks a different question and cannot reuse the answer");
+    assert!(was_cached(&v), "--strict changes the verdict, not the diagnostics: {v}");
+
+    let (_, stdout, _) = htl(&["check", "src", "--format", "json", "--lint", "+no-any"], &root);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(!was_cached(&v), "a different lint selection does change them: {v}");
 }
 
 #[test]
@@ -160,4 +172,173 @@ fn no_cache_neither_writes_nor_reads() {
     let (_, stdout, _) = htl(&["check", "src", "--format", "json", "--no-cache"], &root);
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert!(!was_cached(&v), "--no-cache must not read an entry that is sitting there");
+}
+
+fn replayed(v: &serde_json::Value) -> u64 {
+    v["summary"]["replayed"].as_u64().expect("summary carries `replayed`")
+}
+
+/// Three modules: a leaf, one requiring it, and one requiring nothing. Enough to tell the
+/// two granularities apart, since only per-module can leave the third alone.
+fn three_modules(name: &str) -> PathBuf {
+    let root = scratch(name);
+    write(&root.join("htl.toml"), "[check]\n");
+    write(
+        &root.join("src/leaf.tl"),
+        "local record leaf\nend\nfunction leaf.f(): integer\n   return 1\nend\nreturn leaf\n",
+    );
+    write(
+        &root.join("src/uses_leaf.tl"),
+        "local leaf = require(\"leaf\")\nlocal record uses_leaf\nend\nfunction uses_leaf.g(): integer\n   return leaf.f()\nend\nreturn uses_leaf\n",
+    );
+    write(
+        &root.join("src/alone.tl"),
+        "local record alone\nend\nfunction alone.h(): integer\n   return 2\nend\nreturn alone\n",
+    );
+    root
+}
+
+fn edit_leaf(root: &Path, n: i32) {
+    write(
+        &root.join("src/leaf.tl"),
+        &format!("local record leaf\nend\nfunction leaf.f(): integer\n   return {n}\nend\nreturn leaf\n"),
+    );
+}
+
+fn check_with(root: &Path, args: &[&str]) -> serde_json::Value {
+    let mut a = vec!["check", "src", "--format", "json"];
+    a.extend_from_slice(args);
+    let (_, stdout, _) = htl(&a, root);
+    serde_json::from_str(&stdout).expect("stdout is one JSON document")
+}
+
+/// Editing the leaf must cost the leaf and its requirer, and leave the third module alone —
+/// the whole point of per-module entries.
+#[test]
+fn editing_one_module_rechecks_it_and_its_dependents_only() {
+    let root = three_modules("deps");
+    assert_eq!(replayed(&check(&root)), 0, "the first run has nothing to replay");
+    assert_eq!(replayed(&check(&root)), 3, "the second run replays all three");
+
+    edit_leaf(&root, 2);
+    assert_eq!(
+        replayed(&check(&root)),
+        1,
+        "the leaf and the module requiring it are checked again; the third is not"
+    );
+}
+
+/// `--cache-mode whole-run` grains the cache to the walk instead. One entry covers all of
+/// it, so an edit anywhere re-checks everything — which is the behaviour someone picks it
+/// for, and the same trade #3 shipped before the entries were split.
+///
+/// This is a different question from `--no-cache`, which is whether to cache at all.
+#[test]
+fn whole_run_mode_replays_all_of_the_walk_or_none_of_it() {
+    let root = three_modules("wholerun");
+    let m = &["--cache-mode", "whole-run"];
+
+    assert_eq!(replayed(&check_with(&root, m)), 0, "nothing stored yet");
+    assert_eq!(replayed(&check_with(&root, m)), 3, "the walk replays whole");
+
+    edit_leaf(&root, 3);
+    assert_eq!(replayed(&check_with(&root, m)), 0, "one edit costs the entire walk here");
+    assert_eq!(replayed(&check_with(&root, m)), 3, "and it is whole again after that run");
+}
+
+/// The mode comes from `[cache] mode`, and `--cache-mode` overrides it. The two granularities
+/// key their entries separately, so switching between them does not read the other's.
+#[test]
+fn the_config_picks_the_mode_and_the_flag_overrides_it() {
+    let root = three_modules("mode-config");
+    write(&root.join("htl.toml"), "[cache]\nmode = \"whole-run\"\n");
+
+    assert_eq!(replayed(&check(&root)), 0);
+    assert_eq!(replayed(&check(&root)), 3, "the config selected whole-run");
+    edit_leaf(&root, 4);
+    assert_eq!(replayed(&check(&root)), 0, "so one edit costs the walk");
+
+    // The flag overrides it, and starts from its own empty set of entries.
+    assert_eq!(replayed(&check_with(&root, &["--cache-mode", "per-module"])), 0);
+    assert_eq!(replayed(&check_with(&root, &["--cache-mode", "per-module"])), 3);
+    edit_leaf(&root, 5);
+    assert_eq!(
+        replayed(&check_with(&root, &["--cache-mode", "per-module"])),
+        1,
+        "and under per-module the same edit leaves the independent module alone"
+    );
+}
+
+/// Whether to cache and how to grain it are separate: `--no-cache` wins over any mode.
+#[test]
+fn no_cache_beats_the_mode() {
+    let root = three_modules("both-axes");
+    assert_eq!(replayed(&check_with(&root, &["--cache-mode", "whole-run"])), 0);
+    assert_eq!(replayed(&check_with(&root, &["--cache-mode", "whole-run"])), 3);
+    assert_eq!(
+        replayed(&check_with(&root, &["--cache-mode", "whole-run", "--no-cache"])),
+        0,
+        "--no-cache does not read the entry the mode would have used"
+    );
+}
+
+/// The project-level cycle lint runs over every file's requires, and a replayed file has to
+/// contribute its own — a cycle closing through a module nobody edited is still a cycle.
+/// This is the lint most likely to quietly vanish once modules stop being checked.
+#[test]
+fn the_cycle_lint_still_fires_when_every_file_was_replayed() {
+    let root = scratch("cycle");
+    write(&root.join("htl.toml"), "[check]\n");
+    write(&root.join("src/a.tl"), "local b = require(\"b\")\nlocal record a\nend\nreturn a\n");
+    write(&root.join("src/b.tl"), "local a = require(\"a\")\nlocal record b\nend\nreturn b\n");
+
+    let cycles = |v: &serde_json::Value| {
+        v["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|d| d["rule"].as_str() == Some("require-cycle"))
+            .count()
+    };
+
+    let first = check(&root);
+    assert!(cycles(&first) > 0, "the fixture must produce a cycle lint or this proves nothing: {first}");
+
+    let second = check(&root);
+    assert!(was_cached(&second), "nothing moved, so both modules replay");
+    assert_eq!(cycles(&first), cycles(&second), "the cycle lint survives a fully replayed run");
+}
+
+/// Output order follows the walk, not the split between what was checked and what was
+/// replayed — otherwise a run's diagnostics would shuffle depending on what happened to be
+/// in the store.
+#[test]
+fn diagnostics_come_out_in_file_order_whatever_was_cached() {
+    let root = scratch("order");
+    write(&root.join("htl.toml"), "[check]\n");
+    // Two modules that each report an error, named so the walk visits aaa before zzz.
+    write(&root.join("src/aaa.tl"), "local n: string = 1\nprint(n)\n");
+    write(&root.join("src/zzz.tl"), "local s: integer = \"x\"\nprint(s)\n");
+
+    let files = |v: &serde_json::Value| {
+        v["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["file"].as_str().unwrap_or("").to_string())
+            .collect::<Vec<_>>()
+    };
+
+    let cold = check(&root);
+    assert_eq!(replayed(&cold), 0);
+    let all_cached = check(&root);
+    assert_eq!(replayed(&all_cached), 2);
+
+    // Now a mix: zzz is edited, aaa comes from the store.
+    write(&root.join("src/zzz.tl"), "local s: integer = \"y\"\nprint(s)\n");
+    let mixed = check(&root);
+    assert_eq!(replayed(&mixed), 1, "aaa replays, zzz is checked");
+
+    assert_eq!(files(&cold), files(&all_cached), "a fully replayed run keeps file order");
+    assert_eq!(files(&cold), files(&mixed), "and so does a mixed one");
 }
