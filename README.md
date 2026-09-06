@@ -273,6 +273,29 @@ programs). `HTL_PROFILE=1` prints per-phase and per-file timings to stderr. Any 
 (and optionally `configure({snapshot_dir, update, mkdir})`) plugs in via `--lib`
 (bring its `.d.tl`); files that use no such library pass if they run to completion.
 
+## Fixing (`htl fix`)
+
+Some diagnostics carry a mechanical fix; `htl check` marks them `(fixable: htl fix)`
+and `--format json` carries the edits. `htl fix [paths]` applies them:
+
+- Every fix has an applicability: `safe` (what the program does at run time is
+  unchanged), `unsafe` (it may change; applied only with `--unsafe`), `suggest` (shown,
+  never applied). Today: a forward reference gets its declaration inserted into the
+  record (safe); `explicit-number` gets `: number` (safe); `no-global` becomes `local`
+  (unsafe). `htl.toml` `[fix] unsafe = ["no-global"]` promotes a rule, `disable = [..]`
+  turns its fix off; `--rule a,b` limits a run.
+- The working tree is the undo. A file git reports as modified or staged is refused
+  (`--allow-dirty`), and so is a file outside a repository (`--allow-no-vcs`).
+  `--dry-run` reports without writing; `--diff` prints a unified diff per file instead.
+- A file with a syntax error is never touched. Type errors elsewhere do not block (a
+  fix is often what removes one); after each pass the file is re-checked and put back
+  if it has more errors than before. Edits that overlap an applied one wait for the
+  next pass; passes are capped at 4; two passes producing the same edits are reported
+  as fixes undoing each other.
+- Everything applied is listed (`fixed: file:line: rule (safe)`), as is everything
+  skipped and why. Exit code as `htl check` (remaining errors → 1);
+  `--exit-non-zero-on-fix` also fails when a file changed, for CI.
+
 ## Machine-readable output
 
 `htl check --format json` and `htl test --format json` print one JSON document on

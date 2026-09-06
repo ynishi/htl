@@ -212,6 +212,57 @@ end
 -- "invalid key 'X' in record 'M'" where `function M.X(...)` is defined further down
 -- the same file: Teal adds a record's fields in source order, so the use came too
 -- early. Say so, and hand over the declaration line that makes the order irrelevant.
+-- The `local record <rec>` declaration at the top level of the file, if any.
+local function record_decl(ast, rec)
+   for _, s in ipairs(ast) do
+      if type(s) == "table" and (s.kind == "local_type" or s.kind == "global_type")
+         and s.var and s.var.tk == rec and s.value and s.value.newtype then
+         return s
+      end
+   end
+   return nil
+end
+
+-- Where and how to insert `<key>: function<sig>` into the record: just before its
+-- closing `end`, indented like the last field (or one indent deeper than the header
+-- for an empty record). nil when the record's end line is unknown.
+local function forward_ref_fix(src, decl, line)
+   local lines, i = {}, 0
+   for l in (src .. "\n"):gmatch("([^\n]*)\n") do
+      i = i + 1
+      lines[i] = l
+   end
+   local yend = decl.yend
+   if not yend then
+      -- No end position on the node: the record's `end` is the first line at the
+      -- header's own indentation that is exactly `end`.
+      local head_indent = (lines[decl.y] or ""):match("^(%s*)")
+      for j = decl.y + 1, #lines do
+         if lines[j]:match("^" .. head_indent .. "end%s*$") then
+            yend = j
+            break
+         end
+      end
+   end
+   if not yend or yend <= decl.y then return nil end
+   local indent
+   for j = yend - 1, decl.y + 1, -1 do
+      local l = lines[j]
+      if l and l:match("%S") then
+         indent = l:match("^(%s*)")
+         break
+      end
+   end
+   if not indent then
+      indent = (lines[decl.y] or ""):match("^(%s*)") .. "   "
+   end
+   return {
+      applicability = "safe",
+      edits = { { line = yend, col = 1, end_line = yend, end_col = 1, text = indent .. line .. "\n" } },
+   }
+end
+
+-- Returns msg, fix (fix nil when the record's closing line cannot be located).
 local function explain_forward_ref(ast, src, e, msg)
    local key, rec = msg:match("^invalid key '([%w_]+)' in record '([%w_]+)'")
    if not key or not ast or not src then return msg end
@@ -222,11 +273,15 @@ local function explain_forward_ref(ast, src, e, msg)
          if s.is_method then
             sig = sig:gsub("^%(%s*%)", "(self: " .. rec .. ")", 1):gsub("^%(", "(self: " .. rec .. ", ", 1)
          end
-         return msg .. string.format(
+         local decl_line = key .. ": function" .. sig
+         local explained = msg .. string.format(
             ": `%s.%s` is defined at line %d, after this use, and Teal adds a record's fields in " ..
-            "source order. Declare it up front inside `record %s`: `%s: function%s` -- or move the " ..
+            "source order. Declare it up front inside `record %s`: `%s` -- or move the " ..
             "definition above line %d",
-            rec, key, s.y, rec, key, sig, e.y or 0)
+            rec, key, s.y, rec, decl_line, e.y or 0)
+         local decl = record_decl(ast, rec)
+         local fix = decl and forward_ref_fix(src, decl, decl_line) or nil
+         return explained, fix
       end
    end
    return msg
@@ -280,10 +335,12 @@ local function collect_errors(filename, result, src)
    -- already checked) would otherwise re-walk its AST for require sites and re-resolve
    -- each one on disk: ~11 ms per module, ~1.4 s over a 261-test run [measured].
    if result.htl_errors and result.htl_errors_for == filename then
-      return result.htl_errors
+      return result.htl_errors, result.htl_error_fixes
    end
    local errors = {}
-   result.htl_errors, result.htl_errors_for = errors, filename
+   -- error_fixes[i] = fix for errors[i], or false: a rewrite `htl fix` may apply.
+   local error_fixes = {}
+   result.htl_errors, result.htl_error_fixes, result.htl_errors_for = errors, error_fixes, filename
    for _, e in ipairs(result.syntax_errors or {}) do errors[#errors + 1] = fmt(filename, e) end
    if result.ast and #(result.syntax_errors or {}) == 0 then
       -- Cheap text prefilter: only when some `require("<name>")` in the source resolves
@@ -307,18 +364,24 @@ local function collect_errors(filename, result, src)
    for _, e in ipairs(result.type_errors or {}) do
       local msg = explain_self_require(filename, e)
       local own = e.filename == nil or e.filename == filename
+      local fix
       if own then
          local explained = explain_arity(result.ast, e, msg)
          if explained ~= msg then hinted[e.y] = true end
-         msg = explain_forward_ref(result.ast, src, e, explained)
+         msg, fix = explain_forward_ref(result.ast, src, e, explained)
       end
       -- tl follows the arity error with "argument N: got X, expected T (unresolved
       -- generic)" for the very same call: a consequence, not a second mistake.
       if not (own and hinted[e.y] and msg:find("(unresolved generic)", 1, true)) then
          errors[#errors + 1] = fmt(filename, { filename = e.filename, y = e.y, x = e.x, msg = msg })
+         error_fixes[#errors] = fix or false
       end
    end
-   return errors
+   -- syntax / self-require errors carry no fix
+   for i = 1, #errors do
+      if error_fixes[i] == nil then error_fixes[i] = false end
+   end
+   return errors, error_fixes
 end
 
 -- Collect every enum reachable from a tl type object (records nest enums via
@@ -420,12 +483,13 @@ function H.check(filename, env, opts)
       return { ok = false, errors = { tostring(err) }, warnings = {} }
    end
    t0 = os.clock()
-   local errors, warnings = collect_errors(filename, result), {}
+   local errors, error_fixes = collect_errors(filename, result)
+   local warnings = {}
    for _, w in ipairs(result.warnings or {}) do warnings[#warnings + 1] = fmt(filename, w) end
    local deps = {}
    for _, fname in pairs(result.dependencies or {}) do deps[#deps + 1] = fname end
    table.sort(deps)
-   local lints = {}
+   local lints, lint_fixes = {}, {}
    if opts.lints ~= false and result.ast and #(result.syntax_errors or {}) == 0 then
       local src
       local fd = io.open(filename, "rb")
@@ -443,15 +507,18 @@ function H.check(filename, env, opts)
             subject_enum = subject,
          })
          prof("lint.run", filename, t1)
-         for _, l in ipairs(found or {}) do lints[#lints + 1] = fmt(filename, l) end
+         for _, l in ipairs(found or {}) do
+            lints[#lints + 1] = fmt(filename, l)
+            lint_fixes[#lints] = l.fix or false
+         end
       end
    end
    local requires = {}
    -- require sites feed the project-level require-cycle lint: same gate as the lints.
    if opts.lints ~= false and result.ast then requires = require_sites(result.ast) end
    prof("lint+req", filename, t0)
-   return { ok = #errors == 0, errors = errors, warnings = warnings, deps = deps, lints = lints,
-      requires = requires, result = result }
+   return { ok = #errors == 0, errors = errors, error_fixes = error_fixes, warnings = warnings, deps = deps,
+      lints = lints, lint_fixes = lint_fixes, requires = requires, result = result }
 end
 
 -- Type-check + generate Lua source. Returns code, checkinfo (code is nil on failure).

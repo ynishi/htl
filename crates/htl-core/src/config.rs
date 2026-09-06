@@ -40,6 +40,8 @@ pub struct HtlConfig {
     pub check: CheckConfig,
     #[serde(default)]
     pub build: BuildConfig,
+    #[serde(default)]
+    pub fix: FixConfig,
     /// Static counterpart of `TealResolver::expect_type` / `require_fields`: files
     /// directly under `dir` must return `type`; checked by the `contract` lint.
     #[serde(default)]
@@ -109,6 +111,18 @@ pub struct BuildConfig {
     /// Modules the host provides at run time, besides those declared only by a `.d.tl`.
     #[serde(default)]
     pub host: Vec<String>,
+}
+
+/// `[fix]`: per-rule control over what `htl fix` applies.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FixConfig {
+    /// Rules whose `unsafe` fix is applied as if it were safe (e.g. `["no-global"]`).
+    #[serde(default, rename = "unsafe")]
+    pub unsafe_: Vec<String>,
+    /// Rules whose fix is never applied.
+    #[serde(default)]
+    pub disable: Vec<String>,
 }
 
 impl HtlConfig {

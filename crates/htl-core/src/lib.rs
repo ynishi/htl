@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 pub mod bundle;
 pub mod config;
+pub mod fix;
 pub mod link;
 #[cfg(feature = "dts")]
 pub mod dts;
@@ -52,6 +53,49 @@ pub struct CheckInfo {
     /// Every `require("<literal>")` in the file and where the checker resolved it.
     /// Input to [`require_cycles`].
     pub requires: Vec<RequireSite>,
+    /// `error_fixes[i]` is the fix for `errors[i]`, when the error has one.
+    pub error_fixes: Vec<Option<Fix>>,
+    /// `lint_fixes[i]` is the fix for `lints[i]`, when the lint has one.
+    pub lint_fixes: Vec<Option<Fix>>,
+}
+
+/// How safely a [`Fix`] can be applied without a human looking at it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Applicability {
+    /// The rewrite does not change what the program does at run time.
+    Safe,
+    /// It may; applied only when asked (`htl fix --unsafe`).
+    Unsafe,
+    /// Shown, never applied (a placeholder to fill, a choice to make).
+    Suggest,
+}
+
+impl Applicability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Applicability::Safe => "safe",
+            Applicability::Unsafe => "unsafe",
+            Applicability::Suggest => "suggest",
+        }
+    }
+}
+
+/// One text replacement: `[start, end)` in 1-based line / byte-column coordinates;
+/// an insertion has `end == start`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Edit {
+    pub line: usize,
+    pub col: usize,
+    pub end_line: usize,
+    pub end_col: usize,
+    pub text: String,
+}
+
+/// A mechanical rewrite attached to a diagnostic (see [`fix`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fix {
+    pub applicability: Applicability,
+    pub edits: Vec<Edit>,
 }
 
 /// One literal `require` call in a checked file.
@@ -938,13 +982,50 @@ fn read_checkinfo(t: &Table) -> Result<CheckInfo> {
         Ok(list) => read_requires(&list)?,
         Err(_) => Vec::new(),
     };
+    let errors = seq("errors")?;
+    let lints = seq("lints")?;
+    let error_fixes = read_fixes(t, "error_fixes", errors.len())?;
+    let lint_fixes = read_fixes(t, "lint_fixes", lints.len())?;
     Ok(CheckInfo {
-        errors: seq("errors")?,
+        errors,
         warnings: seq("warnings")?,
         deps: seq("deps")?.into_iter().map(PathBuf::from).collect(),
-        lints: seq("lints")?,
+        lints,
         requires,
+        error_fixes,
+        lint_fixes,
     })
+}
+
+/// `fixes[i]` is a fix table or `false`; missing entries are `None`.
+fn read_fixes(t: &Table, key: &str, len: usize) -> Result<Vec<Option<Fix>>> {
+    let mut out = vec![None; len];
+    let Ok(list) = t.get::<Table>(key) else { return Ok(out) };
+    for (i, slot) in out.iter_mut().enumerate() {
+        let v: Value = list.get(i + 1)?;
+        if let Value::Table(f) = v {
+            let applicability = match f.get::<Option<String>>("applicability")?.as_deref() {
+                Some("unsafe") => Applicability::Unsafe,
+                Some("suggest") => Applicability::Suggest,
+                _ => Applicability::Safe,
+            };
+            let mut edits = Vec::new();
+            if let Ok(es) = f.get::<Table>("edits") {
+                for e in es.sequence_values::<Table>() {
+                    let e = e?;
+                    edits.push(Edit {
+                        line: e.get("line")?,
+                        col: e.get("col")?,
+                        end_line: e.get("end_line")?,
+                        end_col: e.get("end_col")?,
+                        text: e.get::<Option<String>>("text")?.unwrap_or_default(),
+                    });
+                }
+            }
+            *slot = Some(Fix { applicability, edits });
+        }
+    }
+    Ok(out)
 }
 
 fn read_requires(list: &Table) -> Result<Vec<RequireSite>> {
