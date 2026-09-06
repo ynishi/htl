@@ -138,6 +138,10 @@ pub struct ContractResult {
     /// return value is not a literal (not decidable statically).
     pub missing: Option<Vec<String>>,
     pub missing_at: (usize, usize),
+    /// Names `require_fields` asked for that the contract type does not declare. The
+    /// config is wrong about the type, which is a different finding from a module that
+    /// fails the contract, and no module can fix it.
+    pub bad_require_fields: Vec<String>,
 }
 
 impl Htl {
@@ -157,10 +161,15 @@ impl Htl {
         file: &Path,
         modname: &str,
         type_path: &str,
-        require_fields: bool,
+        require_fields: &config::RequireFields,
     ) -> Result<ContractResult> {
         let f: Function = self.h.get("contract_check")?;
-        let t: Table = f.call((path_str(file), modname, type_path, require_fields))?;
+        // `true` for "everything the type declares", the list itself when it names them.
+        let wanted = match require_fields.named() {
+            Some(names) => mlua::Value::Table(self.lua().create_sequence_from(names.to_vec())?),
+            None => mlua::Value::Boolean(require_fields.is_on()),
+        };
+        let t: Table = f.call((path_str(file), modname, type_path, wanted))?;
         let errors: Table = t.get("errors")?;
         let errors = errors
             .sequence_values::<String>()
@@ -176,10 +185,17 @@ impl Htl {
             t.get::<Option<usize>>("missing_y")?.unwrap_or(1),
             t.get::<Option<usize>>("missing_x")?.unwrap_or(1),
         );
+        let bad_require_fields = match t.get::<Option<Table>>("bad_require_fields")? {
+            Some(b) => b
+                .sequence_values::<String>()
+                .collect::<mlua::Result<Vec<_>>>()?,
+            None => Vec::new(),
+        };
         Ok(ContractResult {
             errors,
             missing,
             missing_at,
+            bad_require_fields,
         })
     }
 }
@@ -220,7 +236,20 @@ pub fn contract_lints(
         // project root, its `src/` and `[check] paths`.
         h.add_path(&dir)?;
         h.apply_config(root, cfg)?;
-        let r = h.contract_check(&file_abs, &modname, &c.type_path, c.require_fields)?;
+        let r = h.contract_check(&file_abs, &modname, &c.type_path, &c.require_fields)?;
+        if !r.bad_require_fields.is_empty() {
+            // Nothing under the dir can satisfy a field the type has no room for, so the
+            // finding is about htl.toml even though a module is what surfaced it.
+            out.push(format!(
+                "{}:1:1: htl.toml [[contract]] for {}: require_fields names field(s) that {} \
+                 does not declare: {} [htl contract]",
+                file.display(),
+                c.dir,
+                c.type_path,
+                r.bad_require_fields.join(", ")
+            ));
+            continue;
+        }
         for e in &r.errors {
             // The stub's own "<contract ...>:L:C: " prefix says nothing useful; keep the message.
             let msg = e.splitn(4, ':').last().unwrap_or(e).trim();
@@ -290,10 +319,17 @@ pub fn contract_enforcement_lints(
             continue;
         }
         let by_hand = sources.contains(&format!("expect_type(\"{}\")", c.type_path));
-        let want_fields = if c.require_fields {
-            ".require_fields()"
-        } else {
-            ""
+        let want_fields = match &c.require_fields {
+            config::RequireFields::All(false) => String::new(),
+            config::RequireFields::All(true) => ".require_all_fields()".to_string(),
+            config::RequireFields::Named(names) => format!(
+                ".require_fields([{}])",
+                names
+                    .iter()
+                    .map(|n| format!("{n:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         };
         if !(by_config || by_hand) {
             let by_hand_hint = if c.dir.contains('*') {
@@ -312,10 +348,14 @@ pub fn contract_enforcement_lints(
                 c.type_path,
                 by_hand_hint
             ));
-        } else if c.require_fields && !by_config && !sources.contains("require_fields()") {
+        } else if c.require_fields.is_on()
+            && !by_config
+            && !sources.contains("require_fields(")
+            && !sources.contains("require_all_fields(")
+        {
             out.push(format!(
-                "{}:1:1: contract `{}` -> {} has require_fields = true but the host never calls .require_fields(): \
-                 missing fields will pass at run time [htl contract-unenforced]",
+                "{}:1:1: contract `{}` -> {} requires fields but the host never calls .require_fields(...) \
+                 or .require_all_fields(): missing fields will pass at run time [htl contract-unenforced]",
                 cfg_path.display(),
                 c.dir,
                 c.type_path
