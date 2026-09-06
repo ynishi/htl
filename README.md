@@ -250,8 +250,15 @@ array of strings as its lines (a rendered screen), anything else in a sorted,
 one-entry-per-line form, so the files read well in a review. A name used twice in one
 file is an error.
 
+Coverage: `htl test --coverage` prints, per `.tl` module the tests' checks depended on,
+how many of its statements ran (`executed/all  %`), and a total; a module no test
+reached shows `0/n`. `--coverage-lines` adds the unexecuted line ranges. Statements
+are counted from the `.tl` syntax tree and matched against Lua's line hook (Teal keeps
+line numbers when it generates Lua), so the numbers are `.tl` lines. The hook slows
+the run, and code that runs inside a coroutine the program creates is not seen.
+
 Runner: `htl test [paths] [--filter substr] [--fail-fast] [-v | -q] [--slow MS]
-[--update]`. Each file runs in a fresh state; `-v` prints every test with its time,
+[--update] [--coverage [--coverage-lines]]`. Each file runs in a fresh state; `-v` prints every test with its time,
 `-q` only failures (with their details), errors and the summary line, `--slow 50` the
 tests over 50 ms, `--fail-fast` stops at the first failure. The run has one checker
 (`htl::testing::TestSession`) and one fresh program state per file: globals,
