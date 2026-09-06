@@ -270,6 +270,29 @@ programs). `HTL_PROFILE=1` prints per-phase and per-file timings to stderr. Any 
 (and optionally `configure({snapshot_dir, update, mkdir})`) plugs in via `--lib`
 (bring its `.d.tl`); files that use no such library pass if they run to completion.
 
+## Machine-readable output
+
+`htl check --format json` and `htl test --format json` print one JSON document on
+stdout and nothing on stderr (the text form is stderr-only, so the two never mix).
+The exit code is the same as in text mode. Field names are stable; fields may be
+added, not renamed.
+
+- `check`: `{ files, diagnostics: [{ severity: "error"|"warning"|"lint", file, line,
+  col, rule?, message }], summary: { errors, warnings, lints, strict, ok } }`. `rule`
+  is the lint rule (`nil-index`, `contract`, ...), split out of the message.
+- `test`: `{ files: [{ path, ok, diagnostics, error?, file_level, passed, failed,
+  failures, tests: [{ name, ok, ms }], duration_ms, snapshots_written,
+  snapshots_updated }], summary: { files, files_run, passed, failed, files_with_errors,
+  duration_ms, ok }, coverage?: { modules: [{ path, executed, total, unexecuted:
+  [[first, last]] }], executed, total } }` (`coverage` with `--coverage`).
+
+GitHub Actions annotations from a check, for instance:
+
+```sh
+htl check . --format json | jq -r '.diagnostics[] |
+  "::\(if .severity == "error" then "error" else "warning" end) file=\(.file),line=\(.line),col=\(.col)::\(.message)"'
+```
+
 ## Bundles (`htl build`)
 
 `htl build src/main.tl -o app.hb` follows `require("<literal>")` from the entry and
