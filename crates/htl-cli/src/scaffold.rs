@@ -46,6 +46,7 @@ pub fn scaffold(dir: &Path, name: &str, opts: &Options, must_be_new: bool) -> Re
     let mut files: Vec<(PathBuf, String)> = vec![
         (dir.join("mlua-pkg.toml"), t_manifest(name, &m)),
         (dir.join("htl.toml"), t_htl_toml()),
+        (dir.join("types").join("README.md"), t_types_readme()),
         (dir.join("src").join(&m).join("init.tl"), t_module(&m)),
         (dir.join("tests").join(format!("{m}_test.tl")), t_test(&m)),
         (dir.join(".gitignore"), t_gitignore(opts.embed)),
@@ -107,6 +108,17 @@ fn t_test(m: &str) -> String {
     )
 }
 
+fn t_types_readme() -> String {
+    "# types/\n\n\
+     Hand-written `.d.tl` declarations for modules the host provides at run time and\n\
+     that ship no declaration of their own (a Rust crate re-exported to Lua, a runtime\n\
+     SDK): `xlib.d.tl` here makes `require(\"xlib\")` typed in `htl check`, `htl test` and\n\
+     `include_tl!`. Searched after `src/`; a `.tl` source anywhere on the path beats a\n\
+     declaration, so nothing here can shadow an implementation. Declarations generated\n\
+     from Rust (`#[host_module]`) are written next to the scripts, not here.\n"
+        .to_string()
+}
+
 fn t_htl_toml() -> String {
     "# htl project settings (htl check / htl test / htl fmt / include_tl! all read this).\n\
      # Command-line flags and HTL_LINTS / HTL_LINT override it.\n\n\
@@ -117,7 +129,8 @@ fn t_htl_toml() -> String {
      [fmt]\n\
      indent = 3\n\n\
      [check]\n\
-     # paths = [\"mods\", \"~/.cache/sdk\"]   # extra dirs require() resolves from while checking\n\n\
+     # paths = [\"mods\", \"~/.cache/sdk\"]   # extra dirs require() resolves from while checking\n\
+     # (src/ and types/ are always searched; hand-written .d.tl go under types/)\n\n\
      # Contract for a directory of modules (static form of TealResolver::expect_type):\n\
      # [[contract]]\n\
      # dir = \"mods\"             # relative to this file; \"sites/*\" = each subdirectory\n\
