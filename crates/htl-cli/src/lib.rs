@@ -958,6 +958,15 @@ fn cmd_check(
             n_lint += 1;
         }
     }
+    // Nothing else removes an entry, and this is the only moment the whole set is in hand.
+    if let Some(c) = &store {
+        let keep = match c.mode() {
+            cache::Mode::PerModule => keys.clone(),
+            cache::Mode::WholeRun => vec![run_key.clone()],
+        };
+        c.sweep(&keep, files.len());
+    }
+
     let replayed = files.len() - to_check;
     let fail = report_check(&mut sink, json, files.len(), (n_err, n_warn, n_lint), strict, replayed)?;
     Ok(if fail { ExitCode::FAILURE } else { ExitCode::SUCCESS })

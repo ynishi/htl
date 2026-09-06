@@ -110,16 +110,54 @@ fn editing_a_checked_file_misses() {
     assert!(!was_cached(&check(&root)), "an edited module must be checked again");
 }
 
+/// A project where one module requires another by name, so there is a name whose resolution
+/// can be disturbed.
+fn requires_helper(name: &str) -> PathBuf {
+    let root = scratch(name);
+    write(&root.join("htl.toml"), "[check]\n");
+    write(
+        &root.join("src/helper.tl"),
+        "local record helper\nend\nfunction helper.f(): integer\n   return 1\nend\nreturn helper\n",
+    );
+    write(
+        &root.join("src/main.tl"),
+        "local helper = require(\"helper\")\nlocal x: integer = helper.f()\nprint(x)\n",
+    );
+    root
+}
+
+/// The case a cache keyed only on the files it read gets wrong, and the one ccache documents
+/// as its direct-mode hole: nothing already recorded changed, `types/` did not exist when
+/// the entry was written, and yet a name this module requires can now be found there too.
+///
+/// The checker would still pick `src/helper.tl` — `src/` comes first — but whether it does
+/// is no longer the same question, so the entry is not trusted.
 #[test]
-fn a_module_appearing_on_the_search_path_misses() {
-    // The case a cache keyed only on the files it read gets wrong, and the one ccache
-    // documents as its direct-mode hole: nothing already recorded changed, and `types/`
-    // did not exist when the entry was written, but a `require` would now resolve there.
-    let root = project("appear");
+fn a_module_appearing_under_a_required_name_misses() {
+    let root = requires_helper("appear");
     assert!(!was_cached(&check(&root)));
     assert!(was_cached(&check(&root)));
-    write(&root.join("types/extra.d.tl"), "local record extra\n   version: string\nend\nreturn extra\n");
-    assert!(!was_cached(&check(&root)), "a new module where the checker searches must be checked again");
+
+    write(
+        &root.join("types/helper.d.tl"),
+        "local record helper\n   f: function(): integer\nend\nreturn helper\n",
+    );
+    assert!(!was_cached(&check(&root)), "a file appearing under a required name must be checked again");
+}
+
+/// The other half, and what #24 was about: adding a module nobody requires is a normal thing
+/// to do while working, and it used to re-check the project. A probe that hashed every name
+/// in the directory could not tell the two cases apart.
+#[test]
+fn a_module_appearing_under_a_name_nobody_requires_does_not() {
+    let root = requires_helper("unrelated");
+    assert!(!was_cached(&check(&root)));
+    assert_eq!(replayed(&check(&root)), 2);
+
+    write(&root.join("src/brand_new.tl"), "local record brand_new\nend\nreturn brand_new\n");
+    let v = check(&root);
+    assert_eq!(v["files"], 3, "the new module is part of the walk now");
+    assert_eq!(replayed(&v), 2, "the two that were there replay; only the new one is checked");
 }
 
 #[test]
@@ -212,6 +250,26 @@ fn check_with(root: &Path, args: &[&str]) -> serde_json::Value {
     serde_json::from_str(&stdout).expect("stdout is one JSON document")
 }
 
+fn entries(root: &Path) -> usize {
+    std::fs::read_dir(root.join(".htl/cache"))
+        .map(|rd| rd.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "json")).count())
+        .unwrap_or(0)
+}
+
+/// Run with the eviction bound forced low. Reaching a few hundred entries honestly would
+/// take more invocations than a test should.
+fn check_bounded(root: &Path, bound: usize, args: &[&str]) -> serde_json::Value {
+    let mut a = vec!["check", "src", "--format", "json"];
+    a.extend_from_slice(args);
+    let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+        .args(&a)
+        .env("HTL_CACHE_MAX_ENTRIES", bound.to_string())
+        .current_dir(root)
+        .output()
+        .unwrap();
+    serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("stdout is one JSON document")
+}
+
 /// Editing the leaf must cost the leaf and its requirer, and leave the third module alone —
 /// the whole point of per-module entries.
 #[test]
@@ -267,6 +325,49 @@ fn the_config_picks_the_mode_and_the_flag_overrides_it() {
         1,
         "and under per-module the same edit leaves the independent module alone"
     );
+}
+
+/// The store used to only grow: every distinct invocation left a full set of module entries
+/// and nothing took the old ones away.
+#[test]
+fn the_store_stays_within_its_bound() {
+    let root = three_modules("bound");
+    // Three modules, so each invocation leaves three entries. A bound of four forces the
+    // second shape to evict most of the first.
+    assert_eq!(replayed(&check_bounded(&root, 4, &[])), 0);
+    assert_eq!(entries(&root), 3);
+
+    check_bounded(&root, 4, &["--lint", "+no-any"]);
+    assert!(entries(&root) <= 4, "the store must not exceed the bound: {}", entries(&root));
+
+    check_bounded(&root, 4, &["--lint", "+class-record"]);
+    assert!(entries(&root) <= 4, "nor after another shape: {}", entries(&root));
+}
+
+/// What a run just wrote or just read has to survive its own sweep, or a project whose module
+/// count is near the bound would evict itself on every run and never hit.
+#[test]
+fn a_sweep_never_drops_what_the_run_itself_used() {
+    let root = three_modules("keep");
+    // A bound below the module count: the three entries this run needs are all it may keep.
+    assert_eq!(replayed(&check_bounded(&root, 1, &[])), 0);
+    assert_eq!(replayed(&check_bounded(&root, 1, &[])), 3, "its own entries survived");
+    assert_eq!(replayed(&check_bounded(&root, 1, &[])), 3, "and keep surviving");
+}
+
+/// An entry whose module is gone can never be read again.
+#[test]
+fn entries_for_deleted_modules_are_dropped() {
+    let root = three_modules("orphans");
+    assert_eq!(replayed(&check_bounded(&root, 3, &[])), 0);
+    assert_eq!(entries(&root), 3);
+
+    std::fs::remove_file(root.join("src/alone.tl")).unwrap();
+    // Two modules left, so the bound of 3 is not exceeded by them — but the orphan pushes the
+    // store to 3 and it is the one with nothing behind it.
+    check_bounded(&root, 2, &[]);
+    assert!(entries(&root) <= 2, "the orphan went: {}", entries(&root));
+    assert_eq!(replayed(&check_bounded(&root, 2, &[])), 2, "and the two that remain still replay");
 }
 
 /// Whether to cache and how to grain it are separate: `--no-cache` wins over any mode.

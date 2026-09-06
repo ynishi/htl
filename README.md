@@ -91,11 +91,23 @@ the reason to reach for it if the number of files in `.htl/` becomes a problem b
 eviction lands.
 
 An entry is used only when the module and everything it required still hash the same, every
-directory a `require` could resolve in holds the same modules, and the binary that wrote the
-entry is the one reading it. Content hashes throughout, no timestamps, so touching a file
-without editing it invalidates nothing and a fresh checkout does not either. Anything
-unexpected — a corrupt entry, an unreadable store, an htl upgrade — is a miss, which costs
-the check it would have skipped and never the wrong answer.
+name it requires still resolves where it did, and the binary that wrote the entry is the one
+reading it. Content hashes throughout, no timestamps, so touching a file without editing it
+invalidates nothing and a fresh checkout does not either. Anything unexpected — a corrupt
+entry, an unreadable store, an htl upgrade — is a miss, which costs the check it would have
+skipped and never the wrong answer.
+
+Only the names a module actually requires are watched. Adding a module nothing requires
+leaves every existing entry valid; adding one that could answer to a name something does
+require invalidates the modules asking for that name, whether or not the checker would still
+have picked the old file. Writing a new module is a normal thing to do while working, and it
+costs a check of that module rather than of the project.
+
+The store is bounded, at four entries per module or 256, whichever is larger. A run that
+finds it over the bound drops what it did not itself use: entries whose files are gone go
+first, then the oldest until it fits. A dropped entry is a miss on the next run and nothing
+worse. Eviction is where mtimes are allowed, because being wrong there costs a check rather
+than a wrong answer; invalidation still refuses them.
 
 Flags are part of the key when they change what a module reports and not when they only
 change the verdict: `--lint` gets its own entries, `--strict` reuses them and differs in the
