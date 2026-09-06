@@ -90,6 +90,10 @@ function Expect:to_be_nil()
    if self.actual ~= nil then fail("expected nil, got " .. show(self.actual)) end
 end
 
+function Expect:to_not_be_nil()
+   if self.actual == nil then fail("expected a value, got nil") end
+end
+
 function Expect:to_be_close(expected, eps)
    eps = eps or 1e-9
    local a = self.actual
@@ -144,11 +148,42 @@ function Expect:to_contain(x)
    fail("to_contain needs a string or an array, got " .. show(a))
 end
 
+-- Absent from a string (plain), or from an array; the array message names the index.
+function Expect:to_not_contain(x)
+   local a = self.actual
+   if type(a) == "string" then
+      if type(x) == "string" and a:find(x, 1, true) then
+         fail("expected " .. show(a) .. " not to contain " .. show(x))
+      end
+      return
+   end
+   if type(a) == "table" then
+      for i, v in ipairs(a) do
+         if deep_equal(v, x) then
+            fail("expected array " .. show(a) .. " not to contain " .. show(x) .. " (found at index " .. tostring(i) .. ")")
+         end
+      end
+      return
+   end
+   fail("to_not_contain needs a string or an array, got " .. show(a))
+end
+
 -- Lua pattern match on a string.
 function Expect:to_match(pattern)
    local a = self.actual
    if type(a) ~= "string" or not a:find(pattern) then
       fail("expected " .. show(a) .. " to match /" .. tostring(pattern) .. "/")
+   end
+end
+
+function Expect:to_not_match(pattern)
+   local a = self.actual
+   if type(a) ~= "string" then
+      fail("to_not_match needs a string, got " .. show(a))
+   end
+   local s, e = a:find(pattern)
+   if s then
+      fail("expected " .. show(a) .. " not to match /" .. tostring(pattern) .. "/ (matched " .. show(a:sub(s, e)) .. " at " .. tostring(s) .. ")")
    end
 end
 
