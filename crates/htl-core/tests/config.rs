@@ -1,7 +1,7 @@
 //! `htl.toml`: parsing / discovery, the static `contract` lint, the `contract-unenforced`
 //! host scan, and `contract_resolvers` giving the host the same contract at run time.
 
-use htl_core::config::{HtlConfig, join_specs};
+use htl_core::config::{HtlConfig, RequireFields, join_specs};
 use htl_core::{Htl, contract_enforcement_lints, contract_lints};
 use std::path::{Path, PathBuf};
 
@@ -68,7 +68,7 @@ fn parse_sections_and_lint_spec() {
     assert_eq!(cfg.fmt.indent, Some(2));
     assert_eq!(cfg.contract.len(), 1);
     assert_eq!(cfg.contract[0].type_path, "defs.Mod");
-    assert!(!cfg.contract[0].require_fields, "defaults to off");
+    assert!(!cfg.contract[0].require_fields.is_on(), "defaults to off");
     assert_eq!(
         join_specs([cfg.lint_spec().as_str(), "", "+shadow-local"]),
         "+class-record,+explicit-number,-shadow-local,+shadow-local"
@@ -131,13 +131,116 @@ fn contract_lint_flags_wrong_type_and_missing_field_only() {
 #[test]
 fn contract_lint_without_require_fields_accepts_partial() {
     let (root, mut cfg) = project("lenient");
-    cfg.contract[0].require_fields = false;
+    cfg.contract[0].require_fields = RequireFields::All(false);
     let h = Htl::new().unwrap();
     let partial = contract_lints(&h, &root, &cfg, &root.join("mods/partial.tl")).unwrap();
     assert!(
         partial.is_empty(),
         "every record field is nilable: {partial:?}"
     );
+}
+
+/// `require_fields = ["name"]`: the named field is mandatory, the rest of the record is
+/// not. This is what lets a contract type grow without breaking the modules that predate
+/// the new fields.
+#[test]
+fn contract_lint_with_named_require_fields_holds_only_those() {
+    let (root, mut cfg) = project("named");
+    cfg.contract[0].require_fields = RequireFields::Named(vec!["name".into()]);
+    let h = Htl::new().unwrap();
+    let partial = contract_lints(&h, &root, &cfg, &root.join("mods/partial.tl")).unwrap();
+    assert!(
+        partial.is_empty(),
+        "hp is declared but not required: {partial:?}"
+    );
+
+    cfg.contract[0].require_fields = RequireFields::Named(vec!["name".into(), "hp".into()]);
+    let both = contract_lints(&h, &root, &cfg, &root.join("mods/partial.tl")).unwrap();
+    assert_eq!(both.len(), 1, "{both:?}");
+    assert!(
+        both[0].contains("returned table lacks declared field(s) of defs.Mod: hp"),
+        "the message is the one it always was: {}",
+        both[0]
+    );
+}
+
+/// A name the type does not declare is a mistake in `htl.toml`, and is reported rather
+/// than passed over: a list that reads as a contract must be one.
+#[test]
+fn contract_lint_rejects_a_required_field_the_type_lacks() {
+    let (root, mut cfg) = project("unknown-field");
+    cfg.contract[0].require_fields = RequireFields::Named(vec!["name".into(), "hitpoints".into()]);
+    let h = Htl::new().unwrap();
+    let good = contract_lints(&h, &root, &cfg, &root.join("mods/good.tl")).unwrap();
+    assert_eq!(good.len(), 1, "{good:?}");
+    assert!(
+        good[0].contains("does not declare: hitpoints"),
+        "names the entry to fix: {}",
+        good[0]
+    );
+}
+
+/// `require_fields = true` still means every declared field.
+#[test]
+fn contract_lint_with_require_fields_true_is_unchanged() {
+    let (root, cfg) = project("all");
+    let h = Htl::new().unwrap();
+    let partial = contract_lints(&h, &root, &cfg, &root.join("mods/partial.tl")).unwrap();
+    assert_eq!(partial.len(), 1, "{partial:?}");
+    assert!(
+        partial[0].contains("lacks declared field(s) of defs.Mod: hp"),
+        "{}",
+        partial[0]
+    );
+}
+
+/// The static form and the runtime form are a pair, and a list has to keep them one:
+/// the same fixture, the same list, the same verdict from `htl check` and from `require`.
+#[test]
+fn the_static_and_runtime_forms_agree_on_the_same_fixture() {
+    use htl_core::pkg::{TealResolver, mlua_pkg::Registry};
+
+    let (root, mut cfg) = project("agree");
+    let verdicts = |cfg: &HtlConfig| {
+        let h = Htl::new().unwrap();
+        let statically = !contract_lints(&h, &root, cfg, &root.join("mods/partial.tl"))
+            .unwrap()
+            .is_empty();
+        let h2 = Htl::new().unwrap();
+        let mut reg = Registry::new();
+        for r in TealResolver::for_contract(&root, &cfg.contract[0]).unwrap() {
+            reg.add(r);
+        }
+        reg.install(h2.lua()).unwrap();
+        let at_runtime = h2
+            .lua()
+            .load("return require('partial').name")
+            .eval::<String>()
+            .is_err();
+        (statically, at_runtime)
+    };
+
+    cfg.contract[0].require_fields = RequireFields::Named(vec!["name".into()]);
+    assert_eq!(verdicts(&cfg), (false, false), "hp is not in the list");
+
+    cfg.contract[0].require_fields = RequireFields::Named(vec!["name".into(), "hp".into()]);
+    assert_eq!(verdicts(&cfg), (true, true), "hp is in the list");
+}
+
+#[test]
+fn require_fields_parses_as_a_list_and_as_a_bool() {
+    let cfg = HtlConfig::parse(
+        "[[contract]]\ndir = \"mods\"\ntype = \"defs.Mod\"\nrequire_fields = [\"name\", \"hp\"]\n",
+    )
+    .unwrap();
+    assert_eq!(
+        cfg.contract[0].require_fields,
+        RequireFields::Named(vec!["name".into(), "hp".into()])
+    );
+    let all =
+        HtlConfig::parse("[[contract]]\ndir = \"mods\"\ntype = \"defs.Mod\"\nrequire_fields = true\n")
+            .unwrap();
+    assert_eq!(all.contract[0].require_fields, RequireFields::All(true));
 }
 
 #[test]
@@ -153,7 +256,8 @@ fn unenforced_contract_is_reported_against_host_sources() {
     assert_eq!(none.len(), 1, "{none:?}");
     assert!(none[0].contains("contract-unenforced"), "{}", none[0]);
     assert!(
-        none[0].contains("TealResolver::new(\"mods\").expect_type(\"defs.Mod\").require_fields()"),
+        none[0]
+            .contains("TealResolver::new(\"mods\").expect_type(\"defs.Mod\").require_all_fields()"),
         "tells the host what to write: {}",
         none[0]
     );
@@ -161,14 +265,20 @@ fn unenforced_contract_is_reported_against_host_sources() {
     let no_fields = host("let r = TealResolver::new(\"mods\")?.expect_type(\"defs.Mod\");\n");
     assert_eq!(no_fields.len(), 1, "{no_fields:?}");
     assert!(
-        no_fields[0].contains("never calls .require_fields()"),
+        no_fields[0].contains("never calls .require_fields(...)"),
         "{}",
         no_fields[0]
     );
 
-    let by_hand =
-        host("let r = TealResolver::new(\"mods\")?.expect_type(\"defs.Mod\").require_fields();\n");
+    let by_hand = host(
+        "let r = TealResolver::new(\"mods\")?.expect_type(\"defs.Mod\").require_all_fields();\n",
+    );
     assert!(by_hand.is_empty(), "{by_hand:?}");
+
+    let by_list = host(
+        "let r = TealResolver::new(\"mods\")?.expect_type(\"defs.Mod\").require_fields([\"name\"]);\n",
+    );
+    assert!(by_list.is_empty(), "the list form enforces it too: {by_list:?}");
 
     let by_config = host("for r in htl::pkg::contract_resolvers(&root, &cfg)? { reg.add(r); }\n");
     assert!(by_config.is_empty(), "{by_config:?}");
