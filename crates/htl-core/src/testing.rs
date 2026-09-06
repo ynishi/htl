@@ -51,6 +51,10 @@ pub struct FileReport {
     pub tests: Vec<TestResult>,
     /// Wall time for the whole file: check, load, and every test.
     pub duration_ms: f64,
+    /// Snapshot files created on this run (first `to_match_snapshot` of a name).
+    pub snapshots_written: Vec<String>,
+    /// Snapshot files rewritten because `update_snapshots` was set.
+    pub snapshots_updated: Vec<String>,
 }
 
 /// One test's outcome, as reported by the assertion library.
@@ -66,6 +70,14 @@ pub struct TestResult {
 pub struct RunOptions {
     /// Stop at the first failing test in a file.
     pub fail_fast: bool,
+    /// Rewrite snapshots that differ instead of failing (`htl test --update`).
+    pub update_snapshots: bool,
+}
+
+/// Where a test file's snapshots live: `<dir>/__snapshots__/<file stem>/`.
+pub fn snapshot_dir(test_file: &Path) -> PathBuf {
+    let stem = test_file.file_stem().and_then(|s| s.to_str()).unwrap_or("test");
+    parent_dir(test_file).join("__snapshots__").join(stem)
 }
 
 impl FileReport {
@@ -205,10 +217,32 @@ fn run_in(h: &Htl, path: &Path, filter: Option<&str>, lib: &str, opts: &RunOptio
     let loaded: Table = package.get("loaded")?;
     match loaded.get::<Value>(lib)? {
         Value::Table(t) => {
+            // Snapshots: tell the library where this file's live and whether to
+            // rewrite them. Lua cannot create a directory, so it borrows one.
+            if let Ok(configure) = t.get::<Function>("configure") {
+                let cfg = h.lua().create_table()?;
+                cfg.set("snapshot_dir", snapshot_dir(path).to_string_lossy().as_ref())?;
+                cfg.set("update", opts.update_snapshots)?;
+                cfg.set(
+                    "mkdir",
+                    h.lua().create_function(|_, dir: String| {
+                        std::fs::create_dir_all(&dir).map_err(mlua::Error::external)
+                    })?,
+                )?;
+                configure.call::<()>(cfg)?;
+            }
             let run: Function = t.get("run")?;
             let lua_opts = h.lua().create_table()?;
             lua_opts.set("fail_fast", opts.fail_fast)?;
             let report: Table = run.call((filter, lua_opts))?;
+            for (key, into) in [
+                ("snapshots_written", &mut rep.snapshots_written),
+                ("snapshots_updated", &mut rep.snapshots_updated),
+            ] {
+                if let Ok(list) = report.get::<Table>(key) {
+                    *into = list.sequence_values::<String>().collect::<mlua::Result<_>>()?;
+                }
+            }
             phase("run", &mut t0);
             rep.passed = report.get::<Option<usize>>("passed")?.unwrap_or(0);
             rep.failed = report.get::<Option<usize>>("failed")?.unwrap_or(0);

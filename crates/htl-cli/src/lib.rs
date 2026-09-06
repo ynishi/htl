@@ -61,6 +61,9 @@ enum Cmd {
         /// Also print tests slower than this many milliseconds
         #[arg(long, value_name = "MS")]
         slow: Option<f64>,
+        /// Rewrite snapshots (`to_match_snapshot`) that differ instead of failing
+        #[arg(long)]
+        update: bool,
     },
     /// Write the `.d.tl` files declared by `#[host_module(dts = ..)]` / `#[teal(dts = ..)]`
     /// in a Rust crate, without building it (check / run / test / build do this automatically)
@@ -163,9 +166,13 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
     match cli.cmd {
         Cmd::Check { paths, strict, lint, list_lints } => cmd_check(&paths, strict, lint.as_deref(), list_lints),
         Cmd::Fmt { paths, check, indent } => cmd_fmt(&paths, check, indent),
-        Cmd::Test { paths, filter, lib, lint, fail_fast, verbose, quiet, slow } => {
-            cmd_test(&paths, filter.as_deref(), &lib, lint.as_deref(), TestFlags { fail_fast, verbose, quiet, slow })
-        }
+        Cmd::Test { paths, filter, lib, lint, fail_fast, verbose, quiet, slow, update } => cmd_test(
+            &paths,
+            filter.as_deref(),
+            &lib,
+            lint.as_deref(),
+            TestFlags { fail_fast, verbose, quiet, slow, update },
+        ),
         Cmd::Pkg { args } => cmd_pkg(&args),
         Cmd::Dts { dir } => cmd_dts(dir.as_deref()),
         Cmd::New { name, lib, embed } => cmd_new(&name, lib, embed),
@@ -293,11 +300,12 @@ struct TestFlags {
     verbose: bool,
     quiet: bool,
     slow: Option<f64>,
+    update: bool,
 }
 
 fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&str>, flags: TestFlags) -> Result<ExitCode> {
     let paths = if paths.is_empty() { vec![PathBuf::from(".")] } else { paths.to_vec() };
-    let opts = htl::testing::RunOptions { fail_fast: flags.fail_fast };
+    let opts = htl::testing::RunOptions { fail_fast: flags.fail_fast, update_snapshots: flags.update };
     if let Some(first) = paths.first() {
         auto_dts(first)?;
     }
@@ -347,6 +355,13 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
         }
         for m in &rep.failures {
             eprintln!("      - {m}");
+        }
+        // A snapshot written or rewritten is a change on disk: always say so, even in -q.
+        for p in &rep.snapshots_written {
+            eprintln!("snapshot written: {p}");
+        }
+        for p in &rep.snapshots_updated {
+            eprintln!("snapshot updated: {p}");
         }
         passed += rep.passed;
         failed += rep.failed;
