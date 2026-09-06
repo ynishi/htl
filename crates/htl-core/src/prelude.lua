@@ -569,6 +569,56 @@ function H.resolve_module(name)
    return found, lua_path
 end
 
+-- Statements of a file as { first_line, last_line } ranges, for coverage. Every
+-- statement in every block (function bodies inside expressions included); an `if`
+-- chain contributes each condition's line as its own range. Type declarations are
+-- not statements that run. A range ends where the next statement in its block
+-- starts, or at the node's own end when it is the last one.
+local EXEC_KINDS = {
+   local_declaration = true, assignment = true, ["return"] = true, ["if"] = true,
+   ["while"] = true, ["repeat"] = true, forin = true, fornum = true, ["goto"] = true,
+   ["break"] = true, ["do"] = true, local_function = true, global_function = true,
+   record_function = true, op = true,
+}
+
+function H.executable_ranges(filename)
+   local fd = io.open(filename, "rb")
+   if not fd then return nil end
+   local src = fd:read("a")
+   fd:close()
+   local ast, errs = tl.parse(src, filename, "tl")
+   if not ast or (errs and #errs > 0) then return nil end
+   local ranges = {}
+   local seen = {}
+   local function go(n)
+      if type(n) ~= "table" or seen[n] then return end
+      seen[n] = true
+      if n.kind == "statements" then
+         for i, s in ipairs(n) do
+            if type(s) == "table" and s.kind and EXEC_KINDS[s.kind] and s.y then
+               local nxt = n[i + 1]
+               local last = (type(nxt) == "table" and nxt.y and nxt.y - 1) or s.yend or s.y
+               if last < s.y then last = s.y end
+               ranges[#ranges + 1] = { s.y, last }
+               if s.kind == "if" and s.if_blocks then
+                  for bi = 2, #s.if_blocks do
+                     local b = s.if_blocks[bi]
+                     if b.exp and b.y then ranges[#ranges + 1] = { b.y, b.y } end
+                  end
+               end
+            end
+         end
+      end
+      for k, v in pairs(n) do
+         if k ~= "if_parent" and k ~= "type" and k ~= "newtype" and k ~= "decltuple" and k ~= "expected"
+            and type(v) == "table" then go(v) end
+      end
+   end
+   go(ast)
+   table.sort(ranges, function(a, b) return a[1] < b[1] end)
+   return ranges
+end
+
 function H.check_stub(src, filename)
    local result = tl.check_string(src, new_env(), filename)
    return collect_errors(filename, result, src)
