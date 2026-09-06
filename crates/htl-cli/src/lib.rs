@@ -5,6 +5,7 @@
 //! - `htl run <file.tl|.hb>`  type-check then execute (strict: type errors abort)
 //! - `htl build <dir>`        compile a tree of `.tl` into one stripped-bytecode bundle
 
+mod cache;
 mod report;
 mod scaffold;
 
@@ -49,6 +50,9 @@ enum Cmd {
         /// Output format
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
+        /// Check even if an identical run is cached, and do not store this one
+        #[arg(long)]
+        no_cache: bool,
     },
     /// Run tests: `*_test.tl` and `tests/**/*.tl`, one isolated state per file
     Test {
@@ -214,8 +218,8 @@ pub fn run() -> ExitCode {
 
 fn real_main(cli: Cli) -> Result<ExitCode> {
     match cli.cmd {
-        Cmd::Check { paths, strict, lint, list_lints, format } => {
-            cmd_check(&paths, strict, lint.as_deref(), list_lints, format == Format::Json)
+        Cmd::Check { paths, strict, lint, list_lints, format, no_cache } => {
+            cmd_check(&paths, strict, lint.as_deref(), list_lints, format == Format::Json, !no_cache)
         }
         Cmd::Fmt { paths, check, indent } => cmd_fmt(&paths, check, indent),
         Cmd::Test { paths, filter, lib, lint, fail_fast, verbose, quiet, slow, update, coverage, coverage_lines, format } => {
@@ -796,11 +800,26 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
     Ok(if fail { ExitCode::FAILURE } else { ExitCode::SUCCESS })
 }
 
-fn cmd_check(paths: &[PathBuf], strict: bool, lint: Option<&str>, list_lints: bool, json: bool) -> Result<ExitCode> {
+/// Type-check a tree, replaying a stored run when nothing that feeds it has moved.
+///
+/// The order here is load-bearing. Generating `.d.tl` and collecting the file list come
+/// first, because both produce inputs the cache key is built from. The checker is stood
+/// up only after a miss: building one costs about 13.5 ms
+/// (`crates/htl-core/benches/check.rs`), which is most of what a hit has to save on a
+/// small project.
+fn cmd_check(
+    paths: &[PathBuf],
+    strict: bool,
+    lint: Option<&str>,
+    list_lints: bool,
+    json: bool,
+    use_cache: bool,
+) -> Result<ExitCode> {
     let mut sink = report::Sink::new(json);
     let paths = if paths.is_empty() { vec![PathBuf::from(".")] } else { paths.to_vec() };
-    let h = Htl::new()?;
+    // Listing the rules reports nothing about the project and shares nothing with a run.
     if list_lints {
+        let h = Htl::new()?;
         for r in h.lint_rules()? {
             println!("{r}");
         }
@@ -808,14 +827,39 @@ fn cmd_check(paths: &[PathBuf], strict: bool, lint: Option<&str>, list_lints: bo
     }
     // htl.toml first, then --lint, so the flag wins; `strict` from the file unless flagged.
     let cfg = load_config(&paths[0])?;
+    let strict = strict || cfg.as_ref().and_then(|(_, _, c)| c.lint.strict).unwrap_or(false);
+    // `.d.tl` written from Rust source is an input to the check, so it is regenerated
+    // before anything hashes the tree: a hit computed over stale declarations would be a
+    // hit on a different question from the one being asked.
+    if let Some(first) = paths.first() {
+        auto_dts(first)?;
+    }
+    let files = htl::collect_tl(&paths)?;
+
+    // The store lives at the project root, so invocations from different directories in
+    // one project share it; what separates them is the key, which carries the working
+    // directory and the paths as written.
+    let root = cfg
+        .as_ref()
+        .map(|(r, _, _)| r.clone())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let store = cache::Cache::open(&root, use_cache);
+    let key = cache::key(&paths, strict, lint, json);
+    if let Some(c) = &store
+        && let Some(run) = c.lookup(&key)
+        && sink.replay(&run.diagnostics).is_ok()
+    {
+        let fail = report_check(&mut sink, json, &run, true)?;
+        return Ok(if fail { ExitCode::FAILURE } else { ExitCode::SUCCESS });
+    }
+
+    let h = Htl::new()?;
     let file_spec = cfg.as_ref().map(|(_, _, c)| c.lint_spec()).unwrap_or_default();
     let spec = htl::config::join_specs([file_spec.as_str(), lint.unwrap_or("")]);
     if !spec.is_empty() {
         h.configure_lints(&spec)?;
     }
-    let strict = strict || cfg.as_ref().and_then(|(_, _, c)| c.lint.strict).unwrap_or(false);
     if let Some(first) = paths.first() {
-        auto_dts(first)?;
         apply_project(&h, first)?;
     }
     if let Some((root, _, c)) = &cfg {
@@ -823,7 +867,6 @@ fn cmd_check(paths: &[PathBuf], strict: bool, lint: Option<&str>, list_lints: bo
     }
     // `*_test.tl` under the checked tree require("htl.test"): make its types visible.
     h.install_test_lib()?;
-    let files = htl::collect_tl(&paths)?;
     let (mut n_err, mut n_warn, mut n_lint) = (0usize, 0usize, 0usize);
     let mut infos: Vec<(PathBuf, CheckInfo)> = Vec::with_capacity(files.len());
     for f in &files {
@@ -857,24 +900,85 @@ fn cmd_check(paths: &[PathBuf], strict: bool, lint: Option<&str>, list_lints: bo
             n_lint += 1;
         }
     }
-    let fail = n_err > 0 || (strict && (n_warn > 0 || n_lint > 0));
+    let run = cache::Run {
+        files: files.len(),
+        diagnostics: sink.take_recorded(),
+        errors: n_err,
+        warnings: n_warn,
+        lints: n_lint,
+        strict,
+    };
+    if let Some(c) = &store {
+        c.store(&key, &files, &read_inputs(&infos, &cfg), &search_dirs(&files, &root, &cfg), &run);
+    }
+    let fail = report_check(&mut sink, json, &run, false)?;
+    Ok(if fail { ExitCode::FAILURE } else { ExitCode::SUCCESS })
+}
+
+/// What the run read besides the files it was handed: whatever the checker resolved a
+/// `require` to, and the config that shaped the search.
+fn read_inputs(
+    infos: &[(PathBuf, CheckInfo)],
+    cfg: &Option<(PathBuf, PathBuf, htl::config::HtlConfig)>,
+) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = infos.iter().flat_map(|(_, c)| c.deps.iter().cloned()).collect();
+    if let Some((_, cfg_path, _)) = cfg {
+        out.push(cfg_path.clone());
+    }
+    out
+}
+
+/// Directories a `require` could resolve in, listed whether or not they exist yet.
+///
+/// The ones that do not exist matter most: a `types/` created after an entry was written
+/// changes what a module name resolves to while every file the entry recorded still
+/// hashes the same. Recording only the directories that happened to exist is the hole
+/// ccache documents in its direct mode, and an empty directory hashes differently from
+/// one holding a module, so listing it now is what closes it.
+fn search_dirs(
+    files: &[PathBuf],
+    root: &Path,
+    cfg: &Option<(PathBuf, PathBuf, htl::config::HtlConfig)>,
+) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = files.iter().filter_map(|f| f.parent().map(Path::to_path_buf)).collect();
+    out.push(root.to_path_buf());
+    out.push(root.join("src"));
+    out.push(root.join("types"));
+    if let Some((r, _, c)) = cfg {
+        out.extend(c.search_paths(r));
+    }
+    out
+}
+
+/// The one place a check reports its totals, so a replayed run and a live one cannot
+/// drift apart in how they summarize. Returns whether the run counts as a failure.
+fn report_check(sink: &mut report::Sink, json: bool, run: &cache::Run, cached: bool) -> Result<bool> {
+    let fail = run.errors > 0 || (run.strict && (run.warnings > 0 || run.lints > 0));
     if json {
         report::emit(&report::CheckReport {
-            files: files.len(),
+            files: run.files,
             diagnostics: sink.take(),
-            summary: report::CheckSummary { errors: n_err, warnings: n_warn, lints: n_lint, strict, ok: !fail },
+            summary: report::CheckSummary {
+                errors: run.errors,
+                warnings: run.warnings,
+                lints: run.lints,
+                strict: run.strict,
+                ok: !fail,
+                cached,
+            },
         })?;
     } else {
         eprintln!(
-            "htl check: {} file(s), {} error(s), {} warning(s), {} lint(s){}",
-            files.len(),
-            n_err,
-            n_warn,
-            n_lint,
-            if strict { " [strict]" } else { "" }
+            "htl check: {} file(s), {} error(s), {} warning(s), {} lint(s){}{}",
+            run.files,
+            run.errors,
+            run.warnings,
+            run.lints,
+            if run.strict { " [strict]" } else { "" },
+            if cached { " [cached]" } else { "" }
         );
     }
-    Ok(if fail { ExitCode::FAILURE } else { ExitCode::SUCCESS })
+    Ok(fail)
 }
 
 fn cmd_gen(file: &Path, out: Option<&Path>) -> Result<ExitCode> {
