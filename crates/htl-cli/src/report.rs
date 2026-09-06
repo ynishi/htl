@@ -18,6 +18,38 @@ pub struct Diagnostic {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rule: Option<String>,
     pub message: String,
+    /// A mechanical rewrite `htl fix` may apply, when the diagnostic has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix: Option<FixJson>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct FixJson {
+    /// `safe` / `unsafe` / `suggest`.
+    pub applicability: &'static str,
+    pub edits: Vec<EditJson>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct EditJson {
+    pub line: usize,
+    pub col: usize,
+    pub end_line: usize,
+    pub end_col: usize,
+    pub text: String,
+}
+
+impl FixJson {
+    pub fn from_fix(f: &htl::Fix) -> Self {
+        Self {
+            applicability: f.applicability.as_str(),
+            edits: f
+                .edits
+                .iter()
+                .map(|e| EditJson { line: e.line, col: e.col, end_line: e.end_line, end_col: e.end_col, text: e.text.clone() })
+                .collect(),
+        }
+    }
 }
 
 /// `"<file>:<line>:<col>: <message>"` (what the checker formats) into parts. A line
@@ -28,10 +60,10 @@ pub fn parse_diag(severity: &'static str, text: &str) -> Diagnostic {
         && let (Ok(line), Ok(col)) = (l.trim().parse::<usize>(), c.trim().parse::<usize>())
     {
         let (message, rule) = split_rule(msg.trim_start());
-        return Diagnostic { severity, file: file.to_string(), line, col, rule, message };
+        return Diagnostic { severity, file: file.to_string(), line, col, rule, message, fix: None };
     }
     let (message, rule) = split_rule(text);
-    Diagnostic { severity, file: String::new(), line: 0, col: 0, rule, message }
+    Diagnostic { severity, file: String::new(), line: 0, col: 0, rule, message, fix: None }
 }
 
 /// Lint lines end with ` [htl <rule>]`.
@@ -71,11 +103,26 @@ impl Sink {
         for w in &c.warnings {
             self.diag("warning", w);
         }
-        for l in &c.lints {
-            self.diag("lint", l);
+        for (i, l) in c.lints.iter().enumerate() {
+            self.diag_with_fix("lint", l, c.lint_fixes.get(i).and_then(|f| f.as_ref()));
         }
-        for e in &c.errors {
-            self.diag("error", e);
+        for (i, e) in c.errors.iter().enumerate() {
+            self.diag_with_fix("error", e, c.error_fixes.get(i).and_then(|f| f.as_ref()));
+        }
+    }
+
+    fn diag_with_fix(&mut self, severity: &'static str, text: &str, fix: Option<&htl::Fix>) {
+        if self.json {
+            let mut d = parse_diag(severity, text);
+            d.fix = fix.map(FixJson::from_fix);
+            self.diagnostics.push(d);
+        } else {
+            // Text mode: say a fix exists, so `htl fix` is discoverable from the output.
+            match fix.map(|f| f.applicability) {
+                Some(htl::Applicability::Safe) => eprintln!("{severity}: {text} (fixable: htl fix)"),
+                Some(htl::Applicability::Unsafe) => eprintln!("{severity}: {text} (fixable: htl fix --unsafe)"),
+                _ => eprintln!("{severity}: {text}"),
+            }
         }
     }
 
@@ -181,6 +228,57 @@ pub struct TestReport {
     pub summary: TestSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coverage: Option<CoverageReport>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct FixApplied {
+    pub file: String,
+    pub line: usize,
+    pub rule: String,
+    pub applicability: &'static str,
+    pub pass: usize,
+}
+
+#[derive(Serialize, Debug)]
+pub struct FixSkipped {
+    pub file: String,
+    pub line: usize,
+    pub rule: String,
+    pub reason: String,
+}
+
+#[derive(Serialize, Debug)]
+pub struct FixFile {
+    pub path: String,
+    pub changed: bool,
+    pub deferred: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reverted: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oscillation: Option<String>,
+    /// Diagnostics after fixing.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct FixReport {
+    pub dry_run: bool,
+    pub applied: Vec<FixApplied>,
+    pub skipped: Vec<FixSkipped>,
+    pub files: Vec<FixFile>,
+    pub summary: FixSummary,
+}
+
+#[derive(Serialize, Debug)]
+pub struct FixSummary {
+    pub files: usize,
+    pub files_changed: usize,
+    pub applied: usize,
+    pub skipped: usize,
+    pub deferred: usize,
+    pub reverted: usize,
+    pub errors_remaining: usize,
+    pub ok: bool,
 }
 
 /// Print one document to stdout.
