@@ -725,6 +725,29 @@ impl Htl {
         read_checkinfo(&t)
     }
 
+    /// Check what is on disk right now, ignoring the store and not adding to it.
+    ///
+    /// [`check`](Self::check) serves a module the checker already knows from its store, and
+    /// the underlying `tl.check_file` returns early when the environment has the file
+    /// loaded. That is what makes checking a project fast, and it is wrong for a caller that
+    /// has just written the file: the answer describes the version from before the write.
+    /// `htl fix` writes and then measures, and was reverting correct fixes because of it.
+    ///
+    /// Nothing is stored either, because the caller may be about to put the file back —
+    /// leaving the result behind would have the store describing a file that no longer says
+    /// that.
+    ///
+    /// Slower than `check`: a cold environment re-checks the modules this file requires.
+    pub fn check_written(&self, file: &Path) -> Result<CheckInfo> {
+        let f: Function = self.h.get("check")?;
+        let opts = self.lua.create_table()?;
+        opts.set("seed", false)?;
+        opts.set("store", false)?;
+        // `H.check(filename, env, opts)`: a nil env is a fresh one.
+        let t: Table = f.call((path_str(file), mlua::Value::Nil, opts))?;
+        read_checkinfo(&t)
+    }
+
     /// Type-check and generate Lua source. `None` code means errors (see `CheckInfo`).
     pub fn gen_lua(&self, file: &Path) -> Result<(Option<String>, CheckInfo)> {
         let f: Function = self.h.get("gen")?;

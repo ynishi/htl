@@ -240,6 +240,104 @@ fn other_type_errors_do_not_block_but_syntax_errors_do() {
     );
 }
 
+/// A correct fix must survive its own verification pass, and it did not when anything else
+/// in the run had required the module being fixed.
+///
+/// Checking the requirer puts `world` in the checker's store; `fix_file` then wrote the file
+/// and re-checked it through the same checker, and `tl.check_file` returns early when the
+/// environment already has the file loaded — so the verification saw the version from before
+/// the write, concluded the error count had not moved, and put the file back. Without the
+/// requirer the same fix applied cleanly, which is what made this hard to see.
+#[test]
+fn a_correct_fix_survives_when_another_module_requires_the_one_being_fixed() {
+    let dir = scratch("requirer");
+    write(&dir.join("world.tl"), FWD);
+    write(
+        &dir.join("main.tl"),
+        "local world = require(\"world\")\nlocal w: world.W = { hp = 1 }\nprint(world.tick(w))\n",
+    );
+    let h = Htl::new().unwrap();
+    h.add_path(&dir).unwrap();
+
+    // The step that used to break it: `world` enters the store here.
+    let m = h.check(&dir.join("main.tl")).unwrap();
+    assert!(m.ok(), "the requirer itself is fine: {:?}", m.errors);
+
+    let out = fix_file(&h, &dir.join("world.tl"), &FixOptions::default()).unwrap();
+    assert!(
+        out.reverted.is_none(),
+        "a correct fix must not be reverted: {:?}",
+        out.reverted
+    );
+    assert!(
+        !out.applied.is_empty(),
+        "and it must have applied something"
+    );
+
+    let text = std::fs::read_to_string(dir.join("world.tl")).unwrap();
+    assert!(
+        text.contains("observe:"),
+        "the declaration is in the file on disk:\n{text}"
+    );
+    assert!(
+        h.check_written(&dir.join("world.tl")).unwrap().ok(),
+        "and the file checks clean afterwards"
+    );
+}
+
+/// What a dry run says it would leave is what a real run leaves. They disagreed: the dry run
+/// wrote to a scratch path no store entry named and got the right answer, the real run
+/// re-checked the path the store knew and got the stale one.
+#[test]
+fn a_dry_run_and_a_real_run_agree_on_the_same_tree() {
+    let dry = scratch("agree-dry");
+    let real = scratch("agree-real");
+    for dir in [&dry, &real] {
+        write(&dir.join("world.tl"), FWD);
+        write(
+            &dir.join("main.tl"),
+            "local world = require(\"world\")\nlocal w: world.W = { hp = 1 }\nprint(world.tick(w))\n",
+        );
+    }
+
+    let hd = Htl::new().unwrap();
+    hd.add_path(&dry).unwrap();
+    hd.check(&dry.join("main.tl")).unwrap();
+    let dry_out = fix_file(
+        &hd,
+        &dry.join("world.tl"),
+        &FixOptions {
+            dry_run: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let hr = Htl::new().unwrap();
+    hr.add_path(&real).unwrap();
+    hr.check(&real.join("main.tl")).unwrap();
+    let real_out = fix_file(&hr, &real.join("world.tl"), &FixOptions::default()).unwrap();
+
+    assert_eq!(
+        dry_out.check.errors.len(),
+        real_out.check.errors.len(),
+        "what the dry run says it would leave is what the real run leaves"
+    );
+    assert_eq!(
+        dry_out.applied.len(),
+        real_out.applied.len(),
+        "and they apply the same fixes"
+    );
+    assert!(
+        dry_out.contents.is_some(),
+        "the dry run has a patch to show"
+    );
+    assert!(
+        std::fs::read_to_string(dry.join("world.tl")).unwrap() == FWD,
+        "and still writes nothing"
+    );
+}
+
 #[test]
 fn a_fix_that_makes_things_worse_is_reverted() {
     // Contrived: a fix's declaration line would be inserted into a record whose `end`
