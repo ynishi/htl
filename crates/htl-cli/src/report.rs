@@ -295,6 +295,8 @@ pub struct TestSummary {
     pub replayed: usize,
     pub duration_ms: f64,
     pub ok: bool,
+    /// The run's random seed. Passing it back as `--seed` repeats what every file drew.
+    pub seed: u64,
 }
 
 /// A function of a module no statement of which ran.

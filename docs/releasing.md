@@ -50,10 +50,14 @@ versions.
 resolved version, and cargo says so rather than switching:
 
 ```
-warning: patch `htl v0.1.20 (...)` was not used in the crate graph
+warning: patch `htl v0.2.0 (...)` was not used in the crate graph
 ```
 
 Run `cargo update -p htl -p htl-core -p htl-macros` once; the lock then points at the
 local paths. To go back after the version is on crates.io, delete the `[patch.crates-io]`
-block and run the same `cargo update` again. A caret requirement such as
-`htl = "0.1.19"` already accepts `0.1.20`, so nothing else changes.
+block and run the same `cargo update` again.
+
+Whether the consumer needs anything else depends on which number moved. Under `0.y.z`
+cargo treats the minor as the major, so `htl = "0.1.19"` accepts `0.1.20` and nothing
+else changes, while it does **not** accept `0.2.0`: a release that bumps the minor is one
+where every consumer edits its requirement, which is the point of bumping it.

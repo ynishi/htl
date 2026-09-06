@@ -216,6 +216,20 @@ function M.configure(cfg)
    snap.mkdir = cfg.mkdir
 end
 
+--- The run's random stream, as a function with `math.random`'s own shape:
+--- `rng()`, `rng(m)`, `rng(m, n)`.
+---
+--- The runner seeds the state before the file runs, so this and `math.random` are one
+--- stream and both repeat under `htl test --seed <n>`. Drawing through this rather than
+--- reaching for `math.random` says in the test that the values are meant to be
+--- reproducible, and leaves the runner somewhere to change how they are produced.
+---
+--- A test that calls `math.randomseed` itself takes the stream over from that point; the
+--- runner does not seed again.
+function M.rng()
+   return math.random
+end
+
 -- Deterministic text for a value: sorted keys, one entry per line, so a snapshot
 -- diff is readable and stable across runs.
 local function serialize(v, indent)

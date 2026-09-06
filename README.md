@@ -404,8 +404,24 @@ both of those lines, so neither says anything about calls. A function with nothi
 between — written on one line, or with an empty body — is not reported. The hook slows
 the run, and code that runs inside a coroutine the program creates is not seen.
 
+Randomness: the runner seeds each file before it runs, prints the seed of every run, and
+takes it back with `--seed`, so a test that draws is one whose failure can be looked at
+again:
+
+```text
+htl test: seed 8014255196 (repeat with --seed 8014255196)
+```
+
+`t.rng()` is that stream, shaped like `math.random` (`rng()`, `rng(m)`, `rng(m, n)`);
+`math.random` is the same stream, so a test already using it repeats too. Each file's
+seed is derived from the run's seed and the file's own path rather than drawn from one
+shared stream, so what a file draws does not depend on which other files ran or in what
+order — running it alone, or with `--filter`, reproduces what it did in the full run. A
+test that calls `math.randomseed` itself takes over from there; the runner does not seed
+again.
+
 Runner: `htl test [paths] [--filter substr] [--fail-fast] [-v | -q] [--slow MS]
-[--update] [--coverage [--coverage-lines]]`. Each file runs in a fresh state; `-v` prints every test with its time,
+[--update] [--seed N] [--coverage [--coverage-lines]]`. Each file runs in a fresh state; `-v` prints every test with its time,
 `-q` only failures (with their details), errors and the summary line, `--slow 50` the
 tests over 50 ms, `--fail-fast` stops at the first failure. The run has one checker
 (`htl::testing::TestSession`) and one fresh program state per file: globals,
@@ -453,7 +469,7 @@ added, not renamed.
 - `test`: `{ files: [{ path, ok, diagnostics, error?, file_level, passed, failed,
   failures, tests: [{ name, ok, ms }], duration_ms, snapshots_written,
   snapshots_updated }], summary: { files, files_run, passed, failed, files_with_errors,
-  duration_ms, ok }, coverage?: { modules: [{ path, executed, total, unexecuted:
+  duration_ms, ok, seed }, coverage?: { modules: [{ path, executed, total, unexecuted:
   [[first, last]], never_ran?: [{ name, line }] }], executed, total } }` (`coverage`
   with `--coverage`; `never_ran` is absent when every function of the module ran).
 
