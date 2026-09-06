@@ -62,6 +62,9 @@ local record test
    run: function(filter?: string, opts?: RunOptions): Report
    count: function(): integer
    configure: function(SnapshotConfig)
+   --- The run's random stream, shaped like `math.random`. Repeats under
+   --- `htl test --seed <n>`; see the Tests section of the README.
+   rng: function(): function(integer, integer): integer
 end
 
 return test

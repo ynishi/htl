@@ -137,6 +137,9 @@ enum Cmd {
         /// With --coverage, also list the unexecuted line ranges of each module
         #[arg(long, requires = "coverage")]
         coverage_lines: bool,
+        /// Seed the random stream tests draw from; printed every run, so a failure repeats
+        #[arg(long)]
+        seed: Option<u64>,
         /// Output format
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
@@ -317,6 +320,7 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
             update,
             coverage,
             coverage_lines,
+            seed,
             format,
             no_cache,
             explain_cache,
@@ -336,6 +340,7 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
                 json: format == Format::Json,
                 no_cache,
                 explain: explain_cache,
+                seed,
             },
         ),
         Cmd::Pkg { args } => cmd_pkg(&args),
@@ -551,6 +556,7 @@ struct TestFlags {
     json: bool,
     no_cache: bool,
     explain: bool,
+    seed: Option<u64>,
 }
 
 /// Coverage over the run: every `.tl` the test files' checks depended on (so a module
@@ -701,10 +707,20 @@ fn cmd_test(
     } else {
         paths.to_vec()
     };
+    // Given, or drawn once for the whole run and printed. Drawn from the clock rather
+    // than from a generator this process also hands to the tests: the seed has to differ
+    // between runs, and nothing else about it matters.
+    let seed = flags.seed.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0)
+    });
     let opts = htl::testing::RunOptions {
         fail_fast: flags.fail_fast,
         update_snapshots: flags.update,
         coverage: flags.coverage,
+        seed: Some(seed),
     };
     let mut cov_hits: std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>> =
         Default::default();
@@ -913,6 +929,7 @@ fn cmd_test(
                 replayed,
                 duration_ms,
                 ok: bad_files == 0,
+                seed,
             },
             coverage,
         })?;
@@ -939,6 +956,9 @@ fn cmd_test(
             },
             duration_ms
         );
+        // Always, not only on failure: the seed of a run that passed is what reproduces
+        // the run that passes, and a failure two commits later is compared against it.
+        eprintln!("htl test: seed {seed} (repeat with --seed {seed})");
     }
     Ok(if bad_files == 0 {
         ExitCode::SUCCESS
