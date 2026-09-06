@@ -227,6 +227,30 @@ fn check_paths_make_host_supplied_modules_visible() {
     assert!(ci.errors.iter().any(|e| e.contains("got integer, expected string")), "typed through [check] paths: {:?}", ci.errors);
 }
 
+/// `types/` next to htl.toml is searched without configuration, and a source of the
+/// same module name elsewhere on the path still wins over the declaration there.
+#[test]
+fn types_dir_is_searched_by_default() {
+    let root = scratch("types");
+    write(&root.join("htl.toml"), "[lint]\n");
+    write(&root.join("types/xlib.d.tl"), "local record xlib\n   connect: function(string): boolean\nend\nreturn xlib\n");
+    write(&root.join("src/use.tl"), "local xlib = require(\"xlib\")\nlocal ok: string = xlib.connect(\"h\")\nprint(ok)\n");
+    let (_, cfg) = HtlConfig::find(&root).unwrap().unwrap();
+    assert_eq!(cfg.search_paths(&root), vec![root.clone(), root.join("src"), root.join("types")]);
+
+    let h = Htl::new().unwrap();
+    h.apply_config(&root, &cfg).unwrap();
+    let ci = h.check(&root.join("src/use.tl")).unwrap();
+    assert!(ci.errors.iter().any(|e| e.contains("got boolean, expected string")), "typed through types/: {:?}", ci.errors);
+
+    // A source with the same name in src/ wins over the declaration in types/.
+    write(&root.join("src/xlib.tl"), "local record xlib\nend\nfunction xlib.connect(_: string): string\n   return \"s\"\nend\nreturn xlib\n");
+    let h = Htl::new().unwrap();
+    h.apply_config(&root, &cfg).unwrap();
+    let ci = h.check(&root.join("src/use.tl")).unwrap();
+    assert!(ci.ok(), "source beats the declaration: {:?}", ci.errors);
+}
+
 #[test]
 fn source_beats_a_stale_declaration_wherever_it_sits_on_the_path() {
     let root = scratch("stale-decl");

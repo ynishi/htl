@@ -151,10 +151,13 @@ impl HtlConfig {
         parts.join(",")
     }
 
-    /// Directories the checker should search, in order: `root`, `root/src`, then
-    /// `[check] paths` (resolved against `root`, `~` expanded). Only existing dirs.
+    /// Directories the checker should search, in order: `root`, `root/src`, `root/types`
+    /// (hand-written `.d.tl` for modules the host provides, the DefinitelyTyped shape),
+    /// then `[check] paths` (resolved against `root`, `~` expanded). Only existing dirs.
+    /// A `.tl` source anywhere on the path beats a `.d.tl`, so a declaration under
+    /// `types/` never shadows an implementation.
     pub fn search_paths(&self, root: &Path) -> Vec<PathBuf> {
-        let mut out = vec![root.to_path_buf(), root.join("src")];
+        let mut out = vec![root.to_path_buf(), root.join("src"), root.join("types")];
         for p in &self.check.paths {
             out.push(resolve_path(root, p));
         }
