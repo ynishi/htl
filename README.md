@@ -243,6 +243,7 @@ every declared field, for types that are settled.
 | rule | default | catches |
 |---|---|---|
 | `nil-index` | on | `t[k].x`, `t[k]:m()`, `t[k]()`, `t[k][j]` — Teal types a map/array lookup as `V`, not `V \| nil` |
+| `struct-fields` | on | a table built for a record marked `---@struct` that leaves out a field the record declares and `---@optional` does not exempt. Silent until a record carries the marker (see below) |
 | `enum-exhaustive` | on | `if e == "a" ... elseif e == "b" ... end` over an enum with a value left unhandled and no `else`; enums nested in records and enums from required modules count |
 | `shadow-local` | on | a local / loop var / parameter reusing an enclosing local's name; when that outer local is a `require`d module the message says which module and where it was required |
 | `no-global` | on | `global` declarations |
@@ -254,6 +255,39 @@ every declared field, for types that are settled.
 Silence one occurrence with a trailing `-- htl: allow(nil-index)`. `include_tl!`
 treats lints as errors (`HTL_LINT=warn` downgrades, `HTL_LINTS=+no-any,-shadow-local`
 configures).
+
+### Records built whole (`---@struct`)
+
+Every Teal record field is nilable and Teal has `?` for function parameters but not for
+record fields, so a record the program builds itself still reads as if any field might be
+absent. `---@struct` says it does not:
+
+```tl
+local record MonsterDef   ---@struct
+   id: string
+   hp: integer
+   inflicts: Status       ---@optional
+   ---@optional
+   home: BranchId
+end
+```
+
+Every table built as a `MonsterDef` must then set `id` and `hp`; `inflicts` and `home` may
+be absent. Adding an unmarked field makes the construction sites that predate it report,
+which is the point — the default for a new field is mandatory, and `---@optional` is the
+exception you write on purpose.
+
+The markers go where the record is **declared**, and the report lands where it is
+**built**, so an SDK can declare the shape its mods must fill in. Both marker forms work:
+trailing on the field's own line, or on the line above it. Every construction site counts
+— a bare literal, an element of an array or map of that record, a literal passed as a
+typed argument, and a function's `return`.
+
+This is a lint, not a type. The file stays valid Teal and other tooling ignores the
+comment; use sites still see a nilable field. What it removes is the reason to guard, and
+the doubt about whether a field was ever set. Data arriving from outside the program — a
+mod's return value, a save file, a host — is a different question, and `[[contract]]` with
+`require_fields` is what checks that.
 
 ## Project config (`htl.toml`)
 

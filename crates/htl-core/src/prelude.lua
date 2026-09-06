@@ -62,6 +62,108 @@ local function new_env()
    return env
 end
 
+-- `---@struct` / `---@optional`: which records are built whole, and which of their fields
+-- are exempt. The markers are comments, so the checker discards them; they are read back
+-- from the source of the file that *declares* the record, which is rarely the file being
+-- checked (a mod builds a record its SDK declares).
+--
+-- Reading them here rather than in lint.lua is deliberate. The rule needs to know what
+-- type a bare `{ ... }` is being built as, and that is type information; lint.lua parses
+-- afresh precisely so it never touches the checker's annotated tree (see the note on
+-- L.run). So the type side is answered here and handed over as a lookup, the way
+-- `subject_enum` already is.
+-- Declaring files are read per check, not cached across checks. A cache that outlives the
+-- run is a copy of a file that may since have been written, which is the failure `htl fix`
+-- had when it verified against the store instead of the file it had just written.
+local function source_lines(cache, file)
+   local cached = cache[file]
+   if cached ~= nil then return cached end
+   local fd = io.open(file, "rb")
+   if not fd then
+      cache[file] = false
+      return false
+   end
+   local src = fd:read("a")
+   fd:close()
+   local lines = {}
+   for l in (src .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = l end
+   cache[file] = lines
+   return lines
+end
+
+local function has_marker(lines, y, marker)
+   if not lines or not y then return false end
+   -- On the line itself (trailing), or on the line above it (own line).
+   for _, l in ipairs({ lines[y], lines[y - 1] }) do
+      if l and l:match("%-%-%-@" .. marker .. "%f[%W]") then return true end
+   end
+   return false
+end
+
+local function indent_of(line)
+   return #(line:match("^(%s*)") or "")
+end
+
+-- Fields of the record declared at `file:y`, as name -> the line it is declared on.
+-- A source scan: the record's fields are the `name: type` lines between the declaration
+-- and the `end` that closes it, which is the first `end` indented no deeper than the
+-- declaration itself.
+local function field_lines(lines, y)
+   local out = {}
+   local decl = lines[y]
+   if not decl then return out end
+   local base = indent_of(decl)
+   for i = y + 1, #lines do
+      local l = lines[i]
+      if l:match("^%s*end%f[%W]") and indent_of(l) <= base then break end
+      local name = l:match("^%s*([%w_]+)%s*:")
+      if name then out[name] = i end
+   end
+   return out
+end
+
+-- What `struct_at` returns for a position that holds a `---@struct` record:
+-- { name = "MonsterDef", required = { id = true, hp = true } }.
+local function struct_spec(cache, t)
+   local lines = source_lines(cache, t.file)
+   if not lines then return nil end
+   if not has_marker(lines, t.y, "struct") then return nil end
+   local at = field_lines(lines, t.y)
+   local required = {}
+   local any = false
+   for name in pairs(t.fields or {}) do
+      if not has_marker(lines, at[name], "optional") then
+         required[name] = true
+         any = true
+      end
+   end
+   if not any then return nil end
+   return { name = t.str or "record", required = required }
+end
+
+-- Resolver for the `struct-fields` lint: the `---@struct` record being built at (y, x),
+-- or nil. One report per file, shared with `subject_enum_resolver` above.
+local function struct_resolver(result, filename)
+   local ok, report = pcall(tl.get_types, result)
+   if not ok or type(report) ~= "table" then return nil end
+   local by_pos = report.by_pos and report.by_pos[filename]
+   if not by_pos then return nil end
+   local specs, sources = {}, {}
+   local function deref(id, depth)
+      local t = report.types[id]
+      if t and t.ref and depth < 8 then return deref(t.ref, depth + 1) end
+      return t
+   end
+   return function(y, x)
+      local id = by_pos[y] and by_pos[y][x]
+      if not id then return nil end
+      local t = deref(id, 0)
+      if not t or not t.fields or not t.file or not t.y then return nil end
+      if specs[id] == nil then specs[id] = struct_spec(sources, t) or false end
+      return specs[id] or nil
+   end
+end
+
 -- Resolver for lints: type of a dotted subject (`c` / `w.state`) at (y, x).
 -- Returns (enumset, type name) for an enum, `false` for a known non-enum type,
 -- nil when unknown.
@@ -511,6 +613,7 @@ function H.check(filename, env, opts)
          local found = lint.run(src, filename, H.lint_cfg, {
             enums = enums,
             subject_enum = subject,
+            struct_at = struct_resolver(result, filename),
          })
          prof("lint.run", filename, t1)
          for _, l in ipairs(found or {}) do
