@@ -37,8 +37,8 @@ fn diagnostics(args: &[&str], cwd: &Path) -> Vec<String> {
         .current_dir(cwd)
         .output()
         .unwrap();
-    let v: serde_json::Value =
-        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("stdout is one JSON document");
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout))
+        .expect("stdout is one JSON document");
     v["diagnostics"]
         .as_array()
         .expect("diagnostics array")
@@ -48,7 +48,11 @@ fn diagnostics(args: &[&str], cwd: &Path) -> Vec<String> {
             // `./b/main.tl` where `htl check b/main.tl` says `b/main.tl`. That spelling is
             // not what these tests are about.
             let file = d["file"].as_str().unwrap_or("").trim_start_matches("./");
-            format!("{file}:{}: {}", d["line"], d["message"].as_str().unwrap_or(""))
+            format!(
+                "{file}:{}: {}",
+                d["line"],
+                d["message"].as_str().unwrap_or("")
+            )
         })
         .collect()
 }
@@ -61,7 +65,10 @@ fn two_dirs() -> PathBuf {
         &root.join("a/util.tl"),
         "local record util\nend\nfunction util.f(): integer\n   return 1\nend\nreturn util\n",
     );
-    write(&root.join("b/main.tl"), "local util = require(\"util\")\nlocal x: integer = util.f()\nprint(x)\n");
+    write(
+        &root.join("b/main.tl"),
+        "local util = require(\"util\")\nlocal x: integer = util.f()\nprint(x)\n",
+    );
     root
 }
 
@@ -76,7 +83,10 @@ fn a_file_reports_the_same_wherever_it_falls_in_the_walk() {
         alone.iter().any(|d| d.contains("module not found")),
         "b/ has no util.tl, so checking it alone must say so: {alone:?}"
     );
-    assert_eq!(alone, after, "checking a/ first must not make b/'s missing module resolve");
+    assert_eq!(
+        alone, after,
+        "checking a/ first must not make b/'s missing module resolve"
+    );
     assert_eq!(alone, before, "nor must checking it second");
 }
 
@@ -86,7 +96,10 @@ fn walking_a_tree_agrees_with_checking_its_files_one_at_a_time() {
     let whole = diagnostics(&["."], &root);
     let mut apart = diagnostics(&["a/util.tl"], &root);
     apart.extend(diagnostics(&["b/main.tl"], &root));
-    assert_eq!(whole, apart, "a walk is the files it visits, in the state each would be checked in");
+    assert_eq!(
+        whole, apart,
+        "a walk is the files it visits, in the state each would be checked in"
+    );
 }
 
 /// `add_layout_paths` deliberately puts the project root and `src/` on the path for a file
@@ -99,7 +112,13 @@ fn a_test_file_still_sees_the_project_root_and_src() {
         &root.join("src/util.tl"),
         "local record util\nend\nfunction util.f(): integer\n   return 1\nend\nreturn util\n",
     );
-    write(&root.join("tests/util_test.tl"), "local util = require(\"util\")\nlocal x: integer = util.f()\nprint(x)\n");
+    write(
+        &root.join("tests/util_test.tl"),
+        "local util = require(\"util\")\nlocal x: integer = util.f()\nprint(x)\n",
+    );
     let d = diagnostics(&["."], &root);
-    assert!(d.is_empty(), "a file under tests/ resolves modules from src/: {d:?}");
+    assert!(
+        d.is_empty(),
+        "a file under tests/ resolves modules from src/: {d:?}"
+    );
 }

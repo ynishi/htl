@@ -53,11 +53,26 @@ fn matchers_and_expect_all_are_typed_and_run() {
             end)\n\
          end)\n",
     );
-    let rep = run_test_file(&dir.join("m_test.tl"), None, "htl.test", None, &RunOptions::default()).unwrap();
+    let rep = run_test_file(
+        &dir.join("m_test.tl"),
+        None,
+        "htl.test",
+        None,
+        &RunOptions::default(),
+    )
+    .unwrap();
     assert!(rep.check.ok(), "{:?}", rep.check.errors);
     assert_eq!((rep.passed, rep.failed), (3, 2), "{:?}", rep.failures);
-    assert!(rep.failures[0].contains("greater than 2, got 1"), "{}", rep.failures[0]);
-    assert!(rep.failures[1].contains("expected (false, \"locked\"), got (false, \"no door\")"), "{}", rep.failures[1]);
+    assert!(
+        rep.failures[0].contains("greater than 2, got 1"),
+        "{}",
+        rep.failures[0]
+    );
+    assert!(
+        rep.failures[1].contains("expected (false, \"locked\"), got (false, \"no door\")"),
+        "{}",
+        rep.failures[1]
+    );
     assert_eq!(rep.tests.len(), 5);
     assert!(rep.tests.iter().all(|t| t.ms >= 0.0));
     assert!(rep.tests[0].ok && !rep.tests[3].ok);
@@ -82,13 +97,36 @@ fn negated_matchers_pass_and_fail_with_specific_messages() {
          t.it(\"matches\", function() t.expect(\"costs 12 gold\"):to_not_match(\"%d+ gold\") end)\n\
          t.it(\"is nil\", function() t.expect(nil):to_not_be_nil() end)\n",
     );
-    let rep = run_test_file(&dir.join("n_test.tl"), None, "htl.test", None, &RunOptions::default()).unwrap();
+    let rep = run_test_file(
+        &dir.join("n_test.tl"),
+        None,
+        "htl.test",
+        None,
+        &RunOptions::default(),
+    )
+    .unwrap();
     assert!(rep.check.ok(), "{:?}", rep.check.errors);
     assert_eq!((rep.passed, rep.failed), (1, 4), "{:?}", rep.failures);
-    assert!(rep.failures[0].contains("expected \"closing on the bat\" not to contain \"bat\""), "{}", rep.failures[0]);
-    assert!(rep.failures[1].contains("not to contain \"b\" (found at index 2)"), "{}", rep.failures[1]);
-    assert!(rep.failures[2].contains("not to match /%d+ gold/ (matched \"12 gold\" at 7)"), "{}", rep.failures[2]);
-    assert!(rep.failures[3].contains("expected a value, got nil"), "{}", rep.failures[3]);
+    assert!(
+        rep.failures[0].contains("expected \"closing on the bat\" not to contain \"bat\""),
+        "{}",
+        rep.failures[0]
+    );
+    assert!(
+        rep.failures[1].contains("not to contain \"b\" (found at index 2)"),
+        "{}",
+        rep.failures[1]
+    );
+    assert!(
+        rep.failures[2].contains("not to match /%d+ gold/ (matched \"12 gold\" at 7)"),
+        "{}",
+        rep.failures[2]
+    );
+    assert!(
+        rep.failures[3].contains("expected a value, got nil"),
+        "{}",
+        rep.failures[3]
+    );
 }
 
 #[test]
@@ -101,9 +139,26 @@ fn fail_fast_stops_after_the_first_failure_in_a_file() {
          t.it(\"second\", function() t.expect(1):to_equal(2) end)\n\
          t.it(\"third\", function() t.expect(1):to_equal(3) end)\n",
     );
-    let all = run_test_file(&dir.join("f_test.tl"), None, "htl.test", None, &RunOptions::default()).unwrap();
+    let all = run_test_file(
+        &dir.join("f_test.tl"),
+        None,
+        "htl.test",
+        None,
+        &RunOptions::default(),
+    )
+    .unwrap();
     assert_eq!((all.passed, all.failed), (1, 2));
-    let fast = run_test_file(&dir.join("f_test.tl"), None, "htl.test", None, &RunOptions { fail_fast: true, ..Default::default() }).unwrap();
+    let fast = run_test_file(
+        &dir.join("f_test.tl"),
+        None,
+        "htl.test",
+        None,
+        &RunOptions {
+            fail_fast: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!((fast.passed, fast.failed), (1, 1), "{:?}", fast.failures);
     assert_eq!(fast.tests.len(), 2, "third must not have run");
 }
@@ -131,21 +186,44 @@ fn session_shares_the_checker_but_not_program_state() {
     );
     let session = TestSession::new(None, "htl.test", None, RunOptions::default()).unwrap();
     let a = session.run_file(&dir.join("tests/a_test.tl")).unwrap();
-    assert!(a.check.ok() && a.error.is_none() && a.failed == 0, "{:?} {:?} {:?}", a.check.errors, a.error, a.failures);
+    assert!(
+        a.check.ok() && a.error.is_none() && a.failed == 0,
+        "{:?} {:?} {:?}",
+        a.check.errors,
+        a.error,
+        a.failures
+    );
     let b = session.run_file(&dir.join("tests/b_test.tl")).unwrap();
-    assert!(b.check.ok() && b.error.is_none(), "{:?} {:?}", b.check.errors, b.error);
+    assert!(
+        b.check.ok() && b.error.is_none(),
+        "{:?} {:?}",
+        b.check.errors,
+        b.error
+    );
     assert_eq!((b.passed, b.failed), (1, 0), "{:?}", b.failures);
 
     // A type error in a file is still that file's, and a module with a type error
     // still fails at require in a later file.
-    write(&dir.join("tests/c_test.tl"), "local t = require(\"htl.test\")\nlocal n: integer = \"x\"\nprint(n)\n");
+    write(
+        &dir.join("tests/c_test.tl"),
+        "local t = require(\"htl.test\")\nlocal n: integer = \"x\"\nprint(n)\n",
+    );
     let c = session.run_file(&dir.join("tests/c_test.tl")).unwrap();
     assert!(!c.check.ok());
-    write(&dir.join("src/bad.tl"), "local record bad\nend\nfunction bad.f(): integer\n   return \"s\"\nend\nreturn bad\n");
-    write(&dir.join("tests/d_test.tl"), "local t = require(\"htl.test\")\nlocal bad = require(\"bad\")\nt.it(\"x\", function() t.expect(bad.f()):to_equal(1) end)\n");
+    write(
+        &dir.join("src/bad.tl"),
+        "local record bad\nend\nfunction bad.f(): integer\n   return \"s\"\nend\nreturn bad\n",
+    );
+    write(
+        &dir.join("tests/d_test.tl"),
+        "local t = require(\"htl.test\")\nlocal bad = require(\"bad\")\nt.it(\"x\", function() t.expect(bad.f()):to_equal(1) end)\n",
+    );
     let d = session.run_file(&dir.join("tests/d_test.tl")).unwrap();
     let msg = format!("{:?} {:?}", d.check.errors, d.error);
-    assert!(msg.contains("expected integer"), "bad's own error must surface: {msg}");
+    assert!(
+        msg.contains("expected integer"),
+        "bad's own error must surface: {msg}"
+    );
 }
 
 #[test]
@@ -162,26 +240,55 @@ fn snapshots_write_compare_diff_and_update() {
     };
     write(&file, &src("Depth 1"));
     let run = |update: bool| {
-        TestSession::new(None, "htl.test", None, RunOptions { update_snapshots: update, ..Default::default() })
-            .unwrap()
-            .run_file(&file)
-            .unwrap()
+        TestSession::new(
+            None,
+            "htl.test",
+            None,
+            RunOptions {
+                update_snapshots: update,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .run_file(&file)
+        .unwrap()
     };
 
     // First run: written, and reported as such.
     let r1 = run(false);
-    assert!(r1.check.ok() && r1.failed == 0, "{:?} {:?}", r1.check.errors, r1.failures);
+    assert!(
+        r1.check.ok() && r1.failed == 0,
+        "{:?} {:?}",
+        r1.check.errors,
+        r1.failures
+    );
     assert_eq!(r1.snapshots_written.len(), 2, "{:?}", r1.snapshots_written);
     let sdir = snapshot_dir(&file);
-    assert!(sdir.ends_with("tests/__snapshots__/screen_test"), "{}", sdir.display());
+    assert!(
+        sdir.ends_with("tests/__snapshots__/screen_test"),
+        "{}",
+        sdir.display()
+    );
     let frame = std::fs::read_to_string(sdir.join("first_floor.snap")).unwrap();
-    assert_eq!(frame, "Depth 1\nhp 24/24\n@..#\n", "array of strings = lines");
+    assert_eq!(
+        frame, "Depth 1\nhp 24/24\n@..#\n",
+        "array of strings = lines"
+    );
     let rec = std::fs::read_to_string(sdir.join("a_record.snap")).unwrap();
-    assert_eq!(rec, "{\n  hp = 3,\n  name = \"x\",\n  tags = {\n    [1] = \"a\",\n    [2] = \"b\",\n  },\n}\n", "sorted, one entry per line");
+    assert_eq!(
+        rec,
+        "{\n  hp = 3,\n  name = \"x\",\n  tags = {\n    [1] = \"a\",\n    [2] = \"b\",\n  },\n}\n",
+        "sorted, one entry per line"
+    );
 
     // Second run: same value, nothing written.
     let r2 = run(false);
-    assert_eq!((r2.failed, r2.snapshots_written.len()), (0, 0), "{:?}", r2.failures);
+    assert_eq!(
+        (r2.failed, r2.snapshots_written.len()),
+        (0, 0),
+        "{:?}",
+        r2.failures
+    );
 
     // Changed value: fails with a line diff naming the file.
     write(&file, &src("Depth 2"));
@@ -189,13 +296,25 @@ fn snapshots_write_compare_diff_and_update() {
     assert_eq!(r3.failed, 1, "{:?}", r3.failures);
     let msg = &r3.failures[0];
     assert!(msg.contains("snapshot 'first floor' differs from"), "{msg}");
-    assert!(msg.contains("-Depth 1") && msg.contains("+Depth 2"), "{msg}");
+    assert!(
+        msg.contains("-Depth 1") && msg.contains("+Depth 2"),
+        "{msg}"
+    );
     assert!(msg.contains("--update"), "{msg}");
 
     // --update accepts it and reports the rewrite; the next plain run is green.
     let r4 = run(true);
-    assert_eq!((r4.failed, r4.snapshots_updated.len()), (0, 1), "{:?}", r4.failures);
-    assert!(std::fs::read_to_string(sdir.join("first_floor.snap")).unwrap().starts_with("Depth 2\n"));
+    assert_eq!(
+        (r4.failed, r4.snapshots_updated.len()),
+        (0, 1),
+        "{:?}",
+        r4.failures
+    );
+    assert!(
+        std::fs::read_to_string(sdir.join("first_floor.snap"))
+            .unwrap()
+            .starts_with("Depth 2\n")
+    );
     let r5 = run(false);
     assert_eq!(r5.failed, 0, "{:?}", r5.failures);
 
@@ -237,25 +356,66 @@ fn coverage_reports_executed_statements_with_tl_line_numbers() {
         "local t = require(\"htl.test\")\nlocal rest = require(\"rest\")\n\
          t.it(\"heals\", function()\n   t.expect(rest.step(3, 10)):to_equal(4)\n   t.expect(rest.step(10, 10)):to_equal(10)\nend)\n",
     );
-    let session = TestSession::new(None, "htl.test", None, RunOptions { coverage: true, ..Default::default() }).unwrap();
+    let session = TestSession::new(
+        None,
+        "htl.test",
+        None,
+        RunOptions {
+            coverage: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let rep = session.run_file(&dir.join("tests/rest_test.tl")).unwrap();
-    assert!(rep.check.ok() && rep.failed == 0, "{:?} {:?}", rep.check.errors, rep.failures);
+    assert!(
+        rep.check.ok() && rep.failed == 0,
+        "{:?} {:?}",
+        rep.check.errors,
+        rep.failures
+    );
 
     let rest_path = std::fs::canonicalize(dir.join("src/rest.tl")).unwrap();
     let (_, lines) = rep
         .coverage
         .iter()
-        .find(|(s, _)| s.strip_prefix('@').map(|p| std::fs::canonicalize(p).ok() == Some(rest_path.clone())).unwrap_or(false))
+        .find(|(s, _)| {
+            s.strip_prefix('@')
+                .map(|p| std::fs::canonicalize(p).ok() == Some(rest_path.clone()))
+                .unwrap_or(false)
+        })
         .expect("rest.tl chunk was executed");
-    assert!(lines.contains(&5) && lines.contains(&6) && lines.contains(&10), "if / return / fallthrough ran: {lines:?}");
-    assert!(!lines.contains(&8) && !lines.contains(&14), "elseif body and rest.never did not run: {lines:?}");
+    assert!(
+        lines.contains(&5) && lines.contains(&6) && lines.contains(&10),
+        "if / return / fallthrough ran: {lines:?}"
+    );
+    assert!(
+        !lines.contains(&8) && !lines.contains(&14),
+        "elseif body and rest.never did not run: {lines:?}"
+    );
 
     let ranges = session.checker().executable_ranges(&rest_path).unwrap();
     let starts: Vec<usize> = ranges.iter().map(|r| r.0).collect();
-    assert!(starts.contains(&4) && starts.contains(&5) && starts.contains(&7) && starts.contains(&8) && starts.contains(&10) && starts.contains(&14), "{ranges:?}");
-    assert!(!starts.contains(&1), "record declaration is not executable: {ranges:?}");
-    let executed = ranges.iter().filter(|(a, b)| lines.iter().any(|l| l >= a && l <= b)).count();
-    assert!(executed < ranges.len(), "the unreached branch and function must count as missed");
+    assert!(
+        starts.contains(&4)
+            && starts.contains(&5)
+            && starts.contains(&7)
+            && starts.contains(&8)
+            && starts.contains(&10)
+            && starts.contains(&14),
+        "{ranges:?}"
+    );
+    assert!(
+        !starts.contains(&1),
+        "record declaration is not executable: {ranges:?}"
+    );
+    let executed = ranges
+        .iter()
+        .filter(|(a, b)| lines.iter().any(|l| l >= a && l <= b))
+        .count();
+    assert!(
+        executed < ranges.len(),
+        "the unreached branch and function must count as missed"
+    );
 }
 
 #[test]
@@ -267,9 +427,22 @@ fn a_library_without_tests_field_still_reports() {
         "local M = { n = 0 }\nfunction M.check(b) M.n = M.n + 1 M.ok = (M.ok == nil or M.ok) and b end\n\
          function M.run() return { passed = M.ok and M.n or 0, failed = M.ok and 0 or 1, failures = M.ok and {} or { \"x\" } } end\nreturn M\n",
     );
-    write(&dir.join("mini.d.tl"), "local record mini\n   check: function(boolean)\nend\nreturn mini\n");
-    write(&dir.join("k_test.tl"), "local m = require(\"mini\")\nm.check(1 == 1)\nm.check(2 == 2)\n");
-    let rep = run_test_file(&dir.join("k_test.tl"), None, "mini", None, &RunOptions::default()).unwrap();
+    write(
+        &dir.join("mini.d.tl"),
+        "local record mini\n   check: function(boolean)\nend\nreturn mini\n",
+    );
+    write(
+        &dir.join("k_test.tl"),
+        "local m = require(\"mini\")\nm.check(1 == 1)\nm.check(2 == 2)\n",
+    );
+    let rep = run_test_file(
+        &dir.join("k_test.tl"),
+        None,
+        "mini",
+        None,
+        &RunOptions::default(),
+    )
+    .unwrap();
     assert!(rep.check.ok(), "{:?}", rep.check.errors);
     assert_eq!((rep.passed, rep.failed), (2, 0), "{:?}", rep.failures);
     assert!(rep.tests.is_empty());

@@ -17,10 +17,10 @@ use std::path::{Path, PathBuf};
 
 pub mod bundle;
 pub mod config;
-pub mod fix;
-pub mod link;
 #[cfg(feature = "dts")]
 pub mod dts;
+pub mod fix;
+pub mod link;
 #[cfg(feature = "pkg")]
 pub mod pkg;
 pub mod teal;
@@ -131,36 +131,64 @@ impl Htl {
 
     /// Static form of `TealResolver::expect_type` / `require_fields` for one module file:
     /// `modname` is what a `require` would say (its stem), `type_path` is `"defs.Mod"`.
-    pub fn contract_check(&self, file: &Path, modname: &str, type_path: &str, require_fields: bool) -> Result<ContractResult> {
+    pub fn contract_check(
+        &self,
+        file: &Path,
+        modname: &str,
+        type_path: &str,
+        require_fields: bool,
+    ) -> Result<ContractResult> {
         let f: Function = self.h.get("contract_check")?;
         let t: Table = f.call((path_str(file), modname, type_path, require_fields))?;
         let errors: Table = t.get("errors")?;
-        let errors = errors.sequence_values::<String>().collect::<mlua::Result<_>>()?;
+        let errors = errors
+            .sequence_values::<String>()
+            .collect::<mlua::Result<_>>()?;
         let missing = match t.get::<Option<Table>>("missing")? {
-            Some(m) => Some(m.sequence_values::<String>().collect::<mlua::Result<Vec<_>>>()?),
+            Some(m) => Some(
+                m.sequence_values::<String>()
+                    .collect::<mlua::Result<Vec<_>>>()?,
+            ),
             None => None,
         };
         let missing_at = (
             t.get::<Option<usize>>("missing_y")?.unwrap_or(1),
             t.get::<Option<usize>>("missing_x")?.unwrap_or(1),
         );
-        Ok(ContractResult { errors, missing, missing_at })
+        Ok(ContractResult {
+            errors,
+            missing,
+            missing_at,
+        })
     }
 }
 
 /// `contract` lint for one file: when `file` sits directly under a `[[contract]]` dir
 /// of `cfg` (relative to `root`, the directory holding `htl.toml`), check it against
 /// that contract statically. Returns lint lines (empty when no contract applies).
-pub fn contract_lints(h: &Htl, root: &Path, cfg: &config::HtlConfig, file: &Path) -> Result<Vec<String>> {
+pub fn contract_lints(
+    h: &Htl,
+    root: &Path,
+    cfg: &config::HtlConfig,
+    file: &Path,
+) -> Result<Vec<String>> {
     let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let file_abs = canon(file);
     let mut out = Vec::new();
     if !is_tl_source(&file_abs) {
         return Ok(out);
     }
-    let modname = file_abs.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+    let modname = file_abs
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
     for c in &cfg.contract {
-        let Some(dir) = c.dirs(root).into_iter().map(|d| canon(&d)).find(|d| file_abs.parent() == Some(d.as_path()))
+        let Some(dir) = c
+            .dirs(root)
+            .into_iter()
+            .map(|d| canon(&d))
+            .find(|d| file_abs.parent() == Some(d.as_path()))
         else {
             continue;
         };
@@ -203,7 +231,11 @@ pub fn contract_lints(h: &Htl, root: &Path, cfg: &config::HtlConfig, file: &Path
 /// sources (under `cargo_root`) for `expect_type("<type>")` (plus `require_fields()` when
 /// required) or for the config-driven `contract_resolvers(` / `for_contract(` helpers.
 /// No host crate (`cargo_root` = None) means a script-only project: nothing to enforce.
-pub fn contract_enforcement_lints(cfg: &config::HtlConfig, cfg_path: &Path, cargo_root: Option<&Path>) -> Vec<String> {
+pub fn contract_enforcement_lints(
+    cfg: &config::HtlConfig,
+    cfg_path: &Path,
+    cargo_root: Option<&Path>,
+) -> Vec<String> {
     let mut out = Vec::new();
     if cfg.contract.is_empty() {
         return out;
@@ -237,12 +269,19 @@ pub fn contract_enforcement_lints(cfg: &config::HtlConfig, cfg_path: &Path, carg
             continue;
         }
         let by_hand = sources.contains(&format!("expect_type(\"{}\")", c.type_path));
-        let want_fields = if c.require_fields { ".require_fields()" } else { "" };
+        let want_fields = if c.require_fields {
+            ".require_fields()"
+        } else {
+            ""
+        };
         if !(by_config || by_hand) {
             let by_hand_hint = if c.dir.contains('*') {
                 String::new() // one resolver per matched dir: not a one-liner by hand
             } else {
-                format!("add TealResolver::new(\"{}\").expect_type(\"{}\"){} in the Rust host, or ", c.dir, c.type_path, want_fields)
+                format!(
+                    "add TealResolver::new(\"{}\").expect_type(\"{}\"){} in the Rust host, or ",
+                    c.dir, c.type_path, want_fields
+                )
             };
             out.push(format!(
                 "{}:1:1: contract `{}` -> {} is declared but the host does not enforce it: {}build resolvers with \
@@ -314,8 +353,11 @@ pub fn require_cycles(infos: &[(PathBuf, CheckInfo)]) -> Vec<String> {
                     Some(1) => {
                         // back edge: cycle = stack from `to` .. node, then back to `to`
                         let start = stack.iter().position(|(n, _)| n == to).unwrap_or(0);
-                        let mut members: Vec<PathBuf> =
-                            stack[start..].iter().map(|(n, _)| n.clone()).chain(std::iter::once(node.clone())).collect();
+                        let mut members: Vec<PathBuf> = stack[start..]
+                            .iter()
+                            .map(|(n, _)| n.clone())
+                            .chain(std::iter::once(node.clone()))
+                            .collect();
                         members.dedup();
                         let mut key = members.clone();
                         key.sort();
@@ -328,8 +370,15 @@ pub fn require_cycles(infos: &[(PathBuf, CheckInfo)]) -> Vec<String> {
                                     .map(|s| s.to_string_lossy().into_owned())
                                     .unwrap_or_else(|| p.display().to_string())
                             };
-                            let chain: Vec<String> = members.iter().map(name).chain(std::iter::once(name(to))).collect();
-                            let first_file = display.get(&members[0]).cloned().unwrap_or_else(|| members[0].clone());
+                            let chain: Vec<String> = members
+                                .iter()
+                                .map(name)
+                                .chain(std::iter::once(name(to)))
+                                .collect();
+                            let first_file = display
+                                .get(&members[0])
+                                .cloned()
+                                .unwrap_or_else(|| members[0].clone());
                             // anchor: the edge leaving the cycle's first member
                             let anchor = stack.get(start + 1).and_then(|(_, s)| *s).unwrap_or(site);
                             out.push(format!(
@@ -357,7 +406,15 @@ pub fn require_cycles(infos: &[(PathBuf, CheckInfo)]) -> Vec<String> {
     for n in nodes {
         if !state.contains_key(&n) {
             stack.push((n.clone(), None));
-            dfs(n, &edges, &mut state, &mut stack, &mut reported, &display, &mut out);
+            dfs(
+                n,
+                &edges,
+                &mut state,
+                &mut stack,
+                &mut reported,
+                &display,
+                &mut out,
+            );
             stack.pop();
         }
     }
@@ -426,6 +483,25 @@ function R.install_searcher(gen)
       end
       return a
    end)
+end
+
+-- Put already-generated Lua in front of the searcher for one module name.
+--
+-- `package.preload` is searcher position 1 and R.install_searcher puts htl's at 2, so a
+-- preloaded module is never asked of the searcher — which is the point: asking would check
+-- and generate it again. Loaded the same way the searcher would have loaded it, so the
+-- module sees the same chunk name and the same arguments.
+function R.preload_generated(module_name, code, filename)
+   -- Never displace what is already there. The test library and anything a host preloads are
+   -- put in package.preload by whoever owns them, and Lua generated from a `.tl` of the same
+   -- name is not the same module: preloading over `htl.test` gives the file a stand-in whose
+   -- `run()` reports nothing, and every test silently stops counting.
+   if package.preload[module_name] ~= nil then return end
+   local chunk, lerr = load(code, "@" .. filename, "t")
+   if not chunk then
+      error("htl: cached Lua failed to load: " .. tostring(lerr), 0)
+   end
+   package.preload[module_name] = function(modname) return chunk(modname, filename) end
 end
 
 function R.add_path(dir)
@@ -515,11 +591,35 @@ impl Htl {
         lua.set_app_data(CheckerHandle(checker.h.clone()));
         let begin: Function = checker.h.get("begin_program")?;
         begin.call::<()>(())?;
-        Ok(Self { lua, h: checker.h.clone(), split: true })
+        Ok(Self {
+            lua,
+            h: checker.h.clone(),
+            split: true,
+        })
     }
 
     fn runtime(&self) -> Result<Table> {
-        Ok(self.lua.named_registry_value::<Table>(RUNTIME_REGISTRY_KEY)?)
+        Ok(self
+            .lua
+            .named_registry_value::<Table>(RUNTIME_REGISTRY_KEY)?)
+    }
+
+    /// Put Lua this checker generated for a `.tl` module in front of the searcher, in a
+    /// program state.
+    ///
+    /// Distinct from [`preload`](Self::preload), which registers a source string as a module:
+    /// this loads the way the searcher would have, so the module sees the same chunk name and
+    /// the same arguments as if it had been generated during the run.
+    ///
+    /// Without it, a `require` in running code asks the searcher, which checks and generates
+    /// the module then and there. With it, the module is already present. The two are the
+    /// same thing only if `code` is what this checker would generate now — the caller's
+    /// promise, and the reason anything serving this has to invalidate on the module's own
+    /// content.
+    pub fn preload_generated(&self, name: &str, code: &str, file: &Path) -> Result<()> {
+        let f: Function = self.runtime()?.get("preload_generated")?;
+        f.call::<()>((name, code, path_str(file)))?;
+        Ok(())
     }
 
     /// Start recording which lines of which chunk run in the program state (a state
@@ -541,7 +641,12 @@ impl Htl {
             let e = e?;
             let source: String = e.get("source")?;
             let lines: Table = e.get("lines")?;
-            out.push((source, lines.sequence_values::<usize>().collect::<mlua::Result<_>>()?));
+            out.push((
+                source,
+                lines
+                    .sequence_values::<usize>()
+                    .collect::<mlua::Result<_>>()?,
+            ));
         }
         Ok(out)
     }
@@ -602,7 +707,11 @@ impl Htl {
             .eval()
             .context("loading htl prelude")?;
         lua.set_named_registry_value(PRELUDE_REGISTRY_KEY, h.clone())?;
-        Ok(Self { lua, h, split: false })
+        Ok(Self {
+            lua,
+            h,
+            split: false,
+        })
     }
 
     pub fn lua(&self) -> &Lua {
@@ -749,9 +858,7 @@ impl Htl {
     /// Register a ready-made value (typically a Rust-built table) as a module.
     pub fn preload_value(&self, name: &str, value: impl mlua::IntoLua) -> Result<()> {
         let value = value.into_lua(&self.lua)?;
-        let loader = self
-            .lua
-            .create_function(move |_, ()| Ok(value.clone()))?;
+        let loader = self.lua.create_function(move |_, ()| Ok(value.clone()))?;
         self.preload_table()?.set(name, loader)?;
         Ok(())
     }
@@ -871,7 +978,11 @@ impl Htl {
             bail!(
                 "bundle expects host-provided module(s) {} (declared only by a .d.tl or [build] host at link \
                  time): register them with preload / preload_value / htl_preload before running",
-                missing.iter().map(|m| format!("'{m}'")).collect::<Vec<_>>().join(", ")
+                missing
+                    .iter()
+                    .map(|m| format!("'{m}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
         }
         // Bundled modules become `package.preload` entries: the same place a host puts
@@ -887,14 +998,20 @@ impl Htl {
             let payload = m.payload.clone();
             let kind = m.kind;
             let name = m.name.clone();
-            let loader = self.lua.create_function(move |lua, (modname, origin): (String, Value)| {
-                let chunk = lua.load(payload.as_slice()).set_name(format!("={name}"));
-                let f = match kind {
-                    bundle::Kind::Bytecode => chunk.set_mode(ChunkMode::Binary).into_function()?,
-                    bundle::Kind::Source => chunk.set_mode(ChunkMode::Text).into_function()?,
-                };
-                f.call::<Value>((modname, origin))
-            })?;
+            let loader =
+                self.lua
+                    .create_function(move |lua, (modname, origin): (String, Value)| {
+                        let chunk = lua.load(payload.as_slice()).set_name(format!("={name}"));
+                        let f = match kind {
+                            bundle::Kind::Bytecode => {
+                                chunk.set_mode(ChunkMode::Binary).into_function()?
+                            }
+                            bundle::Kind::Source => {
+                                chunk.set_mode(ChunkMode::Text).into_function()?
+                            }
+                        };
+                        f.call::<Value>((modname, origin))
+                    })?;
             preload.set(m.name.as_str(), loader)?;
         }
         Ok(())
@@ -908,7 +1025,10 @@ impl Htl {
             .ok_or_else(|| anyhow!("entry module '{}' not in bundle", b.entry))?;
         self.install_bundle(b)?;
         self.set_arg(&b.entry, args)?;
-        let chunk = self.lua.load(entry.payload.as_slice()).set_name(format!("={}", b.entry));
+        let chunk = self
+            .lua
+            .load(entry.payload.as_slice())
+            .set_name(format!("={}", b.entry));
         let main: Function = match entry.kind {
             bundle::Kind::Bytecode => chunk.set_mode(ChunkMode::Binary).into_function()?,
             bundle::Kind::Source => chunk.set_mode(ChunkMode::Text).into_function()?,
@@ -970,13 +1090,19 @@ pub fn write_if_changed(path: &Path, text: &str) -> std::io::Result<bool> {
 /// Parent directory of a file, `.` when the path has none.
 pub fn parent_dir(file: &Path) -> PathBuf {
     let dir = file.parent().unwrap_or(Path::new("."));
-    if dir.as_os_str().is_empty() { PathBuf::from(".") } else { dir.to_path_buf() }
+    if dir.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        dir.to_path_buf()
+    }
 }
 
 fn read_checkinfo(t: &Table) -> Result<CheckInfo> {
     let seq = |key: &str| -> Result<Vec<String>> {
         let inner: Table = t.get(key)?;
-        Ok(inner.sequence_values::<String>().collect::<mlua::Result<_>>()?)
+        Ok(inner
+            .sequence_values::<String>()
+            .collect::<mlua::Result<_>>()?)
     };
     let requires = match t.get::<Table>("requires") {
         Ok(list) => read_requires(&list)?,
@@ -1000,7 +1126,9 @@ fn read_checkinfo(t: &Table) -> Result<CheckInfo> {
 /// `fixes[i]` is a fix table or `false`; missing entries are `None`.
 fn read_fixes(t: &Table, key: &str, len: usize) -> Result<Vec<Option<Fix>>> {
     let mut out = vec![None; len];
-    let Ok(list) = t.get::<Table>(key) else { return Ok(out) };
+    let Ok(list) = t.get::<Table>(key) else {
+        return Ok(out);
+    };
     for (i, slot) in out.iter_mut().enumerate() {
         let v: Value = list.get(i + 1)?;
         if let Value::Table(f) = v {
@@ -1022,7 +1150,10 @@ fn read_fixes(t: &Table, key: &str, len: usize) -> Result<Vec<Option<Fix>>> {
                     });
                 }
             }
-            *slot = Some(Fix { applicability, edits });
+            *slot = Some(Fix {
+                applicability,
+                edits,
+            });
         }
     }
     Ok(out)

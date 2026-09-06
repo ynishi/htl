@@ -69,13 +69,21 @@ pub struct FileOutcome {
 /// Fix one file in place (or in memory with `dry_run`). The checker's search path
 /// must already cover the project.
 pub fn fix_file(h: &Htl, path: &Path, opts: &FixOptions) -> Result<FileOutcome> {
-    let original = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let original =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let mut current = original.clone();
-    let mut out = FileOutcome { file: path.to_path_buf(), ..Default::default() };
+    let mut out = FileOutcome {
+        file: path.to_path_buf(),
+        ..Default::default()
+    };
     let mut check = h.check(path)?;
     let mut last_set: Option<BTreeSet<String>> = None;
     // A dry run checks from a scratch copy so the tree stays untouched.
-    let scratch = if opts.dry_run { Some(scratch_path(path)?) } else { None };
+    let scratch = if opts.dry_run {
+        Some(scratch_path(path)?)
+    } else {
+        None
+    };
 
     for pass in 1..=MAX_PASSES {
         if has_syntax_error(&check) {
@@ -83,7 +91,8 @@ pub fn fix_file(h: &Htl, path: &Path, opts: &FixOptions) -> Result<FileOutcome> 
                 file: path.to_path_buf(),
                 line: 0,
                 rule: String::new(),
-                reason: "file has a syntax error; nothing is applied to a tree the parser rejected".into(),
+                reason: "file has a syntax error; nothing is applied to a tree the parser rejected"
+                    .into(),
             });
             break;
         }
@@ -95,7 +104,10 @@ pub fn fix_file(h: &Htl, path: &Path, opts: &FixOptions) -> Result<FileOutcome> 
         if candidates.is_empty() {
             break;
         }
-        let set: BTreeSet<String> = candidates.iter().map(|c| format!("{}:{}:{}", c.rule, c.line, c.key)).collect();
+        let set: BTreeSet<String> = candidates
+            .iter()
+            .map(|c| format!("{}:{}:{}", c.rule, c.line, c.key))
+            .collect();
         if last_set.as_ref() == Some(&set) {
             let rules: BTreeSet<&str> = candidates.iter().map(|c| c.rule.as_str()).collect();
             out.oscillation = Some(rules.into_iter().collect::<Vec<_>>().join(", "));
@@ -113,10 +125,14 @@ pub fn fix_file(h: &Htl, path: &Path, opts: &FixOptions) -> Result<FileOutcome> 
         std::fs::write(target, &next).with_context(|| format!("writing {}", target.display()))?;
         let recheck = h.check(target)?;
         let new_errors = recheck.errors.len();
-        let fixed_errors = applied_idx.iter().filter(|&&i| candidates[i].is_error).count();
+        let fixed_errors = applied_idx
+            .iter()
+            .filter(|&&i| candidates[i].is_error)
+            .count();
         // Errors other than the ones just fixed must not have grown.
         if new_errors > check.errors.len().saturating_sub(fixed_errors) {
-            std::fs::write(target, &current).with_context(|| format!("restoring {}", target.display()))?;
+            std::fs::write(target, &current)
+                .with_context(|| format!("restoring {}", target.display()))?;
             out.reverted = Some(format!(
                 "pass {pass} left {} error(s) where there were {}; the file was put back",
                 new_errors,
@@ -152,7 +168,11 @@ pub fn fix_file(h: &Htl, path: &Path, opts: &FixOptions) -> Result<FileOutcome> 
     if current != original {
         out.contents = Some(current);
     }
-    out.check = if opts.dry_run && out.contents.is_some() { check } else { h.check(path)? };
+    out.check = if opts.dry_run && out.contents.is_some() {
+        check
+    } else {
+        h.check(path)?
+    };
     Ok(out)
 }
 
@@ -171,14 +191,25 @@ struct Candidate {
 }
 
 /// Which of the file's fixes may be applied under `opts`; the rest go to `skipped`.
-fn candidates(check: &CheckInfo, opts: &FixOptions, skipped: &mut Vec<Skipped>, path: &Path) -> Vec<Candidate> {
+fn candidates(
+    check: &CheckInfo,
+    opts: &FixOptions,
+    skipped: &mut Vec<Skipped>,
+    path: &Path,
+) -> Vec<Candidate> {
     let mut out = Vec::new();
     let items = check
         .errors
         .iter()
         .zip(check.error_fixes.iter())
         .map(|(m, f)| (m, f, true))
-        .chain(check.lints.iter().zip(check.lint_fixes.iter()).map(|(m, f)| (m, f, false)));
+        .chain(
+            check
+                .lints
+                .iter()
+                .zip(check.lint_fixes.iter())
+                .map(|(m, f)| (m, f, false)),
+        );
     for (msg, fix, is_error) in items {
         let Some(fix) = fix else { continue };
         let rule = rule_of(msg, is_error);
@@ -187,7 +218,12 @@ fn candidates(check: &CheckInfo, opts: &FixOptions, skipped: &mut Vec<Skipped>, 
             continue;
         }
         if opts.disabled.iter().any(|r| r == &rule) {
-            skipped.push(Skipped { file: path.into(), line, rule, reason: "disabled by [fix] disable".into() });
+            skipped.push(Skipped {
+                file: path.into(),
+                line,
+                rule,
+                reason: "disabled by [fix] disable".into(),
+            });
             continue;
         }
         let promoted = opts.promoted.iter().any(|r| r == &rule);
@@ -198,17 +234,45 @@ fn candidates(check: &CheckInfo, opts: &FixOptions, skipped: &mut Vec<Skipped>, 
         };
         match applicability {
             Applicability::Suggest => {
-                skipped.push(Skipped { file: path.into(), line, rule, reason: "suggestion only; not applied automatically".into() });
+                skipped.push(Skipped {
+                    file: path.into(),
+                    line,
+                    rule,
+                    reason: "suggestion only; not applied automatically".into(),
+                });
                 continue;
             }
             Applicability::Unsafe if !opts.unsafe_fixes => {
-                skipped.push(Skipped { file: path.into(), line, rule, reason: "unsafe fix; apply with --unsafe or promote it under [fix] unsafe".into() });
+                skipped.push(Skipped {
+                    file: path.into(),
+                    line,
+                    rule,
+                    reason: "unsafe fix; apply with --unsafe or promote it under [fix] unsafe"
+                        .into(),
+                });
                 continue;
             }
             _ => {}
         }
-        let key = fix.edits.iter().map(|e| format!("{}:{}:{}:{}:{}", e.line, e.col, e.end_line, e.end_col, e.text)).collect::<Vec<_>>().join("|");
-        out.push(Candidate { rule, line, key, is_error, applicability, edits: fix.edits.clone() });
+        let key = fix
+            .edits
+            .iter()
+            .map(|e| {
+                format!(
+                    "{}:{}:{}:{}:{}",
+                    e.line, e.col, e.end_line, e.end_col, e.text
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        out.push(Candidate {
+            rule,
+            line,
+            key,
+            is_error,
+            applicability,
+            edits: fix.edits.clone(),
+        });
     }
     out
 }
@@ -228,7 +292,10 @@ fn rule_of(msg: &str, is_error: bool) -> String {
 }
 
 fn line_of(msg: &str) -> usize {
-    msg.split(':').nth(1).and_then(|s| s.trim().parse().ok()).unwrap_or(0)
+    msg.split(':')
+        .nth(1)
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 /// Apply the candidates whose edits do not overlap an already accepted edit, in
@@ -241,7 +308,10 @@ fn apply_non_overlapping(src: &str, candidates: &[Candidate]) -> (String, Vec<us
     'cand: for (ci, c) in candidates.iter().enumerate() {
         let mut spans = Vec::new();
         for e in &c.edits {
-            let (Some(s), Some(t)) = (index.offset(e.line, e.col), index.offset(e.end_line, e.end_col)) else {
+            let (Some(s), Some(t)) = (
+                index.offset(e.line, e.col),
+                index.offset(e.end_line, e.end_col),
+            ) else {
                 deferred += 1;
                 continue 'cand;
             };
@@ -256,7 +326,8 @@ fn apply_non_overlapping(src: &str, candidates: &[Candidate]) -> (String, Vec<us
         for (s, t, _) in &spans {
             for (as_, at, _, _) in &accepted {
                 let disjoint = *t <= *as_ || *at <= *s || (*s == *t && *as_ == *at && *s == *as_);
-                let touching_insert = (*s == *t && (*s == *as_ || *s == *at)) || (*as_ == *at && (*as_ == *s || *as_ == *t));
+                let touching_insert = (*s == *t && (*s == *as_ || *s == *at))
+                    || (*as_ == *at && (*as_ == *s || *as_ == *t));
                 if !(disjoint || touching_insert) {
                     deferred += 1;
                     continue 'cand;
@@ -290,7 +361,10 @@ impl LineIndex {
                 starts.push(i + 1);
             }
         }
-        Self { starts, len: src.len() }
+        Self {
+            starts,
+            len: src.len(),
+        }
     }
 
     /// Byte offset of 1-based (line, col); a col past the line's end clamps to it.
@@ -309,7 +383,10 @@ impl LineIndex {
 }
 
 fn scratch_path(path: &Path) -> Result<PathBuf> {
-    let stem = path.file_name().and_then(|s| s.to_str()).unwrap_or("file.tl");
+    let stem = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("file.tl");
     let dir = std::env::temp_dir().join(format!("htl-fix-{}-{}", std::process::id(), nanos()));
     std::fs::create_dir_all(&dir)?;
     Ok(dir.join(stem))
@@ -330,7 +407,11 @@ pub fn unified_diff(name: &str, before: &str, after: &str) -> String {
     let mut l = vec![vec![0usize; m + 1]; n + 1];
     for i in (0..n).rev() {
         for j in (0..m).rev() {
-            l[i][j] = if a[i] == b[j] { l[i + 1][j + 1] + 1 } else { l[i + 1][j].max(l[i][j + 1]) };
+            l[i][j] = if a[i] == b[j] {
+                l[i + 1][j + 1] + 1
+            } else {
+                l[i + 1][j].max(l[i][j + 1])
+            };
         }
     }
     let (mut i, mut j) = (0, 0);

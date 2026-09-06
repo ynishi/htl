@@ -147,7 +147,11 @@ impl HtlConfig {
     /// Nearest `htl.toml` at or above `start` (a file or directory). `Ok(None)` when
     /// there is none; `Err` when one exists but does not parse.
     pub fn find(start: &Path) -> Result<Option<(PathBuf, Self)>> {
-        let mut dir = if start.is_dir() { start.to_path_buf() } else { crate::parent_dir(start) };
+        let mut dir = if start.is_dir() {
+            start.to_path_buf()
+        } else {
+            crate::parent_dir(start)
+        };
         if let Ok(abs) = std::fs::canonicalize(&dir) {
             dir = abs;
         }
@@ -226,7 +230,11 @@ impl Contract {
 
     /// Is a module with this name (file stem) held to the contract?
     pub fn applies_to(&self, module: &str) -> bool {
-        if self.type_path.split_once('.').is_some_and(|(m, _)| m == module) {
+        if self
+            .type_path
+            .split_once('.')
+            .is_some_and(|(m, _)| m == module)
+        {
             return false;
         }
         if self.exclude.iter().any(|e| e == module) {

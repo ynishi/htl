@@ -23,17 +23,16 @@ fn main() -> Result<()> {
     reg.add(NativeResolver::new().add("host", |lua| {
         let t = lua.create_table()?;
         t.set("name", "resolver-example")?;
-        t.set(
-            "double",
-            lua.create_function(|_, n: f64| Ok(n * 2.0))?,
-        )?;
+        t.set("double", lua.create_function(|_, n: f64| Ok(n * 2.0))?)?;
         Ok(htl::mlua::Value::Table(t))
     }));
     reg.add(TealResolver::new(&scripts)?);
     reg.add(FsResolver::new(&scripts)?);
     reg.install(h.lua())?;
 
-    let entry = std::env::args().nth(1).unwrap_or_else(|| "main".to_string());
+    let entry = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "main".to_string());
     let require: htl::mlua::Function = h.lua().globals().get("require")?;
     if let Err(e) = require.call::<()>(entry.as_str()) {
         eprintln!("{e}");
