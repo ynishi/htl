@@ -164,6 +164,38 @@ local function struct_resolver(result, filename)
    end
 end
 
+-- Resolver for the `union-exhaustive` lint: the members of the union type at (y, x), as
+-- a set of names, or `false` for a value that is typed and not a union. Nothing here
+-- reconstructs the union from the `is` tests; the checker already knows it, and knows the
+-- residual after a narrowing too.
+local function union_resolver(result, filename)
+   local ok, report = pcall(tl.get_types, result)
+   if not ok or type(report) ~= "table" then return nil end
+   local by_pos = report.by_pos and report.by_pos[filename]
+   if not by_pos then return nil end
+   local function deref(id, depth)
+      local t = report.types[id]
+      if t and t.ref and depth < 8 then return deref(t.ref, depth + 1) end
+      return t
+   end
+   return function(y, x)
+      local id = by_pos[y] and by_pos[y][x]
+      if not id then return nil end
+      local t = deref(id, 0)
+      if not t then return nil end
+      if type(t.types) ~= "table" or #t.types < 2 then return false end
+      local names = {}
+      for _, mid in ipairs(t.types) do
+         local m = deref(mid, 0)
+         if not m or not m.str then return false end
+         -- Compared on the last segment: a member reads as `A` where the test may be
+         -- written `defs.A`, and both name the same record.
+         names[m.str:match("([^.]+)$") or m.str] = true
+      end
+      return names
+   end
+end
+
 -- Resolver for lints: type of a dotted subject (`c` / `w.state`) at (y, x).
 -- Returns (enumset, type name) for an enum, `false` for a known non-enum type,
 -- nil when unknown.
@@ -614,6 +646,7 @@ function H.check(filename, env, opts)
             enums = enums,
             subject_enum = subject,
             struct_at = struct_resolver(result, filename),
+            union_at = union_resolver(result, filename),
          })
          prof("lint.run", filename, t1)
          for _, l in ipairs(found or {}) do
