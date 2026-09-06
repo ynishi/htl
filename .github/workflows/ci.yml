@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: test + clippy (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # stable, and the workspace's rust-version (MSRV) so a newer-syntax slip is caught.
+        toolchain: [stable, "1.88"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # mlua builds its vendored Lua 5.4; no system Lua or Teal needed.
+      - run: cargo build --workspace --all-targets
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets
+
+  examples:
+    name: CLI and embed example end to end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The CLI on the repository's own .tl (examples/tl/failing/ is meant to fail and
+      # is not run here), and the embed example through both the include_tl! and the
+      # include_bundle! path.
+      - run: cargo run -q -p htl-cli --bin htl -- check examples/tl/util.tl examples/tl/main.tl examples/tl/util_test.tl
+      - run: cargo run -q -p htl-cli --bin htl -- test examples/tl/util_test.tl
+      - run: cargo run -q -p embed
+      - run: cargo run -q -p embed -- --bundle
