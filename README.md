@@ -58,21 +58,31 @@ and `htl test` agree.
 
 ## Caching
 
-`htl check` stores what a run reported under `.htl/cache/` at the project root, and
-replays it when nothing that fed it has changed — the summary line then ends with
-`[cached]`, and `--format json` sets `summary.cached`. A cold check costs about a second
-on a few thousand lines of Teal; a replay costs a few milliseconds and never builds a
-checker. `htl init` puts `.htl/` in `.gitignore`; add it by hand in an existing project.
+`htl check` stores what each module reported under `.htl/cache/` at the project root and
+replays the ones whose inputs have not moved. The summary says how many: `[cached]` when
+every module came from the store and no checker was built at all, `[36/48 cached]` when
+some did, and nothing when none did. `--format json` carries the same as
+`summary.cached` and `summary.replayed`. `htl init` puts `.htl/` in `.gitignore`; add it
+by hand in an existing project.
 
-An entry is used only when every file the run read still hashes the same, every directory
-the checker could resolve a `require` in holds the same modules, and the binary that wrote
-the entry is the one reading it. Content hashes throughout, no timestamps, so touching a
-file without editing it does not invalidate anything and a fresh checkout does not either.
-Anything unexpected — a corrupt entry, an unreadable store, an htl upgrade — is a miss,
-which costs the check it would have skipped and never the wrong answer.
+On a few thousand lines of Teal a cold check is around a second, replaying everything is a
+few dozen milliseconds, and editing one module costs that module, whatever requires it, and
+whatever those pull in — the checker's store starts empty, so a module being re-checked
+re-checks its dependencies too.
 
-`--no-cache` neither reads nor writes, and `HTL_CACHE_DEBUG=1` prints why a run was not
-replayed. `htl test` is not cached: a test file has to run whatever its types say.
+An entry is used only when the module and everything it required still hash the same, every
+directory a `require` could resolve in holds the same modules, and the binary that wrote the
+entry is the one reading it. Content hashes throughout, no timestamps, so touching a file
+without editing it invalidates nothing and a fresh checkout does not either. Anything
+unexpected — a corrupt entry, an unreadable store, an htl upgrade — is a miss, which costs
+the check it would have skipped and never the wrong answer.
+
+Flags are part of the key when they change what a module reports and not when they only
+change the verdict: `--lint` gets its own entries, `--strict` reuses them and differs in the
+exit code alone.
+
+`--no-cache` neither reads nor writes, and `HTL_CACHE_DEBUG=1` prints why a module was not
+replayed. `htl test` is not cached: a test has to run whatever its types say.
 
 ## Embedding in Rust
 

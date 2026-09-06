@@ -74,9 +74,11 @@ fn a_second_run_reports_exactly_what_the_first_reported() {
         "the fixture must produce diagnostics or this test proves nothing"
     );
 
-    // Everything but the flag that says where it came from.
-    v1["summary"]["cached"] = false.into();
-    v2["summary"]["cached"] = false.into();
+    // Everything but the two fields that say where the answer came from.
+    for v in [&mut v1, &mut v2] {
+        v["summary"]["cached"] = false.into();
+        v["summary"]["replayed"] = 0.into();
+    }
     assert_eq!(v1, v2, "a cached run reports what the run it replaces reported");
 }
 
@@ -129,13 +131,23 @@ fn changing_the_config_misses() {
     assert!(!was_cached(&check(&root)), "the config shapes the report and is part of the inputs");
 }
 
+/// A flag belongs in the key when it changes what a module *reports*, and not when it only
+/// changes what the run concludes. `--strict` decides the exit code from diagnostics that
+/// are the same either way, so its modules are reusable; `--lint` changes which lints run,
+/// so they are not.
 #[test]
-fn a_flag_that_changes_the_report_gets_its_own_entry() {
+fn a_flag_is_in_the_key_only_when_it_changes_what_a_module_reports() {
     let root = project("flags");
     assert!(!was_cached(&check(&root)));
+    assert!(was_cached(&check(&root)));
+
     let (_, stdout, _) = htl(&["check", "src", "--format", "json", "--strict"], &root);
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert!(!was_cached(&v), "--strict asks a different question and cannot reuse the answer");
+    assert!(was_cached(&v), "--strict changes the verdict, not the diagnostics: {v}");
+
+    let (_, stdout, _) = htl(&["check", "src", "--format", "json", "--lint", "+no-any"], &root);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(!was_cached(&v), "a different lint selection does change them: {v}");
 }
 
 #[test]
@@ -160,4 +172,102 @@ fn no_cache_neither_writes_nor_reads() {
     let (_, stdout, _) = htl(&["check", "src", "--format", "json", "--no-cache"], &root);
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert!(!was_cached(&v), "--no-cache must not read an entry that is sitting there");
+}
+
+fn replayed(v: &serde_json::Value) -> u64 {
+    v["summary"]["replayed"].as_u64().expect("summary carries `replayed`")
+}
+
+/// Three modules, one of which nothing depends on. Editing the leaf must cost the leaf and
+/// its requirer, and leave the third alone — the whole point of per-module entries.
+#[test]
+fn editing_one_module_rechecks_it_and_its_dependents_only() {
+    let root = scratch("deps");
+    write(&root.join("htl.toml"), "[check]\n");
+    write(
+        &root.join("src/leaf.tl"),
+        "local record leaf\nend\nfunction leaf.f(): integer\n   return 1\nend\nreturn leaf\n",
+    );
+    write(
+        &root.join("src/uses_leaf.tl"),
+        "local leaf = require(\"leaf\")\nlocal record uses_leaf\nend\nfunction uses_leaf.g(): integer\n   return leaf.f()\nend\nreturn uses_leaf\n",
+    );
+    write(
+        &root.join("src/alone.tl"),
+        "local record alone\nend\nfunction alone.h(): integer\n   return 2\nend\nreturn alone\n",
+    );
+
+    assert_eq!(replayed(&check(&root)), 0, "the first run has nothing to replay");
+    assert_eq!(replayed(&check(&root)), 3, "the second run replays all three");
+
+    write(
+        &root.join("src/leaf.tl"),
+        "local record leaf\nend\nfunction leaf.f(): integer\n   return 2\nend\nreturn leaf\n",
+    );
+    assert_eq!(
+        replayed(&check(&root)),
+        1,
+        "the leaf and the module requiring it are checked again; the third is not"
+    );
+}
+
+/// The project-level cycle lint runs over every file's requires, and a replayed file has to
+/// contribute its own — a cycle closing through a module nobody edited is still a cycle.
+/// This is the lint most likely to quietly vanish once modules stop being checked.
+#[test]
+fn the_cycle_lint_still_fires_when_every_file_was_replayed() {
+    let root = scratch("cycle");
+    write(&root.join("htl.toml"), "[check]\n");
+    write(&root.join("src/a.tl"), "local b = require(\"b\")\nlocal record a\nend\nreturn a\n");
+    write(&root.join("src/b.tl"), "local a = require(\"a\")\nlocal record b\nend\nreturn b\n");
+
+    let cycles = |v: &serde_json::Value| {
+        v["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|d| d["rule"].as_str() == Some("require-cycle"))
+            .count()
+    };
+
+    let first = check(&root);
+    assert!(cycles(&first) > 0, "the fixture must produce a cycle lint or this proves nothing: {first}");
+
+    let second = check(&root);
+    assert!(was_cached(&second), "nothing moved, so both modules replay");
+    assert_eq!(cycles(&first), cycles(&second), "the cycle lint survives a fully replayed run");
+}
+
+/// Output order follows the walk, not the split between what was checked and what was
+/// replayed — otherwise a run's diagnostics would shuffle depending on what happened to be
+/// in the store.
+#[test]
+fn diagnostics_come_out_in_file_order_whatever_was_cached() {
+    let root = scratch("order");
+    write(&root.join("htl.toml"), "[check]\n");
+    // Two modules that each report an error, named so the walk visits aaa before zzz.
+    write(&root.join("src/aaa.tl"), "local n: string = 1\nprint(n)\n");
+    write(&root.join("src/zzz.tl"), "local s: integer = \"x\"\nprint(s)\n");
+
+    let files = |v: &serde_json::Value| {
+        v["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["file"].as_str().unwrap_or("").to_string())
+            .collect::<Vec<_>>()
+    };
+
+    let cold = check(&root);
+    assert_eq!(replayed(&cold), 0);
+    let all_cached = check(&root);
+    assert_eq!(replayed(&all_cached), 2);
+
+    // Now a mix: zzz is edited, aaa comes from the store.
+    write(&root.join("src/zzz.tl"), "local s: integer = \"y\"\nprint(s)\n");
+    let mixed = check(&root);
+    assert_eq!(replayed(&mixed), 1, "aaa replays, zzz is checked");
+
+    assert_eq!(files(&cold), files(&all_cached), "a fully replayed run keeps file order");
+    assert_eq!(files(&cold), files(&mixed), "and so does a mixed one");
 }

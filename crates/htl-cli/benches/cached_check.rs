@@ -41,6 +41,21 @@ fn filler(record: &str, fns: usize) -> String {
     s
 }
 
+/// One mid-layer module. `salt` changes its body without changing its type, so the
+/// one-module-edited benchmark can make it miss on every iteration while everything that
+/// does not depend on it still replays.
+fn core_source(i: usize, salt: u32) -> String {
+    format!(
+        "local util = require(\"util\")\n\
+         local record core_{i}\n\
+         end\n\
+         function core_{i}.step(n: integer): integer\n   return util.id(n) + {i} + {salt} - {salt}\nend\n\
+         {}\
+         return core_{i}\n",
+        filler(&format!("core_{i}"), FNS)
+    )
+}
+
 /// An `n`-module project under a fresh directory.
 fn project(n: usize) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
@@ -58,19 +73,7 @@ fn project(n: usize) -> PathBuf {
          return util\n",
     );
     for i in 0..CORES {
-        let name = format!("core_{i}");
-        write(
-            &root.join(format!("src/{name}.tl")),
-            &format!(
-                "local util = require(\"util\")\n\
-                 local record {name}\n\
-                 end\n\
-                 function {name}.step(n: integer): integer\n   return util.id(n) + {i}\nend\n\
-                 {}\
-                 return {name}\n",
-                filler(&name, FNS)
-            ),
-        );
+        write(&root.join(format!("src/core_{i}.tl")), &core_source(i, 0));
     }
     for i in 0..(n - CORES - 1) {
         let name = format!("feat_{i}");
@@ -119,6 +122,19 @@ fn bench_cli(c: &mut Criterion) {
     // Warm the store once, so the measured runs are hits rather than the first miss.
     check(&root, &[]);
     g.bench_function("cached", |b| b.iter(|| check(&root, &[])));
+
+    // The case the per-module entries exist for: one mid-layer module edited, so it and the
+    // quarter of the outer layer that requires it are checked while the rest replay. The
+    // file write is inside the measured region — it is part of what an edit costs, and it
+    // is microseconds against the rest.
+    let mut salt = 0u32;
+    g.bench_function("one-edited", |b| {
+        b.iter(|| {
+            salt += 1;
+            write(&root.join("src/core_0.tl"), &core_source(0, salt));
+            check(&root, &[]);
+        })
+    });
 
     g.finish();
 }
