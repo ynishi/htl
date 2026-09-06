@@ -254,6 +254,8 @@ dependencies = [
  "anyhow",
  "clap",
  "htl",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

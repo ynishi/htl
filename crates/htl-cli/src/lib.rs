@@ -5,7 +5,17 @@
 //! - `htl run <file.tl|.hb>`  type-check then execute (strict: type errors abort)
 //! - `htl build <dir>`        compile a tree of `.tl` into one stripped-bytecode bundle
 
+mod report;
 mod scaffold;
+
+/// Output format of `check` / `test`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
+enum Format {
+    /// Human-readable lines on stderr
+    Text,
+    /// One JSON document on stdout (see README, "Machine-readable output")
+    Json,
+}
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -36,6 +46,9 @@ enum Cmd {
         /// List lint rules and exit
         #[arg(long)]
         list_lints: bool,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
     },
     /// Run tests: `*_test.tl` and `tests/**/*.tl`, one isolated state per file
     Test {
@@ -70,6 +83,9 @@ enum Cmd {
         /// With --coverage, also list the unexecuted line ranges of each module
         #[arg(long, requires = "coverage")]
         coverage_lines: bool,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
     },
     /// Write the `.d.tl` files declared by `#[host_module(dts = ..)]` / `#[teal(dts = ..)]`
     /// in a Rust crate, without building it (check / run / test / build do this automatically)
@@ -170,15 +186,17 @@ pub fn run() -> ExitCode {
 
 fn real_main(cli: Cli) -> Result<ExitCode> {
     match cli.cmd {
-        Cmd::Check { paths, strict, lint, list_lints } => cmd_check(&paths, strict, lint.as_deref(), list_lints),
+        Cmd::Check { paths, strict, lint, list_lints, format } => {
+            cmd_check(&paths, strict, lint.as_deref(), list_lints, format == Format::Json)
+        }
         Cmd::Fmt { paths, check, indent } => cmd_fmt(&paths, check, indent),
-        Cmd::Test { paths, filter, lib, lint, fail_fast, verbose, quiet, slow, update, coverage, coverage_lines } => {
+        Cmd::Test { paths, filter, lib, lint, fail_fast, verbose, quiet, slow, update, coverage, coverage_lines, format } => {
             cmd_test(
                 &paths,
                 filter.as_deref(),
                 &lib,
                 lint.as_deref(),
-                TestFlags { fail_fast, verbose, quiet, slow, update, coverage, coverage_lines },
+                TestFlags { fail_fast, verbose, quiet, slow, update, coverage, coverage_lines, json: format == Format::Json },
             )
         }
         Cmd::Pkg { args } => cmd_pkg(&args),
@@ -311,17 +329,17 @@ struct TestFlags {
     update: bool,
     coverage: bool,
     coverage_lines: bool,
+    json: bool,
 }
 
 /// Coverage over the run: every `.tl` the test files' checks depended on (so a module
 /// no test reached shows 0%), with the executed statements from the line hooks.
-fn print_coverage(
+fn coverage_report(
     checker: &Htl,
     test_files: &[PathBuf],
     hits: &std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>>,
     deps: &std::collections::BTreeSet<PathBuf>,
-    with_lines: bool,
-) -> Result<()> {
+) -> Result<report::CoverageReport> {
     let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let tests: std::collections::HashSet<PathBuf> = test_files.iter().map(|p| canon(p)).collect();
     let mut sources: std::collections::BTreeSet<PathBuf> = deps.iter().map(|p| canon(p)).collect();
@@ -356,27 +374,46 @@ fn print_coverage(
         let shown = src.strip_prefix(&cwd).unwrap_or(src).to_string_lossy().into_owned();
         rows.push((shown, executed, ranges.len(), missed));
     }
-    let width = rows.iter().map(|r| r.0.len()).max().unwrap_or(4).max(5);
-    for (name, executed, all, missed) in &rows {
-        eprintln!("coverage: {name:<width$}  {executed:>5}/{all:<5} {:5.1}%", 100.0 * *executed as f64 / *all as f64);
-        if with_lines && !missed.is_empty() {
-            let spans: Vec<String> = missed
+    Ok(report::CoverageReport {
+        modules: rows
+            .into_iter()
+            .map(|(path, executed, total, unexecuted)| report::CoverageModule { path, executed, total, unexecuted })
+            .collect(),
+        executed: tot_exec,
+        total: tot_all,
+    })
+}
+
+fn print_coverage(cov: &report::CoverageReport, with_lines: bool) {
+    let width = cov.modules.iter().map(|m| m.path.len()).max().unwrap_or(4).max(5);
+    for m in &cov.modules {
+        eprintln!(
+            "coverage: {:<width$}  {:>5}/{:<5} {:5.1}%",
+            m.path,
+            m.executed,
+            m.total,
+            100.0 * m.executed as f64 / m.total as f64
+        );
+        if with_lines && !m.unexecuted.is_empty() {
+            let spans: Vec<String> = m
+                .unexecuted
                 .iter()
                 .map(|(a, b)| if a == b { a.to_string() } else { format!("{a}-{b}") })
                 .collect();
             eprintln!("          unexecuted: {}", spans.join(", "));
         }
     }
-    if tot_all > 0 {
+    if cov.total > 0 {
         eprintln!(
-            "coverage: {:<width$}  {tot_exec:>5}/{tot_all:<5} {:5.1}%  (statements; code run inside coroutines is not seen)",
+            "coverage: {:<width$}  {:>5}/{:<5} {:5.1}%  (statements; code run inside coroutines is not seen)",
             "total",
-            100.0 * tot_exec as f64 / tot_all as f64
+            cov.executed,
+            cov.total,
+            100.0 * cov.executed as f64 / cov.total as f64
         );
     } else {
         eprintln!("coverage: no .tl module reached");
     }
-    Ok(())
 }
 
 fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&str>, flags: TestFlags) -> Result<ExitCode> {
@@ -403,6 +440,8 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
     let started = std::time::Instant::now();
     // One checker for the run; each file still gets a fresh program state.
     let session = htl::testing::TestSession::new(lint, lib, filter, opts)?;
+    let mut sink = report::Sink::new(flags.json);
+    let mut json_files: Vec<report::TestFile> = Vec::new();
     for f in &files {
         let rep = session.run_file(f)?;
         if flags.coverage {
@@ -415,7 +454,10 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
             cov_deps.extend(rep.check.deps.iter().cloned());
         }
         ran_files += 1;
-        print_checkinfo(&rep.check);
+        sink.checkinfo(&rep.check);
+        if flags.json {
+            json_files.push(report::TestFile::from_report(&rep, sink.take()));
+        }
         let tag = if rep.ok() { "ok  " } else { "FAIL" };
         let detail = if !rep.check.ok() {
             "type check failed".to_string()
@@ -427,13 +469,14 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
             format!("{} passed, {} failed", rep.passed, rep.failed)
         };
         // Quiet: a passing file is silence; failures, errors and slow tests still show.
-        let show_file = !flags.quiet || !rep.ok();
+        // JSON: nothing on stderr, the document carries it all.
+        let show_file = !flags.json && (!flags.quiet || !rep.ok());
         if show_file {
             eprintln!("{tag} {}  ({detail}, {:.0} ms)", f.display(), rep.duration_ms);
         }
         for tr in &rep.tests {
             let slow = flags.slow.is_some_and(|ms| tr.ms >= ms);
-            if flags.verbose || slow {
+            if !flags.json && (flags.verbose || slow) {
                 if flags.quiet && !show_file {
                     // The file line was skipped: name the file with the slow test.
                     eprintln!("slow {}  {}  ({:.1} ms)", f.display(), tr.name, tr.ms);
@@ -444,15 +487,17 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
                 eprintln!("      {mark} {}  ({:.1} ms){note}", tr.name, tr.ms);
             }
         }
-        for m in &rep.failures {
-            eprintln!("      - {m}");
-        }
-        // A snapshot written or rewritten is a change on disk: always say so, even in -q.
-        for p in &rep.snapshots_written {
-            eprintln!("snapshot written: {p}");
-        }
-        for p in &rep.snapshots_updated {
-            eprintln!("snapshot updated: {p}");
+        if !flags.json {
+            for m in &rep.failures {
+                eprintln!("      - {m}");
+            }
+            // A snapshot written or rewritten is a change on disk: always say so, even in -q.
+            for p in &rep.snapshots_written {
+                eprintln!("snapshot written: {p}");
+            }
+            for p in &rep.snapshots_updated {
+                eprintln!("snapshot updated: {p}");
+            }
         }
         passed += rep.passed;
         failed += rep.failed;
@@ -463,19 +508,41 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
             }
         }
     }
-    if flags.coverage {
-        print_coverage(session.checker(), &files, &cov_hits, &cov_deps, flags.coverage_lines)?;
-    }
+    let coverage = if flags.coverage {
+        Some(coverage_report(session.checker(), &files, &cov_hits, &cov_deps)?)
+    } else {
+        None
+    };
     let skipped = files.len() - ran_files;
-    eprintln!(
-        "htl test: {} file(s), {} passed, {} failed, {} file(s) with errors{} ({:.0} ms)",
-        ran_files,
-        passed,
-        failed,
-        bad_files,
-        if skipped > 0 { format!(", {skipped} file(s) not run (--fail-fast)") } else { String::new() },
-        started.elapsed().as_secs_f64() * 1000.0
-    );
+    let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+    if flags.json {
+        report::emit(&report::TestReport {
+            files: json_files,
+            summary: report::TestSummary {
+                files: files.len(),
+                files_run: ran_files,
+                passed,
+                failed,
+                files_with_errors: bad_files,
+                duration_ms,
+                ok: bad_files == 0,
+            },
+            coverage,
+        })?;
+    } else {
+        if let Some(cov) = &coverage {
+            print_coverage(cov, flags.coverage_lines);
+        }
+        eprintln!(
+            "htl test: {} file(s), {} passed, {} failed, {} file(s) with errors{} ({:.0} ms)",
+            ran_files,
+            passed,
+            failed,
+            bad_files,
+            if skipped > 0 { format!(", {skipped} file(s) not run (--fail-fast)") } else { String::new() },
+            duration_ms
+        );
+    }
     Ok(if bad_files == 0 { ExitCode::SUCCESS } else { ExitCode::FAILURE })
 }
 
@@ -524,7 +591,8 @@ fn cmd_fmt(paths: &[PathBuf], check: bool, indent: Option<usize>) -> Result<Exit
     Ok(if fail { ExitCode::FAILURE } else { ExitCode::SUCCESS })
 }
 
-fn cmd_check(paths: &[PathBuf], strict: bool, lint: Option<&str>, list_lints: bool) -> Result<ExitCode> {
+fn cmd_check(paths: &[PathBuf], strict: bool, lint: Option<&str>, list_lints: bool, json: bool) -> Result<ExitCode> {
+    let mut sink = report::Sink::new(json);
     let paths = if paths.is_empty() { vec![PathBuf::from(".")] } else { paths.to_vec() };
     let h = Htl::new()?;
     if list_lints {
@@ -556,7 +624,7 @@ fn cmd_check(paths: &[PathBuf], strict: bool, lint: Option<&str>, list_lints: bo
     for f in &files {
         h.add_layout_paths(f)?;
         let c = h.check(f)?;
-        print_checkinfo(&c);
+        sink.checkinfo(&c);
         n_err += c.errors.len();
         n_warn += c.warnings.len();
         n_lint += c.lints.len();
@@ -565,7 +633,7 @@ fn cmd_check(paths: &[PathBuf], strict: bool, lint: Option<&str>, list_lints: bo
             && c.ok()
         {
             for l in htl::contract_lints(&h, root, cfg, f)? {
-                eprintln!("lint: {l}");
+                sink.diag("lint", &l);
                 n_lint += 1;
             }
         }
@@ -573,26 +641,34 @@ fn cmd_check(paths: &[PathBuf], strict: bool, lint: Option<&str>, list_lints: bo
     }
     // Project-level: cycles in the require graph of the files just checked.
     for cyc in htl::require_cycles(&infos) {
-        eprintln!("lint: {cyc}");
+        sink.diag("lint", &cyc);
         n_lint += 1;
     }
     // A contract the host never enforces is documentation, not a guarantee.
     if let Some((_, cfg_path, cfg)) = &cfg {
         let cargo_root = htl::dts::find_cargo_package_root(&paths[0]);
         for l in htl::contract_enforcement_lints(cfg, cfg_path, cargo_root.as_deref()) {
-            eprintln!("lint: {l}");
+            sink.diag("lint", &l);
             n_lint += 1;
         }
     }
-    eprintln!(
-        "htl check: {} file(s), {} error(s), {} warning(s), {} lint(s){}",
-        files.len(),
-        n_err,
-        n_warn,
-        n_lint,
-        if strict { " [strict]" } else { "" }
-    );
     let fail = n_err > 0 || (strict && (n_warn > 0 || n_lint > 0));
+    if json {
+        report::emit(&report::CheckReport {
+            files: files.len(),
+            diagnostics: sink.take(),
+            summary: report::CheckSummary { errors: n_err, warnings: n_warn, lints: n_lint, strict, ok: !fail },
+        })?;
+    } else {
+        eprintln!(
+            "htl check: {} file(s), {} error(s), {} warning(s), {} lint(s){}",
+            files.len(),
+            n_err,
+            n_warn,
+            n_lint,
+            if strict { " [strict]" } else { "" }
+        );
+    }
     Ok(if fail { ExitCode::FAILURE } else { ExitCode::SUCCESS })
 }
 
