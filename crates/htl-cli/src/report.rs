@@ -297,6 +297,14 @@ pub struct TestSummary {
     pub ok: bool,
 }
 
+/// A function of a module no statement of which ran.
+#[derive(Serialize, Debug)]
+pub struct NeverRan {
+    /// As the source writes it: `f`, `M.f`, `M:f`.
+    pub name: String,
+    pub line: usize,
+}
+
 #[derive(Serialize, Debug)]
 pub struct CoverageModule {
     pub path: String,
@@ -304,6 +312,10 @@ pub struct CoverageModule {
     pub total: usize,
     /// Unexecuted statements as `[first_line, last_line]` ranges.
     pub unexecuted: Vec<(usize, usize)>,
+    /// Functions nothing in the run entered. A percentage says how much of a module
+    /// was missed; this says what was missed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub never_ran: Vec<NeverRan>,
 }
 
 #[derive(Serialize, Debug, Default)]

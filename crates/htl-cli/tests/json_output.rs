@@ -39,7 +39,8 @@ fn project() -> PathBuf {
     write(
         &root.join("src/util.tl"),
         "local record util\nend\nfunction util.twice(n: integer): integer\n   return n * 2\nend\n\
-         function util.half(n: integer): integer\n   if n < 0 then\n      return 0\n   end\n   return n // 2\nend\nreturn util\n",
+         function util.half(n: integer): integer\n   if n < 0 then\n      return 0\n   end\n   return n // 2\nend\n\
+         function util.unused(n: integer): integer\n   return n + 1\nend\nreturn util\n",
     );
     // A type error and a lint (nil-index) in one file.
     write(
@@ -130,6 +131,11 @@ fn test_json_carries_files_tests_failures_and_coverage() {
             .any(|r| r[0] == 8),
         "{util}"
     );
+    // The percentage says how much was missed; never_ran says what.
+    let never = util["never_ran"].as_array().unwrap();
+    assert_eq!(never.len(), 1, "only the uncalled function: {util}");
+    assert_eq!(never[0]["name"], "util.unused");
+    assert_eq!(never[0]["line"], 12);
     assert!(cov["total"].as_u64().unwrap() > 0);
 }
 
