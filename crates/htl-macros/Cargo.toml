@@ -5,9 +5,11 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
 description = "Proc macros for htl: include_tl! / include_tl_bytes! (Teal checked at cargo build), TealRecord, host_module. Use via the `htl` crate."
 readme = "../../README.md"
+documentation = "https://docs.rs/htl-macros"
 keywords = ["lua", "teal", "mlua", "proc-macro"]
 categories = ["development-tools::procedural-macro-helpers"]
 

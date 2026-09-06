@@ -5,9 +5,11 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
 description = "htl command line (also `cargo htl`): check / run / test / fmt / build / pkg / new for Teal projects"
 readme = "../../README.md"
+documentation = "https://docs.rs/htl-cli"
 keywords = ["lua", "teal", "cli", "cargo-subcommand"]
 categories = ["development-tools", "command-line-utilities"]
 

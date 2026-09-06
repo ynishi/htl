@@ -5,9 +5,11 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
 description = "Holistic Typed Lua: Teal type-checked at cargo build and run on an embedded mlua state (umbrella over htl-core + htl-macros)"
 readme = "../../README.md"
+documentation = "https://docs.rs/htl"
 keywords = ["lua", "teal", "mlua", "typed", "scripting"]
 categories = ["development-tools", "game-development"]
 
