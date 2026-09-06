@@ -22,6 +22,9 @@ local L = {}
 
 L.DEFAULT = {
    ["nil-index"] = true,
+   -- On by default and still silent by default: nothing is reported until a record is
+   -- marked `---@struct`, which is a thing someone had to write.
+   ["struct-fields"] = true,
    ["enum-exhaustive"] = true,
    ["shadow-local"] = true,
    ["no-global"] = true,
@@ -509,8 +512,52 @@ end
 
 ---------------------------------------------------------------- entry
 
+---------------------------------------------------------------- struct-fields
+
+-- A record marked `---@struct` is built whole: every field it declares is present at
+-- every construction site, except the ones marked `---@optional`. Teal has no `?` for
+-- record fields, so without this a record the program builds itself reads as if any field
+-- might be absent, and every use site pays for that with a nil check.
+--
+-- Which record a bare `{ ... }` is being built as is type information, and this rule is
+-- run over a syntax-only parse (see L.run). `extra.struct_at(y, x)` answers it from the
+-- checker's position report; the rule only compares key sets.
+local function lint_struct_fields(ast, report, extra)
+   local struct_at = extra and extra.struct_at
+   if not struct_at then return end
+   walk(ast, function(n)
+      if n.kind ~= "literal_table" or not n.y or not n.x then return end
+      local spec = struct_at(n.y, n.x)
+      if not spec then return end
+      local present = {}
+      for _, item in ipairs(n) do
+         if type(item) == "table" and item.key then
+            if item.key.kind == "string" then
+               present[unquote(item.key.tk or "")] = true
+            elseif item.key.kind == "identifier" then
+               present[item.key.tk] = true
+            end
+         end
+      end
+      local missing = {}
+      for name in pairs(spec.required) do
+         if not present[name] then missing[#missing + 1] = name end
+      end
+      if #missing == 0 then return end
+      table.sort(missing)
+      report(
+         "struct-fields",
+         n.y,
+         n.x,
+         spec.name .. " is built without " .. table.concat(missing, ", ")
+            .. " (set it here, or mark the field ---@optional where it is declared)"
+      )
+   end)
+end
+
 local RULES = {
    { "nil-index", lint_nil_index },
+   { "struct-fields", lint_struct_fields },
    { "enum-exhaustive", lint_enum_exhaustive },
    { "shadow-local", lint_shadow },
    { "no-global", lint_no_global },
