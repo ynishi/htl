@@ -28,6 +28,15 @@ enum CacheModeArg {
     WholeRun,
 }
 
+#[derive(Subcommand)]
+enum CacheCmd {
+    /// Delete this project's stored check results
+    Clear {
+        /// A path inside the project; the store is found beside its htl.toml
+        path: Option<PathBuf>,
+    },
+}
+
 impl From<CacheModeArg> for cache::Mode {
     fn from(m: CacheModeArg) -> Self {
         match m {
@@ -171,6 +180,11 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Manage the check cache (see README, "Caching")
+    Cache {
+        #[command(subcommand)]
+        cmd: CacheCmd,
+    },
     /// Format .tl files in place (indentation / blank lines / trailing whitespace)
     Fmt {
         paths: Vec<PathBuf>,
@@ -260,6 +274,9 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
             )
         }
         Cmd::Pkg { args } => cmd_pkg(&args),
+        Cmd::Cache { cmd } => match cmd {
+            CacheCmd::Clear { path } => cmd_cache_clear(path.as_deref()),
+        },
         Cmd::Dts { dir } => cmd_dts(dir.as_deref()),
         Cmd::New { name, lib, embed } => cmd_new(&name, lib, embed),
         Cmd::Init { dir, lib, embed } => cmd_init(dir.as_deref(), lib, embed),
@@ -958,9 +975,45 @@ fn cmd_check(
             n_lint += 1;
         }
     }
+    // Nothing else removes an entry, and this is the only moment the whole set is in hand.
+    if let Some(c) = &store {
+        let keep = match c.mode() {
+            cache::Mode::PerModule => keys.clone(),
+            cache::Mode::WholeRun => vec![run_key.clone()],
+        };
+        c.sweep(&keep, files.len());
+    }
+
     let replayed = files.len() - to_check;
     let fail = report_check(&mut sink, json, files.len(), (n_err, n_warn, n_lint), strict, replayed)?;
     Ok(if fail { ExitCode::FAILURE } else { ExitCode::SUCCESS })
+}
+
+/// Delete this project's cache store.
+///
+/// The store sits beside `htl.toml`, which is not necessarily where anyone is standing:
+/// `htl check src` run from anywhere in a repo writes to the project root. That is the
+/// reason this exists rather than leaving people to work out which directory to remove.
+///
+/// Only `.htl/cache` goes. `.htl/` itself is left in place for whatever else may come to
+/// live there, and the path is built here rather than taken from an argument, so there is
+/// no spelling of the command that removes anything else.
+fn cmd_cache_clear(path: Option<&Path>) -> Result<ExitCode> {
+    let start = path.unwrap_or(Path::new("."));
+    let root = load_config(start)?
+        .map(|(r, _, _)| r)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let dir = root.join(".htl").join("cache");
+    if !dir.is_dir() {
+        eprintln!("htl cache: nothing stored at {}", dir.display());
+        return Ok(ExitCode::SUCCESS);
+    }
+    let n = fs::read_dir(&dir)
+        .map(|rd| rd.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "json")).count())
+        .unwrap_or(0);
+    fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
+    eprintln!("htl cache: removed {n} {} from {}", if n == 1 { "entry" } else { "entries" }, dir.display());
+    Ok(ExitCode::SUCCESS)
 }
 
 /// A checker set up the way a check of these paths needs it: the lint selection, the
