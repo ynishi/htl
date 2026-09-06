@@ -5,7 +5,7 @@
 use anyhow::Result;
 use htl::CheckInfo;
 use htl::testing::FileReport;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// One `error:` / `warning:` / `lint:` line, split into its parts.
 #[derive(Serialize, Debug, Clone)]
@@ -23,14 +23,16 @@ pub struct Diagnostic {
     pub fix: Option<FixJson>,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FixJson {
-    /// `safe` / `unsafe` / `suggest`.
-    pub applicability: &'static str,
+    /// `safe` / `unsafe` / `suggest`. Owned rather than `&'static str` because the run
+    /// cache reads these back (`crate::cache`), and a borrowed field cannot be
+    /// deserialized into. The JSON is unchanged either way.
+    pub applicability: String,
     pub edits: Vec<EditJson>,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct EditJson {
     pub line: usize,
     pub col: usize,
@@ -42,7 +44,7 @@ pub struct EditJson {
 impl FixJson {
     pub fn from_fix(f: &htl::Fix) -> Self {
         Self {
-            applicability: f.applicability.as_str(),
+            applicability: f.applicability.as_str().to_string(),
             edits: f
                 .edits
                 .iter()
@@ -80,22 +82,25 @@ fn split_rule(msg: &str) -> (String, Option<String>) {
 }
 
 /// Where diagnostics go: printed as they come (text) or kept for the document (json).
+///
+/// Everything handed over is also recorded verbatim, so one run can be stored and a
+/// later one replayed through this same code (`crate::cache`). Replaying through the
+/// printing path, rather than through a reconstruction of what it printed, is what makes
+/// "a cached run prints what the original printed" a property of the code instead of a
+/// promise in a comment.
 pub struct Sink {
     pub json: bool,
     pub diagnostics: Vec<Diagnostic>,
+    recorded: Vec<crate::cache::Recorded>,
 }
 
 impl Sink {
     pub fn new(json: bool) -> Self {
-        Self { json, diagnostics: Vec::new() }
+        Self { json, diagnostics: Vec::new(), recorded: Vec::new() }
     }
 
     pub fn diag(&mut self, severity: &'static str, text: &str) {
-        if self.json {
-            self.diagnostics.push(parse_diag(severity, text));
-        } else {
-            eprintln!("{severity}: {text}");
-        }
+        self.diag_with_fix(severity, text, None);
     }
 
     /// Same order as the text output has always used: warnings, lints, errors.
@@ -112,22 +117,64 @@ impl Sink {
     }
 
     fn diag_with_fix(&mut self, severity: &'static str, text: &str, fix: Option<&htl::Fix>) {
+        let fix = fix.map(FixJson::from_fix);
+        self.recorded.push(crate::cache::Recorded {
+            severity: severity.to_string(),
+            text: text.to_string(),
+            fix: fix.clone(),
+        });
+        self.emit(severity, text, fix.as_ref());
+    }
+
+    /// The single place a diagnostic becomes output, whether it was just produced or
+    /// recovered from the cache.
+    fn emit(&mut self, severity: &'static str, text: &str, fix: Option<&FixJson>) {
         if self.json {
             let mut d = parse_diag(severity, text);
-            d.fix = fix.map(FixJson::from_fix);
+            d.fix = fix.cloned();
             self.diagnostics.push(d);
         } else {
             // Text mode: say a fix exists, so `htl fix` is discoverable from the output.
-            match fix.map(|f| f.applicability) {
-                Some(htl::Applicability::Safe) => eprintln!("{severity}: {text} (fixable: htl fix)"),
-                Some(htl::Applicability::Unsafe) => eprintln!("{severity}: {text} (fixable: htl fix --unsafe)"),
+            match fix.map(|f| f.applicability.as_str()) {
+                Some("safe") => eprintln!("{severity}: {text} (fixable: htl fix)"),
+                Some("unsafe") => eprintln!("{severity}: {text} (fixable: htl fix --unsafe)"),
                 _ => eprintln!("{severity}: {text}"),
             }
         }
     }
 
+    /// Print a run recovered from the cache.
+    ///
+    /// An entry carrying a severity this build does not know is refused rather than
+    /// guessed at; the caller then runs the check, which is the right answer for a store
+    /// written by something else.
+    pub fn replay(&mut self, recorded: &[crate::cache::Recorded]) -> Result<()> {
+        // Validate the whole entry before printing any of it. Text mode prints as it
+        // goes, so a replay that gave up halfway would leave those lines on the terminal
+        // and the caller — which falls back to running the check — would print them a
+        // second time.
+        let severities = recorded
+            .iter()
+            .map(|r| match r.severity.as_str() {
+                "error" => Ok("error"),
+                "warning" => Ok("warning"),
+                "lint" => Ok("lint"),
+                other => anyhow::bail!("cache entry has an unknown severity: {other}"),
+            })
+            .collect::<Result<Vec<&'static str>>>()?;
+        for (severity, r) in severities.into_iter().zip(recorded) {
+            self.emit(severity, &r.text, r.fix.as_ref());
+        }
+        Ok(())
+    }
+
     pub fn take(&mut self) -> Vec<Diagnostic> {
         std::mem::take(&mut self.diagnostics)
+    }
+
+    /// What this run said, in the form the cache stores it.
+    pub fn take_recorded(&mut self) -> Vec<crate::cache::Recorded> {
+        std::mem::take(&mut self.recorded)
     }
 }
 
@@ -146,6 +193,9 @@ pub struct CheckSummary {
     pub strict: bool,
     /// What the exit code says: no errors, and under `strict` no warnings or lints.
     pub ok: bool,
+    /// Replayed from the run cache rather than checked. The diagnostics are the same
+    /// either way; this says that no checker ran to produce them.
+    pub cached: bool,
 }
 
 #[derive(Serialize, Debug)]

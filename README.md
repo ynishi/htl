@@ -38,7 +38,7 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 | command | what it does |
 |---|---|
 | `htl new <name>` / `htl init [dir]` | scaffold: `mlua-pkg.toml`, `src/<mod>/init.tl`, `src/main.tl`, `tests/`, README (`--lib`, `--embed` for a Rust host) |
-| `htl check [paths] [--strict] [--lint +rule,-rule]` | type-check; htl lints as `lint:` (advisory, `--strict` fails on them) |
+| `htl check [paths] [--strict] [--lint +rule,-rule] [--no-cache]` | type-check; htl lints as `lint:` (advisory, `--strict` fails on them); a run whose inputs are unchanged is replayed from `.htl/` (see Caching) |
 | `htl run <file.tl \| app.hb> [args]` | check then execute; `require` of a `.tl` with type errors fails |
 | `htl test [paths] [--filter s] [--lib mod]` | `*_test.tl` and `tests/**/*.tl`, one isolated state per file |
 | `htl fmt [paths] [--check] [--indent N]` | whitespace formatter (indentation from the syntax tree, blank lines, trailing space) |
@@ -55,6 +55,24 @@ dot-directory are not entered, so dependencies' sources and tests stay theirs. A
 directory passed explicitly is always walked. Files under `tests/` are checked with the
 project root and `src/` on the search path, the same as `htl test`, so `htl check tests`
 and `htl test` agree.
+
+## Caching
+
+`htl check` stores what a run reported under `.htl/cache/` at the project root, and
+replays it when nothing that fed it has changed — the summary line then ends with
+`[cached]`, and `--format json` sets `summary.cached`. A cold check costs about a second
+on a few thousand lines of Teal; a replay costs a few milliseconds and never builds a
+checker. `htl init` puts `.htl/` in `.gitignore`; add it by hand in an existing project.
+
+An entry is used only when every file the run read still hashes the same, every directory
+the checker could resolve a `require` in holds the same modules, and the binary that wrote
+the entry is the one reading it. Content hashes throughout, no timestamps, so touching a
+file without editing it does not invalidate anything and a fresh checkout does not either.
+Anything unexpected — a corrupt entry, an unreadable store, an htl upgrade — is a miss,
+which costs the check it would have skipped and never the wrong answer.
+
+`--no-cache` neither reads nor writes, and `HTL_CACHE_DEBUG=1` prints why a run was not
+replayed. `htl test` is not cached: a test file has to run whatever its types say.
 
 ## Embedding in Rust
 
