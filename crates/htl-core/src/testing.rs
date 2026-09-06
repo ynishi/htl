@@ -76,6 +76,28 @@ pub struct RunOptions {
     pub update_snapshots: bool,
     /// Record executed lines per chunk while the file runs (`htl test --coverage`).
     pub coverage: bool,
+    /// Seed for the run (`htl test --seed`). Each file draws from a stream derived from
+    /// this and its own path, so one file's values do not depend on which other files ran
+    /// or in what order: `--filter` reproduces what the full run did, and a failure can be
+    /// looked at again on its own. `None` leaves the state's own seeding alone.
+    pub seed: Option<u64>,
+}
+
+/// The seed one file gets, from the run's seed and its path.
+///
+/// Derived rather than taken from a shared stream, so the answer to "what did this file
+/// draw" does not depend on the company it kept. SplitMix64 over an FNV-1a of the path:
+/// the point is that neighbouring paths land far apart, not that it is unguessable.
+pub fn file_seed(run_seed: u64, path: &Path) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in path.to_string_lossy().as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let mut z = run_seed.wrapping_add(h).wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
 }
 
 /// Where a test file's snapshots live: `<dir>/__snapshots__/<file stem>/`.
@@ -304,6 +326,14 @@ fn run_in(h: &Htl, path: &Path, r: RunIn<'_>, out_code: &mut Option<String>) -> 
     phase("gen_lua", &mut t0);
     rep.check = check;
     let Some(code) = code else { return Ok(rep) };
+    // Before the file runs, so a module it requires draws from the same stream. Seeding
+    // the state's own generator rather than handing out a private one means a test that
+    // already calls `math.random` becomes reproducible without being rewritten.
+    if let Some(run_seed) = opts.seed {
+        let math: Table = h.lua().globals().get("math")?;
+        let randomseed: Function = math.get("randomseed")?;
+        randomseed.call::<()>(file_seed(run_seed, path) as i64)?;
+    }
     if opts.coverage {
         h.coverage_start()?;
     }
