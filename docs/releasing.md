@@ -12,31 +12,24 @@ git tag v0.1.N && git push origin main && git push origin v0.1.N
 ```
 
 The chain is `&&`-joined on purpose: if a step fails, nothing after it runs, so a
-failure leaves no half-tagged, half-pushed state. Check which crates went out
-(`cargo search htl-core` or the crates.io page) before re-running; a crate that was
-already published for that version fails with "already exists" and the rest continues
-from where it stopped once you drop the published ones from the chain.
+failure leaves no half-tagged, half-pushed state. Before re-running, check which
+crates went out (`cargo search htl-core` or the crates.io page). A crate already
+published at that version fails with "already exists", so drop the published ones
+from the chain and run the rest.
 
-## crates.io rate limit
+## When crates.io refuses a version
 
-crates.io limits how many **versions of one crate** can be published in 24 hours. Nine
-versions of `htl-core` in a day were accepted; the tenth was refused:
+crates.io caps how many versions of one crate can be published per 24 hours; a
+patch release per dogfood round reaches it. The refusal is a
+`429 Too Many Requests` ("published too many versions of this crate in the last
+24 hours") at upload time, and nothing is uploaded. Then:
 
-```
-error: failed to publish htl-core v0.1.20 to registry at https://crates.io
-Caused by:
-  the remote server responded with an error (status 429 Too Many Requests):
-  You have published too many versions of this crate in the last 24 hours
-```
-
-Nothing is uploaded when this happens. What to do:
-
-1. Push the commit anyway (`git push origin main`); the tag waits for the publish.
+1. Push the commit anyway; the tag waits for the publish.
 2. Consumers who need the fix now use the local checkout (next section).
 3. Re-run the same chain once the window has passed.
 
-Patch releases per dogfood round add up quickly; batching two or three fixes into one
-version avoids the limit without holding anything back.
+Batching two or three fixes into one version avoids it without holding anything
+back.
 
 ## Using an unpublished htl from a local checkout
 
