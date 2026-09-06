@@ -370,6 +370,44 @@ fn entries_for_deleted_modules_are_dropped() {
     assert_eq!(replayed(&check_bounded(&root, 2, &[])), 2, "and the two that remain still replay");
 }
 
+/// `htl cache clear` exists because the store is beside `htl.toml` rather than wherever the
+/// caller happens to be standing, so "just delete the directory" is advice that needs a
+/// lookup first.
+#[test]
+fn cache_clear_empties_the_store() {
+    let root = three_modules("clear");
+    assert_eq!(replayed(&check(&root)), 0);
+    assert_eq!(replayed(&check(&root)), 3);
+    assert!(entries(&root) > 0);
+
+    let (ok, _, err) = htl(&["cache", "clear"], &root);
+    assert!(ok, "{err}");
+    assert!(err.contains("removed"), "it says what it did: {err}");
+    assert_eq!(entries(&root), 0);
+    assert_eq!(replayed(&check(&root)), 0, "the next run has nothing to replay");
+}
+
+/// Run from a subdirectory, where there is no `.htl/` — the point of the command.
+#[test]
+fn cache_clear_finds_the_store_from_inside_the_project() {
+    let root = three_modules("clear-sub");
+    check(&root);
+    assert!(entries(&root) > 0);
+
+    let (ok, _, err) = htl(&["cache", "clear"], &root.join("src"));
+    assert!(ok, "{err}");
+    assert_eq!(entries(&root), 0, "it cleared the project's store, not one under src/");
+}
+
+/// Clearing a project that never cached anything is not an error.
+#[test]
+fn cache_clear_on_an_empty_project_says_so_and_succeeds() {
+    let root = three_modules("clear-empty");
+    let (ok, _, err) = htl(&["cache", "clear"], &root);
+    assert!(ok, "{err}");
+    assert!(err.contains("nothing stored"), "{err}");
+}
+
 /// Whether to cache and how to grain it are separate: `--no-cache` wins over any mode.
 #[test]
 fn no_cache_beats_the_mode() {

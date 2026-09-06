@@ -45,6 +45,7 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 | `htl gen <file.tl> [-o out.lua]` | readable Lua, the escape hatch out of htl |
 | `htl build <entry.tl> -o app.hb [--debug] [--source] [--extra a,b] [--host x,y]` | link the entry's `require` closure into one bundle (see Bundles) |
 | `htl pkg <args>` | passthrough to `mlua-pkg` at the nearest `mlua-pkg.toml` root |
+| `htl cache clear [path]` | delete the project's stored check results (see Caching) |
 | `htl dts [dir]` | write the `.d.tl` files declared by `#[host_module]` / `#[derive(TealRecord)]` from Rust source, no build needed (`check` / `run` / `test` / `build` do this automatically when inside a crate) |
 
 `mlua-pkg.toml` is detected by walking up from the file: vendored deps become
@@ -113,8 +114,11 @@ Flags are part of the key when they change what a module reports and not when th
 change the verdict: `--lint` gets its own entries, `--strict` reuses them and differs in the
 exit code alone.
 
-`HTL_CACHE_DEBUG=1` prints why something was not replayed. `htl test` is not cached: a test
-has to run whatever its types say.
+`htl cache clear` empties the store. It finds it beside `htl.toml`, which is not necessarily
+where you are standing — `htl check src` run from anywhere in a repo writes to the project
+root — so this saves working out which directory to remove. `HTL_CACHE_DEBUG=1` prints why
+something was not replayed. `htl test` is not cached: a test has to run whatever its types
+say.
 
 ## Embedding in Rust
 
