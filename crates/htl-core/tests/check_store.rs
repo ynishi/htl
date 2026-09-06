@@ -33,7 +33,9 @@ fn same_named_modules_in_two_dirs_stay_apart_across_checks() {
     write(&b.join("main.tl"), "local util = require(\"util\")\nlocal s: string = util.f()\nprint(s)\n");
 
     let h = Htl::new().unwrap();
-    // The CLI does this per file: reset, then the file's own dir.
+    // Stands in for what the CLI does per file: begin from a known path, then add the
+    // file's own directory. `cmd_check` saves and restores rather than resetting, which
+    // comes to the same thing for a checker that only ever had these directories.
     h.reset_search_path().unwrap();
     h.add_path(&a).unwrap();
     let ca = h.check(&a.join("main.tl")).unwrap();
