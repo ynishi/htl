@@ -38,7 +38,10 @@ impl Host {
 
     /// Record in, record out: `host.Point` crosses the boundary as a plain table.
     pub fn scale(&self, p: Point, k: f64) -> Point {
-        Point { x: p.x * k, y: p.y * k }
+        Point {
+            x: p.x * k,
+            y: p.y * k,
+        }
     }
 
     /// `&str` parameter: Teal passes a string, the wrapper hands the fn a `&String`.
@@ -97,8 +100,14 @@ const BAD: &str = include_tl!("scripts/bad.tl");
 
 fn main() -> Result<()> {
     let h = Htl::new()?;
-    Host { started: Instant::now() }.htl_preload(&h)?;
-    Store { dir: std::env::temp_dir() }.htl_preload(&h)?;
+    Host {
+        started: Instant::now(),
+    }
+    .htl_preload(&h)?;
+    Store {
+        dir: std::env::temp_dir(),
+    }
+    .htl_preload(&h)?;
 
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|a| a == "--bundle") {

@@ -53,37 +53,20 @@ use std::path::{Path, PathBuf};
 /// value is a miss rather than an error: a fresh checkout and an upgrade both take that
 /// path in normal operation, which is why rustc treats its own header mismatch the same
 /// way.
-const FORMAT: u32 = 3;
+const FORMAT: u32 = 5;
 
 /// Where the store lives under the project root. Generated, and `htl init` puts it in
 /// `.gitignore`.
 const DIR: &str = ".htl/cache";
-
-fn debugging() -> bool {
-    std::env::var_os("HTL_CACHE_DEBUG").is_some()
-}
 
 /// How many entries a project's store may hold before a run starts dropping the ones it did
 /// not use.
 ///
 /// Scaled to the project, because the natural size is one entry per module per way of
 /// invoking the check, and "a few ways" is what people do. The floor keeps a small project
-/// from evicting itself on its second invocation. `HTL_CACHE_MAX_ENTRIES` overrides it,
-/// which exists for the tests — reaching a few hundred entries honestly takes more
-/// invocations than a test should run.
-fn max_entries(files: usize) -> usize {
-    if let Some(n) = std::env::var_os("HTL_CACHE_MAX_ENTRIES")
-        .and_then(|v| v.to_str().and_then(|s| s.parse::<usize>().ok()))
-    {
-        return n;
-    }
+/// from evicting itself on its second invocation.
+fn default_bound(files: usize) -> usize {
     (files * 4).max(256)
-}
-
-fn miss(reason: &str) {
-    if debugging() {
-        eprintln!("htl cache: miss ({reason})");
-    }
 }
 
 /// What produced an entry. A cache is only as good as its ability to notice it was
@@ -107,7 +90,12 @@ impl Stamp {
     fn current() -> Option<Self> {
         let exe = std::env::current_exe().ok()?;
         let m = std::fs::metadata(&exe).ok()?;
-        let mtime = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+        let mtime = m
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_nanos();
         Some(Self {
             format: FORMAT,
             htl: env!("CARGO_PKG_VERSION").to_string(),
@@ -176,11 +164,45 @@ pub struct Module {
     /// which is how a dependency's edit invalidates its dependents.
     pub deps: Vec<String>,
     pub requires: Vec<RequireJson>,
+    /// The Lua this module generates, for entries under [`gen_key`]. `htl check` never needs
+    /// it and stores `None`; `htl test` stores it so a replay can go straight to running.
+    /// Absent when checking produced errors, since there is nothing to run then.
+    #[serde(default)]
+    pub code: Option<String>,
+    /// What checking reported, in the form the test runner needs it back.
+    ///
+    /// `htl check` replays `diagnostics` straight into the sink and never reconstructs a
+    /// `CheckInfo`; the test runner puts one into its report, so a replayed test file needs
+    /// the structured form rather than the printed one. Only `gen_key` entries carry it.
+    #[serde(default)]
+    pub check: Option<CheckInfoJson>,
+}
+
+/// A `CheckInfo` as an entry stores it.
+///
+/// Deliberately a separate type from the diagnostics `htl check` replays: those are text
+/// on their way to a terminal, these are the fields the runner reads back.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct CheckInfoJson {
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+    pub lints: Vec<String>,
+    pub deps: Vec<String>,
+    pub requires: Vec<RequireJson>,
+    pub error_fixes: Vec<Option<crate::report::FixJson>>,
+    pub lint_fixes: Vec<Option<crate::report::FixJson>>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Entry {
     stamp: Stamp,
+    /// The file this entry is about, and which question it answers.
+    ///
+    /// Neither is needed to use the entry — the key already decided both. They are here so
+    /// the store can be described: the files on disk are named by hash, and a cache nobody
+    /// can read the contents of is one nobody can reason about (`htl cache status`).
+    subject: String,
+    kind: String,
     inputs: Vec<Input>,
     probes: Vec<Probe>,
     module: Module,
@@ -190,6 +212,9 @@ struct Entry {
 #[derive(Serialize, Deserialize, Debug)]
 struct RunEntry {
     stamp: Stamp,
+    /// The files the walk visited, and which question this answers. See `Entry`.
+    subjects: Vec<String>,
+    kind: String,
     inputs: Vec<Input>,
     probes: Vec<Probe>,
     /// One per file in the walk, in walk order. A different count means the walk itself
@@ -221,11 +246,82 @@ impl Mode {
             _ => None,
         }
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::PerModule => "per-module",
+            Mode::WholeRun => "whole-run",
+        }
+    }
+}
+
+/// Everything the store needs from outside itself.
+///
+/// Built once, by the caller that is already reading flags and the environment, and passed
+/// in. Nothing in this module reaches for `std::env`: a run's behaviour is decided in one
+/// place, so reading that place tells you what the run will do.
+#[derive(Copy, Clone, Debug)]
+pub struct Options {
+    /// `--no-cache` turns this off. Separate from how the cache is grained.
+    pub enabled: bool,
+    pub mode: Mode,
+    /// Say why lookups missed, and what the run did with the store.
+    pub explain: bool,
+    /// Entries a project's store may hold. `None` scales it to the project size.
+    pub max_entries: Option<usize>,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: Mode::default(),
+            explain: false,
+            max_entries: None,
+        }
+    }
+}
+
+/// What one run did with the store.
+///
+/// Kept by the store rather than by its callers, so a report cannot claim a number the store
+/// disagrees with.
+#[derive(Default, Copy, Clone, Debug)]
+pub struct Stats {
+    pub hits: usize,
+    pub misses: usize,
+    pub stored: usize,
+    pub evicted: usize,
+}
+
+impl Stats {
+    /// One line, for the end of a run. `None` when the run did not touch the store at all,
+    /// which is worth saying by saying nothing.
+    pub fn summary(&self, mode: Mode) -> Option<String> {
+        let touched = self.hits + self.misses + self.stored + self.evicted;
+        (touched > 0).then(|| {
+            format!(
+                "htl cache: {} hit, {} missed, {} written, {} evicted ({})",
+                self.hits,
+                self.misses,
+                self.stored,
+                self.evicted,
+                mode.as_str()
+            )
+        })
+    }
 }
 
 /// The identity of one module under one invocation: same key, same question.
+///
+/// Carries which question it is, so an entry written under it can record that too — the file
+/// on disk is named by the hash, and a store whose contents cannot be described is one
+/// nobody can reason about.
 #[derive(Debug, Clone)]
-pub struct Key(String);
+pub struct Key {
+    hash: String,
+    kind: &'static str,
+}
 
 /// Hash of a file's contents, or `None` if it cannot be read — an unreadable input is a
 /// miss, never a silent hit.
@@ -242,7 +338,10 @@ fn hash_file(p: &Path) -> Option<String> {
 /// while the same file reached as an import recorded an absolute one, so its hash depended
 /// on how it was reached. Everything that goes into an entry comes through here.
 pub fn normal(p: &Path) -> String {
-    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()).to_string_lossy().into_owned()
+    std::fs::canonicalize(p)
+        .unwrap_or_else(|_| p.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Whether `name` resolves to a file in `dir`.
@@ -257,8 +356,12 @@ pub fn normal(p: &Path) -> String {
 /// there is no direction in which it produces a wrong answer.
 fn resolves_in(dir: &Path, name: &str) -> bool {
     let stem = name.replace('.', "/");
-    ["tl", "d.tl", "lua"].iter().any(|ext| dir.join(format!("{stem}.{ext}")).is_file())
-        || ["init.tl", "init.d.tl", "init.lua"].iter().any(|f| dir.join(&stem).join(f).is_file())
+    ["tl", "d.tl", "lua"]
+        .iter()
+        .any(|ext| dir.join(format!("{stem}.{ext}")).is_file())
+        || ["init.tl", "init.d.tl", "init.lua"]
+            .iter()
+            .any(|f| dir.join(&stem).join(f).is_file())
 }
 
 /// The key for one module in this invocation.
@@ -269,14 +372,37 @@ fn resolves_in(dir: &Path, name: &str) -> bool {
 /// entry. The working directory completes it, since the same relative spelling means a
 /// different file from somewhere else.
 pub fn module_key(spelling: &Path, lint: Option<&str>) -> Key {
+    key_with(CHECK, spelling, lint)
+}
+
+/// An entry holding what checking a module reported.
+pub const CHECK: &str = "check";
+/// An entry holding that, plus the Lua the module generates.
+pub const GEN: &str = "gen";
+
+/// The key for one test file's checked-and-generated form.
+///
+/// The same material as [`module_key`] under a different prefix, so the two never collide.
+/// They are separate entries on purpose: a `htl check` entry holds diagnostics and nothing
+/// else, and making it carry a few KB of generated Lua would cost every check run a parse it
+/// has no use for.
+pub fn gen_key(spelling: &Path, lint: Option<&str>) -> Key {
+    key_with(GEN, spelling, lint)
+}
+
+fn key_with(kind: &'static str, spelling: &Path, lint: Option<&str>) -> Key {
     let mut h = blake3::Hasher::new();
-    h.update(b"htl-module\0");
+    h.update(kind.as_bytes());
+    h.update(b"\0");
     h.update(spelling.to_string_lossy().as_bytes());
     h.update(b"\0");
     h.update(lint.unwrap_or("").as_bytes());
     h.update(b"\0");
     h.update(cwd().as_bytes());
-    Key(h.finalize().to_hex().to_string())
+    Key {
+        hash: h.finalize().to_hex().to_string(),
+        kind,
+    }
 }
 
 /// The key for the walk as a whole, under `Mode::WholeRun`.
@@ -293,21 +419,113 @@ pub fn run_key(files: &[PathBuf], lint: Option<&str>) -> Key {
     h.update(lint.unwrap_or("").as_bytes());
     h.update(b"\0");
     h.update(cwd().as_bytes());
-    Key(h.finalize().to_hex().to_string())
+    Key {
+        hash: h.finalize().to_hex().to_string(),
+        kind: RUN,
+    }
 }
+
+/// One entry covering a whole walk (`Mode::WholeRun`).
+pub const RUN: &str = "run";
 
 /// The working directory, resolved once. This is called for every module in the walk, and
 /// resolving it means a `canonicalize` syscall — doing that per module is a measurable part
 /// of a run that replays everything and does nothing else.
 fn cwd() -> &'static str {
     static CWD: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    CWD.get_or_init(|| std::env::current_dir().map(|p| normal(&p)).unwrap_or_default())
+    CWD.get_or_init(|| {
+        std::env::current_dir()
+            .map(|p| normal(&p))
+            .unwrap_or_default()
+    })
+}
+
+/// One entry, as `htl cache status` describes it.
+#[derive(Serialize, Debug)]
+pub struct EntrySummary {
+    /// `check`, `gen`, `run` — or `unreadable` for a file this build cannot parse, which is
+    /// worth showing rather than hiding, since it is also a permanent miss.
+    pub kind: String,
+    /// The files it is about. One, except for a whole-run entry.
+    pub subjects: Vec<String>,
+    pub bytes: u64,
+    /// Seconds since the entry was last written or replayed. The sweep drops the oldest.
+    pub age_secs: u64,
+}
+
+/// What a project's store holds.
+#[derive(Serialize, Debug)]
+pub struct Contents {
+    pub dir: String,
+    pub entries: Vec<EntrySummary>,
+    pub bytes: u64,
+}
+
+/// Read the store and say what is in it.
+///
+/// Every entry is parsed, which is why this is a command rather than something a run does on
+/// the side. Nothing here validates: an entry listed may still be a miss on the next run
+/// because its inputs moved. This answers "what is stored", not "what would be reused".
+pub fn describe(root: &Path) -> Contents {
+    let dir = root.join(DIR);
+    let mut out = Contents {
+        dir: dir.to_string_lossy().into_owned(),
+        entries: Vec::new(),
+        bytes: 0,
+    };
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    let now = std::time::SystemTime::now();
+    for e in rd.flatten() {
+        let path = e.path();
+        if path.extension().is_none_or(|x| x != "json") {
+            continue;
+        }
+        let Ok(meta) = e.metadata() else { continue };
+        out.bytes += meta.len();
+        let age_secs = meta
+            .modified()
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let v: serde_json::Value = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or(serde_json::Value::Null);
+        let kind = v
+            .get("kind")
+            .and_then(|k| k.as_str())
+            .unwrap_or("unreadable")
+            .to_string();
+        let subjects = match (v.get("subject"), v.get("subjects")) {
+            (Some(s), _) if s.is_string() => vec![s.as_str().unwrap_or_default().to_string()],
+            (_, Some(a)) if a.is_array() => a
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect(),
+            _ => Vec::new(),
+        };
+        out.entries.push(EntrySummary {
+            kind,
+            subjects,
+            bytes: meta.len(),
+            age_secs,
+        });
+    }
+    out.entries
+        .sort_by(|a, b| a.kind.cmp(&b.kind).then(a.subjects.cmp(&b.subjects)));
+    out
 }
 
 /// A store rooted at a project.
 pub struct Cache {
     dir: PathBuf,
-    mode: Mode,
+    opts: Options,
+    stats: RefCell<Stats>,
     /// Content hashes taken during this run, by normalized path.
     ///
     /// Entries overlap heavily: every module in a project tends to require the same few
@@ -324,17 +542,31 @@ pub struct Cache {
 impl Cache {
     /// `None` when the caller turned caching off, or when this build cannot identify
     /// itself well enough to be sure an entry is its own.
-    pub fn open(root: &Path, enabled: bool, mode: Mode) -> Option<Self> {
-        if !enabled {
+    pub fn open(root: &Path, opts: Options) -> Option<Self> {
+        if !opts.enabled {
             return None;
         }
         Stamp::current()?;
         Some(Self {
             dir: root.join(DIR),
-            mode,
+            opts,
+            stats: RefCell::new(Stats::default()),
             hashes: RefCell::new(HashMap::new()),
             dirs: RefCell::new(HashMap::new()),
         })
+    }
+
+    /// What this run has done with the store so far.
+    pub fn stats(&self) -> Stats {
+        *self.stats.borrow()
+    }
+
+    /// Say why something was not reused. Only when asked; the caller decided that once.
+    fn miss(&self, reason: &str) {
+        self.stats.borrow_mut().misses += 1;
+        if self.opts.explain {
+            eprintln!("htl cache: miss ({reason})");
+        }
     }
 
     /// The hash of a file, taken once per run.
@@ -365,25 +597,29 @@ impl Cache {
         let mut h = blake3::Hasher::new();
         for n in names {
             h.update(n.as_bytes());
-            h.update(if self.resolves(dir, n) { b"\x01" } else { b"\x00" });
+            h.update(if self.resolves(dir, n) {
+                b"\x01"
+            } else {
+                b"\x00"
+            });
         }
         h.finalize().to_hex().to_string()
     }
 
     fn entry_path(&self, key: &Key) -> PathBuf {
-        self.dir.join(format!("{}.json", key.0))
+        self.dir.join(format!("{}.json", key.hash))
     }
 
     pub fn mode(&self) -> Mode {
-        self.mode
+        self.opts.mode
     }
 
     /// A truncated or hand-edited entry is a miss, not a crash.
-    fn parse<T: serde::de::DeserializeOwned>(raw: &str) -> Option<T> {
+    fn parse<T: serde::de::DeserializeOwned>(&self, raw: &str) -> Option<T> {
         match serde_json::from_str(raw) {
             Ok(e) => Some(e),
             Err(e) => {
-                miss(&format!("unreadable entry: {e}"));
+                self.miss(&format!("unreadable entry: {e}"));
                 None
             }
         }
@@ -394,8 +630,10 @@ impl Cache {
     /// Both sides of a probe comparison have to derive this the same way, which is why it is
     /// one function rather than two loops.
     fn required_names(modules: &[Module]) -> Vec<String> {
-        let mut names: Vec<String> =
-            modules.iter().flat_map(|m| m.requires.iter().map(|r| r.module.clone())).collect();
+        let mut names: Vec<String> = modules
+            .iter()
+            .flat_map(|m| m.requires.iter().map(|r| r.module.clone()))
+            .collect();
         names.sort();
         names.dedup();
         names
@@ -404,31 +642,43 @@ impl Cache {
     /// Whether an entry still describes the world: written by this build, every file it read
     /// unchanged, and every directory it could have resolved in still answering the same way
     /// for the names it asked about.
-    fn still_valid(&self, stamp: &Stamp, inputs: &[Input], probes: &[Probe], names: &[String]) -> bool {
-        let Some(current) = Stamp::current() else { return false };
+    fn still_valid(
+        &self,
+        stamp: &Stamp,
+        inputs: &[Input],
+        probes: &[Probe],
+        names: &[String],
+    ) -> bool {
+        let Some(current) = Stamp::current() else {
+            return false;
+        };
         if *stamp != current {
-            miss("written by a different build");
+            self.miss("written by a different build");
             return false;
         }
         for i in inputs {
             match self.hash_of(&i.path) {
                 Some(h) if h == i.hash => {}
                 Some(_) => {
-                    miss(&format!("changed: {}", i.path));
+                    self.miss(&format!("changed: {}", i.path));
                     return false;
                 }
                 None => {
-                    miss(&format!("gone: {}", i.path));
+                    self.miss(&format!("gone: {}", i.path));
                     return false;
                 }
             }
         }
         for p in probes {
             if self.probe_hash(&p.dir, names) != p.names {
-                miss(&format!("what {} offers for this module's requires changed", p.dir));
+                self.miss(&format!(
+                    "what {} offers for this module's requires changed",
+                    p.dir
+                ));
                 return false;
             }
         }
+        self.stats.borrow_mut().hits += 1;
         true
     }
 
@@ -437,7 +687,7 @@ impl Cache {
     /// Under `WholeRun` this is all-or-nothing by construction: one entry covers the walk,
     /// so a single changed input means every module is checked.
     pub fn lookup_all(&self, keys: &[Key], run: &Key, files: usize) -> Vec<Option<Module>> {
-        match self.mode {
+        match self.opts.mode {
             Mode::PerModule => keys.iter().map(|k| self.lookup(k)).collect(),
             Mode::WholeRun => match self.lookup_run(run, files) {
                 Some(ms) => ms.into_iter().map(Some).collect(),
@@ -447,9 +697,9 @@ impl Cache {
     }
 
     /// What the module reported last time, if every input and probe still matches.
-    fn lookup(&self, key: &Key) -> Option<Module> {
+    pub fn lookup(&self, key: &Key) -> Option<Module> {
         let raw = std::fs::read_to_string(self.entry_path(key)).ok()?;
-        let entry: Entry = Self::parse(&raw)?;
+        let entry: Entry = self.parse(&raw)?;
         let names = Self::required_names(std::slice::from_ref(&entry.module));
         if !self.still_valid(&entry.stamp, &entry.inputs, &entry.probes, &names) {
             return None;
@@ -467,16 +717,19 @@ impl Cache {
     /// 58 modules. Failing to touch costs a later re-check and nothing else, so every error
     /// here is ignored.
     fn touch(&self, key: &Key) {
-        if let Ok(f) = std::fs::File::options().write(true).open(self.entry_path(key)) {
+        if let Ok(f) = std::fs::File::options()
+            .write(true)
+            .open(self.entry_path(key))
+        {
             let _ = f.set_modified(std::time::SystemTime::now());
         }
     }
 
     fn lookup_run(&self, key: &Key, files: usize) -> Option<Vec<Module>> {
         let raw = std::fs::read_to_string(self.entry_path(key)).ok()?;
-        let entry: RunEntry = Self::parse(&raw)?;
+        let entry: RunEntry = self.parse(&raw)?;
         if entry.modules.len() != files {
-            miss("the walk visits a different number of files");
+            self.miss("the walk visits a different number of files");
             return None;
         }
         let names = Self::required_names(&entry.modules);
@@ -496,7 +749,10 @@ impl Cache {
         paths.dedup();
         let mut inputs = Vec::with_capacity(paths.len());
         for p in paths {
-            inputs.push(Input { path: p.clone(), hash: self.hash_of(&p)? });
+            inputs.push(Input {
+                path: p.clone(),
+                hash: self.hash_of(&p)?,
+            });
         }
         Some(inputs)
     }
@@ -515,19 +771,36 @@ impl Cache {
 
     /// Record what one module reported. Best-effort: a store that cannot be written leaves
     /// the next run to do the work again, which is slow rather than wrong.
-    pub fn store_module(&self, key: &Key, file: &Path, extra_inputs: &[PathBuf], dirs: &[PathBuf], module: &Module) {
-        let Some(stamp) = Stamp::current() else { return };
+    pub fn store_module(
+        &self,
+        key: &Key,
+        file: &Path,
+        extra_inputs: &[PathBuf],
+        dirs: &[PathBuf],
+        module: &Module,
+    ) {
+        let Some(stamp) = Stamp::current() else {
+            return;
+        };
         let paths = std::iter::once(normal(file))
             .chain(module.deps.iter().cloned())
             .chain(extra_inputs.iter().map(|p| normal(p)));
-        let Some(inputs) = self.inputs_for(paths) else { return };
+        let Some(inputs) = self.inputs_for(paths) else {
+            return;
+        };
         let names = Self::required_names(std::slice::from_ref(module));
-        let entry =
-            Entry { stamp, inputs, probes: self.probes_for(dirs, &names), module: module.clone() };
-        if let Err(e) = self.write(key, &entry)
-            && debugging()
-        {
-            eprintln!("htl cache: not stored ({e})");
+        let entry = Entry {
+            stamp,
+            subject: normal(file),
+            kind: key.kind.to_string(),
+            inputs,
+            probes: self.probes_for(dirs, &names),
+            module: module.clone(),
+        };
+        match self.write(key, &entry) {
+            Ok(()) => self.stats.borrow_mut().stored += 1,
+            Err(e) if self.opts.explain => eprintln!("htl cache: not stored ({e})"),
+            Err(_) => {}
         }
     }
 
@@ -541,24 +814,30 @@ impl Cache {
         dirs: &[PathBuf],
         modules: &[Module],
     ) {
-        let Some(stamp) = Stamp::current() else { return };
+        let Some(stamp) = Stamp::current() else {
+            return;
+        };
         let paths = files
             .iter()
             .map(|f| normal(f))
             .chain(modules.iter().flat_map(|m| m.deps.iter().cloned()))
             .chain(extra_inputs.iter().map(|p| normal(p)));
-        let Some(inputs) = self.inputs_for(paths) else { return };
+        let Some(inputs) = self.inputs_for(paths) else {
+            return;
+        };
         let names = Self::required_names(modules);
         let entry = RunEntry {
             stamp,
+            subjects: files.iter().map(|f| normal(f)).collect(),
+            kind: key.kind.to_string(),
             inputs,
             probes: self.probes_for(dirs, &names),
             modules: modules.to_vec(),
         };
-        if let Err(e) = self.write(key, &entry)
-            && debugging()
-        {
-            eprintln!("htl cache: not stored ({e})");
+        match self.write(key, &entry) {
+            Ok(()) => self.stats.borrow_mut().stored += 1,
+            Err(e) if self.opts.explain => eprintln!("htl cache: not stored ({e})"),
+            Err(_) => {}
         }
     }
 
@@ -584,9 +863,14 @@ impl Cache {
     /// Without that it would mean least recently written, and the shape run most often —
     /// written first — would age out while a shape tried once survived.
     pub fn sweep(&self, keep: &[Key], files: usize) {
-        let bound = max_entries(files);
-        let Ok(rd) = std::fs::read_dir(&self.dir) else { return };
-        let keep: std::collections::HashSet<&str> = keep.iter().map(|k| k.0.as_str()).collect();
+        let bound = self
+            .opts
+            .max_entries
+            .unwrap_or_else(|| default_bound(files));
+        let Ok(rd) = std::fs::read_dir(&self.dir) else {
+            return;
+        };
+        let keep: std::collections::HashSet<&str> = keep.iter().map(|k| k.hash.as_str()).collect();
 
         let mut all = 0usize;
         let mut candidates: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
@@ -596,11 +880,17 @@ impl Cache {
                 continue;
             }
             all += 1;
-            let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let stem = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
             if keep.contains(stem.as_str()) {
                 continue;
             }
-            let mtime = e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+            let mtime = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
             candidates.push((path, mtime));
         }
         if all <= bound {
@@ -630,7 +920,8 @@ impl Cache {
                 }
             }
         }
-        if removed > 0 && debugging() {
+        self.stats.borrow_mut().evicted += removed;
+        if removed > 0 && self.opts.explain {
             eprintln!("htl cache: dropped {removed} of {all} entries (bound {bound})");
         }
     }
@@ -638,9 +929,15 @@ impl Cache {
     /// Whether every file an entry recorded as an input has gone. Unreadable entries count as
     /// orphans: nothing can use them either.
     fn is_orphan(&self, path: &Path) -> bool {
-        let Ok(raw) = std::fs::read_to_string(path) else { return true };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else { return true };
-        let Some(inputs) = v.get("inputs").and_then(|i| i.as_array()) else { return true };
+        let Ok(raw) = std::fs::read_to_string(path) else {
+            return true;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            return true;
+        };
+        let Some(inputs) = v.get("inputs").and_then(|i| i.as_array()) else {
+            return true;
+        };
         !inputs
             .iter()
             .filter_map(|i| i.get("path").and_then(|p| p.as_str()))
@@ -654,7 +951,9 @@ impl Cache {
     fn write<T: Serialize>(&self, key: &Key, entry: &T) -> Result<()> {
         std::fs::create_dir_all(&self.dir)?;
         let final_path = self.entry_path(key);
-        let tmp = self.dir.join(format!(".{}.{}.tmp", key.0, std::process::id()));
+        let tmp = self
+            .dir
+            .join(format!(".{}.{}.tmp", key.hash, std::process::id()));
         std::fs::write(&tmp, serde_json::to_vec(entry)?)?;
         if let Err(e) = std::fs::rename(&tmp, &final_path) {
             let _ = std::fs::remove_file(&tmp);

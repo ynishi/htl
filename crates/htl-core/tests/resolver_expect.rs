@@ -31,8 +31,14 @@ fn setup() -> (PathBuf, Htl) {
         "local record defs\n   record Mod\n      name: string\n      hp: integer\n   end\nend\nreturn defs\n",
     );
     // No `local m: defs.Mod` annotation in either mod.
-    write(&dir.join("good.tl"), "return { name = \"swarm\", hp = 3 }\n");
-    write(&dir.join("bad.tl"), "return { name = \"broken\", hp = \"lots\" }\n");
+    write(
+        &dir.join("good.tl"),
+        "return { name = \"swarm\", hp = 3 }\n",
+    );
+    write(
+        &dir.join("bad.tl"),
+        "return { name = \"broken\", hp = \"lots\" }\n",
+    );
 
     let h = Htl::new().unwrap();
     let mut reg = Registry::new();
@@ -51,10 +57,17 @@ fn conforming_mod_loads() {
 #[test]
 fn nonconforming_mod_is_rejected_at_require() {
     let (_dir, h) = setup();
-    let err = h.lua().load("return require('bad').hp").eval::<i64>().unwrap_err();
+    let err = h
+        .lua()
+        .load("return require('bad').hp")
+        .eval::<i64>()
+        .unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("does not satisfy defs.Mod"), "{msg}");
-    assert!(msg.contains("hp"), "should point at the offending field: {msg}");
+    assert!(
+        msg.contains("hp"),
+        "should point at the offending field: {msg}"
+    );
     assert!(
         msg.contains("hint: annotate the returned table"),
         "should tell how to get field-level errors: {msg}"
@@ -67,11 +80,19 @@ fn setup_strict() -> (PathBuf, Htl) {
         &dir.join("defs.tl"),
         "local record defs\n   record Mod\n      name: string\n      hp: integer\n      monsters: {string}\n   end\nend\nreturn defs\n",
     );
-    write(&dir.join("full.tl"), "return { name = \"swarm\", hp = 3, monsters = { \"bat\" } }\n");
+    write(
+        &dir.join("full.tl"),
+        "return { name = \"swarm\", hp = 3, monsters = { \"bat\" } }\n",
+    );
     write(&dir.join("partial.tl"), "return { name = \"quiet\" }\n");
     let h = Htl::new().unwrap();
     let mut reg = Registry::new();
-    reg.add(TealResolver::new(&dir).unwrap().expect_type("defs.Mod").require_fields());
+    reg.add(
+        TealResolver::new(&dir)
+            .unwrap()
+            .expect_type("defs.Mod")
+            .require_fields(),
+    );
     reg.install(h.lua()).unwrap();
     (dir, h)
 }
@@ -80,8 +101,16 @@ fn setup_strict() -> (PathBuf, Htl) {
 #[test]
 fn require_fields_rejects_missing_fields_at_require() {
     let (_dir, h) = setup_strict();
-    let err = h.lua().load("return require('partial').name").eval::<String>().unwrap_err().to_string();
-    assert!(err.contains("missing required field(s) of defs.Mod: hp, monsters"), "{err}");
+    let err = h
+        .lua()
+        .load("return require('partial').name")
+        .eval::<String>()
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("missing required field(s) of defs.Mod: hp, monsters"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -96,7 +125,11 @@ fn require_fields_accepts_complete_mod() {
 fn without_require_fields_partial_passes() {
     let (_dir, h) = setup();
     write(&_dir.join("partial.tl"), "return { name = \"quiet\" }\n");
-    let name: String = h.lua().load("return require('partial').name").eval().unwrap();
+    let name: String = h
+        .lua()
+        .load("return require('partial').name")
+        .eval()
+        .unwrap();
     assert_eq!(name, "quiet");
 }
 
@@ -106,6 +139,10 @@ fn defs_itself_still_resolves() {
     // in a way that breaks (it isn't a Mod) — so expectation applies only to modules
     // other than the type's own module.
     let (_dir, h) = setup();
-    let ok: bool = h.lua().load("return require('defs') ~= nil").eval().unwrap();
+    let ok: bool = h
+        .lua()
+        .load("return require('defs') ~= nil")
+        .eval()
+        .unwrap();
     assert!(ok);
 }

@@ -80,7 +80,10 @@ pub struct RunOptions {
 
 /// Where a test file's snapshots live: `<dir>/__snapshots__/<file stem>/`.
 pub fn snapshot_dir(test_file: &Path) -> PathBuf {
-    let stem = test_file.file_stem().and_then(|s| s.to_str()).unwrap_or("test");
+    let stem = test_file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("test");
     parent_dir(test_file).join("__snapshots__").join(stem)
 }
 
@@ -151,12 +154,22 @@ pub struct TestSession {
 }
 
 impl TestSession {
-    pub fn new(lint_spec: Option<&str>, lib: &str, filter: Option<&str>, opts: RunOptions) -> Result<Self> {
+    pub fn new(
+        lint_spec: Option<&str>,
+        lib: &str,
+        filter: Option<&str>,
+        opts: RunOptions,
+    ) -> Result<Self> {
         let checker = Htl::new()?;
         if let Some(spec) = lint_spec {
             checker.configure_lints(spec)?;
         }
-        Ok(Self { checker, lib: lib.to_string(), filter: filter.map(String::from), opts })
+        Ok(Self {
+            checker,
+            lib: lib.to_string(),
+            filter: filter.map(String::from),
+            opts,
+        })
     }
 
     /// The session's checker (for [`Htl::executable_ranges`] on the sources a run touched).
@@ -168,24 +181,86 @@ impl TestSession {
     /// checker's search path is restored afterwards so files do not see each other's
     /// directories.
     pub fn run_file(&self, path: &Path) -> Result<FileReport> {
+        self.run_file_with(path, None, &[]).map(|(rep, _)| rep)
+    }
+
+    /// Run one file, reusing Lua the caller generated earlier.
+    ///
+    /// `generated` is `(the Lua, what checking it reported)`. Everything before the codegen
+    /// still happens — the searcher, the search path, the project and the config all have to
+    /// be in place before the code can execute — and everything after it happens as usual.
+    /// Only the check and the codegen are skipped.
+    ///
+    /// The run itself is never reused, and this signature cannot express reusing it: a test
+    /// has to run to say whether it passes.
+    ///
+    /// Returns the report and, when this call generated the Lua rather than being handed it,
+    /// that Lua — so a caller keeping a cache has something to keep.
+    /// `preload` is `(module name, its generated Lua, the file it came from)` for modules
+    /// this file will require. Each one goes in front of the searcher, so requiring it does
+    /// not check and generate it during the run. A module not in the list still loads the
+    /// usual way; the list is an optimisation, never a restriction on what can be required.
+    pub fn run_file_with(
+        &self,
+        path: &Path,
+        generated: Option<(&str, &CheckInfo)>,
+        preload: &[(String, String, PathBuf)],
+    ) -> Result<(FileReport, Option<String>)> {
         let started = std::time::Instant::now();
         let saved = self.checker.search_path()?;
         let h = Htl::with_checker(&self.checker)?;
-        let out = run_in(&h, path, self.filter.as_deref(), &self.lib, &self.opts);
+        let mut code = None;
+        let out = run_in(
+            &h,
+            path,
+            RunIn {
+                filter: self.filter.as_deref(),
+                lib: &self.lib,
+                opts: &self.opts,
+                generated,
+                preload,
+            },
+            &mut code,
+        );
         self.checker.set_search_path(&saved)?;
         let mut rep = out?;
         rep.duration_ms = started.elapsed().as_secs_f64() * 1000.0;
-        Ok(rep)
+        Ok((rep, code))
     }
 }
 
-fn run_in(h: &Htl, path: &Path, filter: Option<&str>, lib: &str, opts: &RunOptions) -> Result<FileReport> {
-    let mut rep = FileReport { path: path.to_path_buf(), ..Default::default() };
+/// What one file's run needs from its session, and what the caller already has for it.
+struct RunIn<'a> {
+    filter: Option<&'a str>,
+    lib: &'a str,
+    opts: &'a RunOptions,
+    /// Lua and diagnostics from an earlier run, when the caller kept them.
+    generated: Option<(&'a str, &'a CheckInfo)>,
+    /// Modules to put in front of the searcher before the file executes.
+    preload: &'a [(String, String, PathBuf)],
+}
+
+fn run_in(h: &Htl, path: &Path, r: RunIn<'_>, out_code: &mut Option<String>) -> Result<FileReport> {
+    let RunIn {
+        filter,
+        lib,
+        opts,
+        generated,
+        preload,
+    } = r;
+    let mut rep = FileReport {
+        path: path.to_path_buf(),
+        ..Default::default()
+    };
     let profile = std::env::var_os("HTL_PROFILE").is_some();
     let mut t0 = std::time::Instant::now();
     let phase = |label: &str, t0: &mut std::time::Instant| {
         if profile {
-            eprintln!("profile: {label:<8} {:7.1} ms  {}", t0.elapsed().as_secs_f64() * 1000.0, path.display());
+            eprintln!(
+                "profile: {label:<8} {:7.1} ms  {}",
+                t0.elapsed().as_secs_f64() * 1000.0,
+                path.display()
+            );
         }
         *t0 = std::time::Instant::now();
     };
@@ -208,10 +283,24 @@ fn run_in(h: &Htl, path: &Path, filter: Option<&str>, lib: &str, opts: &RunOptio
         h.add_path(&root.join("src"))?;
     }
     h.install_searcher()?;
+    // Before the searcher gets a chance to be asked. Position 1 beats position 2.
+    for (name, code, from) in preload {
+        h.preload_generated(name, code, from)?;
+    }
     h.set_arg(&path.to_string_lossy(), &[])?;
     phase("setup", &mut t0);
 
-    let (code, check) = h.gen_lua(path)?;
+    let (code, check) = match generated {
+        Some((code, check)) => (Some(code.to_string()), check.clone()),
+        None => {
+            let (code, check) = h.gen_lua(path)?;
+            // Hand the caller what was generated, before any of the early returns below: a
+            // file whose tests fail still generated the Lua that failed, and the next run
+            // should not have to generate it again to find that out.
+            *out_code = code.clone();
+            (code, check)
+        }
+    };
     phase("gen_lua", &mut t0);
     rep.check = check;
     let Some(code) = code else { return Ok(rep) };
@@ -236,7 +325,10 @@ fn run_in(h: &Htl, path: &Path, filter: Option<&str>, lib: &str, opts: &RunOptio
             // rewrite them. Lua cannot create a directory, so it borrows one.
             if let Ok(configure) = t.get::<Function>("configure") {
                 let cfg = h.lua().create_table()?;
-                cfg.set("snapshot_dir", snapshot_dir(path).to_string_lossy().as_ref())?;
+                cfg.set(
+                    "snapshot_dir",
+                    snapshot_dir(path).to_string_lossy().as_ref(),
+                )?;
                 cfg.set("update", opts.update_snapshots)?;
                 cfg.set(
                     "mkdir",
@@ -255,7 +347,9 @@ fn run_in(h: &Htl, path: &Path, filter: Option<&str>, lib: &str, opts: &RunOptio
                 ("snapshots_updated", &mut rep.snapshots_updated),
             ] {
                 if let Ok(list) = report.get::<Table>(key) {
-                    *into = list.sequence_values::<String>().collect::<mlua::Result<_>>()?;
+                    *into = list
+                        .sequence_values::<String>()
+                        .collect::<mlua::Result<_>>()?;
                 }
             }
             phase("run", &mut t0);

@@ -29,7 +29,10 @@ fn lints_of(dir: &Path, file: &str, spec: Option<&str>) -> Vec<String> {
     }
     h.add_path(dir).unwrap();
     let ci = h.check(&dir.join(file)).unwrap();
-    ci.lints.into_iter().filter(|l| l.contains("explicit-number")).collect()
+    ci.lints
+        .into_iter()
+        .filter(|l| l.contains("explicit-number"))
+        .collect()
 }
 
 const SRC: &str = "local total = 0\n\
@@ -56,19 +59,39 @@ fn flags_integer_locals_that_later_meet_a_number() {
     let dir = scratch("on");
     write(&dir.join("n.tl"), SRC);
     let lints = lints_of(&dir, "n.tl", Some("+explicit-number"));
-    let hit = |name: &str| lints.iter().any(|l| l.contains(&format!("'{name}' is inferred as integer")));
+    let hit = |name: &str| {
+        lints
+            .iter()
+            .any(|l| l.contains(&format!("'{name}' is inferred as integer")))
+    };
     assert!(hit("total"), "assigned `+ 1.5`: {lints:?}");
-    assert!(lints.iter().any(|l| l.contains("'total'") && l.contains("line 6")), "names the assignment: {lints:?}");
+    assert!(
+        lints
+            .iter()
+            .any(|l| l.contains("'total'") && l.contains("line 6")),
+        "names the assignment: {lints:?}"
+    );
     assert!(hit("avg"), "assigned a `/` result: {lints:?}");
-    assert!(!hit("count"), "integer counter must not be reported: {lints:?}");
+    assert!(
+        !hit("count"),
+        "integer counter must not be reported: {lints:?}"
+    );
     assert!(!hit("MASK"), "hex constant must not be reported: {lints:?}");
-    assert!(!lints.iter().any(|l| l.contains("'ratio'") || l.contains("'typed'")), "{lints:?}");
+    assert!(
+        !lints
+            .iter()
+            .any(|l| l.contains("'ratio'") || l.contains("'typed'")),
+        "{lints:?}"
+    );
     assert_eq!(lints.len(), 2, "{lints:?}");
 }
 
 #[test]
 fn allow_comment_silences_it() {
     let dir = scratch("allow");
-    write(&dir.join("n.tl"), "local total = 0 -- htl: allow(explicit-number)\ntotal = total + 1.5\nprint(total)\n");
+    write(
+        &dir.join("n.tl"),
+        "local total = 0 -- htl: allow(explicit-number)\ntotal = total + 1.5\nprint(total)\n",
+    );
     assert!(lints_of(&dir, "n.tl", Some("+explicit-number")).is_empty());
 }

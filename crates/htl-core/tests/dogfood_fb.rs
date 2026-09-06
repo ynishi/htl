@@ -41,7 +41,9 @@ fn self_require_on_case_insensitive_fs_is_explained() {
     let ci = h.check(&dir.join("Site.tl")).unwrap();
     assert!(!ci.ok(), "self-require must not type-check");
     assert!(
-        ci.errors.iter().any(|e| e.contains("the requiring file itself") && e.contains("case-insensitive")),
+        ci.errors
+            .iter()
+            .any(|e| e.contains("the requiring file itself") && e.contains("case-insensitive")),
         "{:?}",
         ci.errors
     );
@@ -58,7 +60,10 @@ fn runtime_provided_module_is_declared_by_a_dts() {
         "local record tsk\n   record Tasks\n      name: string\n   end\nend\nreturn tsk\n",
     );
     // Contract for the user's file. Only types; nothing to run.
-    write(&sdk.join("Tasks.d.tl"), "local tsk = require(\"tsk\")\nlocal Tasks: tsk.Tasks\nreturn Tasks\n");
+    write(
+        &sdk.join("Tasks.d.tl"),
+        "local tsk = require(\"tsk\")\nlocal Tasks: tsk.Tasks\nreturn Tasks\n",
+    );
     write(
         &sdk.join("main.tl"),
         "local tasks = require(\"Tasks\")\nprint(\"task: \" .. tasks.name)\n",
@@ -76,7 +81,11 @@ fn runtime_provided_module_is_declared_by_a_dts() {
     write(&project.join("Tasks.tl"), "return { name = \"build\" }\n");
     let rt = Htl::new().unwrap();
     let mut reg = mlua_pkg::Registry::new();
-    reg.add(htl_core::pkg::TealResolver::new(&project).unwrap().expect_type("tsk.Tasks"));
+    reg.add(
+        htl_core::pkg::TealResolver::new(&project)
+            .unwrap()
+            .expect_type("tsk.Tasks"),
+    );
     reg.install(rt.lua()).unwrap();
     rt.add_path(&sdk).unwrap(); // tsk.tl for expect_type's checker
     rt.exec(&code, "=main.tl", &[]).unwrap();
@@ -98,10 +107,20 @@ fn multi_value_call_in_last_argument_is_explained() {
     h.install_test_lib().unwrap();
     h.add_path(&dir).unwrap();
     let ci = h.check(&dir.join("m_test.tl")).unwrap();
-    let e = ci.errors.iter().find(|e| e.contains("wrong number of arguments")).expect("arity error");
+    let e = ci
+        .errors
+        .iter()
+        .find(|e| e.contains("wrong number of arguments"))
+        .expect("arity error");
     assert!(e.contains("m_test.tl:7:"), "{e}");
-    assert!(e.contains("can_cast(...) is a call in last position"), "{e}");
-    assert!(e.contains("local a, b = can_cast(...)") && e.contains("(can_cast(...))"), "{e}");
+    assert!(
+        e.contains("can_cast(...) is a call in last position"),
+        "{e}"
+    );
+    assert!(
+        e.contains("local a, b = can_cast(...)") && e.contains("(can_cast(...))"),
+        "{e}"
+    );
     assert!(
         !ci.errors.iter().any(|e| e.contains("unresolved generic")),
         "the follow-on generic error is a consequence of the same call: {:?}",
@@ -109,9 +128,16 @@ fn multi_value_call_in_last_argument_is_explained() {
     );
 
     // A plain arity mistake gets no such hint.
-    write(&dir.join("plain.tl"), "local function one(a: integer): integer\n   return a\nend\nprint(one(1, 2))\n");
+    write(
+        &dir.join("plain.tl"),
+        "local function one(a: integer): integer\n   return a\nend\nprint(one(1, 2))\n",
+    );
     let ci = h.check(&dir.join("plain.tl")).unwrap();
-    let e = ci.errors.iter().find(|e| e.contains("wrong number of arguments")).expect("arity error");
+    let e = ci
+        .errors
+        .iter()
+        .find(|e| e.contains("wrong number of arguments"))
+        .expect("arity error");
     assert!(!e.contains("last position"), "{e}");
 }
 
@@ -130,15 +156,38 @@ fn forward_reference_gets_the_declaration_line() {
     let h = Htl::new().unwrap();
     h.add_path(&dir).unwrap();
     let ci = h.check(&dir.join("world.tl")).unwrap();
-    let observe = ci.errors.iter().find(|e| e.contains("'observe'")).expect("forward ref error");
-    assert!(observe.contains("`world.observe` is defined at line 12, after this use"), "{observe}");
-    assert!(observe.contains("`observe: function(w: world.W, what: string)`"), "multi-line header joined, comment dropped: {observe}");
-    assert!(observe.contains("move the definition above line 8"), "{observe}");
-    let alive = ci.errors.iter().find(|e| e.contains("'alive'")).expect("forward ref error");
-    assert!(alive.contains("`alive: function(self: world, w: world.W): boolean`"), "method form: {alive}");
+    let observe = ci
+        .errors
+        .iter()
+        .find(|e| e.contains("'observe'"))
+        .expect("forward ref error");
+    assert!(
+        observe.contains("`world.observe` is defined at line 12, after this use"),
+        "{observe}"
+    );
+    assert!(
+        observe.contains("`observe: function(w: world.W, what: string)`"),
+        "multi-line header joined, comment dropped: {observe}"
+    );
+    assert!(
+        observe.contains("move the definition above line 8"),
+        "{observe}"
+    );
+    let alive = ci
+        .errors
+        .iter()
+        .find(|e| e.contains("'alive'"))
+        .expect("forward ref error");
+    assert!(
+        alive.contains("`alive: function(self: world, w: world.W): boolean`"),
+        "method form: {alive}"
+    );
 
     // A genuinely unknown field gets no such hint.
-    write(&dir.join("typo.tl"), "local record m\nend\nfunction m.f()\n   m.g()\nend\nreturn m\n");
+    write(
+        &dir.join("typo.tl"),
+        "local record m\nend\nfunction m.f()\n   m.g()\nend\nreturn m\n",
+    );
     let ci = h.check(&dir.join("typo.tl")).unwrap();
     let e = ci.errors.iter().find(|e| e.contains("'g'")).expect("error");
     assert!(!e.contains("defined at line"), "{e}");
@@ -149,7 +198,10 @@ fn forward_reference_gets_the_declaration_line() {
 #[test]
 fn shadowing_a_required_module_is_named_as_such() {
     let dir = scratch("shadow-mod");
-    write(&dir.join("bestiary.tl"), "local record bestiary\nend\nfunction bestiary.note()\nend\nreturn bestiary\n");
+    write(
+        &dir.join("bestiary.tl"),
+        "local record bestiary\nend\nfunction bestiary.note()\nend\nreturn bestiary\n",
+    );
     write(
         &dir.join("world.tl"),
         "local bestiary = require(\"bestiary\")\nlocal record world\nend\n\
@@ -160,11 +212,23 @@ fn shadowing_a_required_module_is_named_as_such() {
     let h = Htl::new().unwrap();
     h.add_path(&dir).unwrap();
     let ci = h.check(&dir.join("world.tl")).unwrap();
-    let shadows: Vec<&String> = ci.lints.iter().filter(|l| l.contains("shadow-local")).collect();
+    let shadows: Vec<&String> = ci
+        .lints
+        .iter()
+        .filter(|l| l.contains("shadow-local"))
+        .collect();
     assert_eq!(shadows.len(), 2, "{shadows:?}");
     assert!(shadows[0].contains("world.tl:4:"), "{}", shadows[0]);
-    assert!(shadows[0].contains("shadows the module 'bestiary' required at line 1"), "{}", shadows[0]);
-    assert!(shadows[1].contains("shadows an outer local declared at line 7"), "plain locals keep the old wording: {}", shadows[1]);
+    assert!(
+        shadows[0].contains("shadows the module 'bestiary' required at line 1"),
+        "{}",
+        shadows[0]
+    );
+    assert!(
+        shadows[1].contains("shadows an outer local declared at line 7"),
+        "plain locals keep the old wording: {}",
+        shadows[1]
+    );
 }
 
 #[test]
@@ -175,7 +239,9 @@ fn user_message_strips_traceback_and_unwraps_host_errors() {
         "pages",
         h.lua()
             .create_function(|_, ()| -> mlua::Result<()> {
-                Err(mlua::Error::external("content/no-date.md: front matter: 'date' is required"))
+                Err(mlua::Error::external(
+                    "content/no-date.md: front matter: 'date' is required",
+                ))
             })
             .unwrap(),
     )
@@ -183,10 +249,17 @@ fn user_message_strips_traceback_and_unwraps_host_errors() {
     h.preload_value("host", host).unwrap();
 
     let err = h
-        .exec("local host = require('host')\nhost.pages()\n", "=main.lua", &[])
+        .exec(
+            "local host = require('host')\nhost.pages()\n",
+            "=main.lua",
+            &[],
+        )
         .unwrap_err();
     let raw = err.to_string();
-    assert!(raw.contains("stack traceback"), "precondition: mlua includes a traceback: {raw}");
+    assert!(
+        raw.contains("stack traceback"),
+        "precondition: mlua includes a traceback: {raw}"
+    );
     let msg = user_message(&err);
     assert_eq!(msg, "content/no-date.md: front matter: 'date' is required");
 
