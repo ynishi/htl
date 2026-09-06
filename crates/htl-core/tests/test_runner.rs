@@ -64,6 +64,33 @@ fn matchers_and_expect_all_are_typed_and_run() {
     assert!(rep.duration_ms > 0.0);
 }
 
+/// The three negations that had no opposite matcher; each fails with its own message.
+#[test]
+fn negated_matchers_pass_and_fail_with_specific_messages() {
+    let dir = scratch("negated");
+    write(
+        &dir.join("n_test.tl"),
+        "local t = require(\"htl.test\")\n\
+         t.it(\"holds\", function()\n\
+            t.expect(\"closing on the bat\"):to_not_contain(\"fetching\")\n\
+            t.expect({ \"a\", \"b\" }):to_not_contain(\"c\")\n\
+            t.expect(\"costs 12 gold\"):to_not_match(\"%d+ mana\")\n\
+            t.expect(1):to_not_be_nil()\n\
+         end)\n\
+         t.it(\"string contains\", function() t.expect(\"closing on the bat\"):to_not_contain(\"bat\") end)\n\
+         t.it(\"array contains\", function() t.expect({ \"a\", \"b\" }):to_not_contain(\"b\") end)\n\
+         t.it(\"matches\", function() t.expect(\"costs 12 gold\"):to_not_match(\"%d+ gold\") end)\n\
+         t.it(\"is nil\", function() t.expect(nil):to_not_be_nil() end)\n",
+    );
+    let rep = run_test_file(&dir.join("n_test.tl"), None, "htl.test", None, &RunOptions::default()).unwrap();
+    assert!(rep.check.ok(), "{:?}", rep.check.errors);
+    assert_eq!((rep.passed, rep.failed), (1, 4), "{:?}", rep.failures);
+    assert!(rep.failures[0].contains("expected \"closing on the bat\" not to contain \"bat\""), "{}", rep.failures[0]);
+    assert!(rep.failures[1].contains("not to contain \"b\" (found at index 2)"), "{}", rep.failures[1]);
+    assert!(rep.failures[2].contains("not to match /%d+ gold/ (matched \"12 gold\" at 7)"), "{}", rep.failures[2]);
+    assert!(rep.failures[3].contains("expected a value, got nil"), "{}", rep.failures[3]);
+}
+
 #[test]
 fn fail_fast_stops_after_the_first_failure_in_a_file() {
     let dir = scratch("failfast");
