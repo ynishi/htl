@@ -53,7 +53,7 @@ use std::path::{Path, PathBuf};
 /// value is a miss rather than an error: a fresh checkout and an upgrade both take that
 /// path in normal operation, which is why rustc treats its own header mismatch the same
 /// way.
-const FORMAT: u32 = 3;
+const FORMAT: u32 = 4;
 
 /// Where the store lives under the project root. Generated, and `htl init` puts it in
 /// `.gitignore`.
@@ -176,6 +176,33 @@ pub struct Module {
     /// which is how a dependency's edit invalidates its dependents.
     pub deps: Vec<String>,
     pub requires: Vec<RequireJson>,
+    /// The Lua this module generates, for entries under [`gen_key`]. `htl check` never needs
+    /// it and stores `None`; `htl test` stores it so a replay can go straight to running.
+    /// Absent when checking produced errors, since there is nothing to run then.
+    #[serde(default)]
+    pub code: Option<String>,
+    /// What checking reported, in the form the test runner needs it back.
+    ///
+    /// `htl check` replays `diagnostics` straight into the sink and never reconstructs a
+    /// `CheckInfo`; the test runner puts one into its report, so a replayed test file needs
+    /// the structured form rather than the printed one. Only `gen_key` entries carry it.
+    #[serde(default)]
+    pub check: Option<CheckInfoJson>,
+}
+
+/// A `CheckInfo` as an entry stores it.
+///
+/// Deliberately a separate type from the diagnostics `htl check` replays: those are text
+/// on their way to a terminal, these are the fields the runner reads back.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct CheckInfoJson {
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+    pub lints: Vec<String>,
+    pub deps: Vec<String>,
+    pub requires: Vec<RequireJson>,
+    pub error_fixes: Vec<Option<crate::report::FixJson>>,
+    pub lint_fixes: Vec<Option<crate::report::FixJson>>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -269,8 +296,22 @@ fn resolves_in(dir: &Path, name: &str) -> bool {
 /// entry. The working directory completes it, since the same relative spelling means a
 /// different file from somewhere else.
 pub fn module_key(spelling: &Path, lint: Option<&str>) -> Key {
+    key_with(b"htl-module\0", spelling, lint)
+}
+
+/// The key for one test file's checked-and-generated form.
+///
+/// The same material as [`module_key`] under a different prefix, so the two never collide.
+/// They are separate entries on purpose: a `htl check` entry holds diagnostics and nothing
+/// else, and making it carry a few KB of generated Lua would cost every check run a parse it
+/// has no use for.
+pub fn gen_key(spelling: &Path, lint: Option<&str>) -> Key {
+    key_with(b"htl-gen\0", spelling, lint)
+}
+
+fn key_with(prefix: &[u8], spelling: &Path, lint: Option<&str>) -> Key {
     let mut h = blake3::Hasher::new();
-    h.update(b"htl-module\0");
+    h.update(prefix);
     h.update(spelling.to_string_lossy().as_bytes());
     h.update(b"\0");
     h.update(lint.unwrap_or("").as_bytes());
@@ -447,7 +488,7 @@ impl Cache {
     }
 
     /// What the module reported last time, if every input and probe still matches.
-    fn lookup(&self, key: &Key) -> Option<Module> {
+    pub fn lookup(&self, key: &Key) -> Option<Module> {
         let raw = std::fs::read_to_string(self.entry_path(key)).ok()?;
         let entry: Entry = Self::parse(&raw)?;
         let names = Self::required_names(std::slice::from_ref(&entry.module));

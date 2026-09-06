@@ -255,6 +255,9 @@ pub struct TestSummary {
     pub passed: usize,
     pub failed: usize,
     pub files_with_errors: usize,
+    /// Files whose check and codegen came from the cache. They still ran: only the work
+    /// before the run is reusable.
+    pub replayed: usize,
     pub duration_ms: f64,
     pub ok: bool,
 }

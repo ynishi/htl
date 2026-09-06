@@ -168,18 +168,48 @@ impl TestSession {
     /// checker's search path is restored afterwards so files do not see each other's
     /// directories.
     pub fn run_file(&self, path: &Path) -> Result<FileReport> {
+        self.run_file_with(path, None).map(|(rep, _)| rep)
+    }
+
+    /// Run one file, reusing Lua the caller generated earlier.
+    ///
+    /// `generated` is `(the Lua, what checking it reported)`. Everything before the codegen
+    /// still happens — the searcher, the search path, the project and the config all have to
+    /// be in place before the code can execute — and everything after it happens as usual.
+    /// Only the check and the codegen are skipped.
+    ///
+    /// The run itself is never reused, and this signature cannot express reusing it: a test
+    /// has to run to say whether it passes.
+    ///
+    /// Returns the report and, when this call generated the Lua rather than being handed it,
+    /// that Lua — so a caller keeping a cache has something to keep.
+    pub fn run_file_with(
+        &self,
+        path: &Path,
+        generated: Option<(&str, &CheckInfo)>,
+    ) -> Result<(FileReport, Option<String>)> {
         let started = std::time::Instant::now();
         let saved = self.checker.search_path()?;
         let h = Htl::with_checker(&self.checker)?;
-        let out = run_in(&h, path, self.filter.as_deref(), &self.lib, &self.opts);
+        let mut code = None;
+        let out =
+            run_in(&h, path, self.filter.as_deref(), &self.lib, &self.opts, generated, &mut code);
         self.checker.set_search_path(&saved)?;
         let mut rep = out?;
         rep.duration_ms = started.elapsed().as_secs_f64() * 1000.0;
-        Ok(rep)
+        Ok((rep, code))
     }
 }
 
-fn run_in(h: &Htl, path: &Path, filter: Option<&str>, lib: &str, opts: &RunOptions) -> Result<FileReport> {
+fn run_in(
+    h: &Htl,
+    path: &Path,
+    filter: Option<&str>,
+    lib: &str,
+    opts: &RunOptions,
+    generated: Option<(&str, &CheckInfo)>,
+    out_code: &mut Option<String>,
+) -> Result<FileReport> {
     let mut rep = FileReport { path: path.to_path_buf(), ..Default::default() };
     let profile = std::env::var_os("HTL_PROFILE").is_some();
     let mut t0 = std::time::Instant::now();
@@ -211,7 +241,17 @@ fn run_in(h: &Htl, path: &Path, filter: Option<&str>, lib: &str, opts: &RunOptio
     h.set_arg(&path.to_string_lossy(), &[])?;
     phase("setup", &mut t0);
 
-    let (code, check) = h.gen_lua(path)?;
+    let (code, check) = match generated {
+        Some((code, check)) => (Some(code.to_string()), check.clone()),
+        None => {
+            let (code, check) = h.gen_lua(path)?;
+            // Hand the caller what was generated, before any of the early returns below: a
+            // file whose tests fail still generated the Lua that failed, and the next run
+            // should not have to generate it again to find that out.
+            *out_code = code.clone();
+            (code, check)
+        }
+    };
     phase("gen_lua", &mut t0);
     rep.check = check;
     let Some(code) = code else { return Ok(rep) };

@@ -121,6 +121,9 @@ enum Cmd {
         /// Output format
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
+        /// Check and generate every file even if a cached form is available, and store none
+        #[arg(long)]
+        no_cache: bool,
     },
     /// Apply the fixes diagnostics carry (safe ones by default; see README, "Fixing")
     Fix {
@@ -264,13 +267,13 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
             cache_mode.map(Into::into),
         ),
         Cmd::Fmt { paths, check, indent } => cmd_fmt(&paths, check, indent),
-        Cmd::Test { paths, filter, lib, lint, fail_fast, verbose, quiet, slow, update, coverage, coverage_lines, format } => {
+        Cmd::Test { paths, filter, lib, lint, fail_fast, verbose, quiet, slow, update, coverage, coverage_lines, format, no_cache } => {
             cmd_test(
                 &paths,
                 filter.as_deref(),
                 &lib,
                 lint.as_deref(),
-                TestFlags { fail_fast, verbose, quiet, slow, update, coverage, coverage_lines, json: format == Format::Json },
+                TestFlags { fail_fast, verbose, quiet, slow, update, coverage, coverage_lines, json: format == Format::Json, no_cache },
             )
         }
         Cmd::Pkg { args } => cmd_pkg(&args),
@@ -420,6 +423,7 @@ struct TestFlags {
     coverage: bool,
     coverage_lines: bool,
     json: bool,
+    no_cache: bool,
 }
 
 /// Coverage over the run: every `.tl` the test files' checks depended on (so a module
@@ -530,10 +534,57 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
     let started = std::time::Instant::now();
     // One checker for the run; each file still gets a fresh program state.
     let session = htl::testing::TestSession::new(lint, lib, filter, opts)?;
+
+    // Checking a test file and generating its Lua is most of what a run costs — the tests
+    // themselves are a few percent of it — and none of that work depends on the outcome, so
+    // it is reusable in exactly the way `htl check`'s is. Running is not: a test has to run
+    // to say whether it passes, every time.
+    let cfg = load_config(&paths[0])?;
+    let root = cfg
+        .as_ref()
+        .map(|(r, _, _)| r.clone())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let store = cache::Cache::open(&root, !flags.no_cache, cache::Mode::PerModule);
+    let keys: Vec<cache::Key> = files.iter().map(|f| cache::gen_key(f, lint)).collect();
+    let cfg_inputs: Vec<PathBuf> = cfg.iter().map(|(_, p, _)| p.clone()).collect();
+
     let mut sink = report::Sink::new(flags.json);
     let mut json_files: Vec<report::TestFile> = Vec::new();
-    for f in &files {
-        let rep = session.run_file(f)?;
+    let mut replayed = 0usize;
+    for (f, key) in files.iter().zip(&keys) {
+        // A hit needs both halves: the Lua to run, and what checking it said. An entry
+        // missing either is no use, so it is a miss rather than a partial replay.
+        let hit = store
+            .as_ref()
+            .and_then(|c| c.lookup(key))
+            .filter(|m| m.code.is_some() && m.check.is_some());
+        let rep = match &hit {
+            Some(m) => {
+                replayed += 1;
+                let check = check_from_json(m.check.as_ref().expect("filtered above"));
+                let code = m.code.as_deref().expect("filtered above");
+                session.run_file_with(f, Some((code, &check)))?.0
+            }
+            None => {
+                let (rep, code) = session.run_file_with(f, None)?;
+                // Only when there is code: a file that failed to check has nothing to run,
+                // and storing that would replay an empty run as if it were a result.
+                if let (Some(c), Some(code)) = (&store, code) {
+                    let m = cache::Module {
+                        diagnostics: Vec::new(),
+                        errors: rep.check.errors.len(),
+                        warnings: rep.check.warnings.len(),
+                        lints: rep.check.lints.len(),
+                        deps: rep.check.deps.iter().map(|p| cache::normal(p)).collect(),
+                        requires: requires_json(&rep.check),
+                        code: Some(code),
+                        check: Some(check_json(&rep.check)),
+                    };
+                    c.store_module(key, f, &cfg_inputs, &search_dirs(f, &root, &cfg), &m);
+                }
+                rep
+            }
+        };
         if flags.coverage {
             for (source, lines) in &rep.coverage {
                 // Lua names a file chunk "@<path>"; bundles and preloads ("=name") have no file.
@@ -614,6 +665,7 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
                 passed,
                 failed,
                 files_with_errors: bad_files,
+                replayed,
                 duration_ms,
                 ok: bad_files == 0,
             },
@@ -624,12 +676,14 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
             print_coverage(cov, flags.coverage_lines);
         }
         eprintln!(
-            "htl test: {} file(s), {} passed, {} failed, {} file(s) with errors{} ({:.0} ms)",
+            "htl test: {} file(s), {} passed, {} failed, {} file(s) with errors{}{} ({:.0} ms)",
             ran_files,
             passed,
             failed,
             bad_files,
             if skipped > 0 { format!(", {skipped} file(s) not run (--fail-fast)") } else { String::new() },
+            // Says the checking was reused, not the run: every one of these files ran.
+            if replayed > 0 { format!(", {replayed} checked from cache") } else { String::new() },
             duration_ms
         );
     }
@@ -1077,17 +1131,84 @@ fn check_one(
         warnings: c.warnings.len(),
         lints,
         deps: c.deps.iter().map(|p| cache::normal(p)).collect(),
-        requires: c
+        requires: requires_json(&c),
+        // `htl check` has no use for generated Lua, nor for reading a `CheckInfo` back —
+        // it replays the diagnostics above straight into the sink. `htl test` fills both in.
+        code: None,
+        check: None,
+    })
+}
+
+/// What a test file's check reported, in the form an entry stores it.
+fn check_json(c: &CheckInfo) -> cache::CheckInfoJson {
+    cache::CheckInfoJson {
+        errors: c.errors.clone(),
+        warnings: c.warnings.clone(),
+        lints: c.lints.clone(),
+        deps: c.deps.iter().map(|p| cache::normal(p)).collect(),
+        requires: requires_json(c),
+        error_fixes: c.error_fixes.iter().map(|f| f.as_ref().map(report::FixJson::from_fix)).collect(),
+        lint_fixes: c.lint_fixes.iter().map(|f| f.as_ref().map(report::FixJson::from_fix)).collect(),
+    }
+}
+
+/// And back, for a replayed test file.
+fn check_from_json(j: &cache::CheckInfoJson) -> CheckInfo {
+    CheckInfo {
+        errors: j.errors.clone(),
+        warnings: j.warnings.clone(),
+        lints: j.lints.clone(),
+        deps: j.deps.iter().map(PathBuf::from).collect(),
+        requires: j
             .requires
             .iter()
-            .map(|r| cache::RequireJson {
+            .map(|r| htl::RequireSite {
                 module: r.module.clone(),
-                path: r.path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+                path: r.path.as_ref().map(PathBuf::from),
                 line: r.line,
                 col: r.col,
             })
             .collect(),
-    })
+        error_fixes: j.error_fixes.iter().map(|f| f.as_ref().map(fix_from_json)).collect(),
+        lint_fixes: j.lint_fixes.iter().map(|f| f.as_ref().map(fix_from_json)).collect(),
+    }
+}
+
+fn fix_from_json(f: &report::FixJson) -> htl::Fix {
+    htl::Fix {
+        applicability: match f.applicability.as_str() {
+            "unsafe" => htl::Applicability::Unsafe,
+            "suggest" => htl::Applicability::Suggest,
+            // Anything else is a build that wrote a name this one does not know; treating it
+            // as the most cautious of the three is the only safe reading.
+            "safe" => htl::Applicability::Safe,
+            _ => htl::Applicability::Suggest,
+        },
+        edits: f
+            .edits
+            .iter()
+            .map(|e| htl::Edit {
+                line: e.line,
+                col: e.col,
+                end_line: e.end_line,
+                end_col: e.end_col,
+                text: e.text.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// `CheckInfo`'s requires in the form an entry stores them.
+fn requires_json(c: &CheckInfo) -> Vec<cache::RequireJson> {
+    c.requires
+        .iter()
+        .map(|r| cache::RequireJson {
+            module: r.module.clone(),
+            path: r.path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            line: r.line,
+            col: r.col,
+        })
+        .collect()
 }
 
 /// A `CheckInfo` carrying only what the project-level lints read.
