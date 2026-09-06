@@ -55,6 +55,8 @@ pub struct FileReport {
     pub snapshots_written: Vec<String>,
     /// Snapshot files rewritten because `update_snapshots` was set.
     pub snapshots_updated: Vec<String>,
+    /// With `coverage`: `(chunk source as Lua names it, executed lines)`.
+    pub coverage: Vec<(String, Vec<usize>)>,
 }
 
 /// One test's outcome, as reported by the assertion library.
@@ -72,6 +74,8 @@ pub struct RunOptions {
     pub fail_fast: bool,
     /// Rewrite snapshots that differ instead of failing (`htl test --update`).
     pub update_snapshots: bool,
+    /// Record executed lines per chunk while the file runs (`htl test --coverage`).
+    pub coverage: bool,
 }
 
 /// Where a test file's snapshots live: `<dir>/__snapshots__/<file stem>/`.
@@ -155,6 +159,11 @@ impl TestSession {
         Ok(Self { checker, lib: lib.to_string(), filter: filter.map(String::from), opts })
     }
 
+    /// The session's checker (for [`Htl::executable_ranges`] on the sources a run touched).
+    pub fn checker(&self) -> &Htl {
+        &self.checker
+    }
+
     /// Run one file in a fresh program state borrowing the session's checker. The
     /// checker's search path is restored afterwards so files do not see each other's
     /// directories.
@@ -206,8 +215,14 @@ fn run_in(h: &Htl, path: &Path, filter: Option<&str>, lib: &str, opts: &RunOptio
     phase("gen_lua", &mut t0);
     rep.check = check;
     let Some(code) = code else { return Ok(rep) };
+    if opts.coverage {
+        h.coverage_start()?;
+    }
     if let Err(e) = h.exec(&code, &format!("@{}", path.display()), &[]) {
         rep.error = Some(crate::user_message(&e));
+        if opts.coverage {
+            rep.coverage = h.coverage_stop()?;
+        }
         return Ok(rep);
     }
     phase("exec", &mut t0);
@@ -264,6 +279,9 @@ fn run_in(h: &Htl, path: &Path, filter: Option<&str>, lib: &str, opts: &RunOptio
             rep.file_level = true;
             rep.passed = 1;
         }
+    }
+    if opts.coverage {
+        rep.coverage = h.coverage_stop()?;
     }
     Ok(rep)
 }

@@ -64,6 +64,12 @@ enum Cmd {
         /// Rewrite snapshots (`to_match_snapshot`) that differ instead of failing
         #[arg(long)]
         update: bool,
+        /// Report executed statements per `.tl` module the tests reached (slower: a line hook)
+        #[arg(long)]
+        coverage: bool,
+        /// With --coverage, also list the unexecuted line ranges of each module
+        #[arg(long, requires = "coverage")]
+        coverage_lines: bool,
     },
     /// Write the `.d.tl` files declared by `#[host_module(dts = ..)]` / `#[teal(dts = ..)]`
     /// in a Rust crate, without building it (check / run / test / build do this automatically)
@@ -166,13 +172,15 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
     match cli.cmd {
         Cmd::Check { paths, strict, lint, list_lints } => cmd_check(&paths, strict, lint.as_deref(), list_lints),
         Cmd::Fmt { paths, check, indent } => cmd_fmt(&paths, check, indent),
-        Cmd::Test { paths, filter, lib, lint, fail_fast, verbose, quiet, slow, update } => cmd_test(
-            &paths,
-            filter.as_deref(),
-            &lib,
-            lint.as_deref(),
-            TestFlags { fail_fast, verbose, quiet, slow, update },
-        ),
+        Cmd::Test { paths, filter, lib, lint, fail_fast, verbose, quiet, slow, update, coverage, coverage_lines } => {
+            cmd_test(
+                &paths,
+                filter.as_deref(),
+                &lib,
+                lint.as_deref(),
+                TestFlags { fail_fast, verbose, quiet, slow, update, coverage, coverage_lines },
+            )
+        }
         Cmd::Pkg { args } => cmd_pkg(&args),
         Cmd::Dts { dir } => cmd_dts(dir.as_deref()),
         Cmd::New { name, lib, embed } => cmd_new(&name, lib, embed),
@@ -301,11 +309,85 @@ struct TestFlags {
     quiet: bool,
     slow: Option<f64>,
     update: bool,
+    coverage: bool,
+    coverage_lines: bool,
+}
+
+/// Coverage over the run: every `.tl` the test files' checks depended on (so a module
+/// no test reached shows 0%), with the executed statements from the line hooks.
+fn print_coverage(
+    checker: &Htl,
+    test_files: &[PathBuf],
+    hits: &std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>>,
+    deps: &std::collections::BTreeSet<PathBuf>,
+    with_lines: bool,
+) -> Result<()> {
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let tests: std::collections::HashSet<PathBuf> = test_files.iter().map(|p| canon(p)).collect();
+    let mut sources: std::collections::BTreeSet<PathBuf> = deps.iter().map(|p| canon(p)).collect();
+    sources.extend(hits.keys().cloned());
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let (mut tot_exec, mut tot_all) = (0usize, 0usize);
+    // (module, executed, all, unexecuted ranges)
+    type Row = (String, usize, usize, Vec<(usize, usize)>);
+    let mut rows: Vec<Row> = Vec::new();
+    for src in &sources {
+        let name = src.to_string_lossy();
+        if !name.ends_with(".tl") || name.ends_with(".d.tl") || tests.contains(src) || name.contains("/htl-lib-") {
+            continue;
+        }
+        let ranges = checker.executable_ranges(src)?;
+        if ranges.is_empty() {
+            continue;
+        }
+        let empty = std::collections::BTreeSet::new();
+        let ran = hits.get(src).unwrap_or(&empty);
+        let mut missed = Vec::new();
+        let mut executed = 0usize;
+        for &(a, b) in &ranges {
+            if ran.range(a..=b).next().is_some() {
+                executed += 1;
+            } else {
+                missed.push((a, b));
+            }
+        }
+        tot_exec += executed;
+        tot_all += ranges.len();
+        let shown = src.strip_prefix(&cwd).unwrap_or(src).to_string_lossy().into_owned();
+        rows.push((shown, executed, ranges.len(), missed));
+    }
+    let width = rows.iter().map(|r| r.0.len()).max().unwrap_or(4).max(5);
+    for (name, executed, all, missed) in &rows {
+        eprintln!("coverage: {name:<width$}  {executed:>5}/{all:<5} {:5.1}%", 100.0 * *executed as f64 / *all as f64);
+        if with_lines && !missed.is_empty() {
+            let spans: Vec<String> = missed
+                .iter()
+                .map(|(a, b)| if a == b { a.to_string() } else { format!("{a}-{b}") })
+                .collect();
+            eprintln!("          unexecuted: {}", spans.join(", "));
+        }
+    }
+    if tot_all > 0 {
+        eprintln!(
+            "coverage: {:<width$}  {tot_exec:>5}/{tot_all:<5} {:5.1}%  (statements; code run inside coroutines is not seen)",
+            "total",
+            100.0 * tot_exec as f64 / tot_all as f64
+        );
+    } else {
+        eprintln!("coverage: no .tl module reached");
+    }
+    Ok(())
 }
 
 fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&str>, flags: TestFlags) -> Result<ExitCode> {
     let paths = if paths.is_empty() { vec![PathBuf::from(".")] } else { paths.to_vec() };
-    let opts = htl::testing::RunOptions { fail_fast: flags.fail_fast, update_snapshots: flags.update };
+    let opts = htl::testing::RunOptions {
+        fail_fast: flags.fail_fast,
+        update_snapshots: flags.update,
+        coverage: flags.coverage,
+    };
+    let mut cov_hits: std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>> = Default::default();
+    let mut cov_deps: std::collections::BTreeSet<PathBuf> = Default::default();
     if let Some(first) = paths.first() {
         auto_dts(first)?;
     }
@@ -323,6 +405,15 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
     let session = htl::testing::TestSession::new(lint, lib, filter, opts)?;
     for f in &files {
         let rep = session.run_file(f)?;
+        if flags.coverage {
+            for (source, lines) in &rep.coverage {
+                // Lua names a file chunk "@<path>"; bundles and preloads ("=name") have no file.
+                let Some(path) = source.strip_prefix('@') else { continue };
+                let key = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+                cov_hits.entry(key).or_default().extend(lines.iter().copied());
+            }
+            cov_deps.extend(rep.check.deps.iter().cloned());
+        }
         ran_files += 1;
         print_checkinfo(&rep.check);
         let tag = if rep.ok() { "ok  " } else { "FAIL" };
@@ -371,6 +462,9 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
                 break;
             }
         }
+    }
+    if flags.coverage {
+        print_coverage(session.checker(), &files, &cov_hits, &cov_deps, flags.coverage_lines)?;
     }
     let skipped = files.len() - ran_files;
     eprintln!(

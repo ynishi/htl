@@ -397,6 +397,51 @@ function R.reset_path()
    package.path = ""
 end
 
+-- Line coverage: which lines of which chunk ran. Lua's line hook is per thread, so
+-- code that runs inside a coroutine the test creates is not seen.
+local cov = nil
+function R.coverage_start()
+   cov = {}
+   -- The line event is the hot path. One "S" lookup per function (cached by the
+   -- function object) instead of per line; a call/return-event stack was measured
+   -- slower on a call-heavy suite, since calls are almost as frequent as lines there.
+   local srcs = setmetatable({}, { __mode = "k" })
+   local getinfo = debug.getinfo
+   debug.sethook(function(_, line)
+      local fi = getinfo(2, "f")
+      local func = fi and fi.func
+      if func == nil then return end
+      local t = srcs[func]
+      if t == nil then
+         local si = getinfo(2, "S")
+         local src = si and si.source
+         t = false
+         if src then
+            t = cov[src]
+            if not t then
+               t = {}
+               cov[src] = t
+            end
+         end
+         srcs[func] = t
+      end
+      if t then t[line] = true end
+   end, "l")
+end
+
+function R.coverage_stop()
+   debug.sethook()
+   local out = {}
+   for src, lines in pairs(cov or {}) do
+      local list = {}
+      for l in pairs(lines) do list[#list + 1] = l end
+      table.sort(list)
+      out[#out + 1] = { source = src, lines = list }
+   end
+   cov = nil
+   return out
+end
+
 return R
 "#;
 
@@ -431,6 +476,45 @@ impl Htl {
 
     fn runtime(&self) -> Result<Table> {
         Ok(self.lua.named_registry_value::<Table>(RUNTIME_REGISTRY_KEY)?)
+    }
+
+    /// Start recording which lines of which chunk run in the program state (a state
+    /// made by [`with_checker`](Self::with_checker)). Lua's line hook is per thread:
+    /// code inside coroutines the program creates is not seen.
+    pub fn coverage_start(&self) -> Result<()> {
+        let f: Function = self.runtime()?.get("coverage_start")?;
+        f.call::<()>(())?;
+        Ok(())
+    }
+
+    /// Stop recording; `(chunk source, sorted executed lines)` per chunk. Sources are as
+    /// Lua names them: `@<path>` for files loaded by the searcher and the entry.
+    pub fn coverage_stop(&self) -> Result<Vec<(String, Vec<usize>)>> {
+        let f: Function = self.runtime()?.get("coverage_stop")?;
+        let t: Table = f.call(())?;
+        let mut out = Vec::new();
+        for e in t.sequence_values::<Table>() {
+            let e = e?;
+            let source: String = e.get("source")?;
+            let lines: Table = e.get("lines")?;
+            out.push((source, lines.sequence_values::<usize>().collect::<mlua::Result<_>>()?));
+        }
+        Ok(out)
+    }
+
+    /// Statements of a `.tl` file as `(first line, last line)` ranges: what a coverage
+    /// report counts as executable. A statement counts as executed when any line of its
+    /// range ran (Lua attributes a multi-line statement's instructions to several lines).
+    pub fn executable_ranges(&self, file: &Path) -> Result<Vec<(usize, usize)>> {
+        let f: Function = self.h.get("executable_ranges")?;
+        let t: Option<Table> = f.call(path_str(file))?;
+        let Some(t) = t else { return Ok(Vec::new()) };
+        let mut out = Vec::new();
+        for r in t.sequence_values::<Table>() {
+            let r = r?;
+            out.push((r.get::<usize>(1)?, r.get::<usize>(2)?));
+        }
+        Ok(out)
     }
 
     /// The checker's `package.path` (what `require` inside `.tl` resolves through).

@@ -210,6 +210,54 @@ fn snapshots_write_compare_diff_and_update() {
     assert!(r6.failures[0].contains("used twice"), "{}", r6.failures[0]);
 }
 
+/// `--coverage`: executed lines come back per chunk with `.tl` line numbers, and the
+/// checker's statement ranges say what was executable, so an unreached branch shows.
+#[test]
+fn coverage_reports_executed_statements_with_tl_line_numbers() {
+    use htl_core::testing::TestSession;
+    let dir = scratch("coverage");
+    write(
+        &dir.join("src/rest.tl"),
+        "local record rest\nend\n\n\
+         function rest.step(hp: integer, max: integer): integer\n\
+            if hp >= max then\n\
+               return hp\n\
+            elseif hp < 0 then\n\
+               return 0\n\
+            end\n\
+            return hp + 1\n\
+         end\n\n\
+         function rest.never(): string\n\
+            return \"unreached\"\n\
+         end\n\n\
+         return rest\n",
+    );
+    write(
+        &dir.join("tests/rest_test.tl"),
+        "local t = require(\"htl.test\")\nlocal rest = require(\"rest\")\n\
+         t.it(\"heals\", function()\n   t.expect(rest.step(3, 10)):to_equal(4)\n   t.expect(rest.step(10, 10)):to_equal(10)\nend)\n",
+    );
+    let session = TestSession::new(None, "htl.test", None, RunOptions { coverage: true, ..Default::default() }).unwrap();
+    let rep = session.run_file(&dir.join("tests/rest_test.tl")).unwrap();
+    assert!(rep.check.ok() && rep.failed == 0, "{:?} {:?}", rep.check.errors, rep.failures);
+
+    let rest_path = std::fs::canonicalize(dir.join("src/rest.tl")).unwrap();
+    let (_, lines) = rep
+        .coverage
+        .iter()
+        .find(|(s, _)| s.strip_prefix('@').map(|p| std::fs::canonicalize(p).ok() == Some(rest_path.clone())).unwrap_or(false))
+        .expect("rest.tl chunk was executed");
+    assert!(lines.contains(&5) && lines.contains(&6) && lines.contains(&10), "if / return / fallthrough ran: {lines:?}");
+    assert!(!lines.contains(&8) && !lines.contains(&14), "elseif body and rest.never did not run: {lines:?}");
+
+    let ranges = session.checker().executable_ranges(&rest_path).unwrap();
+    let starts: Vec<usize> = ranges.iter().map(|r| r.0).collect();
+    assert!(starts.contains(&4) && starts.contains(&5) && starts.contains(&7) && starts.contains(&8) && starts.contains(&10) && starts.contains(&14), "{ranges:?}");
+    assert!(!starts.contains(&1), "record declaration is not executable: {ranges:?}");
+    let executed = ranges.iter().filter(|(a, b)| lines.iter().any(|l| l >= a && l <= b)).count();
+    assert!(executed < ranges.len(), "the unreached branch and function must count as missed");
+}
+
 #[test]
 fn a_library_without_tests_field_still_reports() {
     // The runner contract only requires passed / failed / failures.
