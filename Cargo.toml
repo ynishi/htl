@@ -15,6 +15,9 @@ edition = "2024"
 authors = ["Yutaka Nishimura"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ynishi/htl"
+# The project's page is its repository. `documentation` is per crate (docs.rs is keyed on
+# the crate name), so it is set in each of the four rather than inherited from here.
+homepage = "https://github.com/ynishi/htl"
 rust-version = "1.88"
 
 [workspace.dependencies]
