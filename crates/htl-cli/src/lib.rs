@@ -870,6 +870,13 @@ fn cmd_check(
     let (mut n_err, mut n_warn, mut n_lint) = (0usize, 0usize, 0usize);
     let mut infos: Vec<(PathBuf, CheckInfo)> = Vec::with_capacity(files.len());
     for f in &files {
+        // Both `add_layout_paths` and the contract lints prepend to the search path, and
+        // without putting it back the Nth file would be checked against the directories
+        // of the first N-1 as well — so a `require` would resolve against whatever
+        // happened to be walked earlier, and a file's diagnostics would depend on its
+        // position in the walk. `TestSession::run_file` does the same for `htl test`.
+        // An error below ends the process, so the restore is not on that path.
+        let saved = h.search_path()?;
         h.add_layout_paths(f)?;
         let c = h.check(f)?;
         sink.checkinfo(&c);
@@ -885,6 +892,7 @@ fn cmd_check(
                 n_lint += 1;
             }
         }
+        h.set_search_path(&saved)?;
         infos.push((f.clone(), c));
     }
     // Project-level: cycles in the require graph of the files just checked.
