@@ -394,6 +394,13 @@ fn expand_record(item: &ItemStruct) -> Result<TokenStream, String> {
         .map(|(f, _)| format_ident!("{}", f))
         .collect();
     let field_names: Vec<&str> = rd.fields.iter().map(|(f, _)| f.as_str()).collect();
+    // The Teal type each field declares, so a failed conversion can say what the record
+    // asked for rather than the Rust type nobody on the Teal side wrote.
+    let field_teal: Vec<&str> = rd.fields.iter().map(|(_, t)| t.as_str()).collect();
+    let syn::Fields::Named(named) = &item.fields else {
+        return Err("TealRecord: only structs with named fields are supported".into());
+    };
+    let field_types: Vec<&syn::Type> = named.named.iter().map(|f| &f.ty).collect();
 
     Ok(quote! {
         impl ::htl::teal::TealRecord for #ident {
@@ -410,7 +417,17 @@ fn expand_record(item: &ItemStruct) -> Result<TokenStream, String> {
         impl ::htl::mlua::FromLua for #ident {
             fn from_lua(value: ::htl::mlua::Value, lua: &::htl::mlua::Lua) -> ::htl::mlua::Result<Self> {
                 let t = <::htl::mlua::Table as ::htl::mlua::FromLua>::from_lua(value, lua)?;
-                Ok(Self { #( #field_idents: t.get(#field_names)?, )* })
+                Ok(Self { #(
+                    // Take the field as a Value first: what arrived is half the message,
+                    // and the conversion consumes it.
+                    #field_idents: {
+                        let v: ::htl::mlua::Value = t.get(#field_names)?;
+                        let got = v.type_name();
+                        <#field_types as ::htl::mlua::FromLua>::from_lua(v, lua).map_err(|e| {
+                            ::htl::teal::field_error(#name, #field_names, #field_teal, got, e)
+                        })?
+                    },
+                )* })
             }
         }
         impl #ident {

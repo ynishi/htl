@@ -163,6 +163,21 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
+`#[derive(TealRecord)]` is checked in one direction at build time and one at runtime:
+the `.d.tl` it writes is what the Teal side is compiled against, while a table coming
+back the other way is compared field by field as it converts. A table that does not fit
+says which record, which field, what the record declared and what arrived:
+
+```text
+Outcome.cause: expected string, got nil
+Outcome.depth: expected integer, got string
+Recording.outcome.cause: expected string, got nil
+```
+
+A Teal record literal may leave fields out and `htl check` is right to pass it, so this
+message is the whole signal for that direction; `require_fields` in `htl.toml` is the
+check-time counterpart when a module's table is meant to be complete.
+
 `Result<T, E>` returns raise a Lua error on `Err` by default. With
 `#[host_module(name = "store", errors = "return")]` they come back Lua-style instead:
 `Ok(v)` -> `v, nil`, `Ok(())` -> `true, nil`, `Err(e)` -> `nil, tostring(e)`, and the
