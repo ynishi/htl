@@ -76,7 +76,7 @@ fn fail_fast_stops_after_the_first_failure_in_a_file() {
     );
     let all = run_test_file(&dir.join("f_test.tl"), None, "htl.test", None, &RunOptions::default()).unwrap();
     assert_eq!((all.passed, all.failed), (1, 2));
-    let fast = run_test_file(&dir.join("f_test.tl"), None, "htl.test", None, &RunOptions { fail_fast: true }).unwrap();
+    let fast = run_test_file(&dir.join("f_test.tl"), None, "htl.test", None, &RunOptions { fail_fast: true, ..Default::default() }).unwrap();
     assert_eq!((fast.passed, fast.failed), (1, 1), "{:?}", fast.failures);
     assert_eq!(fast.tests.len(), 2, "third must not have run");
 }
@@ -119,6 +119,68 @@ fn session_shares_the_checker_but_not_program_state() {
     let d = session.run_file(&dir.join("tests/d_test.tl")).unwrap();
     let msg = format!("{:?} {:?}", d.check.errors, d.error);
     assert!(msg.contains("expected integer"), "bad's own error must surface: {msg}");
+}
+
+#[test]
+fn snapshots_write_compare_diff_and_update() {
+    use htl_core::testing::{TestSession, snapshot_dir};
+    let dir = scratch("snap");
+    let file = dir.join("tests").join("screen_test.tl");
+    let src = |title: &str| {
+        format!(
+            "local t = require(\"htl.test\")\n\
+             t.it(\"frame\", function()\n   t.expect({{ \"{title}\", \"hp 24/24\", \"@..#\" }}):to_match_snapshot(\"first floor\")\nend)\n\
+             t.it(\"record\", function()\n   t.expect({{ name = \"x\", hp = 3, tags = {{ \"a\", \"b\" }} }}):to_match_snapshot(\"a record\")\nend)\n"
+        )
+    };
+    write(&file, &src("Depth 1"));
+    let run = |update: bool| {
+        TestSession::new(None, "htl.test", None, RunOptions { update_snapshots: update, ..Default::default() })
+            .unwrap()
+            .run_file(&file)
+            .unwrap()
+    };
+
+    // First run: written, and reported as such.
+    let r1 = run(false);
+    assert!(r1.check.ok() && r1.failed == 0, "{:?} {:?}", r1.check.errors, r1.failures);
+    assert_eq!(r1.snapshots_written.len(), 2, "{:?}", r1.snapshots_written);
+    let sdir = snapshot_dir(&file);
+    assert!(sdir.ends_with("tests/__snapshots__/screen_test"), "{}", sdir.display());
+    let frame = std::fs::read_to_string(sdir.join("first_floor.snap")).unwrap();
+    assert_eq!(frame, "Depth 1\nhp 24/24\n@..#\n", "array of strings = lines");
+    let rec = std::fs::read_to_string(sdir.join("a_record.snap")).unwrap();
+    assert_eq!(rec, "{\n  hp = 3,\n  name = \"x\",\n  tags = {\n    [1] = \"a\",\n    [2] = \"b\",\n  },\n}\n", "sorted, one entry per line");
+
+    // Second run: same value, nothing written.
+    let r2 = run(false);
+    assert_eq!((r2.failed, r2.snapshots_written.len()), (0, 0), "{:?}", r2.failures);
+
+    // Changed value: fails with a line diff naming the file.
+    write(&file, &src("Depth 2"));
+    let r3 = run(false);
+    assert_eq!(r3.failed, 1, "{:?}", r3.failures);
+    let msg = &r3.failures[0];
+    assert!(msg.contains("snapshot 'first floor' differs from"), "{msg}");
+    assert!(msg.contains("-Depth 1") && msg.contains("+Depth 2"), "{msg}");
+    assert!(msg.contains("--update"), "{msg}");
+
+    // --update accepts it and reports the rewrite; the next plain run is green.
+    let r4 = run(true);
+    assert_eq!((r4.failed, r4.snapshots_updated.len()), (0, 1), "{:?}", r4.failures);
+    assert!(std::fs::read_to_string(sdir.join("first_floor.snap")).unwrap().starts_with("Depth 2\n"));
+    let r5 = run(false);
+    assert_eq!(r5.failed, 0, "{:?}", r5.failures);
+
+    // The same name twice in one file is an error, not a silent overwrite.
+    write(
+        &file,
+        "local t = require(\"htl.test\")\nt.it(\"a\", function() t.expect(\"x\"):to_match_snapshot(\"dup\") end)\n\
+         t.it(\"b\", function() t.expect(\"y\"):to_match_snapshot(\"dup\") end)\n",
+    );
+    let r6 = run(false);
+    assert_eq!(r6.failed, 1, "{:?}", r6.failures);
+    assert!(r6.failures[0].contains("used twice"), "{}", r6.failures[0]);
 }
 
 #[test]

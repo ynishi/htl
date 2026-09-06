@@ -242,16 +242,25 @@ the assertion surface small enough to read in one screen. Matchers: `to_equal`,
 `t.expect_all(f()):to_equal(false, "no door")` (`t.expect(f())` is a 2-argument call and
 a type error; the message says so).
 
-Runner: `htl test [paths] [--filter substr] [--fail-fast] [-v | -q] [--slow MS]`. Each
-file runs in a fresh state; `-v` prints every test with its time, `-q` only failures
-(with their details), errors and the summary line, `--slow 50` the tests over 50 ms,
-`--fail-fast` stops at the first failure. The run has one checker
+Snapshots: `t.expect(session.frame(s)):to_match_snapshot("first floor")` compares
+the value with `tests/__snapshots__/<test file>/<name>.snap`. The first run writes the
+file (and says so); later runs fail with a `-expected +actual` line diff when the value
+changed; `htl test --update` rewrites the differing ones. A string is stored as is, an
+array of strings as its lines (a rendered screen), anything else in a sorted,
+one-entry-per-line form, so the files read well in a review. A name used twice in one
+file is an error.
+
+Runner: `htl test [paths] [--filter substr] [--fail-fast] [-v | -q] [--slow MS]
+[--update]`. Each file runs in a fresh state; `-v` prints every test with its time,
+`-q` only failures (with their details), errors and the summary line, `--slow 50` the
+tests over 50 ms, `--fail-fast` stops at the first failure. The run has one checker
 (`htl::testing::TestSession`) and one fresh program state per file: globals,
 `package.loaded` and module state never cross files, while a module is type-checked
 and generated once and served to every file whose search path resolves that name to
 the same file (`Htl::with_checker` is the same split for hosts that run many
 programs). `HTL_PROFILE=1` prints per-phase and per-file timings to stderr. Any library exposing
-`run(filter, opts) -> {passed, failed, failures, tests?}` plugs in via `--lib`
+`run(filter, opts) -> {passed, failed, failures, tests?, snapshots_written?, snapshots_updated?}`
+(and optionally `configure({snapshot_dir, update, mkdir})`) plugs in via `--lib`
 (bring its `.d.tl`); files that use no such library pass if they run to completion.
 
 ## Bundles (`htl build`)

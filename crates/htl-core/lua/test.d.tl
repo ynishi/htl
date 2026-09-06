@@ -17,6 +17,15 @@ local record test
       to_match: function(self, pattern: string)
       to_have_length: function(self, n: integer)
       to_error: function(self, pattern?: string)
+      -- compare with tests/__snapshots__/<file>/<name>.snap; first run writes it,
+      -- `htl test --update` rewrites a differing one
+      to_match_snapshot: function(self, name: string)
+   end
+
+   record SnapshotConfig
+      snapshot_dir: string
+      update: boolean
+      mkdir: function(string)
    end
 
    -- `t.expect_all(f()):to_equal(false, "no door")` for a function returning two values.
@@ -35,6 +44,8 @@ local record test
       failed: integer
       failures: {string}
       tests: {TestResult}
+      snapshots_written: {string}
+      snapshots_updated: {string}
    end
 
    record RunOptions
@@ -47,6 +58,7 @@ local record test
    expect_all: function<A, B>(a: A, b: B): Expect2<A, B>
    run: function(filter?: string, opts?: RunOptions): Report
    count: function(): integer
+   configure: function(SnapshotConfig)
 end
 
 return test

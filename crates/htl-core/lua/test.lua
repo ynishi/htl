@@ -4,7 +4,9 @@
 -- Contract with the runner (any library can implement it):
 --   run(filter?: string, opts?: { fail_fast: boolean })
 --     -> { passed: integer, failed: integer, failures: {string},
---          tests: { { name: string, ok: boolean, ms: number } } }   (tests is optional)
+--          tests: { { name: string, ok: boolean, ms: number } },      (optional)
+--          snapshots_written: {string}, snapshots_updated: {string} }  (optional)
+--   configure({ snapshot_dir, update, mkdir })   (optional; called before the file runs)
 --
 -- Kept deliberately small (Go's `testing` / Rust's `assert_eq!` rather than Jest): the
 -- runner is where htl invests; the assertion surface is a handful of matchers that
@@ -167,6 +169,151 @@ function Expect:to_error(pattern)
    end
 end
 
+---------------------------------------------------------------- snapshots
+
+-- Set by the runner before the file runs (`M.configure`): where this file's
+-- snapshots live, whether to rewrite differing ones, and how to create the dir.
+local snap = { dir = nil, update = false, mkdir = nil, used = {}, written = {}, updated = {} }
+
+function M.configure(cfg)
+   snap.dir = cfg.snapshot_dir
+   snap.update = cfg.update and true or false
+   snap.mkdir = cfg.mkdir
+end
+
+-- Deterministic text for a value: sorted keys, one entry per line, so a snapshot
+-- diff is readable and stable across runs.
+local function serialize(v, indent)
+   if type(v) == "string" then return string.format("%q", v) end
+   if type(v) ~= "table" then return tostring(v) end
+   local keys = {}
+   for k in pairs(v) do keys[#keys + 1] = k end
+   table.sort(keys, function(a, b)
+      local ta, tb = type(a), type(b)
+      if ta ~= tb then return ta < tb end
+      return a < b
+   end)
+   if #keys == 0 then return "{}" end
+   local out = { "{" }
+   for _, k in ipairs(keys) do
+      local key = type(k) == "string" and k:match("^[%a_][%w_]*$") and k or ("[" .. serialize(k, "") .. "]")
+      out[#out + 1] = indent .. "  " .. key .. " = " .. serialize(v[k], indent .. "  ") .. ","
+   end
+   out[#out + 1] = indent .. "}"
+   return table.concat(out, "\n")
+end
+
+-- A string is stored as is; an array of strings as its lines (a rendered screen);
+-- anything else serialized. Always newline-terminated.
+local function snapshot_text(v)
+   if type(v) == "string" then
+      return v:sub(-1) == "\n" and v or (v .. "\n")
+   end
+   if type(v) == "table" then
+      local n = 0
+      local lines = true
+      for k, x in pairs(v) do
+         n = n + 1
+         if type(k) ~= "number" or type(x) ~= "string" then lines = false end
+      end
+      if lines and n == #v then
+         return n == 0 and "" or (table.concat(v, "\n") .. "\n")
+      end
+   end
+   return serialize(v, "") .. "\n"
+end
+
+local function split_lines(s)
+   local out = {}
+   for line in (s .. "\n"):gmatch("([^\n]*)\n") do out[#out + 1] = line end
+   if out[#out] == "" then out[#out] = nil end
+   return out
+end
+
+-- Line diff (LCS), printed as `-` / `+` lines with two lines of context.
+local function diff(expected, actual)
+   local a, b = split_lines(expected), split_lines(actual)
+   local n, m = #a, #b
+   local L = {}
+   for i = n + 1, 1, -1 do
+      L[i] = {}
+      for j = m + 1, 1, -1 do
+         if i > n or j > m then
+            L[i][j] = 0
+         elseif a[i] == b[j] then
+            L[i][j] = L[i + 1][j + 1] + 1
+         else
+            L[i][j] = math.max(L[i + 1][j], L[i][j + 1])
+         end
+      end
+   end
+   local ops = {}
+   local i, j = 1, 1
+   while i <= n or j <= m do
+      if i <= n and j <= m and a[i] == b[j] then
+         ops[#ops + 1] = { " ", a[i] }; i, j = i + 1, j + 1
+      elseif i <= n and (j > m or L[i + 1][j] >= L[i][j + 1]) then
+         ops[#ops + 1] = { "-", a[i] }; i = i + 1 -- removals before additions, as diff prints them
+      else
+         ops[#ops + 1] = { "+", b[j] }; j = j + 1
+      end
+   end
+   local keep = {}
+   for k, op in ipairs(ops) do
+      if op[1] ~= " " then
+         for c = math.max(1, k - 2), math.min(#ops, k + 2) do keep[c] = true end
+      end
+   end
+   local out, last = {}, 0
+   for k, op in ipairs(ops) do
+      if keep[k] then
+         if k > last + 1 then out[#out + 1] = "@@" end
+         out[#out + 1] = op[1] .. op[2]
+         last = k
+      end
+   end
+   return table.concat(out, "\n")
+end
+
+local function write_snapshot(path, text)
+   local fd = io.open(path, "wb")
+   if not fd and snap.mkdir then
+      snap.mkdir(snap.dir)
+      fd = io.open(path, "wb")
+   end
+   if not fd then fail("cannot write snapshot " .. path) end
+   fd:write(text)
+   fd:close()
+end
+
+function Expect:to_match_snapshot(name)
+   if type(name) ~= "string" or name == "" then fail("to_match_snapshot needs a name") end
+   if not snap.dir then
+      fail("to_match_snapshot needs the runner: run this file with `htl test`")
+   end
+   local key = name:gsub("[^%w%-%._]+", "_")
+   if snap.used[key] then fail("snapshot name '" .. name .. "' is used twice in this file") end
+   snap.used[key] = true
+   local path = snap.dir .. "/" .. key .. ".snap"
+   local actual = snapshot_text(self.actual)
+   local fd = io.open(path, "rb")
+   if not fd then
+      write_snapshot(path, actual)
+      snap.written[#snap.written + 1] = path
+      return
+   end
+   local expected = fd:read("a")
+   fd:close()
+   if expected == actual then return end
+   if snap.update then
+      write_snapshot(path, actual)
+      snap.updated[#snap.updated + 1] = path
+      return
+   end
+   fail("snapshot '" .. name .. "' differs from " .. path .. " (-expected +actual; `htl test --update` accepts the new value):\n"
+      .. diff(expected, actual))
+end
+
 function M.expect(actual)
    return setmetatable({ actual = actual }, Expect)
 end
@@ -196,7 +343,8 @@ end
 
 function M.run(filter, opts)
    opts = opts or {}
-   local report = { passed = 0, failed = 0, failures = {}, tests = {} }
+   local report = { passed = 0, failed = 0, failures = {}, tests = {},
+      snapshots_written = snap.written, snapshots_updated = snap.updated }
    for _, s in ipairs(suites) do
       for _, t in ipairs(s.tests) do
          local full = (s.name ~= "" and (s.name .. " > ") or "") .. t.name
