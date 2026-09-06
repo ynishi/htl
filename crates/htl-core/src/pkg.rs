@@ -35,8 +35,8 @@ pub struct TealResolver {
     module_separator: char,
     /// `"defs.Mod"`: every module served by this resolver must be assignable to that type.
     expect_type: Option<String>,
-    /// With `expect_type`: every declared field of the record must be non-nil at run time.
-    require_fields: bool,
+    /// With `expect_type`: which fields must be non-nil at run time. `All(false)` is off.
+    require_fields: crate::config::RequireFields,
     /// Extra dirs the checker may search for `require`s (e.g. where `defs.tl` lives).
     checker_paths: Vec<PathBuf>,
     /// Module names served here that `expect_type` / `require_fields` skip.
@@ -55,7 +55,7 @@ impl TealResolver {
             path_added: AtomicBool::new(false),
             module_separator: '.',
             expect_type: None,
-            require_fields: false,
+            require_fields: Default::default(),
             checker_paths: Vec::new(),
             exclude: Vec::new(),
             only_module: None,
@@ -71,7 +71,7 @@ impl TealResolver {
             path_added: AtomicBool::new(false),
             module_separator: '.',
             expect_type: None,
-            require_fields: false,
+            require_fields: Default::default(),
             checker_paths: Vec::new(),
             exclude: Vec::new(),
             only_module: None,
@@ -87,7 +87,7 @@ impl TealResolver {
             path_added: AtomicBool::new(false),
             module_separator: '.',
             expect_type: None,
-            require_fields: false,
+            require_fields: Default::default(),
             checker_paths: Vec::new(),
             exclude: Vec::new(),
             only_module: None,
@@ -114,12 +114,33 @@ impl TealResolver {
         self
     }
 
-    /// With [`expect_type`](Self::expect_type): after the type check, every field the
-    /// record declares must be present (non-nil) in the loaded module, or the `require`
-    /// fails naming the missing fields. Use for contracts where every field is mandatory;
-    /// contracts with optional fields should keep the default and nil-guard instead.
-    pub fn require_fields(mut self) -> Self {
-        self.require_fields = true;
+    /// With [`expect_type`](Self::expect_type): after the type check, these fields must
+    /// be present (non-nil) in the loaded module, or the `require` fails naming the ones
+    /// that are absent.
+    ///
+    /// Naming them rather than taking all of them is what lets the type grow: the fields
+    /// listed here are the contract, and a field added to the record later is optional
+    /// until it is added here too. A name the record does not declare is an error at the
+    /// first `require`, not a line that quietly does nothing.
+    ///
+    /// [`require_all_fields`](Self::require_all_fields) is the every-field form, and the
+    /// static counterpart of both is `require_fields` in `[[contract]]`.
+    pub fn require_fields(
+        mut self,
+        names: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.require_fields =
+            crate::config::RequireFields::Named(names.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// With [`expect_type`](Self::expect_type): every field the record declares must be
+    /// present (non-nil) in the loaded module. Adding a field to the record makes every
+    /// module that predates it fail, which is what
+    /// [`require_fields`](Self::require_fields) exists to avoid; use this where the type
+    /// is settled, or where every field really is mandatory.
+    pub fn require_all_fields(mut self) -> Self {
+        self.require_fields = crate::config::RequireFields::All(true);
         self
     }
 
@@ -156,7 +177,7 @@ impl TealResolver {
 
     /// Resolvers for one `[[contract]]` of `htl.toml`: one per concrete contract dir
     /// (a `dir` with `*` expands to every subdirectory), each with `expect_type(type)`
-    /// (and `require_fields()` when set), the contract's `exclude` / `module`, and
+    /// and the contract's `require_fields` as written, its `exclude` / `module`, and
     /// `root` + `root/src` visible to the checker. `root` is the directory holding
     /// `htl.toml`. The `contract-unenforced` lint of `htl check` recognises this call.
     pub fn for_contract(root: &Path, c: &crate::config::Contract) -> Result<Vec<Self>, InitError> {
@@ -180,26 +201,46 @@ impl TealResolver {
         if let Some(m) = &c.module {
             r = r.only_module(m.clone());
         }
-        if c.require_fields {
-            r = r.require_fields();
-        }
+        r.require_fields = c.require_fields.clone();
         Ok(r)
     }
 
-    /// Declared fields of the expected record that are nil in `value`.
+    /// Required fields of the expected record that are nil in `value`.
     fn missing_fields(&self, h: &Table, value: &Value) -> mlua::Result<Vec<String>> {
-        let (Some(tp), true) = (&self.expect_type, self.require_fields) else {
+        let Some(tp) = &self.expect_type else {
             return Ok(Vec::new());
         };
+        if !self.require_fields.is_on() {
+            return Ok(Vec::new());
+        }
         let f: Function = h.get("record_fields")?;
-        let names: Option<Vec<String>> = f
+        let declared: Option<Vec<String>> = f
             .call::<Option<Table>>(tp.as_str())?
             .map(|t| t.sequence_values::<String>().collect::<mlua::Result<_>>())
             .transpose()?;
-        let Some(names) = names else {
+        let Some(declared) = declared else {
             return Err(mlua::Error::external(format!(
                 "TealResolver::require_fields: record type {tp:?} not found by the checker"
             )));
+        };
+        // A listed name the record does not declare is a mistake in the host's own
+        // wiring; saying so beats holding modules to a field that cannot exist.
+        let names = match self.require_fields.named() {
+            None => declared,
+            Some(wanted) => {
+                let unknown: Vec<&str> = wanted
+                    .iter()
+                    .filter(|w| !declared.iter().any(|d| d == *w))
+                    .map(|w| w.as_str())
+                    .collect();
+                if !unknown.is_empty() {
+                    return Err(mlua::Error::external(format!(
+                        "TealResolver::require_fields names field(s) that {tp} does not declare: {}",
+                        unknown.join(", ")
+                    )));
+                }
+                wanted.to_vec()
+            }
         };
         let Value::Table(t) = value else {
             return Ok(names); // not a table at all: everything is missing
@@ -494,7 +535,7 @@ pub enum TealResolveError {
         expected: String,
         errors: Vec<String>,
     },
-    /// [`require_fields`](TealResolver::require_fields): declared fields absent at run time.
+    /// [`require_fields`](TealResolver::require_fields): required fields absent at run time.
     MissingFields {
         module: String,
         expected: String,

@@ -15,7 +15,7 @@
 //! [[contract]]
 //! dir = "mods"                 # or "sites/*" for one level of subdirectories
 //! type = "defs.Mod"
-//! require_fields = true
+//! require_fields = ["name", "monsters"]  # or `true` for every declared field
 //! exclude = ["defs", "modkit"] # modules in `dir` that are not held to the contract
 //! # module = "Site"            # only this module name (in each dir) is held to it
 //! ```
@@ -61,6 +61,51 @@ pub struct CacheConfig {
     pub mode: Option<String>,
 }
 
+/// `require_fields` of a `[[contract]]`: which fields of the contract type a module's
+/// returned table has to carry.
+///
+/// ```toml
+/// require_fields = true                            # every declared field
+/// require_fields = ["name", "monsters", "items"]   # these, so the type can grow
+/// ```
+///
+/// The list exists because every Teal record field is nilable and Teal has no `?` for
+/// record fields, so a type cannot say which of its own fields are mandatory. Without
+/// it, adding a field to a contract type makes every module already written against it
+/// fail, and the only way out is to stop checking.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum RequireFields {
+    /// `true`: every field the type declares. `false`: no field check at all.
+    All(bool),
+    /// Exactly these. A name the type does not declare is an error, not a no-op.
+    Named(Vec<String>),
+}
+
+impl Default for RequireFields {
+    fn default() -> Self {
+        Self::All(false)
+    }
+}
+
+impl RequireFields {
+    /// Is any field required at all?
+    pub fn is_on(&self) -> bool {
+        match self {
+            Self::All(b) => *b,
+            Self::Named(names) => !names.is_empty(),
+        }
+    }
+
+    /// The names asked for, or `None` when the answer is "whatever the type declares".
+    pub fn named(&self) -> Option<&[String]> {
+        match self {
+            Self::Named(names) => Some(names),
+            Self::All(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Contract {
@@ -70,9 +115,9 @@ pub struct Contract {
     /// `"<module>.<Type>"`, e.g. `"defs.Mod"`.
     #[serde(rename = "type")]
     pub type_path: String,
-    /// Every declared field must appear in the module's returned table literal.
+    /// Which declared fields must appear in the module's returned table literal.
     #[serde(default)]
-    pub require_fields: bool,
+    pub require_fields: RequireFields,
     /// Module names (file stems) inside `dir` that are not held to the contract, e.g.
     /// an SDK the host writes there (`defs`, `modkit`). The module that declares `type`
     /// is always exempt.

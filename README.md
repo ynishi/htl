@@ -232,9 +232,11 @@ For mod / plugin directories, `TealResolver::new("mods")?.expect_type("defs.Mod"
 every served module to a record type: a mod that returns the wrong shape is rejected at
 `require` time even if it never annotates its own return value. It rejects fields of the
 wrong *type*; on its own it does not reject *missing* fields (every Teal record field is
-nilable). Chain `.require_fields()` for contracts where every declared field is mandatory:
-the module is then rejected at `require` naming the nil fields. Keep the default and
-nil-guard on the host side when some fields are optional.
+nilable). Chain `.require_fields(["name", "monsters"])` to name the fields that must be
+present: the module is rejected at `require` naming the nil ones, and a field added to
+the record later stays optional until it is added to the list, so the type can grow
+without breaking the modules already written against it. `.require_all_fields()` takes
+every declared field, for types that are settled.
 
 ## Lints (`htl check`, `include_tl!`)
 
@@ -274,7 +276,9 @@ paths = ["mods", "~/.cache/tsk/sdk"]   # extra dirs require() resolves from whil
 [[contract]]              # static form of TealResolver::expect_type / require_fields
 dir = "mods"              # relative to htl.toml; "sites/*" = every subdirectory of sites/
 type = "defs.Mod"         # every module directly under `dir` must return this record
-require_fields = true     # ... with every declared field present in the returned table
+require_fields = ["name", "monsters"]   # these must be present in the returned table;
+                          # a field added to the record later stays optional until it is
+                          # listed here. `true` = every declared field, for settled types
 exclude = ["modkit"]      # modules in `dir` not held to it (an SDK the host writes there)
 # module = "Site"         # or: only this module name (in each dir) is held to it
 ```
@@ -295,14 +299,15 @@ rewritten it still sees the current types.
 A `[[contract]]` adds two lints:
 
 - `contract` — a module under `dir` whose return value is not assignable to `type`, or
-  (with `require_fields`) whose returned table literal leaves a declared field out, is
+  (with `require_fields`) whose returned table literal leaves a required field out, is
   reported at `htl check` time instead of at the first `require`. The literal is found
   through `return { … }`, `return define({ … })`, `return { … } as T`, and
-  `local m: T = { … } … m.f = … return m`.
+  `local m: T = { … } … m.f = … return m`. A name in the list that `type` does not
+  declare is reported too: a contract that reads as one has to be one.
 - `contract-unenforced` — a contract is only a guarantee if the host enforces it. When a
   Cargo package is found, `htl check` scans its Rust sources for
-  `expect_type("<type>")` (plus `.require_fields()` when required) or for the
-  config-driven helpers below, and otherwise tells you what to add.
+  `expect_type("<type>")` (plus `.require_fields(…)` / `.require_all_fields()` when
+  required) or for the config-driven helpers below, and otherwise tells you what to add.
 
 Hosts get resolvers from the same file, so the two cannot drift:
 
@@ -310,7 +315,8 @@ Hosts get resolvers from the same file, so the two cannot drift:
 let (path, cfg) = htl::config::HtlConfig::find(Path::new("."))?.expect("htl.toml");
 let mut reg = mlua_pkg::Registry::new();
 for r in htl::pkg::contract_resolvers(&htl::parent_dir(&path), &cfg)? {
-    reg.add(r); // TealResolver for <root>/mods with expect_type("defs.Mod").require_fields()
+    reg.add(r); // TealResolver for <root>/mods, carrying the contract's expect_type /
+                // require_fields as written in htl.toml
 }
 ```
 

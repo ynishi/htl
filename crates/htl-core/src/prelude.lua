@@ -619,9 +619,10 @@ end
 
 -- Static contract check for one module file (the `contract` lint):
 --   1. `local m: <type_path> = require("<modname>")` through the checker (type errors),
---   2. with require_fields: keys of the module's returned table literal (also
---      `X.define({ ... })`) vs the record's declared fields (missing ones).
--- Returns { errors = {string}, missing = {string} | nil (nil = not decidable) }.
+--   2. with require_fields (`true` for every declared field, or a list of names): keys
+--      of the module's returned table literal (also `X.define({ ... })`) vs those.
+-- Returns { errors = {string}, missing = {string} | nil (nil = not decidable),
+--           bad_require_fields = {string} (names the type does not declare) }.
 -- Type-check a stub in a fresh env: the shared env caches module types by name, so a
 -- second `Site` (another contract dir) would be judged by the first one's type.
 -- Literal `require`s of a plain Lua file (a vendored dependency), resolved like the
@@ -750,6 +751,27 @@ function H.contract_check(filename, modname, type_path, require_fields)
    if not require_fields then return out end
    local declared = H.record_fields(type_path)
    if not declared then return out end
+   -- `require_fields` is either true (everything the type declares) or the list from
+   -- htl.toml. A name in the list the type does not declare is a mistake in the config
+   -- and is said as one: silently ignoring it would make the contract quietly weaker
+   -- than it reads.
+   local wanted = declared
+   if type(require_fields) == "table" then
+      local is_declared = {}
+      for _, f in ipairs(declared) do is_declared[f] = true end
+      local unknown = {}
+      for _, f in ipairs(require_fields) do
+         if not is_declared[f] then unknown[#unknown + 1] = f end
+      end
+      if #unknown > 0 then
+         table.sort(unknown)
+         -- Its own field, not an entry in `errors`: this is the config being wrong about
+         -- the type, not a module failing to satisfy it, and the two read differently.
+         out.bad_require_fields = unknown
+         return out
+      end
+      wanted = require_fields
+   end
    -- Keys of the returned table literal, if the module ends in one.
    local fd = io.open(filename, "rb")
    if not fd then return out end
@@ -810,7 +832,7 @@ function H.contract_check(filename, modname, type_path, require_fields)
       end
    end
    out.missing = {}
-   for _, f in ipairs(declared) do
+   for _, f in ipairs(wanted) do
       if not present[f] then out.missing[#out.missing + 1] = f end
    end
    out.missing_y, out.missing_x = ret.y, ret.x

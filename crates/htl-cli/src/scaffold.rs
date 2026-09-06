@@ -140,11 +140,12 @@ fn t_htl_toml() -> String {
      # [[contract]]\n\
      # dir = \"mods\"             # relative to this file; \"sites/*\" = each subdirectory\n\
      # type = \"defs.Mod\"        # every module under `dir` must return this record\n\
-     # require_fields = true    # ... with every declared field present\n\
+     # require_fields = [\"name\"] # these must be present; a field added to the record\n\
+     #                          # later stays optional until it is listed. true = all\n\
      # exclude = [\"modkit\"]     # modules in `dir` not held to it (an SDK the host writes there)\n\
      # module = \"Site\"          # or: only this module name is held to it\n\
      # The host must enforce it too: htl::pkg::contract_resolvers(root, &config), or\n\
-     # TealResolver::new(\"mods\").expect_type(\"defs.Mod\").require_fields() by hand.\n\
+     # TealResolver::new(\"mods\").expect_type(\"defs.Mod\").require_fields([\"name\"]) by hand.\n\
      # `htl check` reports `contract-unenforced` when neither appears in the Rust sources.\n"
         .to_string()
 }
