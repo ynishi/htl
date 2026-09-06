@@ -235,10 +235,10 @@ file is refused before it runs.
 
 The split follows Go / Rust rather than Jest: htl invests in the **runner** and keeps
 the assertion surface small enough to read in one screen. Matchers: `to_equal`,
-`to_not_equal`, `to_be_truthy` / `to_be_falsy` / `to_be_nil`, `to_be_close`,
-`to_be_greater_than` / `to_be_less_than` / `to_be_at_least` / `to_be_at_most`,
-`to_contain` (substring or array element), `to_match` (Lua pattern),
-`to_have_length`, `to_error`. A function returning two values is asserted with
+`to_not_equal`, `to_be_truthy` / `to_be_falsy`, `to_be_nil` / `to_not_be_nil`,
+`to_be_close`, `to_be_greater_than` / `to_be_less_than` / `to_be_at_least` /
+`to_be_at_most`, `to_contain` / `to_not_contain` (substring or array element),
+`to_match` / `to_not_match` (Lua pattern), `to_have_length`, `to_error`. A function returning two values is asserted with
 `t.expect_all(f()):to_equal(false, "no door")` (`t.expect(f())` is a 2-argument call and
 a type error; the message says so).
 

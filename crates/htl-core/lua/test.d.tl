@@ -6,6 +6,7 @@ local record test
       to_be_truthy: function(self)
       to_be_falsy: function(self)
       to_be_nil: function(self)
+      to_not_be_nil: function(self)
       to_be_close: function(self, expected: number, eps?: number)
       to_be_greater_than: function(self, n: number)
       to_be_less_than: function(self, n: number)
@@ -13,8 +14,10 @@ local record test
       to_be_at_most: function(self, n: number)
       -- substring of a string (plain), or an element of an array
       to_contain: function(self, x: any)
+      to_not_contain: function(self, x: any)
       -- Lua pattern on a string
       to_match: function(self, pattern: string)
+      to_not_match: function(self, pattern: string)
       to_have_length: function(self, n: integer)
       to_error: function(self, pattern?: string)
       -- compare with tests/__snapshots__/<file>/<name>.snap; first run writes it,
