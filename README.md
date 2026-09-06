@@ -336,6 +336,14 @@ with `src/<name>.tl`); htl resolves that form in the checker and in `TealResolve
   arguments" at `expect`. htl names the expanding call and the two fixes (bind first,
   or parenthesize to keep the first value).
 
+## Releasing and using a local checkout
+
+`docs/releasing.md`: the publish order, the crates.io per-crate 24-hour version limit
+and what to do when it hits, and how a consumer runs against an unpublished htl with
+`[patch.crates-io]` (all three crates, plus one `cargo update -p htl -p htl-core -p
+htl-macros`, without which cargo keeps the locked version and warns that the patch
+was not used).
+
 ## What is deliberately not here
 
 - No Teal fork: `tl.lua` is vendored verbatim (0.24.8, MIT) and swapped as a file.
