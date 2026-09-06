@@ -87,6 +87,34 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
     },
+    /// Apply the fixes diagnostics carry (safe ones by default; see README, "Fixing")
+    Fix {
+        paths: Vec<PathBuf>,
+        /// Only fixes of these rules (e.g. `forward-ref,explicit-number`)
+        #[arg(long, value_delimiter = ',')]
+        rule: Vec<String>,
+        /// Also apply `unsafe` fixes (may change what the program does)
+        #[arg(long = "unsafe")]
+        unsafe_fixes: bool,
+        /// Compute and report, write nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Like --dry-run, and print a unified diff per file that would change
+        #[arg(long)]
+        diff: bool,
+        /// Fix files that git reports as modified or staged
+        #[arg(long)]
+        allow_dirty: bool,
+        /// Fix files that are not inside a git repository
+        #[arg(long)]
+        allow_no_vcs: bool,
+        /// Exit 1 when any file was changed (for CI)
+        #[arg(long)]
+        exit_non_zero_on_fix: bool,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+    },
     /// Write the `.d.tl` files declared by `#[host_module(dts = ..)]` / `#[teal(dts = ..)]`
     /// in a Rust crate, without building it (check / run / test / build do this automatically)
     Dts {
@@ -205,6 +233,19 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
         Cmd::Init { dir, lib, embed } => cmd_init(dir.as_deref(), lib, embed),
         Cmd::Gen { file, out } => cmd_gen(&file, out.as_deref()),
         Cmd::Run { file, args } => cmd_run(&file, &args),
+        Cmd::Fix { paths, rule, unsafe_fixes, dry_run, diff, allow_dirty, allow_no_vcs, exit_non_zero_on_fix, format } => cmd_fix(
+            &paths,
+            FixFlags {
+                rule,
+                unsafe_fixes,
+                dry_run: dry_run || diff,
+                diff,
+                allow_dirty,
+                allow_no_vcs,
+                exit_non_zero_on_fix,
+                json: format == Format::Json,
+            },
+        ),
         Cmd::Build { entry, out, main, debug, source, extra, host } => {
             cmd_build(&entry, &out, &main, htl::link::LinkOptions { debug, source, extra, host })
         }
@@ -588,6 +629,170 @@ fn cmd_fmt(paths: &[PathBuf], check: bool, indent: Option<usize>) -> Result<Exit
         failed
     );
     let fail = failed > 0 || (check && changed > 0);
+    Ok(if fail { ExitCode::FAILURE } else { ExitCode::SUCCESS })
+}
+
+struct FixFlags {
+    rule: Vec<String>,
+    unsafe_fixes: bool,
+    dry_run: bool,
+    diff: bool,
+    allow_dirty: bool,
+    allow_no_vcs: bool,
+    exit_non_zero_on_fix: bool,
+    json: bool,
+}
+
+fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
+    use htl::fix::{FixOptions, fix_file, git_dirty, unified_diff};
+    let paths = if paths.is_empty() { vec![PathBuf::from(".")] } else { paths.to_vec() };
+    let h = Htl::new()?;
+    let cfg = load_config(&paths[0])?;
+    let file_spec = cfg.as_ref().map(|(_, _, c)| c.lint_spec()).unwrap_or_default();
+    if !file_spec.is_empty() {
+        h.configure_lints(&file_spec)?;
+    }
+    if let Some(first) = paths.first() {
+        auto_dts(first)?;
+        apply_project(&h, first)?;
+    }
+    if let Some((root, _, c)) = &cfg {
+        h.apply_config(root, c)?;
+    }
+    h.install_test_lib()?;
+    let opts = FixOptions {
+        unsafe_fixes: flags.unsafe_fixes,
+        promoted: cfg.as_ref().map(|(_, _, c)| c.fix.unsafe_.clone()).unwrap_or_default(),
+        disabled: cfg.as_ref().map(|(_, _, c)| c.fix.disable.clone()).unwrap_or_default(),
+        only: flags.rule.clone(),
+        dry_run: flags.dry_run,
+    };
+    let files = htl::collect_tl(&paths)?;
+
+    // The working tree is the undo: refuse to rewrite what git could not give back.
+    if !flags.dry_run {
+        let mut dirty = Vec::new();
+        let mut no_vcs = Vec::new();
+        for f in &files {
+            match git_dirty(f)? {
+                Some(true) => dirty.push(f.clone()),
+                Some(false) => {}
+                None => no_vcs.push(f.clone()),
+            }
+        }
+        if !dirty.is_empty() && !flags.allow_dirty {
+            bail!(
+                "htl fix rewrites files in place and relies on git to undo it; these have uncommitted changes:\n  {}\ncommit or stash them, or pass --allow-dirty",
+                dirty.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n  ")
+            );
+        }
+        if !no_vcs.is_empty() && !flags.allow_no_vcs {
+            bail!(
+                "htl fix rewrites files in place and relies on git to undo it; these are not in a git repository:\n  {}\npass --allow-no-vcs to proceed without that safety net",
+                no_vcs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n  ")
+            );
+        }
+    }
+
+    let mut sink = report::Sink::new(flags.json);
+    let (mut applied, mut skipped, mut json_files) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut changed, mut deferred, mut reverted, mut errors_remaining) = (0usize, 0usize, 0usize, 0usize);
+    for f in &files {
+        h.add_layout_paths(f)?;
+        let before = if flags.diff { std::fs::read_to_string(f).ok() } else { None };
+        let out = fix_file(&h, f, &opts)?;
+        if out.contents.is_some() {
+            changed += 1;
+        }
+        deferred += out.deferred;
+        if out.reverted.is_some() {
+            reverted += 1;
+        }
+        errors_remaining += out.check.errors.len();
+        if !flags.json {
+            for a in &out.applied {
+                eprintln!(
+                    "fixed: {}:{}: {} ({}{})",
+                    f.display(),
+                    a.line,
+                    a.rule,
+                    a.applicability.as_str(),
+                    if flags.dry_run { ", not written" } else { "" }
+                );
+            }
+            for s in &out.skipped {
+                eprintln!("skipped: {}:{}: {} — {}", f.display(), s.line, s.rule, s.reason);
+            }
+            if let Some(r) = &out.reverted {
+                eprintln!("reverted: {}: {r}", f.display());
+            }
+            if let Some(o) = &out.oscillation {
+                eprintln!("stopped: {}: fixes of {o} undo each other", f.display());
+            }
+            if out.deferred > 0 {
+                eprintln!("deferred: {}: {} edit(s) overlapped applied ones; run htl fix again", f.display(), out.deferred);
+            }
+            if flags.diff
+                && let (Some(b), Some(a)) = (&before, &out.contents)
+            {
+                print!("{}", unified_diff(&f.display().to_string(), b, a));
+            }
+        }
+        sink.checkinfo(&out.check);
+        if flags.json {
+            applied.extend(out.applied.iter().map(|a| report::FixApplied {
+                file: f.display().to_string(),
+                line: a.line,
+                rule: a.rule.clone(),
+                applicability: a.applicability.as_str(),
+                pass: a.pass,
+            }));
+            skipped.extend(out.skipped.iter().map(|s| report::FixSkipped {
+                file: f.display().to_string(),
+                line: s.line,
+                rule: s.rule.clone(),
+                reason: s.reason.clone(),
+            }));
+            json_files.push(report::FixFile {
+                path: f.display().to_string(),
+                changed: out.contents.is_some(),
+                deferred: out.deferred,
+                reverted: out.reverted.clone(),
+                oscillation: out.oscillation.clone(),
+                diagnostics: sink.take(),
+            });
+        }
+    }
+    let n_applied = if flags.json { applied.len() } else { 0 };
+    let fail = errors_remaining > 0 || (flags.exit_non_zero_on_fix && changed > 0);
+    if flags.json {
+        let n_skipped = skipped.len();
+        report::emit(&report::FixReport {
+            dry_run: flags.dry_run,
+            applied,
+            skipped,
+            files: json_files,
+            summary: report::FixSummary {
+                files: files.len(),
+                files_changed: changed,
+                applied: n_applied,
+                skipped: n_skipped,
+                deferred,
+                reverted,
+                errors_remaining,
+                ok: !fail,
+            },
+        })?;
+    } else {
+        eprintln!(
+            "htl fix: {} file(s), {} changed{}, {} error(s) remaining{}",
+            files.len(),
+            changed,
+            if flags.dry_run { " (dry run, nothing written)" } else { "" },
+            errors_remaining,
+            if deferred > 0 { format!(", {deferred} deferred") } else { String::new() }
+        );
+    }
     Ok(if fail { ExitCode::FAILURE } else { ExitCode::SUCCESS })
 }
 

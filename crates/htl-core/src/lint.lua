@@ -361,10 +361,23 @@ end
 
 local GLOBAL_KINDS = { global_declaration = true, global_function = true, global_type = true }
 
-local function lint_no_global(ast, report)
+local function lint_no_global(ast, report, extra)
+   local lines = extra and extra.lines
    walk(ast, function(n)
       if GLOBAL_KINDS[n.kind] then
-         report("no-global", n.y, n.x, "global declaration; prefer a local and return it from the module")
+         -- `global` -> `local` at the keyword. The node's position is the declared
+         -- name; the keyword is the last `global` on the line before it. Unsafe: the
+         -- name stops being visible to other chunks, which may be what some file relied on.
+         local fix
+         local line = lines and lines[n.y]
+         local kw = line and line:sub(1, (n.x or 1) - 1):match(".*()global")
+         if kw then
+            fix = {
+               applicability = "unsafe",
+               edits = { { line = n.y, col = kw, end_line = n.y, end_col = kw + 6, text = "local" } },
+            }
+         end
+         report("no-global", n.y, n.x, "global declaration; prefer a local and return it from the module", fix)
       end
    end)
 end
@@ -439,9 +452,15 @@ local function lint_explicit_number(ast, report)
                and mixes_number(n.exps[i]) then
                local d = ints[v.tk]
                ints[v.tk] = nil
+               -- Safe fix: `: number` right after the name. The local already receives
+               -- a number, so the annotation states what the code does.
+               local after = d.x + #tostring(v.tk)
                report("explicit-number", d.y, d.x,
                   "'" .. tostring(v.tk) .. "' is inferred as integer from its literal but is assigned a number at line "
-                  .. tostring(n.y) .. "; write `local " .. tostring(v.tk) .. ": number = ...` to fix the numeric type explicitly")
+                  .. tostring(n.y) .. "; write `local " .. tostring(v.tk) .. ": number = ...` to fix the numeric type explicitly", {
+                  applicability = "safe",
+                  edits = { { line = d.y, col = after, end_line = d.y, end_col = after, text = ": number" } },
+               })
             end
          end
       end
@@ -535,10 +554,21 @@ function L.run(src, filename, cfg, extra)
       return nil, errs[1] and errs[1].msg or "parse failed"
    end
    local allows = collect_allows(src)
+   -- Source lines by number, for rules whose fix needs a keyword the AST does not
+   -- position (`global`).
+   extra = extra or {}
+   if not extra.lines then
+      local lines = {}
+      for l in (src .. "\n"):gmatch("([^\n]*)\n") do lines[#lines + 1] = l end
+      extra.lines = lines
+   end
    local out = {}
-   local function report(rule, y, x, msg)
+   -- `fix` (optional) = { applicability = "safe" | "unsafe" | "suggest", edits = { { line,
+   -- col, end_line, end_col, text } } }: a mechanical rewrite `htl fix` may apply.
+   -- Positions are 1-based line / byte column; an insertion has end == start.
+   local function report(rule, y, x, msg, fix)
       if allows[y] and allows[y][rule] then return end
-      out[#out + 1] = { rule = rule, y = y or 0, x = x or 0, msg = msg .. " [htl " .. rule .. "]" }
+      out[#out + 1] = { rule = rule, y = y or 0, x = x or 0, msg = msg .. " [htl " .. rule .. "]", fix = fix }
    end
    local profile = os.getenv("HTL_PROFILE") ~= nil
    for _, r in ipairs(RULES) do
