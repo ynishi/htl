@@ -493,6 +493,54 @@ mlua-pkg's `entry` is a directory, so a consumer's `require("<name>")` looks for
 `<name>/init.tl`. A flat package can instead ship `<name>/<name>.tl` (e.g. `entry = "src"`
 with `src/<name>.tl`); htl resolves that form in the checker and in `TealResolver`.
 
+## Unions of records (`where`)
+
+Teal refuses a union of two record types on its own:
+
+```text
+cannot discriminate a union between multiple table types: A | B
+```
+
+The refusal is about run time, not syntax: `is` narrows with a `type()` check, and two
+records are both `table`. A record can supply its own discriminator with a `where` clause,
+and then the union type-checks and `is` narrows it:
+
+```tl
+local record Monster
+   where self.kind == "monster"
+   kind: string
+   hp: integer
+end
+
+local record Item
+   where self.kind == "item"
+   kind: string
+   weight: number
+end
+
+local function describe(e: Monster | Item): string
+   if e is Monster then
+      return "hp " .. tostring(e.hp)      -- e.weight here is an error
+   else
+      return "weight " .. tostring(e.weight)
+   end
+end
+```
+
+`where` takes an expression that uses `self` once; comparing an enum-typed tag field works
+the same way and is the usual shape. Inside a narrowed branch the other variant's fields
+are not in scope — reaching for one is `invalid key 'weight' in record 'e' of type
+Monster` — and a partially narrowed value keeps its remaining variants, so after `is A`
+over `A | B | C` the value is `B | C` and a field only `B` has is still an error.
+
+What is not checked is a variant nobody handled: an `is` chain that covers `A` and `B` and
+falls through to a default compiles, and goes on compiling when `C` joins the union. Until
+there is a lint for it, an `is` chain over a union that gains a variant is a place to go
+and look.
+
+This is a Teal feature, not an htl one; it is documented here because the error above is
+what a reader meets first, and it reads like a dead end rather than a pointer to `where`.
+
 ## Pitfalls the checker now names
 
 - **Case-insensitive filesystems (macOS, Windows)**: `require("site")` from a file
@@ -507,6 +555,9 @@ with `src/<name>.tl`); htl resolves that form in the checker and in `TealResolve
   line to paste into the record (`observe: function(w: World, what: string)`), which
   also makes the record the module's declared API; moving the definition up is the
   other fix.
+- **A union of two records**: "cannot discriminate a union between multiple table
+  types" reads like a limit on the type system, and it is a limit on `is`, which each
+  record can lift for itself with a `where` clause (see above).
 - **Multi-value call in last position**: `t.expect(can_cast(x))` with `can_cast`
   returning `boolean, string` is a 2-argument call, and Teal reports "wrong number of
   arguments" at `expect`. htl names the expanding call and the two fixes (bind first,
