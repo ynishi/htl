@@ -21,3 +21,14 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Content hashes for the run cache (src/cache.rs). Keyed on content, never on mtime.
+blake3 = "1"
+
+[dev-dependencies]
+criterion = "0.8"
+
+# What the run cache saves, through the binary a user actually runs. The per-phase costs
+# it is saving are in `htl-core`'s `check` bench.
+[[bench]]
+name = "cached_check"
+harness = false

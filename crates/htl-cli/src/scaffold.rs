@@ -145,7 +145,9 @@ fn t_htl_toml() -> String {
 }
 
 fn t_gitignore(embed: bool) -> String {
-    let mut s = String::from(".mlua-pkgs/\n*.hb\n");
+    // `.htl/` holds the run cache: generated, machine-local, and keyed on absolute paths,
+    // so it is never worth sharing.
+    let mut s = String::from(".mlua-pkgs/\n.htl/\n*.hb\n");
     if embed {
         s.push_str("/target\n");
     }

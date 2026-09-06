@@ -28,3 +28,12 @@ walkdir = { workspace = true }
 syn = { version = "2", features = ["full"], optional = true }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+
+[dev-dependencies]
+criterion = "0.8"
+
+# What a cold check spends its time on, so that a claim about what the incremental
+# cache saves rests on a measurement. See `benches/check.rs`.
+[[bench]]
+name = "check"
+harness = false
