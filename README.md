@@ -45,6 +45,7 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 | `htl gen <file.tl> [-o out.lua]` | readable Lua, the escape hatch out of htl |
 | `htl build <entry.tl> -o app.hb [--debug] [--source] [--extra a,b] [--host x,y]` | link the entry's `require` closure into one bundle (see Bundles) |
 | `htl pkg <args>` | passthrough to `mlua-pkg` at the nearest `mlua-pkg.toml` root |
+| `htl cache clear [path]` | delete the project's stored check results (see Caching) |
 | `htl dts [dir]` | write the `.d.tl` files declared by `#[host_module]` / `#[derive(TealRecord)]` from Rust source, no build needed (`check` / `run` / `test` / `build` do this automatically when inside a crate) |
 
 `mlua-pkg.toml` is detected by walking up from the file: vendored deps become
@@ -91,18 +92,33 @@ the reason to reach for it if the number of files in `.htl/` becomes a problem b
 eviction lands.
 
 An entry is used only when the module and everything it required still hash the same, every
-directory a `require` could resolve in holds the same modules, and the binary that wrote the
-entry is the one reading it. Content hashes throughout, no timestamps, so touching a file
-without editing it invalidates nothing and a fresh checkout does not either. Anything
-unexpected — a corrupt entry, an unreadable store, an htl upgrade — is a miss, which costs
-the check it would have skipped and never the wrong answer.
+name it requires still resolves where it did, and the binary that wrote the entry is the one
+reading it. Content hashes throughout, no timestamps, so touching a file without editing it
+invalidates nothing and a fresh checkout does not either. Anything unexpected — a corrupt
+entry, an unreadable store, an htl upgrade — is a miss, which costs the check it would have
+skipped and never the wrong answer.
+
+Only the names a module actually requires are watched. Adding a module nothing requires
+leaves every existing entry valid; adding one that could answer to a name something does
+require invalidates the modules asking for that name, whether or not the checker would still
+have picked the old file. Writing a new module is a normal thing to do while working, and it
+costs a check of that module rather than of the project.
+
+The store is bounded, at four entries per module or 256, whichever is larger. A run that
+finds it over the bound drops what it did not itself use: entries whose files are gone go
+first, then the oldest until it fits. A dropped entry is a miss on the next run and nothing
+worse. Eviction is where mtimes are allowed, because being wrong there costs a check rather
+than a wrong answer; invalidation still refuses them.
 
 Flags are part of the key when they change what a module reports and not when they only
 change the verdict: `--lint` gets its own entries, `--strict` reuses them and differs in the
 exit code alone.
 
-`HTL_CACHE_DEBUG=1` prints why something was not replayed. `htl test` is not cached: a test
-has to run whatever its types say.
+`htl cache clear` empties the store. It finds it beside `htl.toml`, which is not necessarily
+where you are standing — `htl check src` run from anywhere in a repo writes to the project
+root — so this saves working out which directory to remove. `HTL_CACHE_DEBUG=1` prints why
+something was not replayed. `htl test` is not cached: a test has to run whatever its types
+say.
 
 ## Embedding in Rust
 

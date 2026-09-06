@@ -53,7 +53,7 @@ use std::path::{Path, PathBuf};
 /// value is a miss rather than an error: a fresh checkout and an upgrade both take that
 /// path in normal operation, which is why rustc treats its own header mismatch the same
 /// way.
-const FORMAT: u32 = 2;
+const FORMAT: u32 = 3;
 
 /// Where the store lives under the project root. Generated, and `htl init` puts it in
 /// `.gitignore`.
@@ -61,6 +61,23 @@ const DIR: &str = ".htl/cache";
 
 fn debugging() -> bool {
     std::env::var_os("HTL_CACHE_DEBUG").is_some()
+}
+
+/// How many entries a project's store may hold before a run starts dropping the ones it did
+/// not use.
+///
+/// Scaled to the project, because the natural size is one entry per module per way of
+/// invoking the check, and "a few ways" is what people do. The floor keeps a small project
+/// from evicting itself on its second invocation. `HTL_CACHE_MAX_ENTRIES` overrides it,
+/// which exists for the tests — reaching a few hundred entries honestly takes more
+/// invocations than a test should run.
+fn max_entries(files: usize) -> usize {
+    if let Some(n) = std::env::var_os("HTL_CACHE_MAX_ENTRIES")
+        .and_then(|v| v.to_str().and_then(|s| s.parse::<usize>().ok()))
+    {
+        return n;
+    }
+    (files * 4).max(256)
 }
 
 fn miss(reason: &str) {
@@ -107,13 +124,21 @@ struct Input {
     hash: String,
 }
 
-/// One directory a `require` could have resolved in, by the set of module names it held.
-/// Catches a file appearing where the checker would now find it, which no hash of the
-/// files it *did* read can see.
+/// One directory a `require` could have resolved in, and what it offered *for the names
+/// this module asked for*.
+///
+/// This catches a file appearing where the checker would now find it, which no hash of the
+/// files it did read can see — the hole ccache documents in its direct mode. It used to
+/// hash every module name in the directory, which meant adding any file at all invalidated
+/// every module whose search path included it: writing one new module re-checked the whole
+/// project (#24). A file appearing under a name nobody requires cannot change what anybody
+/// resolved, so only the requested names go in.
 #[derive(Serialize, Deserialize, Debug)]
 struct Probe {
     dir: String,
-    /// Hash of the sorted `.tl` / `.d.tl` / `.lua` names in the directory.
+    /// Hash of `(name, whether it resolves here)` over the module's own requires, in the
+    /// order they are stored. Changing which directory a name resolves in changes this for
+    /// both directories involved, which is how a shadowing file is caught.
     names: String,
 }
 
@@ -220,26 +245,20 @@ pub fn normal(p: &Path) -> String {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()).to_string_lossy().into_owned()
 }
 
-/// The module names a directory offers, hashed. An unreadable directory hashes as empty,
-/// which is the honest answer: it offers nothing right now, and if it offered something
-/// when the entry was written the hashes differ and the module gets checked.
-fn hash_dir_names(dir: &Path) -> String {
-    let mut names: Vec<String> = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        for e in rd.flatten() {
-            let n = e.file_name().to_string_lossy().into_owned();
-            if n.ends_with(".tl") || n.ends_with(".lua") {
-                names.push(n);
-            }
-        }
-    }
-    names.sort();
-    let mut h = blake3::Hasher::new();
-    for n in &names {
-        h.update(n.as_bytes());
-        h.update(b"\0");
-    }
-    h.finalize().to_hex().to_string()
+/// Whether `name` resolves to a file in `dir`.
+///
+/// The shapes are the ones `H.add_path` puts on the search path (`dir/?.tl`,
+/// `dir/?/init.tl`) plus the declaration and Lua forms the checker falls back to. A dot in
+/// a module name is a directory separator, as it is for Lua's own searcher.
+///
+/// This is an existence question, not a resolution: it says the name *could* be found here,
+/// and comparing the answer across every directory on the path is what makes a change of
+/// resolution visible. Getting it wrong in the direction of "present" costs a re-check;
+/// there is no direction in which it produces a wrong answer.
+fn resolves_in(dir: &Path, name: &str) -> bool {
+    let stem = name.replace('.', "/");
+    ["tl", "d.tl", "lua"].iter().any(|ext| dir.join(format!("{stem}.{ext}")).is_file())
+        || ["init.tl", "init.d.tl", "init.lua"].iter().any(|f| dir.join(&stem).join(f).is_file())
 }
 
 /// The key for one module in this invocation.
@@ -297,8 +316,9 @@ pub struct Cache {
     /// of what a fully replayed run spends. A file is assumed not to change while one
     /// `htl check` is running; if it does, the run's answer was undefined anyway.
     hashes: RefCell<HashMap<String, Option<String>>>,
-    /// Directory listings taken during this run, by normalized path. Same reasoning.
-    dirs: RefCell<HashMap<String, String>>,
+    /// Name-resolves-here answers taken during this run, by (directory, name). Same
+    /// reasoning.
+    dirs: RefCell<HashMap<(String, String), bool>>,
 }
 
 impl Cache {
@@ -327,15 +347,27 @@ impl Cache {
         h
     }
 
-    /// The module names in a directory, listed once per run. The project root, `src/` and
-    /// `types/` are probed by every entry, so this overlaps even more than the file hashes.
-    fn dir_names_of(&self, dir: &str) -> String {
-        if let Some(n) = self.dirs.borrow().get(dir) {
-            return n.clone();
+    /// Whether one name resolves in one directory, answered once per run. The project root,
+    /// `src/` and `types/` are probed by every module, and modules share the names they
+    /// require, so this overlaps even more than the file hashes do.
+    fn resolves(&self, dir: &str, name: &str) -> bool {
+        let k = (dir.to_string(), name.to_string());
+        if let Some(v) = self.dirs.borrow().get(&k) {
+            return *v;
         }
-        let n = hash_dir_names(Path::new(dir));
-        self.dirs.borrow_mut().insert(dir.to_string(), n.clone());
-        n
+        let v = resolves_in(Path::new(dir), name);
+        self.dirs.borrow_mut().insert(k, v);
+        v
+    }
+
+    /// What `dir` offers for `names`, hashed.
+    fn probe_hash(&self, dir: &str, names: &[String]) -> String {
+        let mut h = blake3::Hasher::new();
+        for n in names {
+            h.update(n.as_bytes());
+            h.update(if self.resolves(dir, n) { b"\x01" } else { b"\x00" });
+        }
+        h.finalize().to_hex().to_string()
     }
 
     fn entry_path(&self, key: &Key) -> PathBuf {
@@ -357,9 +389,22 @@ impl Cache {
         }
     }
 
+    /// The module names an entry's modules asked for, sorted and deduplicated.
+    ///
+    /// Both sides of a probe comparison have to derive this the same way, which is why it is
+    /// one function rather than two loops.
+    fn required_names(modules: &[Module]) -> Vec<String> {
+        let mut names: Vec<String> =
+            modules.iter().flat_map(|m| m.requires.iter().map(|r| r.module.clone())).collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     /// Whether an entry still describes the world: written by this build, every file it read
-    /// unchanged, every directory it could have resolved in holding the same modules.
-    fn still_valid(&self, stamp: &Stamp, inputs: &[Input], probes: &[Probe]) -> bool {
+    /// unchanged, and every directory it could have resolved in still answering the same way
+    /// for the names it asked about.
+    fn still_valid(&self, stamp: &Stamp, inputs: &[Input], probes: &[Probe], names: &[String]) -> bool {
         let Some(current) = Stamp::current() else { return false };
         if *stamp != current {
             miss("written by a different build");
@@ -379,8 +424,8 @@ impl Cache {
             }
         }
         for p in probes {
-            if self.dir_names_of(&p.dir) != p.names {
-                miss(&format!("directory contents changed: {}", p.dir));
+            if self.probe_hash(&p.dir, names) != p.names {
+                miss(&format!("what {} offers for this module's requires changed", p.dir));
                 return false;
             }
         }
@@ -405,7 +450,26 @@ impl Cache {
     fn lookup(&self, key: &Key) -> Option<Module> {
         let raw = std::fs::read_to_string(self.entry_path(key)).ok()?;
         let entry: Entry = Self::parse(&raw)?;
-        self.still_valid(&entry.stamp, &entry.inputs, &entry.probes).then_some(entry.module)
+        let names = Self::required_names(std::slice::from_ref(&entry.module));
+        if !self.still_valid(&entry.stamp, &entry.inputs, &entry.probes, &names) {
+            return None;
+        }
+        self.touch(key);
+        Some(entry.module)
+    }
+
+    /// Mark an entry as used, so that the sweep drops what is stale rather than what is
+    /// merely old.
+    ///
+    /// Without this the shape you run most often is the one whose entries were written
+    /// first, so it ages out while a lint flag you tried once survives — measured on a
+    /// 58-module project, running four other shapes left the plain one replaying 24 of its
+    /// 58 modules. Failing to touch costs a later re-check and nothing else, so every error
+    /// here is ignored.
+    fn touch(&self, key: &Key) {
+        if let Ok(f) = std::fs::File::options().write(true).open(self.entry_path(key)) {
+            let _ = f.set_modified(std::time::SystemTime::now());
+        }
     }
 
     fn lookup_run(&self, key: &Key, files: usize) -> Option<Vec<Module>> {
@@ -415,7 +479,12 @@ impl Cache {
             miss("the walk visits a different number of files");
             return None;
         }
-        self.still_valid(&entry.stamp, &entry.inputs, &entry.probes).then_some(entry.modules)
+        let names = Self::required_names(&entry.modules);
+        if !self.still_valid(&entry.stamp, &entry.inputs, &entry.probes, &names) {
+            return None;
+        }
+        self.touch(key);
+        Some(entry.modules)
     }
 
     /// Hash every path an entry has to compare next time, once each: a dependency reached
@@ -432,14 +501,14 @@ impl Cache {
         Some(inputs)
     }
 
-    fn probes_for(&self, dirs: &[PathBuf]) -> Vec<Probe> {
+    fn probes_for(&self, dirs: &[PathBuf], names: &[String]) -> Vec<Probe> {
         let mut dirs: Vec<String> = dirs.iter().map(|p| normal(p)).collect();
         dirs.sort();
         dirs.dedup();
         dirs.into_iter()
             .map(|d| {
-                let names = self.dir_names_of(&d);
-                Probe { dir: d, names }
+                let h = self.probe_hash(&d, names);
+                Probe { dir: d, names: h }
             })
             .collect()
     }
@@ -452,7 +521,9 @@ impl Cache {
             .chain(module.deps.iter().cloned())
             .chain(extra_inputs.iter().map(|p| normal(p)));
         let Some(inputs) = self.inputs_for(paths) else { return };
-        let entry = Entry { stamp, inputs, probes: self.probes_for(dirs), module: module.clone() };
+        let names = Self::required_names(std::slice::from_ref(module));
+        let entry =
+            Entry { stamp, inputs, probes: self.probes_for(dirs, &names), module: module.clone() };
         if let Err(e) = self.write(key, &entry)
             && debugging()
         {
@@ -477,12 +548,103 @@ impl Cache {
             .chain(modules.iter().flat_map(|m| m.deps.iter().cloned()))
             .chain(extra_inputs.iter().map(|p| normal(p)));
         let Some(inputs) = self.inputs_for(paths) else { return };
-        let entry = RunEntry { stamp, inputs, probes: self.probes_for(dirs), modules: modules.to_vec() };
+        let names = Self::required_names(modules);
+        let entry = RunEntry {
+            stamp,
+            inputs,
+            probes: self.probes_for(dirs, &names),
+            modules: modules.to_vec(),
+        };
         if let Err(e) = self.write(key, &entry)
             && debugging()
         {
             eprintln!("htl cache: not stored ({e})");
         }
+    }
+
+    /// Drop entries this run did not use, once the store has outgrown what the project
+    /// warrants.
+    ///
+    /// Nothing else removes an entry. The key covers the paths as written, the lint
+    /// selection and the working directory, so every distinct way of invoking the check
+    /// leaves a full set of module entries behind — a lint flag tried once doubles the store
+    /// permanently, and a deleted module's entry is never read again. `htl check` sees the
+    /// whole graph in one process, which is what lets this be exact about the orphans rather
+    /// than sampling the way ccache has to.
+    ///
+    /// Two passes. Entries whose recorded inputs have all gone describe modules that no
+    /// longer exist, and go first. If the store is still over, the oldest go until it fits.
+    ///
+    /// **This uses mtimes, and #3's rule against them still holds.** That rule is about
+    /// invalidation, where trusting a timestamp means replaying a stale result and reporting
+    /// something untrue. Dropping an entry that was still good costs the check it would have
+    /// skipped and nothing else. The two questions deserve different tools.
+    ///
+    /// "Oldest" is least recently *used*, because a hit touches its entry ([`Self::touch`]).
+    /// Without that it would mean least recently written, and the shape run most often —
+    /// written first — would age out while a shape tried once survived.
+    pub fn sweep(&self, keep: &[Key], files: usize) {
+        let bound = max_entries(files);
+        let Ok(rd) = std::fs::read_dir(&self.dir) else { return };
+        let keep: std::collections::HashSet<&str> = keep.iter().map(|k| k.0.as_str()).collect();
+
+        let mut all = 0usize;
+        let mut candidates: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+        for e in rd.flatten() {
+            let path = e.path();
+            if path.extension().is_none_or(|x| x != "json") {
+                continue;
+            }
+            all += 1;
+            let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            if keep.contains(stem.as_str()) {
+                continue;
+            }
+            let mtime = e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+            candidates.push((path, mtime));
+        }
+        if all <= bound {
+            return;
+        }
+
+        let mut removed = 0usize;
+        // Orphans first: an entry none of whose inputs still exist cannot be read again.
+        candidates.retain(|(p, _)| {
+            if all - removed <= bound || !self.is_orphan(p) {
+                return true;
+            }
+            if std::fs::remove_file(p).is_ok() {
+                removed += 1;
+            }
+            false
+        });
+        // Then by age, oldest first, until the store fits.
+        if all - removed > bound {
+            candidates.sort_by_key(|(_, t)| *t);
+            for (p, _) in &candidates {
+                if all - removed <= bound {
+                    break;
+                }
+                if std::fs::remove_file(p).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+        if removed > 0 && debugging() {
+            eprintln!("htl cache: dropped {removed} of {all} entries (bound {bound})");
+        }
+    }
+
+    /// Whether every file an entry recorded as an input has gone. Unreadable entries count as
+    /// orphans: nothing can use them either.
+    fn is_orphan(&self, path: &Path) -> bool {
+        let Ok(raw) = std::fs::read_to_string(path) else { return true };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else { return true };
+        let Some(inputs) = v.get("inputs").and_then(|i| i.as_array()) else { return true };
+        !inputs
+            .iter()
+            .filter_map(|i| i.get("path").and_then(|p| p.as_str()))
+            .any(|p| Path::new(p).exists())
     }
 
     /// Whole or not at all: a temporary file in the same directory, then a rename. On every
