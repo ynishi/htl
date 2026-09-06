@@ -245,6 +245,7 @@ every declared field, for types that are settled.
 | `nil-index` | on | `t[k].x`, `t[k]:m()`, `t[k]()`, `t[k][j]` — Teal types a map/array lookup as `V`, not `V \| nil` |
 | `struct-fields` | on | a table built for a record marked `---@struct` that leaves out a field the record declares and `---@optional` does not exempt. Silent until a record carries the marker (see below) |
 | `enum-exhaustive` | on | `if e == "a" ... elseif e == "b" ... end` over an enum with a value left unhandled and no `else`; enums nested in records and enums from required modules count |
+| `union-exhaustive` | on | `if x is A ... elseif x is B ... end` over a union with a variant never tested and no `else`. The variants come from the checker, so a chain that predates a variant is reported once the union gains it (see "Unions of records") |
 | `shadow-local` | on | a local / loop var / parameter reusing an enclosing local's name; when that outer local is a `require`d module the message says which module and where it was required |
 | `no-global` | on | `global` declarations |
 | `no-any` | off | explicit `any` annotations and `as any` casts |
@@ -567,10 +568,12 @@ are not in scope — reaching for one is `invalid key 'weight' in record 'e' of 
 Monster` — and a partially narrowed value keeps its remaining variants, so after `is A`
 over `A | B | C` the value is `B | C` and a field only `B` has is still an error.
 
-What is not checked is a variant nobody handled: an `is` chain that covers `A` and `B` and
-falls through to a default compiles, and goes on compiling when `C` joins the union. Until
-there is a lint for it, an `is` chain over a union that gains a variant is a place to go
-and look.
+A variant nobody handled is not a type error — an `is` chain that covers `A` and `B` and
+falls through compiles, and goes on compiling when `C` joins the union — so the
+`union-exhaustive` lint reports it. It reads the union's members from the checker rather
+than from the tests, and stays quiet for a chain with an `else`, for a single `is` (that
+is a guard, not a dispatch), and where every branch returns and code follows, which is the
+`else` written differently. Those are the same exemptions `enum-exhaustive` makes.
 
 This is a Teal feature, not an htl one; it is documented here because the error above is
 what a reader meets first, and it reads like a dead end rather than a pointer to `where`.

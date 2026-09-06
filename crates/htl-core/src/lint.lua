@@ -26,6 +26,7 @@ L.DEFAULT = {
    -- marked `---@struct`, which is a thing someone had to write.
    ["struct-fields"] = true,
    ["enum-exhaustive"] = true,
+   ["union-exhaustive"] = true,
    ["shadow-local"] = true,
    ["no-global"] = true,
    ["no-any"] = false,
@@ -254,6 +255,72 @@ local function lint_enum_exhaustive(ast, report, extra)
             "if-chain on '" .. subject .. "' does not cover enum " .. best_name .. " value(s): "
             .. table.concat(missing, ", ") .. "; add a branch or an else")
       end
+   end)
+end
+
+---------------------------------------------------------------- union-exhaustive
+
+-- `x is A` — the subject variable and the type named, or nil for any other test.
+local function is_test(exp)
+   if not is_node(exp) or exp.kind ~= "op" or not exp.op or exp.op.op ~= "is" then
+      return nil
+   end
+   local subject = exp.e1
+   if not is_node(subject) or subject.kind ~= "variable" or not subject.tk then return nil end
+   local target = exp.e2
+   if not is_node(target) then return nil end
+   local name = target.casttype and target.casttype.names
+      and target.casttype.names[#target.casttype.names]
+   name = name or target.tk
+   if not name then return nil end
+   return subject.tk, name, subject
+end
+
+-- An `is` chain over a union that leaves a variant untested and has no `else`. The
+-- sibling of `enum-exhaustive`, and it exists for the same reason: adding a variant
+-- otherwise leaves every chain that predates it compiling, with the new one falling
+-- wherever the last branch happened to lead.
+--
+-- The union's members come from the checker (`extra.union_at`), not from the tests: a
+-- chain that names two variants tells you nothing about how many there are.
+local function lint_union_exhaustive(ast, report, extra)
+   extra = extra or {}
+   local union_at = extra.union_at
+   if not union_at then return end
+   local has_next = mark_fallthrough(ast)
+   walk(ast, function(n)
+      if n.kind ~= "if" or not n.if_blocks then return end
+      -- One `if x is A then ... end` is a guard, not a dispatch (same rule as enums).
+      if #n.if_blocks < 2 then return end
+      if has_next[n] then
+         local all_return = true
+         for _, blk in ipairs(n.if_blocks) do
+            if not ends_in_return(blk.body) then all_return = false break end
+         end
+         if all_return then return end
+      end
+      local subject, tested, first = nil, {}, nil
+      for _, blk in ipairs(n.if_blocks) do
+         if not blk.exp then return end -- has `else`: exhaustive by construction
+         local s, name, node = is_test(blk.exp)
+         if not s then return end
+         if subject and s ~= subject then return end
+         subject = s
+         first = first or node
+         tested[name] = true
+      end
+      if not first then return end
+      local members = union_at(first.y, first.x)
+      if not members then return end -- unknown, or typed and not a union
+      local missing = {}
+      for name in pairs(members) do
+         if not tested[name] then missing[#missing + 1] = name end
+      end
+      if #missing == 0 then return end
+      table.sort(missing)
+      report("union-exhaustive", n.y, n.x,
+         "if-chain on '" .. subject .. "' does not cover " .. table.concat(missing, ", ")
+         .. "; add a branch or an else")
    end)
 end
 
@@ -559,6 +626,7 @@ local RULES = {
    { "nil-index", lint_nil_index },
    { "struct-fields", lint_struct_fields },
    { "enum-exhaustive", lint_enum_exhaustive },
+   { "union-exhaustive", lint_union_exhaustive },
    { "shadow-local", lint_shadow },
    { "no-global", lint_no_global },
    { "no-any", lint_no_any },
