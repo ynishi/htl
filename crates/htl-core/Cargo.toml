@@ -37,3 +37,9 @@ criterion = "0.8"
 [[bench]]
 name = "check"
 harness = false
+
+# What verifying a fix against the file rather than against the store costs. See
+# `benches/fix.rs`.
+[[bench]]
+name = "fix"
+harness = false

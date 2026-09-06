@@ -29,11 +29,13 @@
 //! cargo bench -p htl-core --bench check -- check/module-size
 //! ```
 
+mod common;
+
+use common::{config, scratch, write};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use htl_core::Htl;
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 /// Module counts to measure. Two points, so the fixed cost and the per-module cost
 /// can be told apart; more points would cost bench time without changing the answer.
@@ -52,25 +54,6 @@ const FN_COUNTS: [usize; 3] = [3, 20, 60];
 
 /// Module count held fixed while module size varies.
 const SIZE_BENCH_MODULES: usize = 48;
-
-/// A scratch directory that does not collide with a parallel run of this bench.
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "htl-bench-{name}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-fn write(path: &Path, text: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, text).unwrap();
-}
 
 /// `fns` typed functions on `record`, about five lines each, so a module can be grown
 /// without changing the shape of the dependency graph. Every one of them goes through
@@ -223,13 +206,7 @@ fn bench_module_size(c: &mut Criterion) {
 
 criterion_group! {
     name = benches;
-    // A cold run of 48 modules is not a microbenchmark: the default 100 samples would
-    // hold the machine for minutes to sharpen a number we read to one significant
-    // figure. Ten samples over ten seconds is enough to separate these groups.
-    config = Criterion::default()
-        .sample_size(10)
-        .measurement_time(Duration::from_secs(10))
-        .warm_up_time(Duration::from_secs(3));
+    config = config();
     targets = bench_checker_new, bench_check_cold, bench_check_warm_checker, bench_module_size
 }
 criterion_main!(benches);

@@ -36,9 +36,10 @@ e2e:
     cargo run -q -p embed
     cargo run -q -p embed -- --bundle
 
-# The benchmarks behind the caching figures in the README. Ten samples each; a few minutes.
+# Every benchmark: the figures in the README come from these. Ten samples each; a few minutes.
 bench:
     cargo bench -p htl-core --bench check
+    cargo bench -p htl-core --bench fix
     cargo bench -p htl-cli --bench cached_check
 
 # A release binary, for timing against a real project rather than a generated one.
