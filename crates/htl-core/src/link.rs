@@ -71,7 +71,11 @@ impl Linked {
     }
 
     fn error(&self) -> anyhow::Error {
-        anyhow::anyhow!("link failed with {} error(s):\n  {}", self.errors.len(), self.errors.join("\n  "))
+        anyhow::anyhow!(
+            "link failed with {} error(s):\n  {}",
+            self.errors.len(),
+            self.errors.join("\n  ")
+        )
     }
 
     /// Every file the bundle was built from (entry, modules, and what the checker read
@@ -112,7 +116,9 @@ pub fn link(h: &Htl, entry: &Path, opts: &LinkOptions) -> Result<Linked> {
             Target::Host => {
                 host.insert(name.clone());
             }
-            Target::Missing => out.errors.push(format!("extra module '{name}' not found on the search path")),
+            Target::Missing => out.errors.push(format!(
+                "extra module '{name}' not found on the search path"
+            )),
         }
     }
 
@@ -126,7 +132,8 @@ pub fn link(h: &Htl, entry: &Path, opts: &LinkOptions) -> Result<Linked> {
             out.checks.push((path.clone(), ci));
             (code, reqs)
         } else {
-            let src = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+            let src = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {}", path.display()))?;
             let reqs = h.lua_requires(&src, &path)?;
             (Some(src), reqs)
         };
@@ -150,10 +157,18 @@ pub fn link(h: &Htl, entry: &Path, opts: &LinkOptions) -> Result<Linked> {
         }
         let Some(code) = code else { continue };
         let payload = if opts.source {
-            Module { name: name.clone(), kind: Kind::Source, payload: code.into_bytes() }
+            Module {
+                name: name.clone(),
+                kind: Kind::Source,
+                payload: code.into_bytes(),
+            }
         } else {
             let bc = h.compile_with(&name, &code, !opts.debug)?;
-            Module { name: name.clone(), kind: Kind::Bytecode, payload: bc }
+            Module {
+                name: name.clone(),
+                kind: Kind::Bytecode,
+                payload: bc,
+            }
         };
         out.bundle.modules.push(payload);
         out.modules.push(LinkedModule { name, path, typed });
@@ -201,7 +216,9 @@ fn classify(h: &Htl, name: &str, found: Option<&Path>) -> Result<Target> {
         Some(p) => (Some(p.to_path_buf()), None),
         None => h.resolve_module(name)?,
     };
-    let Some(p) = found else { return Ok(Target::Missing) };
+    let Some(p) = found else {
+        return Ok(Target::Missing);
+    };
     if !is_decl(&p) {
         return Ok(Target::File(p));
     }

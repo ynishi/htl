@@ -69,7 +69,6 @@ fn default_bound(files: usize) -> usize {
     (files * 4).max(256)
 }
 
-
 /// What produced an entry. A cache is only as good as its ability to notice it was
 /// written by something else.
 ///
@@ -91,7 +90,12 @@ impl Stamp {
     fn current() -> Option<Self> {
         let exe = std::env::current_exe().ok()?;
         let m = std::fs::metadata(&exe).ok()?;
-        let mtime = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+        let mtime = m
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_nanos();
         Some(Self {
             format: FORMAT,
             htl: env!("CARGO_PKG_VERSION").to_string(),
@@ -269,7 +273,12 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { enabled: true, mode: Mode::default(), explain: false, max_entries: None }
+        Self {
+            enabled: true,
+            mode: Mode::default(),
+            explain: false,
+            max_entries: None,
+        }
     }
 }
 
@@ -329,7 +338,10 @@ fn hash_file(p: &Path) -> Option<String> {
 /// while the same file reached as an import recorded an absolute one, so its hash depended
 /// on how it was reached. Everything that goes into an entry comes through here.
 pub fn normal(p: &Path) -> String {
-    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()).to_string_lossy().into_owned()
+    std::fs::canonicalize(p)
+        .unwrap_or_else(|_| p.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Whether `name` resolves to a file in `dir`.
@@ -344,8 +356,12 @@ pub fn normal(p: &Path) -> String {
 /// there is no direction in which it produces a wrong answer.
 fn resolves_in(dir: &Path, name: &str) -> bool {
     let stem = name.replace('.', "/");
-    ["tl", "d.tl", "lua"].iter().any(|ext| dir.join(format!("{stem}.{ext}")).is_file())
-        || ["init.tl", "init.d.tl", "init.lua"].iter().any(|f| dir.join(&stem).join(f).is_file())
+    ["tl", "d.tl", "lua"]
+        .iter()
+        .any(|ext| dir.join(format!("{stem}.{ext}")).is_file())
+        || ["init.tl", "init.d.tl", "init.lua"]
+            .iter()
+            .any(|f| dir.join(&stem).join(f).is_file())
 }
 
 /// The key for one module in this invocation.
@@ -383,7 +399,10 @@ fn key_with(kind: &'static str, spelling: &Path, lint: Option<&str>) -> Key {
     h.update(lint.unwrap_or("").as_bytes());
     h.update(b"\0");
     h.update(cwd().as_bytes());
-    Key { hash: h.finalize().to_hex().to_string(), kind }
+    Key {
+        hash: h.finalize().to_hex().to_string(),
+        kind,
+    }
 }
 
 /// The key for the walk as a whole, under `Mode::WholeRun`.
@@ -400,7 +419,10 @@ pub fn run_key(files: &[PathBuf], lint: Option<&str>) -> Key {
     h.update(lint.unwrap_or("").as_bytes());
     h.update(b"\0");
     h.update(cwd().as_bytes());
-    Key { hash: h.finalize().to_hex().to_string(), kind: RUN }
+    Key {
+        hash: h.finalize().to_hex().to_string(),
+        kind: RUN,
+    }
 }
 
 /// One entry covering a whole walk (`Mode::WholeRun`).
@@ -411,7 +433,11 @@ pub const RUN: &str = "run";
 /// of a run that replays everything and does nothing else.
 fn cwd() -> &'static str {
     static CWD: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    CWD.get_or_init(|| std::env::current_dir().map(|p| normal(&p)).unwrap_or_default())
+    CWD.get_or_init(|| {
+        std::env::current_dir()
+            .map(|p| normal(&p))
+            .unwrap_or_default()
+    })
 }
 
 /// One entry, as `htl cache status` describes it.
@@ -442,8 +468,14 @@ pub struct Contents {
 /// because its inputs moved. This answers "what is stored", not "what would be reused".
 pub fn describe(root: &Path) -> Contents {
     let dir = root.join(DIR);
-    let mut out = Contents { dir: dir.to_string_lossy().into_owned(), entries: Vec::new(), bytes: 0 };
-    let Ok(rd) = std::fs::read_dir(&dir) else { return out };
+    let mut out = Contents {
+        dir: dir.to_string_lossy().into_owned(),
+        entries: Vec::new(),
+        bytes: 0,
+    };
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return out;
+    };
     let now = std::time::SystemTime::now();
     for e in rd.flatten() {
         let path = e.path();
@@ -462,7 +494,11 @@ pub fn describe(root: &Path) -> Contents {
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or(serde_json::Value::Null);
-        let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("unreadable").to_string();
+        let kind = v
+            .get("kind")
+            .and_then(|k| k.as_str())
+            .unwrap_or("unreadable")
+            .to_string();
         let subjects = match (v.get("subject"), v.get("subjects")) {
             (Some(s), _) if s.is_string() => vec![s.as_str().unwrap_or_default().to_string()],
             (_, Some(a)) if a.is_array() => a
@@ -473,9 +509,15 @@ pub fn describe(root: &Path) -> Contents {
                 .collect(),
             _ => Vec::new(),
         };
-        out.entries.push(EntrySummary { kind, subjects, bytes: meta.len(), age_secs });
+        out.entries.push(EntrySummary {
+            kind,
+            subjects,
+            bytes: meta.len(),
+            age_secs,
+        });
     }
-    out.entries.sort_by(|a, b| a.kind.cmp(&b.kind).then(a.subjects.cmp(&b.subjects)));
+    out.entries
+        .sort_by(|a, b| a.kind.cmp(&b.kind).then(a.subjects.cmp(&b.subjects)));
     out
 }
 
@@ -555,7 +597,11 @@ impl Cache {
         let mut h = blake3::Hasher::new();
         for n in names {
             h.update(n.as_bytes());
-            h.update(if self.resolves(dir, n) { b"\x01" } else { b"\x00" });
+            h.update(if self.resolves(dir, n) {
+                b"\x01"
+            } else {
+                b"\x00"
+            });
         }
         h.finalize().to_hex().to_string()
     }
@@ -584,8 +630,10 @@ impl Cache {
     /// Both sides of a probe comparison have to derive this the same way, which is why it is
     /// one function rather than two loops.
     fn required_names(modules: &[Module]) -> Vec<String> {
-        let mut names: Vec<String> =
-            modules.iter().flat_map(|m| m.requires.iter().map(|r| r.module.clone())).collect();
+        let mut names: Vec<String> = modules
+            .iter()
+            .flat_map(|m| m.requires.iter().map(|r| r.module.clone()))
+            .collect();
         names.sort();
         names.dedup();
         names
@@ -594,8 +642,16 @@ impl Cache {
     /// Whether an entry still describes the world: written by this build, every file it read
     /// unchanged, and every directory it could have resolved in still answering the same way
     /// for the names it asked about.
-    fn still_valid(&self, stamp: &Stamp, inputs: &[Input], probes: &[Probe], names: &[String]) -> bool {
-        let Some(current) = Stamp::current() else { return false };
+    fn still_valid(
+        &self,
+        stamp: &Stamp,
+        inputs: &[Input],
+        probes: &[Probe],
+        names: &[String],
+    ) -> bool {
+        let Some(current) = Stamp::current() else {
+            return false;
+        };
         if *stamp != current {
             self.miss("written by a different build");
             return false;
@@ -615,7 +671,10 @@ impl Cache {
         }
         for p in probes {
             if self.probe_hash(&p.dir, names) != p.names {
-                self.miss(&format!("what {} offers for this module's requires changed", p.dir));
+                self.miss(&format!(
+                    "what {} offers for this module's requires changed",
+                    p.dir
+                ));
                 return false;
             }
         }
@@ -658,7 +717,10 @@ impl Cache {
     /// 58 modules. Failing to touch costs a later re-check and nothing else, so every error
     /// here is ignored.
     fn touch(&self, key: &Key) {
-        if let Ok(f) = std::fs::File::options().write(true).open(self.entry_path(key)) {
+        if let Ok(f) = std::fs::File::options()
+            .write(true)
+            .open(self.entry_path(key))
+        {
             let _ = f.set_modified(std::time::SystemTime::now());
         }
     }
@@ -687,7 +749,10 @@ impl Cache {
         paths.dedup();
         let mut inputs = Vec::with_capacity(paths.len());
         for p in paths {
-            inputs.push(Input { path: p.clone(), hash: self.hash_of(&p)? });
+            inputs.push(Input {
+                path: p.clone(),
+                hash: self.hash_of(&p)?,
+            });
         }
         Some(inputs)
     }
@@ -706,12 +771,23 @@ impl Cache {
 
     /// Record what one module reported. Best-effort: a store that cannot be written leaves
     /// the next run to do the work again, which is slow rather than wrong.
-    pub fn store_module(&self, key: &Key, file: &Path, extra_inputs: &[PathBuf], dirs: &[PathBuf], module: &Module) {
-        let Some(stamp) = Stamp::current() else { return };
+    pub fn store_module(
+        &self,
+        key: &Key,
+        file: &Path,
+        extra_inputs: &[PathBuf],
+        dirs: &[PathBuf],
+        module: &Module,
+    ) {
+        let Some(stamp) = Stamp::current() else {
+            return;
+        };
         let paths = std::iter::once(normal(file))
             .chain(module.deps.iter().cloned())
             .chain(extra_inputs.iter().map(|p| normal(p)));
-        let Some(inputs) = self.inputs_for(paths) else { return };
+        let Some(inputs) = self.inputs_for(paths) else {
+            return;
+        };
         let names = Self::required_names(std::slice::from_ref(module));
         let entry = Entry {
             stamp,
@@ -738,13 +814,17 @@ impl Cache {
         dirs: &[PathBuf],
         modules: &[Module],
     ) {
-        let Some(stamp) = Stamp::current() else { return };
+        let Some(stamp) = Stamp::current() else {
+            return;
+        };
         let paths = files
             .iter()
             .map(|f| normal(f))
             .chain(modules.iter().flat_map(|m| m.deps.iter().cloned()))
             .chain(extra_inputs.iter().map(|p| normal(p)));
-        let Some(inputs) = self.inputs_for(paths) else { return };
+        let Some(inputs) = self.inputs_for(paths) else {
+            return;
+        };
         let names = Self::required_names(modules);
         let entry = RunEntry {
             stamp,
@@ -783,8 +863,13 @@ impl Cache {
     /// Without that it would mean least recently written, and the shape run most often —
     /// written first — would age out while a shape tried once survived.
     pub fn sweep(&self, keep: &[Key], files: usize) {
-        let bound = self.opts.max_entries.unwrap_or_else(|| default_bound(files));
-        let Ok(rd) = std::fs::read_dir(&self.dir) else { return };
+        let bound = self
+            .opts
+            .max_entries
+            .unwrap_or_else(|| default_bound(files));
+        let Ok(rd) = std::fs::read_dir(&self.dir) else {
+            return;
+        };
         let keep: std::collections::HashSet<&str> = keep.iter().map(|k| k.hash.as_str()).collect();
 
         let mut all = 0usize;
@@ -795,11 +880,17 @@ impl Cache {
                 continue;
             }
             all += 1;
-            let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let stem = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
             if keep.contains(stem.as_str()) {
                 continue;
             }
-            let mtime = e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+            let mtime = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
             candidates.push((path, mtime));
         }
         if all <= bound {
@@ -838,9 +929,15 @@ impl Cache {
     /// Whether every file an entry recorded as an input has gone. Unreadable entries count as
     /// orphans: nothing can use them either.
     fn is_orphan(&self, path: &Path) -> bool {
-        let Ok(raw) = std::fs::read_to_string(path) else { return true };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else { return true };
-        let Some(inputs) = v.get("inputs").and_then(|i| i.as_array()) else { return true };
+        let Ok(raw) = std::fs::read_to_string(path) else {
+            return true;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            return true;
+        };
+        let Some(inputs) = v.get("inputs").and_then(|i| i.as_array()) else {
+            return true;
+        };
         !inputs
             .iter()
             .filter_map(|i| i.get("path").and_then(|p| p.as_str()))
@@ -854,7 +951,9 @@ impl Cache {
     fn write<T: Serialize>(&self, key: &Key, entry: &T) -> Result<()> {
         std::fs::create_dir_all(&self.dir)?;
         let final_path = self.entry_path(key);
-        let tmp = self.dir.join(format!(".{}.{}.tmp", key.hash, std::process::id()));
+        let tmp = self
+            .dir
+            .join(format!(".{}.{}.tmp", key.hash, std::process::id()));
         std::fs::write(&tmp, serde_json::to_vec(entry)?)?;
         if let Err(e) = std::fs::rename(&tmp, &final_path) {
             let _ = std::fs::remove_file(&tmp);

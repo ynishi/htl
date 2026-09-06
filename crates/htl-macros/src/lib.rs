@@ -88,24 +88,42 @@ impl syn::parse::Parse for BundleArgs {
                     match v.value().as_str() {
                         "bytecode" => opts.source = false,
                         "source" => opts.source = true,
-                        other => return Err(syn::Error::new(v.span(), format!("payload must be \"bytecode\" or \"source\", got {other:?}"))),
+                        other => {
+                            return Err(syn::Error::new(
+                                v.span(),
+                                format!(
+                                    "payload must be \"bytecode\" or \"source\", got {other:?}"
+                                ),
+                            ));
+                        }
                     }
                 }
                 "debug" => {
                     let v: syn::LitBool = input.parse()?;
                     opts.debug = v.value();
                 }
-                other => return Err(syn::Error::new(key.span(), format!("unknown include_bundle! option `{other}` (host, extra, payload, debug)"))),
+                other => {
+                    return Err(syn::Error::new(
+                        key.span(),
+                        format!(
+                            "unknown include_bundle! option `{other}` (host, extra, payload, debug)"
+                        ),
+                    ));
+                }
             }
         }
-        Ok(Self { entry: entry.value(), opts })
+        Ok(Self {
+            entry: entry.value(),
+            opts,
+        })
     }
 }
 
 fn parse_str_list(input: syn::parse::ParseStream) -> syn::Result<Vec<String>> {
     let content;
     syn::bracketed!(content in input);
-    let items: Punctuated<LitStr, Token![,]> = content.parse_terminated(<LitStr as syn::parse::Parse>::parse, Token![,])?;
+    let items: Punctuated<LitStr, Token![,]> =
+        content.parse_terminated(<LitStr as syn::parse::Parse>::parse, Token![,])?;
     Ok(items.iter().map(|l| l.value()).collect())
 }
 
@@ -117,7 +135,11 @@ struct BundleOut {
 
 /// Link `rel` (relative to `manifest_dir`) with the CLI's search paths and `[build]`
 /// settings from `htl.toml` merged into `opts`.
-fn resolve_bundle(manifest_dir: &Path, rel: &str, opts: &htl_core::link::LinkOptions) -> Result<BundleOut, String> {
+fn resolve_bundle(
+    manifest_dir: &Path,
+    rel: &str,
+    opts: &htl_core::link::LinkOptions,
+) -> Result<BundleOut, String> {
     let path = manifest_dir.join(rel);
     if !path.is_file() {
         return Err(format!("include_bundle!: no such file: {}", path.display()));
@@ -128,7 +150,8 @@ fn resolve_bundle(manifest_dir: &Path, rel: &str, opts: &htl_core::link::LinkOpt
         opts.extra.extend(c.build.extra.iter().cloned());
         opts.host.extend(c.build.host.iter().cloned());
     }
-    let linked = htl_core::link::link(&h, &path, &opts).map_err(|e| format!("include_bundle!: {e:#}"))?;
+    let linked =
+        htl_core::link::link(&h, &path, &opts).map_err(|e| format!("include_bundle!: {e:#}"))?;
     for (_, ci) in &linked.checks {
         for w in &ci.warnings {
             eprintln!("include_bundle! warning: {w}");
@@ -140,18 +163,32 @@ fn resolve_bundle(manifest_dir: &Path, rel: &str, opts: &htl_core::link::LinkOpt
                 eprintln!("include_bundle! lint: {l}");
             }
         } else {
-            return Err(format!("htl lint failed (set HTL_LINT=warn to downgrade):\n{}", linked.lints.join("\n")));
+            return Err(format!(
+                "htl lint failed (set HTL_LINT=warn to downgrade):\n{}",
+                linked.lints.join("\n")
+            ));
         }
     }
     let inputs: Vec<String> = linked
         .inputs()
         .into_iter()
-        .map(|p| if p.is_absolute() { p } else { manifest_dir.join(p) })
+        .map(|p| {
+            if p.is_absolute() {
+                p
+            } else {
+                manifest_dir.join(p)
+            }
+        })
         .filter(|p| p.is_file())
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
-    let bundle = linked.into_bundle().map_err(|e| format!("include_bundle!: {e:#}"))?;
-    Ok(BundleOut { bytes: bundle.encode(), inputs })
+    let bundle = linked
+        .into_bundle()
+        .map_err(|e| format!("include_bundle!: {e:#}"))?;
+    Ok(BundleOut {
+        bytes: bundle.encode(),
+        inputs,
+    })
 }
 
 fn expand_bundle(args: &BundleArgs) -> Result<TokenStream, String> {
@@ -192,7 +229,11 @@ enum Payload {
 /// A checker set up the way the CLI would be for `path`: `htl.toml` lints, the file's
 /// own dir, the crate's `src/`, the mlua-pkg project, `[check] paths`, the test lib.
 /// Never the process cwd (cargo's), which has nothing to do with the script.
-fn checker_for(tag: &str, manifest_dir: &Path, path: &Path) -> Result<(htl_core::Htl, Option<htl_core::config::HtlConfig>), String> {
+fn checker_for(
+    tag: &str,
+    manifest_dir: &Path,
+    path: &Path,
+) -> Result<(htl_core::Htl, Option<htl_core::config::HtlConfig>), String> {
     let h = htl_core::Htl::new().map_err(|e| format!("{tag}: {e:#}"))?;
     // htl.toml `[lint]` first, then HTL_LINTS, so the env var wins.
     let cfg = htl_core::config::HtlConfig::find(path).map_err(|e| format!("{tag}: {e:#}"))?;
@@ -202,19 +243,23 @@ fn checker_for(tag: &str, manifest_dir: &Path, path: &Path) -> Result<(htl_core:
     let env_spec = std::env::var("HTL_LINTS").unwrap_or_default();
     let spec = htl_core::config::join_specs([file_spec.as_str(), env_spec.as_str()]);
     if !spec.is_empty() {
-        h.configure_lints(&spec).map_err(|e| format!("{tag}: lint spec {spec:?}: {e:#}"))?;
+        h.configure_lints(&spec)
+            .map_err(|e| format!("{tag}: lint spec {spec:?}: {e:#}"))?;
     }
     h.reset_search_path().map_err(|e| format!("{tag}: {e:#}"))?;
-    h.add_path(&htl_core::parent_dir(path)).map_err(|e| format!("{tag}: {e:#}"))?;
+    h.add_path(&htl_core::parent_dir(path))
+        .map_err(|e| format!("{tag}: {e:#}"))?;
     let crate_src = manifest_dir.join("src");
     if crate_src.is_dir() {
-        h.add_path(&crate_src).map_err(|e| format!("{tag}: {e:#}"))?;
+        h.add_path(&crate_src)
+            .map_err(|e| format!("{tag}: {e:#}"))?;
     }
     if let Some(p) = htl_core::pkg::Project::find(path) {
         h.apply_project(&p).map_err(|e| format!("{tag}: {e:#}"))?;
     }
     if let (Some(root), Some(c)) = (&cfg_root, &cfg) {
-        h.apply_config(root, c).map_err(|e| format!("{tag}: {e:#}"))?;
+        h.apply_config(root, c)
+            .map_err(|e| format!("{tag}: {e:#}"))?;
     }
     h.install_test_lib().map_err(|e| format!("{tag}: {e:#}"))?;
     Ok((h, cfg))
@@ -234,7 +279,9 @@ fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Includ
         return Err(format!("include_tl!: no such file: {}", path.display()));
     }
     let (h, cfg) = checker_for("include_tl!", manifest_dir, &path)?;
-    let (code, ci) = h.gen_lua(&path).map_err(|e| format!("include_tl!: {e:#}"))?;
+    let (code, ci) = h
+        .gen_lua(&path)
+        .map_err(|e| format!("include_tl!: {e:#}"))?;
 
     for w in &ci.warnings {
         eprintln!("include_tl! warning: {w}");
@@ -262,7 +309,11 @@ fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Includ
         .deps
         .iter()
         .filter_map(|d| {
-            let p = if d.is_absolute() { d.clone() } else { manifest_dir.join(d) };
+            let p = if d.is_absolute() {
+                d.clone()
+            } else {
+                manifest_dir.join(d)
+            };
             let p = std::fs::canonicalize(&p).unwrap_or(p);
             p.is_file().then(|| p.to_string_lossy().into_owned())
         })
@@ -282,7 +333,11 @@ fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Includ
         Payload::Source(code)
     };
 
-    Ok(Included { main_abs, deps, payload })
+    Ok(Included {
+        main_abs,
+        deps,
+        payload,
+    })
 }
 
 fn expand_include(rel: &str, bytes: bool) -> Result<TokenStream, String> {
@@ -309,7 +364,8 @@ fn expand_include(rel: &str, bytes: bool) -> Result<TokenStream, String> {
 
 fn write_dts(rel: &str, text: &str) -> Result<(), String> {
     let path = manifest_dir()?.join(rel);
-    htl_core::write_if_changed(&path, text).map_err(|e| format!("writing {}: {e}", path.display()))?;
+    htl_core::write_if_changed(&path, text)
+        .map_err(|e| format!("writing {}: {e}", path.display()))?;
     Ok(())
 }
 
@@ -332,7 +388,11 @@ fn expand_record(item: &ItemStruct) -> Result<TokenStream, String> {
     let ident = &item.ident;
     let name = &rd.name;
     let decl = &rd.decl;
-    let field_idents: Vec<_> = rd.fields.iter().map(|(f, _)| format_ident!("{}", f)).collect();
+    let field_idents: Vec<_> = rd
+        .fields
+        .iter()
+        .map(|(f, _)| format_ident!("{}", f))
+        .collect();
     let field_names: Vec<&str> = rd.fields.iter().map(|(f, _)| f.as_str()).collect();
 
     Ok(quote! {
@@ -389,9 +449,16 @@ fn current_file_items() -> Option<Vec<syn::Item>> {
     syn::parse_file(&src).ok().map(|f| f.items)
 }
 
-fn expand_host_module(metas: Punctuated<Meta, Token![,]>, imp: &ItemImpl) -> Result<TokenStream, String> {
+fn expand_host_module(
+    metas: Punctuated<Meta, Token![,]>,
+    imp: &ItemImpl,
+) -> Result<TokenStream, String> {
     let attrs = dts::parse_attr_metas(metas)?;
-    let file_items = if attrs.records.is_empty() { None } else { current_file_items() };
+    let file_items = if attrs.records.is_empty() {
+        None
+    } else {
+        current_file_items()
+    };
     let hd = dts::host_decl(imp, attrs, file_items.as_deref())?;
     if let Some(d) = &hd.attrs.dts {
         write_dts(d, &hd.decl)?;
@@ -404,14 +471,22 @@ fn expand_host_module(metas: Punctuated<Meta, Token![,]>, imp: &ItemImpl) -> Res
     for m in &hd.methods {
         let fname = format_ident!("{}", m.name);
         let fname_s = &m.name;
-        let arg_pats: Vec<_> = m.params.iter().map(|p| format_ident!("{}", p.name)).collect();
+        let arg_pats: Vec<_> = m
+            .params
+            .iter()
+            .map(|p| format_ident!("{}", p.name))
+            .collect();
         let arg_tys: Vec<&syn::Type> = m.params.iter().map(|p| &p.owned_ty).collect();
         let call_exprs: Vec<_> = m
             .params
             .iter()
             .map(|p| {
                 let id = format_ident!("{}", p.name);
-                if p.by_ref { quote! { &#id } } else { quote! { #id } }
+                if p.by_ref {
+                    quote! { &#id }
+                } else {
+                    quote! { #id }
+                }
             })
             .collect();
         let call_args = quote! { #( #call_exprs ),* };
@@ -492,7 +567,10 @@ mod tests {
     #[test]
     fn include_resolves_vendored_dep_from_mlua_pkg_project() {
         let root = scratch("vendored");
-        write(&root.join("mlua-pkg.toml"), "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[deps]\n");
+        write(
+            &root.join("mlua-pkg.toml"),
+            "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[deps]\n",
+        );
         write(
             &root.join(".mlua-pkgs/vendored/mathx/init.tl"),
             "local record mathx\nend\nfunction mathx.twice(n: number): number\n   return n * 2\nend\nreturn mathx\n",
@@ -502,10 +580,13 @@ mod tests {
             "local mathx = require(\"mathx\")\nprint(mathx.twice(21))\n",
         );
 
-        let inc = resolve_include(&root, "scripts/main.tl", false).expect("vendored dep must resolve");
+        let inc =
+            resolve_include(&root, "scripts/main.tl", false).expect("vendored dep must resolve");
         assert!(inc.main_abs.ends_with("scripts/main.tl"));
         assert!(
-            inc.deps.iter().any(|d| d.ends_with("vendored/mathx/init.tl")),
+            inc.deps
+                .iter()
+                .any(|d| d.ends_with("vendored/mathx/init.tl")),
             "dep must be tracked for rebuilds: {:?}",
             inc.deps
         );
@@ -532,7 +613,10 @@ mod tests {
             &root.join("lua/mathx/init.tl"),
             "local record mathx\nend\nfunction mathx.twice(n: number): number\n   return n * 2\nend\nreturn mathx\n",
         );
-        write(&root.join("src/main.tl"), "local mathx = require(\"mathx\")\nprint(mathx.twice(1))\n");
+        write(
+            &root.join("src/main.tl"),
+            "local mathx = require(\"mathx\")\nprint(mathx.twice(1))\n",
+        );
 
         let inc = resolve_include(&root, "src/main.tl", true).expect("target_dir dep must resolve");
         assert!(matches!(inc.payload, Payload::Bytes(ref b) if !b.is_empty()));
@@ -542,12 +626,18 @@ mod tests {
     #[test]
     fn include_resolves_flat_package_module() {
         let root = scratch("flat");
-        write(&root.join("mlua-pkg.toml"), "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[deps]\n");
+        write(
+            &root.join("mlua-pkg.toml"),
+            "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[deps]\n",
+        );
         write(
             &root.join(".mlua-pkgs/vendored/mathx/mathx.tl"),
             "local record mathx\nend\nfunction mathx.twice(n: number): number\n   return n * 2\nend\nreturn mathx\n",
         );
-        write(&root.join("src/main.tl"), "local mathx = require(\"mathx\")\nprint(mathx.twice(1))\n");
+        write(
+            &root.join("src/main.tl"),
+            "local mathx = require(\"mathx\")\nprint(mathx.twice(1))\n",
+        );
         resolve_include(&root, "src/main.tl", false).expect("flat package must resolve");
     }
 
@@ -556,9 +646,15 @@ mod tests {
     #[test]
     fn include_ignores_modules_in_the_process_cwd() {
         let decoy = scratch("cwd-decoy");
-        write(&decoy.join("Tasks.tl"), "local record Tasks\nend\nreturn Tasks\n");
+        write(
+            &decoy.join("Tasks.tl"),
+            "local record Tasks\nend\nreturn Tasks\n",
+        );
         let root = scratch("cwd-crate");
-        write(&root.join("src/main.tl"), "local ok, t = pcall(require, \"Tasks\")\nprint(ok, t)\n");
+        write(
+            &root.join("src/main.tl"),
+            "local ok, t = pcall(require, \"Tasks\")\nprint(ok, t)\n",
+        );
 
         let prev = std::env::current_dir().unwrap();
         std::env::set_current_dir(&decoy).unwrap();
@@ -566,7 +662,10 @@ mod tests {
         std::env::set_current_dir(prev).unwrap();
 
         let err = out.unwrap_err();
-        assert!(err.contains("module not found: 'Tasks'"), "cwd decoy must not resolve: {err}");
+        assert!(
+            err.contains("module not found: 'Tasks'"),
+            "cwd decoy must not resolve: {err}"
+        );
     }
 
     /// `htl.toml` drives the macro too: `[lint] enable` turns a rule on, and
@@ -580,9 +679,15 @@ mod tests {
 
         write(&root.join("htl.toml"), "[lint]\nenable = [\"no-any\"]\n");
         let err = resolve_include(&root, "src/main.tl", false).unwrap_err();
-        assert!(err.contains("htl lint failed") && err.contains("no-any"), "{err}");
+        assert!(
+            err.contains("htl lint failed") && err.contains("no-any"),
+            "{err}"
+        );
 
-        write(&root.join("htl.toml"), "[lint]\nenable = [\"no-any\"]\nstrict = false\n");
+        write(
+            &root.join("htl.toml"),
+            "[lint]\nenable = [\"no-any\"]\nstrict = false\n",
+        );
         resolve_include(&root, "src/main.tl", false).expect("strict = false downgrades lints");
     }
 
@@ -591,39 +696,84 @@ mod tests {
     #[test]
     fn bundle_links_closure_tracks_inputs_and_fails_on_type_errors() {
         let root = scratch("bundle");
-        write(&root.join("src/main.tl"), "local util = require(\"util\")\nlocal host = require(\"host\")\nprint(util.twice(host.base()))\n");
+        write(
+            &root.join("src/main.tl"),
+            "local util = require(\"util\")\nlocal host = require(\"host\")\nprint(util.twice(host.base()))\n",
+        );
         write(
             &root.join("src/util.tl"),
             "local record util\nend\nfunction util.twice(n: integer): integer\n   return n * 2\nend\nreturn util\n",
         );
-        write(&root.join("src/host.d.tl"), "local record host\n   base: function(): integer\nend\nreturn host\n");
+        write(
+            &root.join("src/host.d.tl"),
+            "local record host\n   base: function(): integer\nend\nreturn host\n",
+        );
         write(&root.join("htl.toml"), "[build]\nextra = [\"plugin\"]\n");
         write(&root.join("src/plugin.tl"), "return { plugged = true }\n");
 
-        let out = resolve_bundle(&root, "src/main.tl", &htl_core::link::LinkOptions::default()).expect("links");
+        let out = resolve_bundle(
+            &root,
+            "src/main.tl",
+            &htl_core::link::LinkOptions::default(),
+        )
+        .expect("links");
         let b = htl_core::bundle::Bundle::decode(&out.bytes).unwrap();
         let names: Vec<&str> = b.modules.iter().map(|m| m.name.as_str()).collect();
-        assert!(names.contains(&"main") && names.contains(&"util") && names.contains(&"plugin"), "{names:?}");
+        assert!(
+            names.contains(&"main") && names.contains(&"util") && names.contains(&"plugin"),
+            "{names:?}"
+        );
         assert_eq!(b.host_modules, vec!["host".to_string()]);
         let has = |s: &str| out.inputs.iter().any(|p| p.ends_with(s));
-        assert!(has("src/main.tl") && has("src/util.tl") && has("src/host.d.tl") && has("src/plugin.tl"), "{:?}", out.inputs);
+        assert!(
+            has("src/main.tl")
+                && has("src/util.tl")
+                && has("src/host.d.tl")
+                && has("src/plugin.tl"),
+            "{:?}",
+            out.inputs
+        );
 
-        let src_opts = htl_core::link::LinkOptions { source: true, ..Default::default() };
+        let src_opts = htl_core::link::LinkOptions {
+            source: true,
+            ..Default::default()
+        };
         let out = resolve_bundle(&root, "src/main.tl", &src_opts).expect("links as source");
         let b = htl_core::bundle::Bundle::decode(&out.bytes).unwrap();
-        assert!(b.modules.iter().all(|m| m.kind == htl_core::bundle::Kind::Source));
+        assert!(
+            b.modules
+                .iter()
+                .all(|m| m.kind == htl_core::bundle::Kind::Source)
+        );
 
-        write(&root.join("src/util.tl"), "local record util\nend\nfunction util.twice(n: integer): integer\n   return \"no\"\nend\nreturn util\n");
-        let err = resolve_bundle(&root, "src/main.tl", &htl_core::link::LinkOptions::default()).unwrap_err();
-        assert!(err.contains("util.tl") && err.contains("expected integer"), "{err}");
+        write(
+            &root.join("src/util.tl"),
+            "local record util\nend\nfunction util.twice(n: integer): integer\n   return \"no\"\nend\nreturn util\n",
+        );
+        let err = resolve_bundle(
+            &root,
+            "src/main.tl",
+            &htl_core::link::LinkOptions::default(),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("util.tl") && err.contains("expected integer"),
+            "{err}"
+        );
     }
 
     /// Without a project the same script fails: the dep is genuinely not on the path.
     #[test]
     fn include_without_project_does_not_see_vendored_dir() {
         let root = scratch("noproject");
-        write(&root.join(".mlua-pkgs/vendored/mathx/init.tl"), "return {}\n");
-        write(&root.join("scripts/main.tl"), "local mathx = require(\"mathx\")\nprint(mathx)\n");
+        write(
+            &root.join(".mlua-pkgs/vendored/mathx/init.tl"),
+            "return {}\n",
+        );
+        write(
+            &root.join("scripts/main.tl"),
+            "local mathx = require(\"mathx\")\nprint(mathx)\n",
+        );
         let err = resolve_include(&root, "scripts/main.tl", false).unwrap_err();
         assert!(err.contains("module not found: 'mathx'"), "{err}");
     }

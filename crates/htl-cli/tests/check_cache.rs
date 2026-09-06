@@ -28,7 +28,11 @@ fn write(path: &Path, text: &str) {
 }
 
 fn htl(args: &[&str], cwd: &Path) -> (bool, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_htl")).args(args).current_dir(cwd).output().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap();
     (
         out.status.success(),
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -45,7 +49,10 @@ fn project(name: &str) -> PathBuf {
         &root.join("src/util.tl"),
         "local record util\nend\nfunction util.twice(n: integer): integer\n   return n * 2\nend\nreturn util\n",
     );
-    write(&root.join("src/bad.tl"), "local t: {string: {integer}} = {}\nlocal n: string = t[\"a\"][1]\nprint(n)\n");
+    write(
+        &root.join("src/bad.tl"),
+        "local t: {string: {integer}} = {}\nlocal n: string = t[\"a\"][1]\nprint(n)\n",
+    );
     root
 }
 
@@ -55,7 +62,9 @@ fn check(root: &Path) -> serde_json::Value {
 }
 
 fn was_cached(v: &serde_json::Value) -> bool {
-    v["summary"]["cached"].as_bool().expect("summary carries `cached`")
+    v["summary"]["cached"]
+        .as_bool()
+        .expect("summary carries `cached`")
 }
 
 #[test]
@@ -79,7 +88,10 @@ fn a_second_run_reports_exactly_what_the_first_reported() {
         v["summary"]["cached"] = false.into();
         v["summary"]["replayed"] = 0.into();
     }
-    assert_eq!(v1, v2, "a cached run reports what the run it replaces reported");
+    assert_eq!(
+        v1, v2,
+        "a cached run reports what the run it replaces reported"
+    );
 }
 
 #[test]
@@ -92,10 +104,20 @@ fn text_output_differs_only_in_saying_it_was_cached() {
 
     // The summary is the one line that is allowed to differ.
     let diagnostics = |s: &str| {
-        s.lines().filter(|l| !l.starts_with("htl check:")).collect::<Vec<_>>().join("\n")
+        s.lines()
+            .filter(|l| !l.starts_with("htl check:"))
+            .collect::<Vec<_>>()
+            .join("\n")
     };
-    assert!(!diagnostics(&err1).is_empty(), "the fixture must print diagnostics");
-    assert_eq!(diagnostics(&err1), diagnostics(&err2), "the diagnostics a replay prints are the stored ones");
+    assert!(
+        !diagnostics(&err1).is_empty(),
+        "the fixture must print diagnostics"
+    );
+    assert_eq!(
+        diagnostics(&err1),
+        diagnostics(&err2),
+        "the diagnostics a replay prints are the stored ones"
+    );
 }
 
 #[test]
@@ -107,7 +129,10 @@ fn editing_a_checked_file_misses() {
         &root.join("src/util.tl"),
         "local record util\nend\nfunction util.twice(n: integer): integer\n   return n + n\nend\nreturn util\n",
     );
-    assert!(!was_cached(&check(&root)), "an edited module must be checked again");
+    assert!(
+        !was_cached(&check(&root)),
+        "an edited module must be checked again"
+    );
 }
 
 /// A project where one module requires another by name, so there is a name whose resolution
@@ -142,7 +167,10 @@ fn a_module_appearing_under_a_required_name_misses() {
         &root.join("types/helper.d.tl"),
         "local record helper\n   f: function(): integer\nend\nreturn helper\n",
     );
-    assert!(!was_cached(&check(&root)), "a file appearing under a required name must be checked again");
+    assert!(
+        !was_cached(&check(&root)),
+        "a file appearing under a required name must be checked again"
+    );
 }
 
 /// The other half, and what #24 was about: adding a module nobody requires is a normal thing
@@ -154,10 +182,17 @@ fn a_module_appearing_under_a_name_nobody_requires_does_not() {
     assert!(!was_cached(&check(&root)));
     assert_eq!(replayed(&check(&root)), 2);
 
-    write(&root.join("src/brand_new.tl"), "local record brand_new\nend\nreturn brand_new\n");
+    write(
+        &root.join("src/brand_new.tl"),
+        "local record brand_new\nend\nreturn brand_new\n",
+    );
     let v = check(&root);
     assert_eq!(v["files"], 3, "the new module is part of the walk now");
-    assert_eq!(replayed(&v), 2, "the two that were there replay; only the new one is checked");
+    assert_eq!(
+        replayed(&v),
+        2,
+        "the two that were there replay; only the new one is checked"
+    );
 }
 
 #[test]
@@ -165,8 +200,14 @@ fn changing_the_config_misses() {
     let root = project("config");
     assert!(!was_cached(&check(&root)));
     assert!(was_cached(&check(&root)));
-    write(&root.join("htl.toml"), "[lint]\ndisable = [\"nil-index\"]\n");
-    assert!(!was_cached(&check(&root)), "the config shapes the report and is part of the inputs");
+    write(
+        &root.join("htl.toml"),
+        "[lint]\ndisable = [\"nil-index\"]\n",
+    );
+    assert!(
+        !was_cached(&check(&root)),
+        "the config shapes the report and is part of the inputs"
+    );
 }
 
 /// A flag belongs in the key when it changes what a module *reports*, and not when it only
@@ -181,39 +222,64 @@ fn a_flag_is_in_the_key_only_when_it_changes_what_a_module_reports() {
 
     let (_, stdout, _) = htl(&["check", "src", "--format", "json", "--strict"], &root);
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert!(was_cached(&v), "--strict changes the verdict, not the diagnostics: {v}");
+    assert!(
+        was_cached(&v),
+        "--strict changes the verdict, not the diagnostics: {v}"
+    );
 
-    let (_, stdout, _) = htl(&["check", "src", "--format", "json", "--lint", "+no-any"], &root);
+    let (_, stdout, _) = htl(
+        &["check", "src", "--format", "json", "--lint", "+no-any"],
+        &root,
+    );
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert!(!was_cached(&v), "a different lint selection does change them: {v}");
+    assert!(
+        !was_cached(&v),
+        "a different lint selection does change them: {v}"
+    );
 }
 
 #[test]
 fn a_truncated_entry_is_a_miss_rather_than_a_crash() {
     let root = project("corrupt");
     assert!(!was_cached(&check(&root)));
-    let entry = std::fs::read_dir(root.join(".htl/cache")).unwrap().next().unwrap().unwrap().path();
+    let entry = std::fs::read_dir(root.join(".htl/cache"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
     std::fs::write(&entry, "{\"stamp\":{\"format\":1,\"htl\":\"0.1.0\"").unwrap();
     let v = check(&root);
     assert!(!was_cached(&v), "a half-written entry must be ignored");
-    assert!(!v["diagnostics"].as_array().unwrap().is_empty(), "and the run must happen normally");
+    assert!(
+        !v["diagnostics"].as_array().unwrap().is_empty(),
+        "and the run must happen normally"
+    );
 }
 
 #[test]
 fn no_cache_neither_writes_nor_reads() {
     let root = project("off");
     htl(&["check", "src", "--format", "json", "--no-cache"], &root);
-    assert!(!root.join(".htl").exists(), "--no-cache must not create a store");
+    assert!(
+        !root.join(".htl").exists(),
+        "--no-cache must not create a store"
+    );
 
     assert!(!was_cached(&check(&root)));
     assert!(was_cached(&check(&root)));
     let (_, stdout, _) = htl(&["check", "src", "--format", "json", "--no-cache"], &root);
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert!(!was_cached(&v), "--no-cache must not read an entry that is sitting there");
+    assert!(
+        !was_cached(&v),
+        "--no-cache must not read an entry that is sitting there"
+    );
 }
 
 fn replayed(v: &serde_json::Value) -> u64 {
-    v["summary"]["replayed"].as_u64().expect("summary carries `replayed`")
+    v["summary"]["replayed"]
+        .as_u64()
+        .expect("summary carries `replayed`")
 }
 
 /// Three modules: a leaf, one requiring it, and one requiring nothing. Enough to tell the
@@ -239,7 +305,9 @@ fn three_modules(name: &str) -> PathBuf {
 fn edit_leaf(root: &Path, n: i32) {
     write(
         &root.join("src/leaf.tl"),
-        &format!("local record leaf\nend\nfunction leaf.f(): integer\n   return {n}\nend\nreturn leaf\n"),
+        &format!(
+            "local record leaf\nend\nfunction leaf.f(): integer\n   return {n}\nend\nreturn leaf\n"
+        ),
     );
 }
 
@@ -252,7 +320,11 @@ fn check_with(root: &Path, args: &[&str]) -> serde_json::Value {
 
 fn entries(root: &Path) -> usize {
     std::fs::read_dir(root.join(".htl/cache"))
-        .map(|rd| rd.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "json")).count())
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+                .count()
+        })
         .unwrap_or(0)
 }
 
@@ -267,7 +339,8 @@ fn check_bounded(root: &Path, bound: usize, args: &[&str]) -> serde_json::Value 
         .current_dir(root)
         .output()
         .unwrap();
-    serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("stdout is one JSON document")
+    serde_json::from_str(&String::from_utf8_lossy(&out.stdout))
+        .expect("stdout is one JSON document")
 }
 
 /// Editing the leaf must cost the leaf and its requirer, and leave the third module alone —
@@ -275,8 +348,16 @@ fn check_bounded(root: &Path, bound: usize, args: &[&str]) -> serde_json::Value 
 #[test]
 fn editing_one_module_rechecks_it_and_its_dependents_only() {
     let root = three_modules("deps");
-    assert_eq!(replayed(&check(&root)), 0, "the first run has nothing to replay");
-    assert_eq!(replayed(&check(&root)), 3, "the second run replays all three");
+    assert_eq!(
+        replayed(&check(&root)),
+        0,
+        "the first run has nothing to replay"
+    );
+    assert_eq!(
+        replayed(&check(&root)),
+        3,
+        "the second run replays all three"
+    );
 
     edit_leaf(&root, 2);
     assert_eq!(
@@ -300,8 +381,16 @@ fn whole_run_mode_replays_all_of_the_walk_or_none_of_it() {
     assert_eq!(replayed(&check_with(&root, m)), 3, "the walk replays whole");
 
     edit_leaf(&root, 3);
-    assert_eq!(replayed(&check_with(&root, m)), 0, "one edit costs the entire walk here");
-    assert_eq!(replayed(&check_with(&root, m)), 3, "and it is whole again after that run");
+    assert_eq!(
+        replayed(&check_with(&root, m)),
+        0,
+        "one edit costs the entire walk here"
+    );
+    assert_eq!(
+        replayed(&check_with(&root, m)),
+        3,
+        "and it is whole again after that run"
+    );
 }
 
 /// The mode comes from `[cache] mode`, and `--cache-mode` overrides it. The two granularities
@@ -317,8 +406,14 @@ fn the_config_picks_the_mode_and_the_flag_overrides_it() {
     assert_eq!(replayed(&check(&root)), 0, "so one edit costs the walk");
 
     // The flag overrides it, and starts from its own empty set of entries.
-    assert_eq!(replayed(&check_with(&root, &["--cache-mode", "per-module"])), 0);
-    assert_eq!(replayed(&check_with(&root, &["--cache-mode", "per-module"])), 3);
+    assert_eq!(
+        replayed(&check_with(&root, &["--cache-mode", "per-module"])),
+        0
+    );
+    assert_eq!(
+        replayed(&check_with(&root, &["--cache-mode", "per-module"])),
+        3
+    );
     edit_leaf(&root, 5);
     assert_eq!(
         replayed(&check_with(&root, &["--cache-mode", "per-module"])),
@@ -338,10 +433,18 @@ fn the_store_stays_within_its_bound() {
     assert_eq!(entries(&root), 3);
 
     check_bounded(&root, 4, &["--lint", "+no-any"]);
-    assert!(entries(&root) <= 4, "the store must not exceed the bound: {}", entries(&root));
+    assert!(
+        entries(&root) <= 4,
+        "the store must not exceed the bound: {}",
+        entries(&root)
+    );
 
     check_bounded(&root, 4, &["--lint", "+class-record"]);
-    assert!(entries(&root) <= 4, "nor after another shape: {}", entries(&root));
+    assert!(
+        entries(&root) <= 4,
+        "nor after another shape: {}",
+        entries(&root)
+    );
 }
 
 /// What a run just wrote or just read has to survive its own sweep, or a project whose module
@@ -351,8 +454,16 @@ fn a_sweep_never_drops_what_the_run_itself_used() {
     let root = three_modules("keep");
     // A bound below the module count: the three entries this run needs are all it may keep.
     assert_eq!(replayed(&check_bounded(&root, 1, &[])), 0);
-    assert_eq!(replayed(&check_bounded(&root, 1, &[])), 3, "its own entries survived");
-    assert_eq!(replayed(&check_bounded(&root, 1, &[])), 3, "and keep surviving");
+    assert_eq!(
+        replayed(&check_bounded(&root, 1, &[])),
+        3,
+        "its own entries survived"
+    );
+    assert_eq!(
+        replayed(&check_bounded(&root, 1, &[])),
+        3,
+        "and keep surviving"
+    );
 }
 
 /// An entry whose module is gone can never be read again.
@@ -367,7 +478,11 @@ fn entries_for_deleted_modules_are_dropped() {
     // store to 3 and it is the one with nothing behind it.
     check_bounded(&root, 2, &[]);
     assert!(entries(&root) <= 2, "the orphan went: {}", entries(&root));
-    assert_eq!(replayed(&check_bounded(&root, 2, &[])), 2, "and the two that remain still replay");
+    assert_eq!(
+        replayed(&check_bounded(&root, 2, &[])),
+        2,
+        "and the two that remain still replay"
+    );
 }
 
 /// `htl cache clear` exists because the store is beside `htl.toml` rather than wherever the
@@ -384,7 +499,11 @@ fn cache_clear_empties_the_store() {
     assert!(ok, "{err}");
     assert!(err.contains("removed"), "it says what it did: {err}");
     assert_eq!(entries(&root), 0);
-    assert_eq!(replayed(&check(&root)), 0, "the next run has nothing to replay");
+    assert_eq!(
+        replayed(&check(&root)),
+        0,
+        "the next run has nothing to replay"
+    );
 }
 
 /// Run from a subdirectory, where there is no `.htl/` — the point of the command.
@@ -396,7 +515,11 @@ fn cache_clear_finds_the_store_from_inside_the_project() {
 
     let (ok, _, err) = htl(&["cache", "clear"], &root.join("src"));
     assert!(ok, "{err}");
-    assert_eq!(entries(&root), 0, "it cleared the project's store, not one under src/");
+    assert_eq!(
+        entries(&root),
+        0,
+        "it cleared the project's store, not one under src/"
+    );
 }
 
 /// Clearing a project that never cached anything is not an error.
@@ -412,10 +535,19 @@ fn cache_clear_on_an_empty_project_says_so_and_succeeds() {
 #[test]
 fn no_cache_beats_the_mode() {
     let root = three_modules("both-axes");
-    assert_eq!(replayed(&check_with(&root, &["--cache-mode", "whole-run"])), 0);
-    assert_eq!(replayed(&check_with(&root, &["--cache-mode", "whole-run"])), 3);
     assert_eq!(
-        replayed(&check_with(&root, &["--cache-mode", "whole-run", "--no-cache"])),
+        replayed(&check_with(&root, &["--cache-mode", "whole-run"])),
+        0
+    );
+    assert_eq!(
+        replayed(&check_with(&root, &["--cache-mode", "whole-run"])),
+        3
+    );
+    assert_eq!(
+        replayed(&check_with(
+            &root,
+            &["--cache-mode", "whole-run", "--no-cache"]
+        )),
         0,
         "--no-cache does not read the entry the mode would have used"
     );
@@ -428,8 +560,14 @@ fn no_cache_beats_the_mode() {
 fn the_cycle_lint_still_fires_when_every_file_was_replayed() {
     let root = scratch("cycle");
     write(&root.join("htl.toml"), "[check]\n");
-    write(&root.join("src/a.tl"), "local b = require(\"b\")\nlocal record a\nend\nreturn a\n");
-    write(&root.join("src/b.tl"), "local a = require(\"a\")\nlocal record b\nend\nreturn b\n");
+    write(
+        &root.join("src/a.tl"),
+        "local b = require(\"b\")\nlocal record a\nend\nreturn a\n",
+    );
+    write(
+        &root.join("src/b.tl"),
+        "local a = require(\"a\")\nlocal record b\nend\nreturn b\n",
+    );
 
     let cycles = |v: &serde_json::Value| {
         v["diagnostics"]
@@ -441,11 +579,18 @@ fn the_cycle_lint_still_fires_when_every_file_was_replayed() {
     };
 
     let first = check(&root);
-    assert!(cycles(&first) > 0, "the fixture must produce a cycle lint or this proves nothing: {first}");
+    assert!(
+        cycles(&first) > 0,
+        "the fixture must produce a cycle lint or this proves nothing: {first}"
+    );
 
     let second = check(&root);
     assert!(was_cached(&second), "nothing moved, so both modules replay");
-    assert_eq!(cycles(&first), cycles(&second), "the cycle lint survives a fully replayed run");
+    assert_eq!(
+        cycles(&first),
+        cycles(&second),
+        "the cycle lint survives a fully replayed run"
+    );
 }
 
 /// Output order follows the walk, not the split between what was checked and what was
@@ -457,7 +602,10 @@ fn diagnostics_come_out_in_file_order_whatever_was_cached() {
     write(&root.join("htl.toml"), "[check]\n");
     // Two modules that each report an error, named so the walk visits aaa before zzz.
     write(&root.join("src/aaa.tl"), "local n: string = 1\nprint(n)\n");
-    write(&root.join("src/zzz.tl"), "local s: integer = \"x\"\nprint(s)\n");
+    write(
+        &root.join("src/zzz.tl"),
+        "local s: integer = \"x\"\nprint(s)\n",
+    );
 
     let files = |v: &serde_json::Value| {
         v["diagnostics"]
@@ -474,10 +622,17 @@ fn diagnostics_come_out_in_file_order_whatever_was_cached() {
     assert_eq!(replayed(&all_cached), 2);
 
     // Now a mix: zzz is edited, aaa comes from the store.
-    write(&root.join("src/zzz.tl"), "local s: integer = \"y\"\nprint(s)\n");
+    write(
+        &root.join("src/zzz.tl"),
+        "local s: integer = \"y\"\nprint(s)\n",
+    );
     let mixed = check(&root);
     assert_eq!(replayed(&mixed), 1, "aaa replays, zzz is checked");
 
-    assert_eq!(files(&cold), files(&all_cached), "a fully replayed run keeps file order");
+    assert_eq!(
+        files(&cold),
+        files(&all_cached),
+        "a fully replayed run keeps file order"
+    );
     assert_eq!(files(&cold), files(&mixed), "and so does a mixed one");
 }

@@ -80,7 +80,10 @@ pub struct RunOptions {
 
 /// Where a test file's snapshots live: `<dir>/__snapshots__/<file stem>/`.
 pub fn snapshot_dir(test_file: &Path) -> PathBuf {
-    let stem = test_file.file_stem().and_then(|s| s.to_str()).unwrap_or("test");
+    let stem = test_file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("test");
     parent_dir(test_file).join("__snapshots__").join(stem)
 }
 
@@ -151,12 +154,22 @@ pub struct TestSession {
 }
 
 impl TestSession {
-    pub fn new(lint_spec: Option<&str>, lib: &str, filter: Option<&str>, opts: RunOptions) -> Result<Self> {
+    pub fn new(
+        lint_spec: Option<&str>,
+        lib: &str,
+        filter: Option<&str>,
+        opts: RunOptions,
+    ) -> Result<Self> {
         let checker = Htl::new()?;
         if let Some(spec) = lint_spec {
             checker.configure_lints(spec)?;
         }
-        Ok(Self { checker, lib: lib.to_string(), filter: filter.map(String::from), opts })
+        Ok(Self {
+            checker,
+            lib: lib.to_string(),
+            filter: filter.map(String::from),
+            opts,
+        })
     }
 
     /// The session's checker (for [`Htl::executable_ranges`] on the sources a run touched).
@@ -227,19 +240,27 @@ struct RunIn<'a> {
     preload: &'a [(String, String, PathBuf)],
 }
 
-fn run_in(
-    h: &Htl,
-    path: &Path,
-    r: RunIn<'_>,
-    out_code: &mut Option<String>,
-) -> Result<FileReport> {
-    let RunIn { filter, lib, opts, generated, preload } = r;
-    let mut rep = FileReport { path: path.to_path_buf(), ..Default::default() };
+fn run_in(h: &Htl, path: &Path, r: RunIn<'_>, out_code: &mut Option<String>) -> Result<FileReport> {
+    let RunIn {
+        filter,
+        lib,
+        opts,
+        generated,
+        preload,
+    } = r;
+    let mut rep = FileReport {
+        path: path.to_path_buf(),
+        ..Default::default()
+    };
     let profile = std::env::var_os("HTL_PROFILE").is_some();
     let mut t0 = std::time::Instant::now();
     let phase = |label: &str, t0: &mut std::time::Instant| {
         if profile {
-            eprintln!("profile: {label:<8} {:7.1} ms  {}", t0.elapsed().as_secs_f64() * 1000.0, path.display());
+            eprintln!(
+                "profile: {label:<8} {:7.1} ms  {}",
+                t0.elapsed().as_secs_f64() * 1000.0,
+                path.display()
+            );
         }
         *t0 = std::time::Instant::now();
     };
@@ -304,7 +325,10 @@ fn run_in(
             // rewrite them. Lua cannot create a directory, so it borrows one.
             if let Ok(configure) = t.get::<Function>("configure") {
                 let cfg = h.lua().create_table()?;
-                cfg.set("snapshot_dir", snapshot_dir(path).to_string_lossy().as_ref())?;
+                cfg.set(
+                    "snapshot_dir",
+                    snapshot_dir(path).to_string_lossy().as_ref(),
+                )?;
                 cfg.set("update", opts.update_snapshots)?;
                 cfg.set(
                     "mkdir",
@@ -323,7 +347,9 @@ fn run_in(
                 ("snapshots_updated", &mut rep.snapshots_updated),
             ] {
                 if let Ok(list) = report.get::<Table>(key) {
-                    *into = list.sequence_values::<String>().collect::<mlua::Result<_>>()?;
+                    *into = list
+                        .sequence_values::<String>()
+                        .collect::<mlua::Result<_>>()?;
                 }
             }
             phase("run", &mut t0);

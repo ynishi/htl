@@ -67,7 +67,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 #[derive(Parser)]
-#[command(name = "htl", version, about = "Teal, hidden: run / check / build .tl on mlua")]
+#[command(
+    name = "htl",
+    version,
+    about = "Teal, hidden: run / check / build .tl on mlua"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -275,43 +279,90 @@ pub fn run() -> ExitCode {
 
 fn real_main(cli: Cli) -> Result<ExitCode> {
     match cli.cmd {
-        Cmd::Check { paths, strict, lint, list_lints, format, no_cache, cache_mode, explain_cache } => {
-            cmd_check(
-                &paths,
-                lint.as_deref(),
-                CheckFlags {
-                    strict,
-                    list_lints,
-                    json: format == Format::Json,
-                    use_cache: !no_cache,
-                    cache_mode: cache_mode.map(Into::into),
-                    explain: explain_cache,
-                },
-            )
-        }
-        Cmd::Fmt { paths, check, indent } => cmd_fmt(&paths, check, indent),
-        Cmd::Test { paths, filter, lib, lint, fail_fast, verbose, quiet, slow, update, coverage, coverage_lines, format, no_cache, explain_cache } => {
-            cmd_test(
-                &paths,
-                filter.as_deref(),
-                &lib,
-                lint.as_deref(),
-                TestFlags { fail_fast, verbose, quiet, slow, update, coverage, coverage_lines, json: format == Format::Json, no_cache, explain: explain_cache },
-            )
-        }
+        Cmd::Check {
+            paths,
+            strict,
+            lint,
+            list_lints,
+            format,
+            no_cache,
+            cache_mode,
+            explain_cache,
+        } => cmd_check(
+            &paths,
+            lint.as_deref(),
+            CheckFlags {
+                strict,
+                list_lints,
+                json: format == Format::Json,
+                use_cache: !no_cache,
+                cache_mode: cache_mode.map(Into::into),
+                explain: explain_cache,
+            },
+        ),
+        Cmd::Fmt {
+            paths,
+            check,
+            indent,
+        } => cmd_fmt(&paths, check, indent),
+        Cmd::Test {
+            paths,
+            filter,
+            lib,
+            lint,
+            fail_fast,
+            verbose,
+            quiet,
+            slow,
+            update,
+            coverage,
+            coverage_lines,
+            format,
+            no_cache,
+            explain_cache,
+        } => cmd_test(
+            &paths,
+            filter.as_deref(),
+            &lib,
+            lint.as_deref(),
+            TestFlags {
+                fail_fast,
+                verbose,
+                quiet,
+                slow,
+                update,
+                coverage,
+                coverage_lines,
+                json: format == Format::Json,
+                no_cache,
+                explain: explain_cache,
+            },
+        ),
         Cmd::Pkg { args } => cmd_pkg(&args),
         Cmd::Cache { cmd } => match cmd {
             CacheCmd::Clear { path } => cmd_cache_clear(path.as_deref()),
-            CacheCmd::Status { path, format, entries } => {
-                cmd_cache_status(path.as_deref(), format == Format::Json, entries)
-            }
+            CacheCmd::Status {
+                path,
+                format,
+                entries,
+            } => cmd_cache_status(path.as_deref(), format == Format::Json, entries),
         },
         Cmd::Dts { dir } => cmd_dts(dir.as_deref()),
         Cmd::New { name, lib, embed } => cmd_new(&name, lib, embed),
         Cmd::Init { dir, lib, embed } => cmd_init(dir.as_deref(), lib, embed),
         Cmd::Gen { file, out } => cmd_gen(&file, out.as_deref()),
         Cmd::Run { file, args } => cmd_run(&file, &args),
-        Cmd::Fix { paths, rule, unsafe_fixes, dry_run, diff, allow_dirty, allow_no_vcs, exit_non_zero_on_fix, format } => cmd_fix(
+        Cmd::Fix {
+            paths,
+            rule,
+            unsafe_fixes,
+            dry_run,
+            diff,
+            allow_dirty,
+            allow_no_vcs,
+            exit_non_zero_on_fix,
+            format,
+        } => cmd_fix(
             &paths,
             FixFlags {
                 rule,
@@ -324,9 +375,25 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
                 json: format == Format::Json,
             },
         ),
-        Cmd::Build { entry, out, main, debug, source, extra, host } => {
-            cmd_build(&entry, &out, &main, htl::link::LinkOptions { debug, source, extra, host })
-        }
+        Cmd::Build {
+            entry,
+            out,
+            main,
+            debug,
+            source,
+            extra,
+            host,
+        } => cmd_build(
+            &entry,
+            &out,
+            &main,
+            htl::link::LinkOptions {
+                debug,
+                source,
+                extra,
+                host,
+            },
+        ),
     }
 }
 
@@ -346,11 +413,16 @@ fn print_checkinfo(c: &CheckInfo) {
 /// `#[host_module]` / `#[derive(TealRecord)]` declare, so the checker sees Rust-side
 /// modules before any `cargo build`. Quiet unless something was written.
 fn auto_dts(start: &Path) -> Result<()> {
-    let Some(root) = htl::dts::find_cargo_package_root(start) else { return Ok(()) };
+    let Some(root) = htl::dts::find_cargo_package_root(start) else {
+        return Ok(());
+    };
     let results = htl::dts::generate_crate(&root).map_err(|e| anyhow::anyhow!("htl dts: {e}"))?;
     for (target, written) in results {
         if written {
-            eprintln!("dts: wrote {}", target.strip_prefix(&root).unwrap_or(&target).display());
+            eprintln!(
+                "dts: wrote {}",
+                target.strip_prefix(&root).unwrap_or(&target).display()
+            );
         }
     }
     Ok(())
@@ -362,7 +434,10 @@ fn cmd_dts(dir: Option<&Path>) -> Result<ExitCode> {
         None => std::env::current_dir()?,
     };
     let Some(root) = htl::dts::find_cargo_package_root(&start) else {
-        bail!("no Cargo.toml with a [package] section found at or above {}", start.display());
+        bail!(
+            "no Cargo.toml with a [package] section found at or above {}",
+            start.display()
+        );
     };
     let results = htl::dts::generate_crate(&root).map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut written = 0usize;
@@ -371,14 +446,21 @@ fn cmd_dts(dir: Option<&Path>) -> Result<ExitCode> {
         eprintln!("  {} {}", if *w { "wrote    " } else { "unchanged" }, rel);
         written += usize::from(*w);
     }
-    eprintln!("htl dts: {} declaration(s) from {}, {} written", results.len(), root.display(), written);
+    eprintln!(
+        "htl dts: {} declaration(s) from {}, {} written",
+        results.len(),
+        root.display(),
+        written
+    );
     Ok(ExitCode::SUCCESS)
 }
 
 /// If `start` is inside an `mlua-pkg.toml` project, expose its vendored deps to the
 /// checker / strict searcher. Returns the project when found.
 fn apply_project(h: &Htl, start: &Path) -> Result<Option<htl::pkg::Project>> {
-    let Some(p) = htl::pkg::Project::find(start) else { return Ok(None) };
+    let Some(p) = htl::pkg::Project::find(start) else {
+        return Ok(None);
+    };
     h.apply_project(&p)?;
     Ok(Some(p))
 }
@@ -388,7 +470,11 @@ fn report_scaffold(dir: &Path, written: &[PathBuf]) {
         let rel = p.strip_prefix(dir).unwrap_or(p);
         eprintln!("  created {}", rel.display());
     }
-    eprintln!("htl: {} file(s) written under {}", written.len(), dir.display());
+    eprintln!(
+        "htl: {} file(s) written under {}",
+        written.len(),
+        dir.display()
+    );
 }
 
 fn cmd_new(name: &str, lib: bool, embed: bool) -> Result<ExitCode> {
@@ -432,7 +518,11 @@ fn cmd_pkg(args: &[String]) -> Result<ExitCode> {
         .current_dir(&root)
         .status();
     match status {
-        Ok(s) => Ok(if s.success() { ExitCode::SUCCESS } else { ExitCode::FAILURE }),
+        Ok(s) => Ok(if s.success() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             bail!("`mlua-pkg` binary not found on PATH (install with `cargo install mlua-pkg`)")
         }
@@ -482,7 +572,11 @@ fn coverage_report(
     let mut rows: Vec<Row> = Vec::new();
     for src in &sources {
         let name = src.to_string_lossy();
-        if !name.ends_with(".tl") || name.ends_with(".d.tl") || tests.contains(src) || name.contains("/htl-lib-") {
+        if !name.ends_with(".tl")
+            || name.ends_with(".d.tl")
+            || tests.contains(src)
+            || name.contains("/htl-lib-")
+        {
             continue;
         }
         let ranges = checker.executable_ranges(src)?;
@@ -502,13 +596,24 @@ fn coverage_report(
         }
         tot_exec += executed;
         tot_all += ranges.len();
-        let shown = src.strip_prefix(&cwd).unwrap_or(src).to_string_lossy().into_owned();
+        let shown = src
+            .strip_prefix(&cwd)
+            .unwrap_or(src)
+            .to_string_lossy()
+            .into_owned();
         rows.push((shown, executed, ranges.len(), missed));
     }
     Ok(report::CoverageReport {
         modules: rows
             .into_iter()
-            .map(|(path, executed, total, unexecuted)| report::CoverageModule { path, executed, total, unexecuted })
+            .map(
+                |(path, executed, total, unexecuted)| report::CoverageModule {
+                    path,
+                    executed,
+                    total,
+                    unexecuted,
+                },
+            )
             .collect(),
         executed: tot_exec,
         total: tot_all,
@@ -516,7 +621,13 @@ fn coverage_report(
 }
 
 fn print_coverage(cov: &report::CoverageReport, with_lines: bool) {
-    let width = cov.modules.iter().map(|m| m.path.len()).max().unwrap_or(4).max(5);
+    let width = cov
+        .modules
+        .iter()
+        .map(|m| m.path.len())
+        .max()
+        .unwrap_or(4)
+        .max(5);
     for m in &cov.modules {
         eprintln!(
             "coverage: {:<width$}  {:>5}/{:<5} {:5.1}%",
@@ -529,7 +640,13 @@ fn print_coverage(cov: &report::CoverageReport, with_lines: bool) {
             let spans: Vec<String> = m
                 .unexecuted
                 .iter()
-                .map(|(a, b)| if a == b { a.to_string() } else { format!("{a}-{b}") })
+                .map(|(a, b)| {
+                    if a == b {
+                        a.to_string()
+                    } else {
+                        format!("{a}-{b}")
+                    }
+                })
                 .collect();
             eprintln!("          unexecuted: {}", spans.join(", "));
         }
@@ -547,21 +664,38 @@ fn print_coverage(cov: &report::CoverageReport, with_lines: bool) {
     }
 }
 
-fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&str>, flags: TestFlags) -> Result<ExitCode> {
-    let paths = if paths.is_empty() { vec![PathBuf::from(".")] } else { paths.to_vec() };
+fn cmd_test(
+    paths: &[PathBuf],
+    filter: Option<&str>,
+    lib: &str,
+    lint: Option<&str>,
+    flags: TestFlags,
+) -> Result<ExitCode> {
+    let paths = if paths.is_empty() {
+        vec![PathBuf::from(".")]
+    } else {
+        paths.to_vec()
+    };
     let opts = htl::testing::RunOptions {
         fail_fast: flags.fail_fast,
         update_snapshots: flags.update,
         coverage: flags.coverage,
     };
-    let mut cov_hits: std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>> = Default::default();
+    let mut cov_hits: std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>> =
+        Default::default();
     let mut cov_deps: std::collections::BTreeSet<PathBuf> = Default::default();
     if let Some(first) = paths.first() {
         auto_dts(first)?;
     }
-    let file_spec = load_config(&paths[0])?.map(|(_, _, c)| c.lint_spec()).unwrap_or_default();
+    let file_spec = load_config(&paths[0])?
+        .map(|(_, _, c)| c.lint_spec())
+        .unwrap_or_default();
     let spec = htl::config::join_specs([file_spec.as_str(), lint.unwrap_or("")]);
-    let lint = if spec.is_empty() { None } else { Some(spec.as_str()) };
+    let lint = if spec.is_empty() {
+        None
+    } else {
+        Some(spec.as_str())
+    };
     let files = htl::testing::discover_tests(&paths)?;
     if files.is_empty() {
         eprintln!("htl test: no test files found (looked for *_test.tl and tests/**/*.tl)");
@@ -584,7 +718,12 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
     // Test entries are always per-module: a whole-run entry over test files would mean one
     // edit anywhere re-checks every suite, which is the trade `htl check` offers because a
     // check is one answer. A test run is many.
-    let opts = cache_options(!flags.no_cache, Some(cache::Mode::PerModule), &cfg, flags.explain);
+    let opts = cache_options(
+        !flags.no_cache,
+        Some(cache::Mode::PerModule),
+        &cfg,
+        flags.explain,
+    );
     let store = cache::Cache::open(&root, opts);
     let keys: Vec<cache::Key> = files.iter().map(|f| cache::gen_key(f, lint)).collect();
     let cfg_inputs: Vec<PathBuf> = cfg.iter().map(|(_, p, _)| p.clone()).collect();
@@ -616,8 +755,10 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
                 let code = m.code.as_deref().expect("filtered above");
                 // Without these, every module this file requires is checked and generated
                 // while it runs — the work skipping `gen_lua` was supposed to avoid.
-                let pre =
-                    store.as_ref().map(|c| preloads_for(c, m, lint, opts)).unwrap_or_default();
+                let pre = store
+                    .as_ref()
+                    .map(|c| preloads_for(c, m, lint, opts))
+                    .unwrap_or_default();
                 session.run_file_with(f, Some((code, &check)), &pre)?.0
             }
             None => {
@@ -648,9 +789,14 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
         if flags.coverage {
             for (source, lines) in &rep.coverage {
                 // Lua names a file chunk "@<path>"; bundles and preloads ("=name") have no file.
-                let Some(path) = source.strip_prefix('@') else { continue };
+                let Some(path) = source.strip_prefix('@') else {
+                    continue;
+                };
                 let key = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
-                cov_hits.entry(key).or_default().extend(lines.iter().copied());
+                cov_hits
+                    .entry(key)
+                    .or_default()
+                    .extend(lines.iter().copied());
             }
             cov_deps.extend(rep.check.deps.iter().cloned());
         }
@@ -673,7 +819,11 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
         // JSON: nothing on stderr, the document carries it all.
         let show_file = !flags.json && (!flags.quiet || !rep.ok());
         if show_file {
-            eprintln!("{tag} {}  ({detail}, {:.0} ms)", f.display(), rep.duration_ms);
+            eprintln!(
+                "{tag} {}  ({detail}, {:.0} ms)",
+                f.display(),
+                rep.duration_ms
+            );
         }
         for tr in &rep.tests {
             let slow = flags.slow.is_some_and(|ms| tr.ms >= ms);
@@ -684,7 +834,11 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
                     continue;
                 }
                 let mark = if tr.ok { "ok  " } else { "FAIL" };
-                let note = if slow && !flags.verbose { "  [slow]" } else { "" };
+                let note = if slow && !flags.verbose {
+                    "  [slow]"
+                } else {
+                    ""
+                };
                 eprintln!("      {mark} {}  ({:.1} ms){note}", tr.name, tr.ms);
             }
         }
@@ -710,7 +864,12 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
         }
     }
     let coverage = if flags.coverage {
-        Some(coverage_report(session.checker(), &files, &cov_hits, &cov_deps)?)
+        Some(coverage_report(
+            session.checker(),
+            &files,
+            &cov_hits,
+            &cov_deps,
+        )?)
     } else {
         None
     };
@@ -742,13 +901,25 @@ fn cmd_test(paths: &[PathBuf], filter: Option<&str>, lib: &str, lint: Option<&st
             passed,
             failed,
             bad_files,
-            if skipped > 0 { format!(", {skipped} file(s) not run (--fail-fast)") } else { String::new() },
+            if skipped > 0 {
+                format!(", {skipped} file(s) not run (--fail-fast)")
+            } else {
+                String::new()
+            },
             // Says the checking was reused, not the run: every one of these files ran.
-            if replayed > 0 { format!(", {replayed} checked from cache") } else { String::new() },
+            if replayed > 0 {
+                format!(", {replayed} checked from cache")
+            } else {
+                String::new()
+            },
             duration_ms
         );
     }
-    Ok(if bad_files == 0 { ExitCode::SUCCESS } else { ExitCode::FAILURE })
+    Ok(if bad_files == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }
 
 /// Nearest `htl.toml` above the first path: `(dir holding it, path, config)`.
@@ -757,7 +928,11 @@ fn load_config(first: &Path) -> Result<Option<(PathBuf, PathBuf, htl::config::Ht
 }
 
 fn cmd_fmt(paths: &[PathBuf], check: bool, indent: Option<usize>) -> Result<ExitCode> {
-    let paths = if paths.is_empty() { vec![PathBuf::from(".")] } else { paths.to_vec() };
+    let paths = if paths.is_empty() {
+        vec![PathBuf::from(".")]
+    } else {
+        paths.to_vec()
+    };
     let cfg = load_config(&paths[0])?;
     let indent = indent
         .or_else(|| cfg.as_ref().and_then(|(_, _, c)| c.fmt.indent))
@@ -793,7 +968,11 @@ fn cmd_fmt(paths: &[PathBuf], check: bool, indent: Option<usize>) -> Result<Exit
         failed
     );
     let fail = failed > 0 || (check && changed > 0);
-    Ok(if fail { ExitCode::FAILURE } else { ExitCode::SUCCESS })
+    Ok(if fail {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 struct FixFlags {
@@ -809,10 +988,17 @@ struct FixFlags {
 
 fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
     use htl::fix::{FixOptions, fix_file, git_dirty, unified_diff};
-    let paths = if paths.is_empty() { vec![PathBuf::from(".")] } else { paths.to_vec() };
+    let paths = if paths.is_empty() {
+        vec![PathBuf::from(".")]
+    } else {
+        paths.to_vec()
+    };
     let h = Htl::new()?;
     let cfg = load_config(&paths[0])?;
-    let file_spec = cfg.as_ref().map(|(_, _, c)| c.lint_spec()).unwrap_or_default();
+    let file_spec = cfg
+        .as_ref()
+        .map(|(_, _, c)| c.lint_spec())
+        .unwrap_or_default();
     if !file_spec.is_empty() {
         h.configure_lints(&file_spec)?;
     }
@@ -826,8 +1012,14 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
     h.install_test_lib()?;
     let opts = FixOptions {
         unsafe_fixes: flags.unsafe_fixes,
-        promoted: cfg.as_ref().map(|(_, _, c)| c.fix.unsafe_.clone()).unwrap_or_default(),
-        disabled: cfg.as_ref().map(|(_, _, c)| c.fix.disable.clone()).unwrap_or_default(),
+        promoted: cfg
+            .as_ref()
+            .map(|(_, _, c)| c.fix.unsafe_.clone())
+            .unwrap_or_default(),
+        disabled: cfg
+            .as_ref()
+            .map(|(_, _, c)| c.fix.disable.clone())
+            .unwrap_or_default(),
         only: flags.rule.clone(),
         dry_run: flags.dry_run,
     };
@@ -847,23 +1039,36 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
         if !dirty.is_empty() && !flags.allow_dirty {
             bail!(
                 "htl fix rewrites files in place and relies on git to undo it; these have uncommitted changes:\n  {}\ncommit or stash them, or pass --allow-dirty",
-                dirty.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n  ")
+                dirty
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n  ")
             );
         }
         if !no_vcs.is_empty() && !flags.allow_no_vcs {
             bail!(
                 "htl fix rewrites files in place and relies on git to undo it; these are not in a git repository:\n  {}\npass --allow-no-vcs to proceed without that safety net",
-                no_vcs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n  ")
+                no_vcs
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n  ")
             );
         }
     }
 
     let mut sink = report::Sink::new(flags.json);
     let (mut applied, mut skipped, mut json_files) = (Vec::new(), Vec::new(), Vec::new());
-    let (mut changed, mut deferred, mut reverted, mut errors_remaining) = (0usize, 0usize, 0usize, 0usize);
+    let (mut changed, mut deferred, mut reverted, mut errors_remaining) =
+        (0usize, 0usize, 0usize, 0usize);
     for f in &files {
         h.add_layout_paths(f)?;
-        let before = if flags.diff { std::fs::read_to_string(f).ok() } else { None };
+        let before = if flags.diff {
+            std::fs::read_to_string(f).ok()
+        } else {
+            None
+        };
         let out = fix_file(&h, f, &opts)?;
         if out.contents.is_some() {
             changed += 1;
@@ -885,7 +1090,13 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
                 );
             }
             for s in &out.skipped {
-                eprintln!("skipped: {}:{}: {} — {}", f.display(), s.line, s.rule, s.reason);
+                eprintln!(
+                    "skipped: {}:{}: {} — {}",
+                    f.display(),
+                    s.line,
+                    s.rule,
+                    s.reason
+                );
             }
             if let Some(r) = &out.reverted {
                 eprintln!("reverted: {}: {r}", f.display());
@@ -894,7 +1105,11 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
                 eprintln!("stopped: {}: fixes of {o} undo each other", f.display());
             }
             if out.deferred > 0 {
-                eprintln!("deferred: {}: {} edit(s) overlapped applied ones; run htl fix again", f.display(), out.deferred);
+                eprintln!(
+                    "deferred: {}: {} edit(s) overlapped applied ones; run htl fix again",
+                    f.display(),
+                    out.deferred
+                );
             }
             if flags.diff
                 && let (Some(b), Some(a)) = (&before, &out.contents)
@@ -952,12 +1167,24 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
             "htl fix: {} file(s), {} changed{}, {} error(s) remaining{}",
             files.len(),
             changed,
-            if flags.dry_run { " (dry run, nothing written)" } else { "" },
+            if flags.dry_run {
+                " (dry run, nothing written)"
+            } else {
+                ""
+            },
             errors_remaining,
-            if deferred > 0 { format!(", {deferred} deferred") } else { String::new() }
+            if deferred > 0 {
+                format!(", {deferred} deferred")
+            } else {
+                String::new()
+            }
         );
     }
-    Ok(if fail { ExitCode::FAILURE } else { ExitCode::SUCCESS })
+    Ok(if fail {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 /// Type-check a tree, replaying the modules whose inputs have not moved.
@@ -972,9 +1199,20 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
 /// checker's store starts empty. So an edit costs the edited module, whatever depends on
 /// it, and whatever those pull in — less than the project, more than the minimum.
 fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result<ExitCode> {
-    let CheckFlags { list_lints, json, use_cache, cache_mode, explain, .. } = flags;
+    let CheckFlags {
+        list_lints,
+        json,
+        use_cache,
+        cache_mode,
+        explain,
+        ..
+    } = flags;
     let mut sink = report::Sink::new(json);
-    let paths = if paths.is_empty() { vec![PathBuf::from(".")] } else { paths.to_vec() };
+    let paths = if paths.is_empty() {
+        vec![PathBuf::from(".")]
+    } else {
+        paths.to_vec()
+    };
     // Listing the rules reports nothing about the project and shares nothing with a run.
     if list_lints {
         let h = Htl::new()?;
@@ -985,7 +1223,11 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
     }
     // htl.toml first, then --lint, so the flag wins; `strict` from the file unless flagged.
     let cfg = load_config(&paths[0])?;
-    let strict = flags.strict || cfg.as_ref().and_then(|(_, _, c)| c.lint.strict).unwrap_or(false);
+    let strict = flags.strict
+        || cfg
+            .as_ref()
+            .and_then(|(_, _, c)| c.lint.strict)
+            .unwrap_or(false);
     // `.d.tl` written from Rust source is an input to the check, so it is regenerated
     // before anything hashes the tree: a hit computed over stale declarations would be a
     // hit on a different question from the one being asked.
@@ -1005,12 +1247,18 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
     let store = cache::Cache::open(&root, opts);
 
     // The lint selection is part of what a module reports, so it is part of every key.
-    let file_spec = cfg.as_ref().map(|(_, _, c)| c.lint_spec()).unwrap_or_default();
+    let file_spec = cfg
+        .as_ref()
+        .map(|(_, _, c)| c.lint_spec())
+        .unwrap_or_default();
     let spec = htl::config::join_specs([file_spec.as_str(), lint.unwrap_or("")]);
 
     // Look every module up before checking any of them, so that a run where nothing moved
     // never builds a checker at all.
-    let keys: Vec<cache::Key> = files.iter().map(|f| cache::module_key(f, Some(&spec))).collect();
+    let keys: Vec<cache::Key> = files
+        .iter()
+        .map(|f| cache::module_key(f, Some(&spec)))
+        .collect();
     let run_key = cache::run_key(&files, Some(&spec));
     let hits: Vec<Option<cache::Module>> = match &store {
         Some(c) => c.lookup_all(&keys, &run_key, files.len()),
@@ -1018,7 +1266,11 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
     };
     let to_check = hits.iter().filter(|h| h.is_none()).count();
 
-    let h = if to_check > 0 { Some(build_checker(&cfg, &paths, &spec)?) } else { None };
+    let h = if to_check > 0 {
+        Some(build_checker(&cfg, &paths, &spec)?)
+    } else {
+        None
+    };
     let cfg_inputs: Vec<PathBuf> = cfg.iter().map(|(_, p, _)| p.clone()).collect();
 
     let (mut n_err, mut n_warn, mut n_lint) = (0usize, 0usize, 0usize);
@@ -1055,7 +1307,10 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
         && c.mode() == cache::Mode::WholeRun
         && to_check > 0
     {
-        let dirs: Vec<PathBuf> = files.iter().flat_map(|f| search_dirs(f, &root, &cfg)).collect();
+        let dirs: Vec<PathBuf> = files
+            .iter()
+            .flat_map(|f| search_dirs(f, &root, &cfg))
+            .collect();
         c.store_run(&run_key, &files, &cfg_inputs, &dirs, &modules);
     }
     // Project-level: cycles in the require graph of the files just checked.
@@ -1082,8 +1337,19 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
     explain_cache(store.as_ref(), opts);
 
     let replayed = files.len() - to_check;
-    let fail = report_check(&mut sink, json, files.len(), (n_err, n_warn, n_lint), strict, replayed)?;
-    Ok(if fail { ExitCode::FAILURE } else { ExitCode::SUCCESS })
+    let fail = report_check(
+        &mut sink,
+        json,
+        files.len(),
+        (n_err, n_warn, n_lint),
+        strict,
+        replayed,
+    )?;
+    Ok(if fail {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 /// Delete this project's cache store.
@@ -1106,10 +1372,18 @@ fn cmd_cache_clear(path: Option<&Path>) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
     let n = fs::read_dir(&dir)
-        .map(|rd| rd.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "json")).count())
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+                .count()
+        })
         .unwrap_or(0);
     fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
-    eprintln!("htl cache: removed {n} {} from {}", if n == 1 { "entry" } else { "entries" }, dir.display());
+    eprintln!(
+        "htl cache: removed {n} {} from {}",
+        if n == 1 { "entry" } else { "entries" },
+        dir.display()
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1131,12 +1405,14 @@ fn cache_options(
 ) -> cache::Options {
     let mode = mode
         .or_else(|| {
-            cfg.as_ref().and_then(|(_, _, c)| c.cache.mode.as_deref()).map(|m| {
-                cache::Mode::parse(m).unwrap_or_else(|| {
-                    eprintln!("htl: unknown [cache] mode {m:?}, using per-module");
-                    cache::Mode::PerModule
+            cfg.as_ref()
+                .and_then(|(_, _, c)| c.cache.mode.as_deref())
+                .map(|m| {
+                    cache::Mode::parse(m).unwrap_or_else(|| {
+                        eprintln!("htl: unknown [cache] mode {m:?}, using per-module");
+                        cache::Mode::PerModule
+                    })
                 })
-            })
         })
         .unwrap_or_default();
     cache::Options {
@@ -1189,7 +1465,12 @@ fn cmd_cache_status(path: Option<&Path>, json: bool, list_entries: bool) -> Resu
         slot.0 += 1;
         slot.1 += e.bytes;
     }
-    println!("htl cache: {} entries, {} at {}", c.entries.len(), human_bytes(c.bytes), c.dir);
+    println!(
+        "htl cache: {} entries, {} at {}",
+        c.entries.len(),
+        human_bytes(c.bytes),
+        c.dir
+    );
     for (kind, (n, bytes)) in &by_kind {
         let what = match *kind {
             cache::CHECK => "checked modules",
@@ -1199,15 +1480,25 @@ fn cmd_cache_status(path: Option<&Path>, json: bool, list_entries: bool) -> Resu
         };
         println!("  {n:>5} {what} ({})", human_bytes(*bytes));
     }
-    if let (Some(min), Some(max)) =
-        (c.entries.iter().map(|e| e.age_secs).min(), c.entries.iter().map(|e| e.age_secs).max())
-    {
-        println!("  last used between {} and {} ago", human_age(min), human_age(max));
+    if let (Some(min), Some(max)) = (
+        c.entries.iter().map(|e| e.age_secs).min(),
+        c.entries.iter().map(|e| e.age_secs).max(),
+    ) {
+        println!(
+            "  last used between {} and {} ago",
+            human_age(min),
+            human_age(max)
+        );
     }
     if list_entries {
         println!();
         for e in &c.entries {
-            println!("  {:<6} {:>8}  {}", e.kind, human_bytes(e.bytes), e.subjects.join(", "));
+            println!(
+                "  {:<6} {:>8}  {}",
+                e.kind,
+                human_bytes(e.bytes),
+                e.subjects.join(", ")
+            );
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -1305,7 +1596,11 @@ fn check_one(
 fn resolved_requires(requires: &[cache::RequireJson]) -> Vec<(String, PathBuf)> {
     requires
         .iter()
-        .filter_map(|r| r.path.as_ref().map(|p| (r.module.clone(), PathBuf::from(p))))
+        .filter_map(|r| {
+            r.path
+                .as_ref()
+                .map(|p| (r.module.clone(), PathBuf::from(p)))
+        })
         .collect()
 }
 
@@ -1333,7 +1628,16 @@ struct Harvest<'a> {
 /// Best-effort throughout. A module that fails to generate is one the next run will generate
 /// itself, which is what happens today.
 fn harvest_modules(h: &Harvest<'_>, check: &CheckInfo, test_file: &Path) {
-    let Harvest { store, session, cfg_inputs, root, cfg, lint, opts, done } = h;
+    let Harvest {
+        store,
+        session,
+        cfg_inputs,
+        root,
+        cfg,
+        lint,
+        opts,
+        done,
+    } = h;
     let (lint, opts) = (*lint, *opts);
     let done = &mut *done.borrow_mut();
     // The run put the search path back before returning, so `src/` is no longer on it and
@@ -1448,8 +1752,16 @@ fn check_json(c: &CheckInfo) -> cache::CheckInfoJson {
         lints: c.lints.clone(),
         deps: c.deps.iter().map(|p| cache::normal(p)).collect(),
         requires: requires_json(c),
-        error_fixes: c.error_fixes.iter().map(|f| f.as_ref().map(report::FixJson::from_fix)).collect(),
-        lint_fixes: c.lint_fixes.iter().map(|f| f.as_ref().map(report::FixJson::from_fix)).collect(),
+        error_fixes: c
+            .error_fixes
+            .iter()
+            .map(|f| f.as_ref().map(report::FixJson::from_fix))
+            .collect(),
+        lint_fixes: c
+            .lint_fixes
+            .iter()
+            .map(|f| f.as_ref().map(report::FixJson::from_fix))
+            .collect(),
     }
 }
 
@@ -1470,8 +1782,16 @@ fn check_from_json(j: &cache::CheckInfoJson) -> CheckInfo {
                 col: r.col,
             })
             .collect(),
-        error_fixes: j.error_fixes.iter().map(|f| f.as_ref().map(fix_from_json)).collect(),
-        lint_fixes: j.lint_fixes.iter().map(|f| f.as_ref().map(fix_from_json)).collect(),
+        error_fixes: j
+            .error_fixes
+            .iter()
+            .map(|f| f.as_ref().map(fix_from_json))
+            .collect(),
+        lint_fixes: j
+            .lint_fixes
+            .iter()
+            .map(|f| f.as_ref().map(fix_from_json))
+            .collect(),
     }
 }
 
@@ -1608,7 +1928,9 @@ fn cmd_gen(file: &Path, out: Option<&Path>) -> Result<ExitCode> {
     apply_project(&h, file)?;
     let (code, c) = h.gen_lua(file)?;
     print_checkinfo(&c);
-    let Some(mut code) = code else { return Ok(ExitCode::FAILURE) };
+    let Some(mut code) = code else {
+        return Ok(ExitCode::FAILURE);
+    };
     if !code.ends_with('\n') {
         code.push('\n');
     }
@@ -1641,7 +1963,9 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
     h.set_arg(&file.to_string_lossy(), args)?;
     let (code, c) = h.gen_lua(file)?;
     print_checkinfo(&c);
-    let Some(code) = code else { return Ok(ExitCode::FAILURE) };
+    let Some(code) = code else {
+        return Ok(ExitCode::FAILURE);
+    };
     match h.exec(&code, &format!("@{}", file.display()), args) {
         Ok(()) => Ok(ExitCode::SUCCESS),
         Err(e) => {
@@ -1652,7 +1976,12 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
     }
 }
 
-fn cmd_build(entry: &Path, out: &Path, main: &str, mut opts: htl::link::LinkOptions) -> Result<ExitCode> {
+fn cmd_build(
+    entry: &Path,
+    out: &Path,
+    main: &str,
+    mut opts: htl::link::LinkOptions,
+) -> Result<ExitCode> {
     let h = Htl::new()?;
     auto_dts(entry)?;
     apply_project(&h, entry)?;
@@ -1670,7 +1999,11 @@ fn cmd_build(entry: &Path, out: &Path, main: &str, mut opts: htl::link::LinkOpti
         print_checkinfo(c);
     }
     let n_err = linked.errors.len();
-    for e in linked.errors.iter().filter(|e| e.contains("is not on the search path")) {
+    for e in linked
+        .errors
+        .iter()
+        .filter(|e| e.contains("is not on the search path"))
+    {
         eprintln!("error: {e}");
     }
     if n_err > 0 {
@@ -1686,20 +2019,37 @@ fn cmd_build(entry: &Path, out: &Path, main: &str, mut opts: htl::link::LinkOpti
         linked.modules.len() - typed,
         out.display(),
         buf.len(),
-        if opts.source { ", source" } else { ", bytecode" },
+        if opts.source {
+            ", source"
+        } else {
+            ", bytecode"
+        },
         if opts.debug { " with debug info" } else { "" }
     );
     if !linked.host_modules.is_empty() {
-        eprintln!("htl build: host must provide: {}", linked.host_modules.join(", "));
+        eprintln!(
+            "htl build: host must provide: {}",
+            linked.host_modules.join(", ")
+        );
     }
     Ok(ExitCode::SUCCESS)
 }
 
 /// The older form: every `.tl` under a directory, module names from their paths.
-fn cmd_build_dir(h: &Htl, dir: &Path, out: &Path, entry: &str, opts: &htl::link::LinkOptions) -> Result<ExitCode> {
+fn cmd_build_dir(
+    h: &Htl,
+    dir: &Path,
+    out: &Path,
+    entry: &str,
+    opts: &htl::link::LinkOptions,
+) -> Result<ExitCode> {
     h.add_path(dir)?;
     let files = htl::collect_tl(&[dir.to_path_buf()])?;
-    let mut b = Bundle { entry: entry.to_string(), htl_version: env!("CARGO_PKG_VERSION").into(), ..Default::default() };
+    let mut b = Bundle {
+        entry: entry.to_string(),
+        htl_version: env!("CARGO_PKG_VERSION").into(),
+        ..Default::default()
+    };
     let mut n_err = 0usize;
     for f in &files {
         let name = htl::module_name(dir, f)?;
@@ -1710,22 +2060,37 @@ fn cmd_build_dir(h: &Htl, dir: &Path, out: &Path, entry: &str, opts: &htl::link:
         let (kind, payload) = if opts.source {
             (htl::bundle::Kind::Source, code.into_bytes())
         } else {
-            (htl::bundle::Kind::Bytecode, h.compile_with(&name, &code, !opts.debug)?)
+            (
+                htl::bundle::Kind::Bytecode,
+                h.compile_with(&name, &code, !opts.debug)?,
+            )
         };
-        b.modules.push(htl::bundle::Module { name, kind, payload });
+        b.modules.push(htl::bundle::Module {
+            name,
+            kind,
+            payload,
+        });
     }
     if n_err > 0 {
         eprintln!("htl build: {n_err} error(s), bundle not written");
         return Ok(ExitCode::FAILURE);
     }
     if b.module(entry).is_none() {
-        bail!("entry module '{entry}' not found among {} module(s)", b.modules.len());
+        bail!(
+            "entry module '{entry}' not found among {} module(s)",
+            b.modules.len()
+        );
     }
     if !opts.source {
         b.fingerprint = h.fingerprint()?;
     }
     let buf = b.encode();
     fs::write(out, &buf).with_context(|| format!("writing {}", out.display()))?;
-    eprintln!("htl build: {} module(s) -> {} ({} bytes)", b.modules.len(), out.display(), buf.len());
+    eprintln!(
+        "htl build: {} module(s) -> {} ({} bytes)",
+        b.modules.len(),
+        out.display(),
+        buf.len()
+    );
     Ok(ExitCode::SUCCESS)
 }

@@ -24,7 +24,8 @@ pub fn teal_type(ty: &Type, self_name: &str) -> Result<String, String> {
         Type::Paren(p) => teal_type(&p.elem, self_name),
         Type::Tuple(t) if t.elems.is_empty() => Ok(String::new()),
         Type::Tuple(t) => {
-            let parts: Result<Vec<_>, _> = t.elems.iter().map(|e| teal_type(e, self_name)).collect();
+            let parts: Result<Vec<_>, _> =
+                t.elems.iter().map(|e| teal_type(e, self_name)).collect();
             Ok(parts?.join(", "))
         }
         Type::Slice(s) => Ok(format!("{{{}}}", teal_type(&s.elem, self_name)?)),
@@ -65,14 +66,22 @@ pub fn teal_type(ty: &Type, self_name: &str) -> Result<String, String> {
                 other => other.to_string(),
             })
         }
-        _ => Err("unsupported type for Teal mapping (use a path, reference, tuple, slice or array type)".into()),
+        _ => Err(
+            "unsupported type for Teal mapping (use a path, reference, tuple, slice or array type)"
+                .into(),
+        ),
     }
 }
 
 /// `true` if the outermost type is `Result<..>` (the wrapper must propagate the error).
 pub fn is_result(ty: &Type) -> bool {
     match ty {
-        Type::Path(p) => p.path.segments.last().map(|s| s.ident == "Result").unwrap_or(false),
+        Type::Path(p) => p
+            .path
+            .segments
+            .last()
+            .map(|s| s.ident == "Result")
+            .unwrap_or(false),
         _ => false,
     }
 }
@@ -115,9 +124,13 @@ fn type_list(arr: &syn::ExprArray, key: &str) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     for e in &arr.elems {
         match e {
-            Expr::Path(p) => {
-                out.push(p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default())
-            }
+            Expr::Path(p) => out.push(
+                p.path
+                    .segments
+                    .last()
+                    .map(|s| s.ident.to_string())
+                    .unwrap_or_default(),
+            ),
             _ => return Err(format!("`{key}` expects a list of type names")),
         }
     }
@@ -131,7 +144,11 @@ pub fn parse_attr_metas(metas: impl IntoIterator<Item = Meta>) -> Result<TealAtt
         let Meta::NameValue(nv) = meta else {
             return Err("expected `key = value` pairs".into());
         };
-        let key = nv.path.get_ident().map(|i| i.to_string()).unwrap_or_default();
+        let key = nv
+            .path
+            .get_ident()
+            .map(|i| i.to_string())
+            .unwrap_or_default();
         match (key.as_str(), &nv.value) {
             ("name", Expr::Lit(l)) => out.name = Some(lit_str(&l.lit)?),
             ("dts", Expr::Lit(l)) => out.dts = Some(lit_str(&l.lit)?),
@@ -140,7 +157,9 @@ pub fn parse_attr_metas(metas: impl IntoIterator<Item = Meta>) -> Result<TealAtt
             ("errors", Expr::Lit(l)) => {
                 let v = lit_str(&l.lit)?;
                 if v != "raise" && v != "return" {
-                    return Err(format!("`errors` must be \"raise\" or \"return\", got {v:?}"));
+                    return Err(format!(
+                        "`errors` must be \"raise\" or \"return\", got {v:?}"
+                    ));
                 }
                 out.errors = Some(v);
             }
@@ -187,7 +206,14 @@ pub fn derives_teal_record(attrs: &[Attribute]) -> bool {
             return false;
         }
         a.parse_args_with(Punctuated::<syn::Path, Token![,]>::parse_terminated)
-            .map(|paths| paths.iter().any(|p| p.segments.last().map(|s| s.ident == "TealRecord").unwrap_or(false)))
+            .map(|paths| {
+                paths.iter().any(|p| {
+                    p.segments
+                        .last()
+                        .map(|s| s.ident == "TealRecord")
+                        .unwrap_or(false)
+                })
+            })
             .unwrap_or(false)
     })
 }
@@ -215,7 +241,10 @@ pub struct RecordDecl {
     pub attrs: TealAttrs,
 }
 
-fn record_fields(fields: &syn::FieldsNamed, self_name: &str) -> Result<Vec<(String, String)>, String> {
+fn record_fields(
+    fields: &syn::FieldsNamed,
+    self_name: &str,
+) -> Result<Vec<(String, String)>, String> {
     let mut out = Vec::new();
     for f in &fields.named {
         let fi = f.ident.as_ref().unwrap().to_string();
@@ -239,7 +268,12 @@ pub fn record_decl(item: &ItemStruct) -> Result<RecordDecl, String> {
         decl.push_str(&format!("   {f}: {t}\n"));
     }
     decl.push_str(&format!("end\n\nreturn {name}\n"));
-    Ok(RecordDecl { name, fields, decl, attrs })
+    Ok(RecordDecl {
+        name,
+        fields,
+        decl,
+        attrs,
+    })
 }
 
 /// Find a struct by name in a file's items (recursing into inline modules).
@@ -260,7 +294,10 @@ pub fn find_struct<'a>(items: &'a [Item], name: &str) -> Option<&'a ItemStruct> 
     None
 }
 
-fn nested_record_decls(names: &[String], file_items: Option<&[Item]>) -> Result<Vec<String>, String> {
+fn nested_record_decls(
+    names: &[String],
+    file_items: Option<&[Item]>,
+) -> Result<Vec<String>, String> {
     if names.is_empty() {
         return Ok(Vec::new());
     }
@@ -278,7 +315,9 @@ fn nested_record_decls(names: &[String], file_items: Option<&[Item]>) -> Result<
             )
         })?;
         let syn::Fields::Named(fields) = &st.fields else {
-            return Err(format!("host_module: `{name}` must be a struct with named fields"));
+            return Err(format!(
+                "host_module: `{name}` must be a struct with named fields"
+            ));
         };
         let mut s = format!("   record {name}\n");
         for (f, t) in record_fields(fields, name)? {
@@ -327,12 +366,24 @@ pub struct HostDecl {
 
 /// Declaration + wrapper plan for a `#[host_module]` impl block. `file_items` (the
 /// enclosing file's items) is only needed when `records = [...]` is used.
-pub fn host_decl(imp: &ItemImpl, attrs: TealAttrs, file_items: Option<&[Item]>) -> Result<HostDecl, String> {
+pub fn host_decl(
+    imp: &ItemImpl,
+    attrs: TealAttrs,
+    file_items: Option<&[Item]>,
+) -> Result<HostDecl, String> {
     let type_name = match &*imp.self_ty {
-        Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default(),
+        Type::Path(p) => p
+            .path
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_default(),
         _ => return Err("host_module: impl target must be a plain type".into()),
     };
-    let module = attrs.name.clone().unwrap_or_else(|| type_name.to_lowercase());
+    let module = attrs
+        .name
+        .clone()
+        .unwrap_or_else(|| type_name.to_lowercase());
     let err_mode = match attrs.errors.as_deref() {
         Some("return") => ErrMode::Return,
         _ => ErrMode::Raise,
@@ -361,10 +412,14 @@ pub fn host_decl(imp: &ItemImpl, attrs: TealAttrs, file_items: Option<&[Item]>) 
                     let (owned_ty, by_ref): (Type, bool) = match &*pt.ty {
                         Type::Reference(r) => {
                             if r.mutability.is_some() {
-                                return Err(format!("host_module: `{fname}`: `&mut` parameters are not supported"));
+                                return Err(format!(
+                                    "host_module: `{fname}`: `&mut` parameters are not supported"
+                                ));
                             }
                             let owned: Type = match &*r.elem {
-                                Type::Path(p) if p.path.is_ident("str") => syn::parse_quote!(::std::string::String),
+                                Type::Path(p) if p.path.is_ident("str") => {
+                                    syn::parse_quote!(::std::string::String)
+                                }
                                 Type::Slice(s) => {
                                     let e = &s.elem;
                                     syn::parse_quote!(::std::vec::Vec<#e>)
@@ -381,7 +436,12 @@ pub fn host_decl(imp: &ItemImpl, attrs: TealAttrs, file_items: Option<&[Item]>) 
                     };
                     let teal = teal_type(&owned_ty, &module)?;
                     teal_params.push(format!("{pname}: {teal}"));
-                    params.push(HostParam { name: pname, owned_ty, by_ref, teal });
+                    params.push(HostParam {
+                        name: pname,
+                        owned_ty,
+                        by_ref,
+                        teal,
+                    });
                 }
             }
         }
@@ -396,17 +456,42 @@ pub fn host_decl(imp: &ItemImpl, attrs: TealAttrs, file_items: Option<&[Item]>) 
         // Teal-side return: `Result` in return mode becomes `T, string` (`boolean, string`
         // for unit), the Lua `value, err` convention; otherwise just `T`.
         let teal_ret = if ret_is_result && err_mode == ErrMode::Return {
-            if ret_is_unit { "boolean, string".to_string() } else { format!("{ret_teal}, string") }
+            if ret_is_unit {
+                "boolean, string".to_string()
+            } else {
+                format!("{ret_teal}, string")
+            }
         } else {
             ret_teal.clone()
         };
-        let ret_suffix = if teal_ret.is_empty() { String::new() } else { format!(": {teal_ret}") };
-        decl.push_str(&format!("   {fname}: function({}){ret_suffix}\n", teal_params.join(", ")));
-        methods.push(HostMethod { name: fname, receiver, params, ret_teal, ret_is_result, ret_is_unit });
+        let ret_suffix = if teal_ret.is_empty() {
+            String::new()
+        } else {
+            format!(": {teal_ret}")
+        };
+        decl.push_str(&format!(
+            "   {fname}: function({}){ret_suffix}\n",
+            teal_params.join(", ")
+        ));
+        methods.push(HostMethod {
+            name: fname,
+            receiver,
+            params,
+            ret_teal,
+            ret_is_result,
+            ret_is_unit,
+        });
     }
     decl.push_str(&format!("end\n\nreturn {module}\n"));
 
-    Ok(HostDecl { type_name, module, decl, methods, attrs, err_mode })
+    Ok(HostDecl {
+        type_name,
+        module,
+        decl,
+        methods,
+        attrs,
+        err_mode,
+    })
 }
 
 // ---------------------------------------------------------------- file scanning (`htl dts`)
@@ -435,7 +520,8 @@ fn walk_items<'a>(items: &'a [Item], out: &mut Vec<&'a Item>) {
 
 /// Declarations requested by `#[host_module(dts = ..)]` / `#[teal(dts = ..)]` in one file.
 pub fn scan_rust_file(path: &Path, manifest_dir: &Path) -> Result<Vec<Generated>, String> {
-    let src = std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let src =
+        std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     let file = syn::parse_file(&src).map_err(|e| format!("parsing {}: {e}", path.display()))?;
     let mut flat = Vec::new();
     walk_items(&file.items, &mut flat);
@@ -475,7 +561,11 @@ pub fn scan_rust_file(path: &Path, manifest_dir: &Path) -> Result<Vec<Generated>
 /// Nearest ancestor of `start` holding a `Cargo.toml` with a `[package]` section
 /// (a workspace root without a package does not count).
 pub fn find_cargo_package_root(start: &Path) -> Option<PathBuf> {
-    let mut dir = if start.is_dir() { start.to_path_buf() } else { crate::parent_dir(start) };
+    let mut dir = if start.is_dir() {
+        start.to_path_buf()
+    } else {
+        crate::parent_dir(start)
+    };
     if let Ok(abs) = std::fs::canonicalize(&dir) {
         dir = abs;
     }

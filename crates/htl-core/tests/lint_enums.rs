@@ -41,7 +41,9 @@ fn enum_nested_in_record_is_covered() {
     );
     let lints = lints_of(&dir, "game.tl");
     assert!(
-        lints.iter().any(|l| l.contains("enum-exhaustive") && l.contains("quit")),
+        lints
+            .iter()
+            .any(|l| l.contains("enum-exhaustive") && l.contains("quit")),
         "expected enum-exhaustive for nested enum, got {lints:?}"
     );
 }
@@ -59,7 +61,9 @@ fn enum_from_required_module_is_covered() {
     );
     let lints = lints_of(&dir, "ai.tl");
     assert!(
-        lints.iter().any(|l| l.contains("enum-exhaustive") && l.contains("flee")),
+        lints
+            .iter()
+            .any(|l| l.contains("enum-exhaustive") && l.contains("flee")),
         "expected enum-exhaustive for required-module enum, got {lints:?}"
     );
 }
@@ -75,7 +79,10 @@ fn single_branch_guard_is_not_flagged() {
          return game\n",
     );
     let lints = lints_of(&dir, "game.tl");
-    assert!(!lints.iter().any(|l| l.contains("enum-exhaustive")), "guard flagged: {lints:?}");
+    assert!(
+        !lints.iter().any(|l| l.contains("enum-exhaustive")),
+        "guard flagged: {lints:?}"
+    );
 }
 
 /// The enum is taken from the subject's checked type, not from whichever known enum
@@ -91,9 +98,18 @@ fn subject_type_decides_the_enum() {
          return game\n",
     );
     let lints = lints_of(&dir, "game.tl");
-    let cmd = lints.iter().find(|l| l.contains("'c'")).expect("Command chain must be flagged");
-    assert!(cmd.contains("Command") && cmd.contains("wait") && !cmd.contains("State"), "{cmd}");
-    let st = lints.iter().find(|l| l.contains("'w.state'")).expect("State chain must be flagged");
+    let cmd = lints
+        .iter()
+        .find(|l| l.contains("'c'"))
+        .expect("Command chain must be flagged");
+    assert!(
+        cmd.contains("Command") && cmd.contains("wait") && !cmd.contains("State"),
+        "{cmd}"
+    );
+    let st = lints
+        .iter()
+        .find(|l| l.contains("'w.state'"))
+        .expect("State chain must be flagged");
     assert!(st.contains("State") && st.contains("playing"), "{st}");
 }
 
@@ -106,7 +122,10 @@ fn string_subject_is_not_flagged() {
         "local enum Kind\n   \"a\"\n   \"b\"\n   \"c\"\nend\n\nlocal function f(s: string): integer\n   if s == \"a\" then\n      return 1\n   elseif s == \"b\" then\n      return 2\n   end\n   return 0\nend\n\nprint(f(\"a\"))\n",
     );
     let lints = lints_of(&dir, "s.tl");
-    assert!(!lints.iter().any(|l| l.contains("enum-exhaustive")), "string subject flagged: {lints:?}");
+    assert!(
+        !lints.iter().any(|l| l.contains("enum-exhaustive")),
+        "string subject flagged: {lints:?}"
+    );
 }
 
 /// Every branch returns and code follows: the fallthrough is the `else`, no lint.
@@ -122,8 +141,15 @@ fn all_return_chain_with_fallthrough_is_exhaustive() {
          print(bonus(\"ring\"), name(\"ring\"))\n",
     );
     let lints = lints_of(&dir, "e.tl");
-    let hits: Vec<&String> = lints.iter().filter(|l| l.contains("enum-exhaustive")).collect();
-    assert_eq!(hits.len(), 1, "only the assigning chain (no return) is a real gap: {lints:?}");
+    let hits: Vec<&String> = lints
+        .iter()
+        .filter(|l| l.contains("enum-exhaustive"))
+        .collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "only the assigning chain (no return) is a real gap: {lints:?}"
+    );
     assert!(hits[0].contains("e.tl:18:"), "{}", hits[0]);
 }
 
@@ -139,5 +165,8 @@ fn exhaustive_chain_stays_quiet() {
         "local defs = require(\"defs\")\n\nlocal function act(b: defs.Behavior)\n   if b == \"chase\" then\n      print(1)\n   elseif b == \"flee\" then\n      print(2)\n   end\nend\n\nact(\"chase\")\n",
     );
     let lints = lints_of(&dir, "ai.tl");
-    assert!(!lints.iter().any(|l| l.contains("enum-exhaustive")), "false positive: {lints:?}");
+    assert!(
+        !lints.iter().any(|l| l.contains("enum-exhaustive")),
+        "false positive: {lints:?}"
+    );
 }

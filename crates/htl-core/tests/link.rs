@@ -37,9 +37,18 @@ fn project(name: &str) -> PathBuf {
         "local mathx = require(\"mathx\")\nlocal record util\nend\nfunction util.twice(n: integer): integer\n   return mathx.double(n)\nend\nreturn util\n",
     );
     write(&root.join("src/unused.tl"), "return { x = 1 }\n");
-    write(&root.join("src/host.d.tl"), "local record host\n   base: function(): integer\nend\nreturn host\n");
-    write(&root.join("src/mathx.d.tl"), "local record mathx\n   double: function(integer): integer\nend\nreturn mathx\n");
-    write(&root.join("vendor/mathx.lua"), "local M = {}\nfunction M.double(n) return n * 2 end\nreturn M\n");
+    write(
+        &root.join("src/host.d.tl"),
+        "local record host\n   base: function(): integer\nend\nreturn host\n",
+    );
+    write(
+        &root.join("src/mathx.d.tl"),
+        "local record mathx\n   double: function(integer): integer\nend\nreturn mathx\n",
+    );
+    write(
+        &root.join("vendor/mathx.lua"),
+        "local M = {}\nfunction M.double(n) return n * 2 end\nreturn M\n",
+    );
     write(&root.join("src/orphan.tl"), "return { orphan = true }\n");
     root
 }
@@ -58,13 +67,43 @@ fn links_the_closure_and_records_host_modules() {
     let linked = link(&h, &root.join("src/main.tl"), &LinkOptions::default()).unwrap();
     assert!(linked.errors.is_empty(), "{:?}", linked.errors);
     let names: Vec<&str> = linked.modules.iter().map(|m| m.name.as_str()).collect();
-    assert_eq!(names, vec!["main", "util", "unused", "mathx"], "BFS from the entry; orphan.tl untouched");
-    assert_eq!(linked.host_modules, vec!["host".to_string()], "declared only by host.d.tl");
-    assert!(linked.modules.iter().find(|m| m.name == "mathx").unwrap().path.ends_with("vendor/mathx.lua"));
-    assert!(!linked.modules.iter().find(|m| m.name == "mathx").unwrap().typed);
+    assert_eq!(
+        names,
+        vec!["main", "util", "unused", "mathx"],
+        "BFS from the entry; orphan.tl untouched"
+    );
+    assert_eq!(
+        linked.host_modules,
+        vec!["host".to_string()],
+        "declared only by host.d.tl"
+    );
+    assert!(
+        linked
+            .modules
+            .iter()
+            .find(|m| m.name == "mathx")
+            .unwrap()
+            .path
+            .ends_with("vendor/mathx.lua")
+    );
+    assert!(
+        !linked
+            .modules
+            .iter()
+            .find(|m| m.name == "mathx")
+            .unwrap()
+            .typed
+    );
     assert_eq!(linked.bundle().unwrap().entry, "main");
     assert!(!linked.bundle().unwrap().fingerprint.is_empty());
-    assert!(linked.bundle().unwrap().modules.iter().all(|m| m.kind == Kind::Bytecode));
+    assert!(
+        linked
+            .bundle()
+            .unwrap()
+            .modules
+            .iter()
+            .all(|m| m.kind == Kind::Bytecode)
+    );
     // `.d.tl` for mathx exists next to the .lua: the typed check used the declaration,
     // the bundle carries the implementation.
 }
@@ -72,15 +111,35 @@ fn links_the_closure_and_records_host_modules() {
 #[test]
 fn unresolved_require_is_a_link_error_unless_declared_host() {
     let root = project("unresolved");
-    write(&root.join("src/main.tl"), "local ghost = require(\"ghost\")\nprint(ghost)\n");
+    write(
+        &root.join("src/main.tl"),
+        "local ghost = require(\"ghost\")\nprint(ghost)\n",
+    );
     let h = checker(&root);
     let linked = link(&h, &root.join("src/main.tl"), &LinkOptions::default()).unwrap();
     // The checker already reports the missing module; the linker adds where to declare it.
-    assert!(linked.errors.iter().any(|e| e.contains("require(\"ghost\") is not on the search path")), "{:?}", linked.errors);
-    assert!(linked.errors.iter().any(|e| e.contains("[build] host") && e.contains("[build] extra")), "{:?}", linked.errors);
+    assert!(
+        linked
+            .errors
+            .iter()
+            .any(|e| e.contains("require(\"ghost\") is not on the search path")),
+        "{:?}",
+        linked.errors
+    );
+    assert!(
+        linked
+            .errors
+            .iter()
+            .any(|e| e.contains("[build] host") && e.contains("[build] extra")),
+        "{:?}",
+        linked.errors
+    );
     assert!(!linked.ok());
     let err = linked.bundle().unwrap_err().to_string();
-    assert!(err.contains("link failed with") && err.contains("ghost"), "{err}");
+    assert!(
+        err.contains("link failed with") && err.contains("ghost"),
+        "{err}"
+    );
 }
 
 /// A type error in a module: `link` still returns `Ok` (so every error can be listed)
@@ -89,11 +148,21 @@ fn unresolved_require_is_a_link_error_unless_declared_host() {
 #[test]
 fn type_error_withholds_the_bundle() {
     let root = project("typeerr");
-    write(&root.join("src/util.tl"), "local record util\nend\nfunction util.twice(n: integer): integer\n   return \"no\"\nend\nreturn util\n");
+    write(
+        &root.join("src/util.tl"),
+        "local record util\nend\nfunction util.twice(n: integer): integer\n   return \"no\"\nend\nreturn util\n",
+    );
     let h = checker(&root);
     let linked = link(&h, &root.join("src/main.tl"), &LinkOptions::default()).unwrap();
     assert!(!linked.ok());
-    assert!(linked.errors.iter().any(|e| e.contains("util.tl") && e.contains("expected integer")), "{:?}", linked.errors);
+    assert!(
+        linked
+            .errors
+            .iter()
+            .any(|e| e.contains("util.tl") && e.contains("expected integer")),
+        "{:?}",
+        linked.errors
+    );
     let err = linked.into_bundle().unwrap_err().to_string();
     assert!(err.contains("util.tl"), "{err}");
 }
@@ -105,18 +174,30 @@ fn inputs_list_every_file_the_bundle_depends_on() {
     let linked = link(&h, &root.join("src/main.tl"), &LinkOptions::default()).unwrap();
     let inputs = linked.inputs();
     let has = |suffix: &str| inputs.iter().any(|p| p.to_string_lossy().ends_with(suffix));
-    assert!(has("src/main.tl") && has("src/util.tl") && has("vendor/mathx.lua"), "{inputs:?}");
-    assert!(has("src/host.d.tl") && has("src/mathx.d.tl"), "declarations the checker read: {inputs:?}");
+    assert!(
+        has("src/main.tl") && has("src/util.tl") && has("vendor/mathx.lua"),
+        "{inputs:?}"
+    );
+    assert!(
+        has("src/host.d.tl") && has("src/mathx.d.tl"),
+        "declarations the checker read: {inputs:?}"
+    );
     assert!(!has("orphan.tl"), "{inputs:?}");
 }
 
 #[test]
 fn extra_modules_are_bundled_for_dynamic_requires() {
     let root = project("extra");
-    write(&root.join("src/main.tl"), "local name = \"plug\" .. \"in\"\nlocal p = require(name)\nprint(p)\n");
+    write(
+        &root.join("src/main.tl"),
+        "local name = \"plug\" .. \"in\"\nlocal p = require(name)\nprint(p)\n",
+    );
     write(&root.join("src/plugin.tl"), "return { plugged = true }\n");
     let h = checker(&root);
-    let opts = LinkOptions { extra: vec!["plugin".into()], ..Default::default() };
+    let opts = LinkOptions {
+        extra: vec!["plugin".into()],
+        ..Default::default()
+    };
     let linked = link(&h, &root.join("src/main.tl"), &opts).unwrap();
     assert!(linked.errors.is_empty(), "{:?}", linked.errors);
     assert!(linked.bundle().unwrap().module("plugin").is_some());
@@ -141,7 +222,8 @@ fn bundle_runs_with_host_module_and_refuses_without() {
     // With it: runs, and the entry's return value / loader contract hold.
     let r = Htl::new().unwrap();
     let t = r.lua().create_table().unwrap();
-    t.set("base", r.lua().create_function(|_, ()| Ok(21)).unwrap()).unwrap();
+    t.set("base", r.lua().create_function(|_, ()| Ok(21)).unwrap())
+        .unwrap();
     r.preload_value("host", t).unwrap();
     r.install_bundle(&b).unwrap();
     // `...` in a bundled module: (modname, "bundle:<name>") like a file searcher.
@@ -153,10 +235,18 @@ fn bundle_runs_with_host_module_and_refuses_without() {
         .call(("x", "y"))
         .unwrap();
     assert_eq!((name.as_str(), origin.as_str()), ("x", "y"));
-    let v: i64 = r.lua().load("return require('util').twice(21)").eval().unwrap();
+    let v: i64 = r
+        .lua()
+        .load("return require('util').twice(21)")
+        .eval()
+        .unwrap();
     assert_eq!(v, 42, "util -> vendored mathx.lua, both from the bundle");
     // Served through package.preload, so the loader sees Lua's own preload origin.
-    let has: bool = r.lua().load("return package.preload['util'] ~= nil").eval().unwrap();
+    let has: bool = r
+        .lua()
+        .load("return package.preload['util'] ~= nil")
+        .eval()
+        .unwrap();
     assert!(has);
 }
 
@@ -168,17 +258,30 @@ fn bundle_runs_with_host_module_and_refuses_without() {
 fn declaration_steps_aside_for_a_bundled_module() {
     let root = project("decl-bundle");
     // The SDK the mods use: declared in mods/, implemented in src/ and bundled via `extra`.
-    write(&root.join("src/modkit.tl"), "local record modkit\nend\nfunction modkit.define(n: integer): integer\n   return n + 1\nend\nreturn modkit\n");
-    write(&root.join("mods/modkit.d.tl"), "local record modkit\n   define: function(integer): integer\nend\nreturn modkit\n");
-    write(&root.join("mods/deepwood.tl"), "local modkit = require(\"modkit\")\nreturn { n = modkit.define(41) }\n");
+    write(
+        &root.join("src/modkit.tl"),
+        "local record modkit\nend\nfunction modkit.define(n: integer): integer\n   return n + 1\nend\nreturn modkit\n",
+    );
+    write(
+        &root.join("mods/modkit.d.tl"),
+        "local record modkit\n   define: function(integer): integer\nend\nreturn modkit\n",
+    );
+    write(
+        &root.join("mods/deepwood.tl"),
+        "local modkit = require(\"modkit\")\nreturn { n = modkit.define(41) }\n",
+    );
     let h = checker(&root);
-    let opts = LinkOptions { extra: vec!["modkit".into()], ..Default::default() };
+    let opts = LinkOptions {
+        extra: vec!["modkit".into()],
+        ..Default::default()
+    };
     let linked = link(&h, &root.join("src/main.tl"), &opts).unwrap();
     assert!(linked.ok(), "{:?}", linked.errors);
 
     let r = Htl::new().unwrap();
     let t = r.lua().create_table().unwrap();
-    t.set("base", r.lua().create_function(|_, ()| Ok(1)).unwrap()).unwrap();
+    t.set("base", r.lua().create_function(|_, ()| Ok(1)).unwrap())
+        .unwrap();
     r.preload_value("host", t).unwrap();
     r.install_bundle(linked.bundle().unwrap()).unwrap();
     let mut reg = htl_core::pkg::mlua_pkg::Registry::new();
@@ -190,13 +293,22 @@ fn declaration_steps_aside_for_a_bundled_module() {
     // A host preload of the same name is not overwritten by the bundle.
     let r2 = Htl::new().unwrap();
     let t = r2.lua().create_table().unwrap();
-    t.set("twice", r2.lua().create_function(|_, n: i64| Ok(n * 100)).unwrap()).unwrap();
+    t.set(
+        "twice",
+        r2.lua().create_function(|_, n: i64| Ok(n * 100)).unwrap(),
+    )
+    .unwrap();
     r2.preload_value("util", t).unwrap();
     let t = r2.lua().create_table().unwrap();
-    t.set("base", r2.lua().create_function(|_, ()| Ok(1)).unwrap()).unwrap();
+    t.set("base", r2.lua().create_function(|_, ()| Ok(1)).unwrap())
+        .unwrap();
     r2.preload_value("host", t).unwrap();
     r2.install_bundle(linked.bundle().unwrap()).unwrap();
-    let v: i64 = r2.lua().load("return require('util').twice(1)").eval().unwrap();
+    let v: i64 = r2
+        .lua()
+        .load("return require('util').twice(1)")
+        .eval()
+        .unwrap();
     assert_eq!(v, 100, "host wins over the bundle");
 }
 
@@ -204,18 +316,37 @@ fn declaration_steps_aside_for_a_bundled_module() {
 fn source_bundles_carry_no_fingerprint_and_run() {
     let root = project("source");
     let h = checker(&root);
-    let opts = LinkOptions { source: true, ..Default::default() };
+    let opts = LinkOptions {
+        source: true,
+        ..Default::default()
+    };
     let linked = link(&h, &root.join("src/main.tl"), &opts).unwrap();
     assert!(linked.bundle().unwrap().fingerprint.is_empty());
-    assert!(linked.bundle().unwrap().modules.iter().all(|m| m.kind == Kind::Source));
-    let src = std::str::from_utf8(&linked.bundle().unwrap().module("util").unwrap().payload).unwrap();
-    assert!(src.contains("mathx.double"), "generated Lua, readable: {src}");
+    assert!(
+        linked
+            .bundle()
+            .unwrap()
+            .modules
+            .iter()
+            .all(|m| m.kind == Kind::Source)
+    );
+    let src =
+        std::str::from_utf8(&linked.bundle().unwrap().module("util").unwrap().payload).unwrap();
+    assert!(
+        src.contains("mathx.double"),
+        "generated Lua, readable: {src}"
+    );
     let r = Htl::new().unwrap();
     let t = r.lua().create_table().unwrap();
-    t.set("base", r.lua().create_function(|_, ()| Ok(1)).unwrap()).unwrap();
+    t.set("base", r.lua().create_function(|_, ()| Ok(1)).unwrap())
+        .unwrap();
     r.preload_value("host", t).unwrap();
     r.install_bundle(linked.bundle().unwrap()).unwrap();
-    let v: i64 = r.lua().load("return require('util').twice(4)").eval().unwrap();
+    let v: i64 = r
+        .lua()
+        .load("return require('util').twice(4)")
+        .eval()
+        .unwrap();
     assert_eq!(v, 8);
 }
 
@@ -229,19 +360,42 @@ fn foreign_bytecode_is_refused_with_a_readable_message() {
     b.fingerprint[13] = 4;
     let r = Htl::new().unwrap();
     let err = r.install_bundle(&b).unwrap_err().to_string();
-    assert!(err.contains("compiled for Lua 5.4") && err.contains("sizeof(Integer)=4"), "{err}");
-    assert!(err.contains("this host runs Lua 5.4") && err.contains("sizeof(Integer)=8"), "{err}");
+    assert!(
+        err.contains("compiled for Lua 5.4") && err.contains("sizeof(Integer)=4"),
+        "{err}"
+    );
+    assert!(
+        err.contains("this host runs Lua 5.4") && err.contains("sizeof(Integer)=8"),
+        "{err}"
+    );
     assert!(err.contains("--source"), "{err}");
 }
 
 #[test]
 fn debug_bytecode_keeps_line_numbers() {
     let root = project("debug");
-    write(&root.join("src/main.tl"), "local function boom()\n   error(\"kaboom\")\nend\nboom()\n");
+    write(
+        &root.join("src/main.tl"),
+        "local function boom()\n   error(\"kaboom\")\nend\nboom()\n",
+    );
     let h = checker(&root);
     let stripped = link(&h, &root.join("src/main.tl"), &LinkOptions::default()).unwrap();
-    let debug = link(&h, &root.join("src/main.tl"), &LinkOptions { debug: true, ..Default::default() }).unwrap();
-    let run = |b: &Bundle| Htl::new().unwrap().run_bundle(b, &[]).unwrap_err().to_string();
+    let debug = link(
+        &h,
+        &root.join("src/main.tl"),
+        &LinkOptions {
+            debug: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let run = |b: &Bundle| {
+        Htl::new()
+            .unwrap()
+            .run_bundle(b, &[])
+            .unwrap_err()
+            .to_string()
+    };
     let e1 = run(stripped.bundle().unwrap());
     let e2 = run(debug.bundle().unwrap());
     assert!(e2.contains("main:2:"), "debug info keeps the line: {e2}");

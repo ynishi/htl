@@ -40,7 +40,10 @@ pub fn module_ident(name: &str) -> String {
 /// With `must_be_new`, the directory must not exist (or be empty).
 pub fn scaffold(dir: &Path, name: &str, opts: &Options, must_be_new: bool) -> Result<Vec<PathBuf>> {
     if must_be_new && dir.exists() && dir.read_dir()?.next().is_some() {
-        bail!("{} already exists and is not empty (use `htl init` to fill in a directory)", dir.display());
+        bail!(
+            "{} already exists and is not empty (use `htl init` to fill in a directory)",
+            dir.display()
+        );
     }
     let m = module_ident(name);
     let mut files: Vec<(PathBuf, String)> = vec![
@@ -96,7 +99,9 @@ fn t_main(m: &str, embed: bool) -> String {
              print(host:greet(g.who))\nlocal p: host.Point = host:scale({{ x = 1, y = 2 }}, 3)\nprint(\"scaled:\", p.x, p.y)\n"
         )
     } else {
-        format!("local {m} = require(\"{m}\")\n\nlocal g = {m}.greet(arg and arg[1] or \"teal\")\nprint(g.text)\n")
+        format!(
+            "local {m} = require(\"{m}\")\n\nlocal g = {m}.greet(arg and arg[1] or \"teal\")\nprint(g.text)\n"
+        )
     }
 }
 
@@ -155,7 +160,9 @@ fn t_gitignore(embed: bool) -> String {
 }
 
 fn t_readme(name: &str, m: &str, opts: &Options) -> String {
-    let mut s = format!("# {name}\n\nTeal project managed with [htl](https://github.com/ynishi/htl).\n\n```sh\nhtl check .            # type-check + lints\n");
+    let mut s = format!(
+        "# {name}\n\nTeal project managed with [htl](https://github.com/ynishi/htl).\n\n```sh\nhtl check .            # type-check + lints\n"
+    );
     if !opts.lib && !opts.embed {
         s.push_str("htl run src/main.tl    # run the entry script\n");
     }
@@ -203,7 +210,9 @@ fn t_main_rs(m: &str, lib: bool) -> String {
         "use htl::{Htl, TealRecord, host_module, include_tl};\n"
     };
     let run = if lib {
-        format!("    let g: htl::mlua::Table = h.lua().load(\"return require('{m}').greet('rust')\").eval()?;\n    println!(\"{{}}\", g.get::<String>(\"text\")?);\n")
+        format!(
+            "    let g: htl::mlua::Table = h.lua().load(\"return require('{m}').greet('rust')\").eval()?;\n    println!(\"{{}}\", g.get::<String>(\"text\")?);\n"
+        )
     } else {
         "    let args: Vec<String> = std::env::args().skip(1).collect();\n    h.exec(MAIN, \"=main.tl\", &args)?;\n".to_string()
     };

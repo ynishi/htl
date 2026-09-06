@@ -26,7 +26,12 @@ fn write(path: &Path, text: &str) {
 fn rel(root: &Path, files: &[PathBuf]) -> Vec<String> {
     let mut v: Vec<String> = files
         .iter()
-        .map(|f| f.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/"))
+        .map(|f| {
+            f.strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
         .collect();
     v.sort();
     v
@@ -34,14 +39,26 @@ fn rel(root: &Path, files: &[PathBuf]) -> Vec<String> {
 
 fn project() -> PathBuf {
     let root = scratch("proj");
-    write(&root.join("mlua-pkg.toml"), "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[deps]\n");
+    write(
+        &root.join("mlua-pkg.toml"),
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[deps]\n",
+    );
     write(&root.join("src/main.tl"), "print(1)\n");
     write(&root.join("src/util.tl"), "return {}\n");
     write(&root.join("tests/util_test.tl"), "print(2)\n");
     // dependency material that `htl pkg install` produces under the project
-    write(&root.join(".mlua-pkgs/cache/git/x/vec2/abc/src/vec2.tl"), "return {}\n");
-    write(&root.join(".mlua-pkgs/cache/git/x/vec2/abc/tests/vec2_test.tl"), "print(3)\n");
-    write(&root.join(".mlua-pkgs/vendored/vec2/vec2.tl"), "return {}\n");
+    write(
+        &root.join(".mlua-pkgs/cache/git/x/vec2/abc/src/vec2.tl"),
+        "return {}\n",
+    );
+    write(
+        &root.join(".mlua-pkgs/cache/git/x/vec2/abc/tests/vec2_test.tl"),
+        "print(3)\n",
+    );
+    write(
+        &root.join(".mlua-pkgs/vendored/vec2/vec2.tl"),
+        "return {}\n",
+    );
     // build output and other tool state
     write(&root.join("target/debug/gen.tl"), "print(4)\n");
     write(&root.join(".hidden/x_test.tl"), "print(5)\n");
@@ -53,7 +70,10 @@ fn project() -> PathBuf {
 fn collect_tl_skips_packages_build_output_and_dot_dirs() {
     let root = project();
     let files = collect_tl(std::slice::from_ref(&root)).unwrap();
-    assert_eq!(rel(&root, &files), vec!["src/main.tl", "src/util.tl", "tests/util_test.tl"]);
+    assert_eq!(
+        rel(&root, &files),
+        vec!["src/main.tl", "src/util.tl", "tests/util_test.tl"]
+    );
 }
 
 #[test]

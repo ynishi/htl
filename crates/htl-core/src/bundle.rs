@@ -105,9 +105,19 @@ impl Bundle {
             };
             let name = String::from_utf8(take_bytes(&mut cur)?.to_vec())?;
             let payload = take_bytes(&mut cur)?.to_vec();
-            modules.push(Module { name, kind, payload });
+            modules.push(Module {
+                name,
+                kind,
+                payload,
+            });
         }
-        Ok(Self { entry, fingerprint, htl_version, host_modules, modules })
+        Ok(Self {
+            entry,
+            fingerprint,
+            htl_version,
+            host_modules,
+            modules,
+        })
     }
 
     fn decode_v1(mut cur: &[u8]) -> Result<Self> {
@@ -117,9 +127,17 @@ impl Bundle {
         for _ in 0..count {
             let name = String::from_utf8(take_bytes(&mut cur)?.to_vec())?;
             let payload = take_bytes(&mut cur)?.to_vec();
-            modules.push(Module { name, kind: Kind::Bytecode, payload });
+            modules.push(Module {
+                name,
+                kind: Kind::Bytecode,
+                payload,
+            });
         }
-        Ok(Self { entry, modules, ..Default::default() })
+        Ok(Self {
+            entry,
+            modules,
+            ..Default::default()
+        })
     }
 }
 
@@ -163,7 +181,11 @@ pub fn describe_fingerprint(fp: &[u8]) -> String {
         return format!("{} byte(s)", fp.len());
     }
     let ver = fp[4];
-    let endian = if fp.len() >= 23 && fp[15] == 0x78 { "little-endian" } else { "big-endian" };
+    let endian = if fp.len() >= 23 && fp[15] == 0x78 {
+        "little-endian"
+    } else {
+        "big-endian"
+    };
     format!(
         "Lua {}.{}, format {}, sizeof(Instruction)={} sizeof(Integer)={} sizeof(Number)={}, {endian}",
         ver >> 4,

@@ -16,7 +16,7 @@
 //! cargo bench -p htl-cli --bench cached_check
 //! ```
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -61,7 +61,10 @@ fn project(n: usize) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
         "htl-cli-bench-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     write(&root.join("htl.toml"), "[check]\n");
     write(

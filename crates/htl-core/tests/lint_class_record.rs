@@ -45,7 +45,10 @@ fn off_by_default() {
     let dir = scratch("default");
     write(&dir.join("c.tl"), SRC);
     let lints = lints_of(&dir, "c.tl", None);
-    assert!(!lints.iter().any(|l| l.contains("class-record")), "{lints:?}");
+    assert!(
+        !lints.iter().any(|l| l.contains("class-record")),
+        "{lints:?}"
+    );
 }
 
 #[test]
@@ -56,8 +59,23 @@ fn flags_records_with_metamethods_including_nested() {
         .into_iter()
         .filter(|l| l.contains("class-record"))
         .collect();
-    assert!(lints.iter().any(|l| l.contains("record Actor declares metamethod(s) __index")), "{lints:?}");
-    assert!(lints.iter().any(|l| l.contains("record game.Vec declares metamethod(s) __add")), "{lints:?}");
-    assert!(!lints.iter().any(|l| l.contains("Pos") || l.contains("Plain")), "plain records flagged: {lints:?}");
+    assert!(
+        lints
+            .iter()
+            .any(|l| l.contains("record Actor declares metamethod(s) __index")),
+        "{lints:?}"
+    );
+    assert!(
+        lints
+            .iter()
+            .any(|l| l.contains("record game.Vec declares metamethod(s) __add")),
+        "{lints:?}"
+    );
+    assert!(
+        !lints
+            .iter()
+            .any(|l| l.contains("Pos") || l.contains("Plain")),
+        "plain records flagged: {lints:?}"
+    );
     assert_eq!(lints.len(), 2, "{lints:?}");
 }

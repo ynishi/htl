@@ -48,7 +48,13 @@ impl FixJson {
             edits: f
                 .edits
                 .iter()
-                .map(|e| EditJson { line: e.line, col: e.col, end_line: e.end_line, end_col: e.end_col, text: e.text.clone() })
+                .map(|e| EditJson {
+                    line: e.line,
+                    col: e.col,
+                    end_line: e.end_line,
+                    end_col: e.end_col,
+                    text: e.text.clone(),
+                })
                 .collect(),
         }
     }
@@ -58,14 +64,31 @@ impl FixJson {
 /// that does not have that shape keeps its whole text as the message.
 pub fn parse_diag(severity: &'static str, text: &str) -> Diagnostic {
     let mut parts = text.splitn(4, ':');
-    if let (Some(file), Some(l), Some(c), Some(msg)) = (parts.next(), parts.next(), parts.next(), parts.next())
+    if let (Some(file), Some(l), Some(c), Some(msg)) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
         && let (Ok(line), Ok(col)) = (l.trim().parse::<usize>(), c.trim().parse::<usize>())
     {
         let (message, rule) = split_rule(msg.trim_start());
-        return Diagnostic { severity, file: file.to_string(), line, col, rule, message, fix: None };
+        return Diagnostic {
+            severity,
+            file: file.to_string(),
+            line,
+            col,
+            rule,
+            message,
+            fix: None,
+        };
     }
     let (message, rule) = split_rule(text);
-    Diagnostic { severity, file: String::new(), line: 0, col: 0, rule, message, fix: None }
+    Diagnostic {
+        severity,
+        file: String::new(),
+        line: 0,
+        col: 0,
+        rule,
+        message,
+        fix: None,
+    }
 }
 
 /// Lint lines end with ` [htl <rule>]`.
@@ -96,7 +119,11 @@ pub struct Sink {
 
 impl Sink {
     pub fn new(json: bool) -> Self {
-        Self { json, diagnostics: Vec::new(), recorded: Vec::new() }
+        Self {
+            json,
+            diagnostics: Vec::new(),
+            recorded: Vec::new(),
+        }
     }
 
     pub fn diag(&mut self, severity: &'static str, text: &str) {
@@ -238,7 +265,15 @@ impl TestFile {
             passed: rep.passed,
             failed: rep.failed,
             failures: rep.failures.clone(),
-            tests: rep.tests.iter().map(|t| TestCase { name: t.name.clone(), ok: t.ok, ms: t.ms }).collect(),
+            tests: rep
+                .tests
+                .iter()
+                .map(|t| TestCase {
+                    name: t.name.clone(),
+                    ok: t.ok,
+                    ms: t.ms,
+                })
+                .collect(),
             duration_ms: rep.duration_ms,
             snapshots_written: rep.snapshots_written.clone(),
             snapshots_updated: rep.snapshots_updated.clone(),

@@ -37,8 +37,14 @@ fn check_all(dir: &Path, names: &[&str]) -> Vec<(PathBuf, CheckInfo)> {
 #[test]
 fn two_file_cycle_is_reported_once() {
     let dir = scratch("ab");
-    write(&dir.join("a.tl"), "local b = require(\"b\")\nlocal record a\nend\nfunction a.f(): integer return 1 end\nprint(b)\nreturn a\n");
-    write(&dir.join("b.tl"), "local a = require(\"a\")\nlocal record b\nend\nprint(a)\nreturn b\n");
+    write(
+        &dir.join("a.tl"),
+        "local b = require(\"b\")\nlocal record a\nend\nfunction a.f(): integer return 1 end\nprint(b)\nreturn a\n",
+    );
+    write(
+        &dir.join("b.tl"),
+        "local a = require(\"a\")\nlocal record b\nend\nprint(a)\nreturn b\n",
+    );
     let infos = check_all(&dir, &["a.tl", "b.tl"]);
     let cycles = require_cycles(&infos);
     assert_eq!(cycles.len(), 1, "{cycles:?}");
@@ -51,9 +57,18 @@ fn two_file_cycle_is_reported_once() {
 #[test]
 fn dag_has_no_cycles() {
     let dir = scratch("dag");
-    write(&dir.join("defs.tl"), "local record defs\n   record P\n      x: number\n   end\nend\nreturn defs\n");
-    write(&dir.join("grid.tl"), "local defs = require(\"defs\")\nlocal record grid\nend\nfunction grid.at(p: defs.P): number return p.x end\nreturn grid\n");
-    write(&dir.join("world.tl"), "local defs = require(\"defs\")\nlocal grid = require(\"grid\")\nlocal record world\nend\nfunction world.go(p: defs.P): number return grid.at(p) end\nreturn world\n");
+    write(
+        &dir.join("defs.tl"),
+        "local record defs\n   record P\n      x: number\n   end\nend\nreturn defs\n",
+    );
+    write(
+        &dir.join("grid.tl"),
+        "local defs = require(\"defs\")\nlocal record grid\nend\nfunction grid.at(p: defs.P): number return p.x end\nreturn grid\n",
+    );
+    write(
+        &dir.join("world.tl"),
+        "local defs = require(\"defs\")\nlocal grid = require(\"grid\")\nlocal record world\nend\nfunction world.go(p: defs.P): number return grid.at(p) end\nreturn world\n",
+    );
     let infos = check_all(&dir, &["defs.tl", "grid.tl", "world.tl"]);
     assert!(require_cycles(&infos).is_empty());
 }
@@ -61,11 +76,24 @@ fn dag_has_no_cycles() {
 #[test]
 fn three_file_cycle_names_the_loop() {
     let dir = scratch("abc");
-    write(&dir.join("a.tl"), "local b = require(\"b\")\nprint(b)\nreturn {}\n");
-    write(&dir.join("b.tl"), "local c = require(\"c\")\nprint(c)\nreturn {}\n");
-    write(&dir.join("c.tl"), "local a = require(\"a\")\nprint(a)\nreturn {}\n");
+    write(
+        &dir.join("a.tl"),
+        "local b = require(\"b\")\nprint(b)\nreturn {}\n",
+    );
+    write(
+        &dir.join("b.tl"),
+        "local c = require(\"c\")\nprint(c)\nreturn {}\n",
+    );
+    write(
+        &dir.join("c.tl"),
+        "local a = require(\"a\")\nprint(a)\nreturn {}\n",
+    );
     let infos = check_all(&dir, &["a.tl", "b.tl", "c.tl"]);
     let cycles = require_cycles(&infos);
     assert_eq!(cycles.len(), 1, "{cycles:?}");
-    assert!(cycles[0].contains("a.tl -> b.tl -> c.tl -> a.tl"), "{}", cycles[0]);
+    assert!(
+        cycles[0].contains("a.tl -> b.tl -> c.tl -> a.tl"),
+        "{}",
+        cycles[0]
+    );
 }

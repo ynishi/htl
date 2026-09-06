@@ -29,7 +29,7 @@
 //! cargo bench -p htl-core --bench check -- check/module-size
 //! ```
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use htl_core::Htl;
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
@@ -93,7 +93,10 @@ fn filler(record: &str, fns: usize) -> String {
 /// Shape: `util` is required by everything; `core_0..core_3` require `util`; the rest
 /// are `feat_i`, each requiring `util` and one `core`.
 fn project(n: usize, fns: usize) -> (PathBuf, Vec<PathBuf>) {
-    assert!(n > CORES + 1, "n must leave room for the leaf and the cores");
+    assert!(
+        n > CORES + 1,
+        "n must leave room for the leaf and the cores"
+    );
     let dir = scratch(&format!("proj{n}x{fns}"));
     let mut files = Vec::with_capacity(n);
 
@@ -157,7 +160,11 @@ fn check_all(h: &Htl, dir: &Path, files: &[PathBuf]) {
     h.add_path(dir).unwrap();
     for f in files {
         let info = h.check(f).unwrap();
-        assert!(info.ok(), "bench fixture must type-check: {:?}", info.errors);
+        assert!(
+            info.ok(),
+            "bench fixture must type-check: {:?}",
+            info.errors
+        );
         black_box(&info);
     }
 }

@@ -160,11 +160,18 @@ impl TealResolver {
     /// `root` + `root/src` visible to the checker. `root` is the directory holding
     /// `htl.toml`. The `contract-unenforced` lint of `htl check` recognises this call.
     pub fn for_contract(root: &Path, c: &crate::config::Contract) -> Result<Vec<Self>, InitError> {
-        c.dirs(root).into_iter().map(|d| Self::for_contract_dir(root, &d, c)).collect()
+        c.dirs(root)
+            .into_iter()
+            .map(|d| Self::for_contract_dir(root, &d, c))
+            .collect()
     }
 
     /// One resolver for the concrete contract directory `dir` (see [`for_contract`](Self::for_contract)).
-    pub fn for_contract_dir(root: &Path, dir: &Path, c: &crate::config::Contract) -> Result<Self, InitError> {
+    pub fn for_contract_dir(
+        root: &Path,
+        dir: &Path,
+        c: &crate::config::Contract,
+    ) -> Result<Self, InitError> {
         let mut r = Self::new_symlink_aware(dir)?
             .expect_type(c.type_path.clone())
             .exclude_modules(c.exclude.iter().cloned())
@@ -181,7 +188,9 @@ impl TealResolver {
 
     /// Declared fields of the expected record that are nil in `value`.
     fn missing_fields(&self, h: &Table, value: &Value) -> mlua::Result<Vec<String>> {
-        let (Some(tp), true) = (&self.expect_type, self.require_fields) else { return Ok(Vec::new()) };
+        let (Some(tp), true) = (&self.expect_type, self.require_fields) else {
+            return Ok(Vec::new());
+        };
         let f: Function = h.get("record_fields")?;
         let names: Option<Vec<String>> = f
             .call::<Option<Table>>(tp.as_str())?
@@ -206,7 +215,9 @@ impl TealResolver {
 
     /// Check `local m: <T> = require("<name>")` against the checker; `None` when it holds.
     fn expectation_errors(&self, h: &Table, name: &str) -> mlua::Result<Option<Vec<String>>> {
-        let Some(tp) = &self.expect_type else { return Ok(None) };
+        let Some(tp) = &self.expect_type else {
+            return Ok(None);
+        };
         let (module, _) = tp.split_once('.').ok_or_else(|| {
             mlua::Error::external(format!(
                 "TealResolver::expect_type: expected \"<module>.<Type>\", got {tp:?}"
@@ -222,8 +233,11 @@ impl TealResolver {
         // Fresh checker env per stub: several resolvers may serve a module of the same
         // name (one per contract dir) and must not share a cached type for it.
         let check: Function = h.get("check_stub")?;
-        let errors: Table = check.call((stub.as_str(), format!("<expect {tp} for module '{name}'>")))?;
-        let msgs: Vec<String> = errors.sequence_values::<String>().collect::<mlua::Result<_>>()?;
+        let errors: Table =
+            check.call((stub.as_str(), format!("<expect {tp} for module '{name}'>")))?;
+        let msgs: Vec<String> = errors
+            .sequence_values::<String>()
+            .collect::<mlua::Result<_>>()?;
         Ok(if msgs.is_empty() { None } else { Some(msgs) })
     }
 
@@ -268,12 +282,22 @@ impl TealResolver {
         false
     }
 
-    fn load_teal(&self, lua: &Lua, h: &Table, src: &str, resolved: &Path, name: &str) -> mlua::Result<Value> {
+    fn load_teal(
+        &self,
+        lua: &Lua,
+        h: &Table,
+        src: &str,
+        resolved: &Path,
+        name: &str,
+    ) -> mlua::Result<Value> {
         let gen_fn: Function = h.get("gen_string")?;
-        let (code, info): (Option<String>, Table) = gen_fn.call((src, resolved.to_string_lossy().as_ref()))?;
+        let (code, info): (Option<String>, Table) =
+            gen_fn.call((src, resolved.to_string_lossy().as_ref()))?;
         let Some(code) = code else {
             let errors: Table = info.get("errors")?;
-            let msgs: Vec<String> = errors.sequence_values::<String>().collect::<mlua::Result<_>>()?;
+            let msgs: Vec<String> = errors
+                .sequence_values::<String>()
+                .collect::<mlua::Result<_>>()?;
             return Err(mlua::Error::external(TealResolveError::TypeCheck {
                 module: name.to_string(),
                 errors: msgs,
@@ -322,7 +346,11 @@ pub const LOCKFILE_NAME: &str = "mlua-pkg.lock";
 impl Project {
     /// Walk up from `start` (a file or directory) looking for `mlua-pkg.toml`.
     pub fn find(start: &Path) -> Option<Self> {
-        let mut dir = if start.is_dir() { start.to_path_buf() } else { crate::parent_dir(start) };
+        let mut dir = if start.is_dir() {
+            start.to_path_buf()
+        } else {
+            crate::parent_dir(start)
+        };
         if let Ok(abs) = std::fs::canonicalize(&dir) {
             dir = abs;
         }
@@ -352,7 +380,10 @@ impl Project {
             for dep in m.deps.values() {
                 if let Some(td) = &dep.target_dir {
                     let abs = root.join(td);
-                    let parent = abs.parent().map(Path::to_path_buf).unwrap_or_else(|| root.to_path_buf());
+                    let parent = abs
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| root.to_path_buf());
                     if !target_dirs.contains(&parent) {
                         target_dirs.push(parent);
                     }
@@ -384,7 +415,10 @@ impl Project {
     /// mlua-pkg's own resolver for plain `.lua` inside vendored deps.
     pub fn vendored_resolver(&self) -> anyhow::Result<mlua_pkg::resolvers::VendoredResolver> {
         if self.installed() {
-            Ok(mlua_pkg::resolvers::VendoredResolver::from_lockfile(&self.lockfile, &self.vendored)?)
+            Ok(mlua_pkg::resolvers::VendoredResolver::from_lockfile(
+                &self.lockfile,
+                &self.vendored,
+            )?)
         } else {
             let _ = std::fs::create_dir_all(&self.vendored);
             Ok(mlua_pkg::resolvers::VendoredResolver::new(&self.vendored)?)
@@ -411,7 +445,10 @@ impl Project {
 /// host and `htl check` enforce the same contracts from the same source. `root` is the
 /// directory holding `htl.toml` (the path [`HtlConfig::find`](crate::config::HtlConfig::find)
 /// returns, minus the file name). Add them to a `Registry` before the plain resolvers.
-pub fn contract_resolvers(root: &Path, cfg: &crate::config::HtlConfig) -> Result<Vec<TealResolver>, InitError> {
+pub fn contract_resolvers(
+    root: &Path,
+    cfg: &crate::config::HtlConfig,
+) -> Result<Vec<TealResolver>, InitError> {
     let mut out = Vec::new();
     for c in &cfg.contract {
         for mut r in TealResolver::for_contract(root, c)? {
@@ -446,13 +483,27 @@ impl crate::Htl {
 /// Error raised when a `.tl` module fails the type check at `require` time.
 #[derive(Debug)]
 pub enum TealResolveError {
-    TypeCheck { module: String, errors: Vec<String> },
+    TypeCheck {
+        module: String,
+        errors: Vec<String>,
+    },
     /// The module type-checks on its own but is not assignable to the resolver's
     /// [`expect_type`](TealResolver::expect_type).
-    Expectation { module: String, expected: String, errors: Vec<String> },
+    Expectation {
+        module: String,
+        expected: String,
+        errors: Vec<String>,
+    },
     /// [`require_fields`](TealResolver::require_fields): declared fields absent at run time.
-    MissingFields { module: String, expected: String, fields: Vec<String> },
-    Read { module: String, source: ReadError },
+    MissingFields {
+        module: String,
+        expected: String,
+        fields: Vec<String>,
+    },
+    Read {
+        module: String,
+        source: ReadError,
+    },
 }
 
 impl std::fmt::Display for TealResolveError {
@@ -465,7 +516,11 @@ impl std::fmt::Display for TealResolveError {
                 }
                 Ok(())
             }
-            Self::Expectation { module, expected, errors } => {
+            Self::Expectation {
+                module,
+                expected,
+                errors,
+            } => {
                 write!(f, "module '{module}' does not satisfy {expected}:")?;
                 for e in errors {
                     write!(f, "\n  {e}")?;
@@ -476,7 +531,11 @@ impl std::fmt::Display for TealResolveError {
                      to get field-level errors with line numbers"
                 )
             }
-            Self::MissingFields { module, expected, fields } => write!(
+            Self::MissingFields {
+                module,
+                expected,
+                fields,
+            } => write!(
                 f,
                 "module '{module}' is missing required field(s) of {expected}: {} (every field of that record must be non-nil)",
                 fields.join(", ")
@@ -533,26 +592,28 @@ impl Resolver for TealResolver {
                         }
                         // Declaration-only module: nothing to run. Hand require a table whose
                         // lookups explain that the implementation lives elsewhere.
-                        return Some(
-                            h.get::<Function>("type_only_module")
-                                .and_then(|f| f.call::<Value>((name, file.resolved_path.to_string_lossy().as_ref()))),
-                        );
+                        return Some(h.get::<Function>("type_only_module").and_then(|f| {
+                            f.call::<Value>((name, file.resolved_path.to_string_lossy().as_ref()))
+                        }));
                     }
-                    let loaded = match self.load_teal(lua, &h, &file.content, &file.resolved_path, name) {
-                        Ok(v) => v,
-                        Err(e) => return Some(Err(e)),
-                    };
+                    let loaded =
+                        match self.load_teal(lua, &h, &file.content, &file.resolved_path, name) {
+                            Ok(v) => v,
+                            Err(e) => return Some(Err(e)),
+                        };
                     if !self.held(name) {
                         return Some(Ok(loaded));
                     }
                     match self.missing_fields(&h, &loaded) {
                         Ok(m) if m.is_empty() => return Some(Ok(loaded)),
                         Ok(missing) => {
-                            return Some(Err(mlua::Error::external(TealResolveError::MissingFields {
-                                module: name.to_string(),
-                                expected: self.expect_type.clone().unwrap_or_default(),
-                                fields: missing,
-                            })));
+                            return Some(Err(mlua::Error::external(
+                                TealResolveError::MissingFields {
+                                    module: name.to_string(),
+                                    expected: self.expect_type.clone().unwrap_or_default(),
+                                    fields: missing,
+                                },
+                            )));
                         }
                         Err(e) => return Some(Err(e)),
                     }
