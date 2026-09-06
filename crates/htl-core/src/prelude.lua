@@ -465,7 +465,13 @@ end
 
 -- opts.lints = false skips the lint pass (runtime `require` of an already type-checked
 -- module: nobody reads lints there, and the pass costs more than the check itself).
--- opts.seed = false checks with a cold env (no store).
+-- opts.seed = false checks with a cold env (no store): what is on disk right now, rather
+-- than what the store remembers. A caller that just wrote the file has to ask this way —
+-- tl.check_file returns early when the env already has the file loaded, which a seed puts
+-- there, so a re-check would answer about the version before the write.
+-- opts.store = false leaves the store untouched, for a check whose result may be about a
+-- file that is then reverted: storing it would leave the store describing a file that no
+-- longer says that.
 function H.check(filename, env, opts)
    opts = opts or {}
    env = env or new_env() -- bind first: assert() would also pass its message along as `fd`
@@ -478,7 +484,7 @@ function H.check(filename, env, opts)
    end
    local result, err = tl.check_file(filename, env)
    prof("check", filename, t0)
-   if result then store_from(env) end
+   if result and opts.store ~= false then store_from(env) end
    if not result then
       return { ok = false, errors = { tostring(err) }, warnings = {} }
    end

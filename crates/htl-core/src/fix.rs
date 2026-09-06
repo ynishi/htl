@@ -123,7 +123,12 @@ pub fn fix_file(h: &Htl, path: &Path, opts: &FixOptions) -> Result<FileOutcome> 
         // Write, re-check, keep or revert.
         let target = scratch.as_deref().unwrap_or(path);
         std::fs::write(target, &next).with_context(|| format!("writing {}", target.display()))?;
-        let recheck = h.check(target)?;
+        // Ask about the file that was just written, not about the one the checker's store
+        // remembers. A dry run got the right answer by accident — it writes to a scratch path
+        // no store entry names — while a real run re-checked the path the store knew and was
+        // handed the result from before the write, then reverted a correct fix for leaving
+        // the error count unchanged.
+        let recheck = h.check_written(target)?;
         let new_errors = recheck.errors.len();
         let fixed_errors = applied_idx
             .iter()
@@ -171,7 +176,8 @@ pub fn fix_file(h: &Htl, path: &Path, opts: &FixOptions) -> Result<FileOutcome> 
     out.check = if opts.dry_run && out.contents.is_some() {
         check
     } else {
-        h.check(path)?
+        // Same reason as the re-check above: this file may have been written during the loop.
+        h.check_written(path)?
     };
     Ok(out)
 }
