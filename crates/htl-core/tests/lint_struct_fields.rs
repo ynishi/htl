@@ -40,6 +40,95 @@ fn defs(dir: &Path) {
     );
 }
 
+/// A struct with a short field and a long one, for the two near-miss bounds.
+fn spelling_defs(dir: &Path) {
+    write(
+        &dir.join("defs.tl"),
+        "local record defs\n   ---@struct\n   record MonsterDef\n      id: string\n\
+         \n      color: string\n      hp: integer\n      description: string\n   end\nend\nreturn defs\n",
+    );
+}
+
+/// Type errors are expected here and are the point: a key the record does not declare is
+/// `unknown field`, and this rule is the other half of the same mistake. So the lints are
+/// read without requiring the file to check.
+fn spelled(dir: &Path, literal: &str) -> Vec<String> {
+    write(
+        &dir.join("mod.tl"),
+        &format!("local defs = require(\"defs\")\nlocal m: defs.MonsterDef = {literal}\nreturn m\n"),
+    );
+    let h = Htl::new().unwrap();
+    h.add_path(dir).unwrap();
+    h.check(&dir.join("mod.tl")).unwrap().lints
+}
+
+/// One edit away, so the key that was written is the answer and "mark it optional" is not.
+#[test]
+fn a_misspelled_key_is_named_instead_of_the_standing_advice() {
+    let dir = scratch("typo");
+    spelling_defs(&dir);
+    let lints = spelled(
+        &dir,
+        "{ id = \"x\", colour = \"red\", hp = 1, description = \"d\" }",
+    );
+    assert_eq!(lints.len(), 1, "{lints:?}");
+    assert!(
+        lints[0].contains("is built without color (the literal sets `colour`)"),
+        "{}",
+        lints[0]
+    );
+    assert!(
+        !lints[0].contains("---@optional"),
+        "the advice for a typo is not to mark it optional: {}",
+        lints[0]
+    );
+}
+
+/// Two edits, believable in a name long enough that two is still a small share of it.
+#[test]
+fn a_longer_name_is_matched_two_edits_away() {
+    let dir = scratch("typo-long");
+    spelling_defs(&dir);
+    let lints = spelled(
+        &dir,
+        "{ id = \"x\", color = \"red\", hp = 1, descrption = \"d\" }",
+    );
+    assert_eq!(lints.len(), 1, "{lints:?}");
+    assert!(
+        lints[0].contains("is built without description (the literal sets `descrption`)"),
+        "{}",
+        lints[0]
+    );
+}
+
+#[test]
+fn a_field_simply_left_out_keeps_the_old_message() {
+    let dir = scratch("plain");
+    spelling_defs(&dir);
+    let lints = spelled(&dir, "{ id = \"x\", hp = 1, description = \"d\" }");
+    assert_eq!(lints.len(), 1, "{lints:?}");
+    assert!(
+        lints[0].contains("---@optional"),
+        "nothing to suggest, so the advice stands: {}",
+        lints[0]
+    );
+    assert!(!lints[0].contains("the literal sets"), "{}", lints[0]);
+}
+
+/// An extra key that is nothing like the missing one is not offered as a suggestion.
+#[test]
+fn an_unrelated_extra_key_is_not_offered() {
+    let dir = scratch("unrelated");
+    spelling_defs(&dir);
+    let lints = spelled(
+        &dir,
+        "{ id = \"x\", hp = 1, description = \"d\", weight = 2 }",
+    );
+    assert_eq!(lints.len(), 1, "{lints:?}");
+    assert!(!lints[0].contains("weight"), "{}", lints[0]);
+    assert!(!lints[0].contains("the literal sets"), "{}", lints[0]);
+}
+
 #[test]
 fn a_field_left_out_is_reported_where_the_record_is_built() {
     let dir = scratch("missing");
