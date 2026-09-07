@@ -101,6 +101,30 @@ fn a_longer_name_is_matched_two_edits_away() {
     );
 }
 
+/// Two letters swapped is one of the commonest ways to mistype a name, and plain
+/// Levenshtein charges it two edits — outside the bound for a name this short.
+#[test]
+fn two_letters_swapped_is_one_edit() {
+    let dir = scratch("swap");
+    write(
+        &dir.join("defs.tl"),
+        "local record defs\n   ---@struct\n   record Tag\n      label: string\n      n: integer\n   end\nend\nreturn defs\n",
+    );
+    write(
+        &dir.join("mod.tl"),
+        "local defs = require(\"defs\")\nlocal m: defs.Tag = { lable = \"x\", n = 1 }\nreturn m\n",
+    );
+    let h = Htl::new().unwrap();
+    h.add_path(&dir).unwrap();
+    let lints = h.check(&dir.join("mod.tl")).unwrap().lints;
+    assert_eq!(lints.len(), 1, "{lints:?}");
+    assert!(
+        lints[0].contains("is built without label (the literal sets `lable`)"),
+        "{}",
+        lints[0]
+    );
+}
+
 #[test]
 fn a_field_simply_left_out_keeps_the_old_message() {
     let dir = scratch("plain");
