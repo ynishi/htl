@@ -530,6 +530,48 @@ fn types_dir_is_searched_by_default() {
     assert!(ci.ok(), "source beats the declaration: {:?}", ci.errors);
 }
 
+/// `search_paths` reads as a search order, and `apply_config` has to consult the
+/// directories in that order rather than in the reverse of it: `add_path` prepends, so
+/// adding the list front to back leaves the last entry first. The case it decides is two
+/// declarations of one module — a `.tl` beats a `.d.tl` wherever the two sit, so the
+/// order is invisible until neither is a source.
+#[test]
+fn the_search_order_is_the_one_search_paths_states() {
+    let root = scratch("search-order");
+    write(&root.join("htl.toml"), "[check]\npaths = [\"sdk\"]\n");
+    // The same module declared three times, each saying something different about the
+    // return type of `connect`, so the error names the one that was read.
+    for (dir, ret) in [("src", "string"), ("types", "boolean"), ("sdk", "integer")] {
+        write(
+            &root.join(dir).join("xlib.d.tl"),
+            &format!("local record xlib\n   connect: function(string): {ret}\nend\nreturn xlib\n"),
+        );
+    }
+    write(
+        &root.join("src/use.tl"),
+        "local xlib = require(\"xlib\")\nlocal n: nil = xlib.connect(\"h\")\nprint(n)\n",
+    );
+    let (_, cfg) = HtlConfig::find(&root).unwrap().unwrap();
+    assert_eq!(
+        cfg.search_paths(&root),
+        vec![
+            root.clone(),
+            root.join("src"),
+            root.join("types"),
+            root.join("sdk")
+        ],
+        "the list itself is in search order"
+    );
+
+    let h = Htl::new().unwrap();
+    h.apply_config(&root, &cfg).unwrap();
+    let errors = h.check(&root.join("src/use.tl")).unwrap().errors;
+    assert!(
+        errors.iter().any(|e| e.contains("got string")),
+        "src/ is consulted before types/ and the [check] path: {errors:?}"
+    );
+}
+
 #[test]
 fn source_beats_a_stale_declaration_wherever_it_sits_on_the_path() {
     let root = scratch("stale-decl");

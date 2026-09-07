@@ -782,6 +782,32 @@ function H.resolve_module(name)
    return found, lua_path
 end
 
+-- Every `<name>.d.tl` reachable on the current `package.path`, in the order the path is
+-- consulted. `package.searchpath` answers with the first hit and says nothing about the
+-- rest, which is the whole problem: two declarations of one module means one is read and
+-- the other is not, decided by a position nobody wrote down.
+function H.declaration_sites(name)
+   local out, seen = {}, {}
+   local relative = (name:gsub("%.", "/"))
+   for template in package.path:gmatch("[^;]+") do
+      -- The path templates end in `.lua` (tl rewrites the suffix when it searches);
+      -- anything else on the path is not ours to interpret.
+      local decl = template:gsub("%.lua$", ".d.tl")
+      if decl ~= template then
+         local p = (decl:gsub("%?", relative))
+         if not seen[p] then
+            seen[p] = true
+            local fd = io.open(p, "r")
+            if fd then
+               fd:close()
+               out[#out + 1] = p
+            end
+         end
+      end
+   end
+   return out
+end
+
 -- Statements of a file as { first_line, last_line } ranges, for coverage. Every
 -- statement in every block (function bodies inside expressions included); an `if`
 -- chain contributes each condition's line as its own range. Type declarations are

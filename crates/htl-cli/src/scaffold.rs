@@ -118,9 +118,11 @@ fn t_types_readme() -> String {
      Hand-written `.d.tl` declarations for modules the host provides at run time and\n\
      that ship no declaration of their own (a Rust crate re-exported to Lua, a runtime\n\
      SDK): `xlib.d.tl` here makes `require(\"xlib\")` typed in `htl check`, `htl test` and\n\
-     `include_tl!`. Searched after `src/`; a `.tl` source anywhere on the path beats a\n\
-     declaration, so nothing here can shadow an implementation. Declarations generated\n\
-     from Rust (`#[host_module]`) are written next to the scripts, not here.\n"
+     `include_tl!`. Consulted after the project root and `src/`, before `[check] paths`;\n\
+     a `.tl` source anywhere on the path beats a declaration, so nothing here can shadow\n\
+     an implementation, and a second declaration of the same module is reported\n\
+     (`duplicate-declaration`) rather than silently losing to one of them. Declarations\n\
+     generated from Rust (`#[host_module]`) are written next to the scripts, not here.\n"
         .to_string()
 }
 

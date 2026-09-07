@@ -312,13 +312,16 @@ impl TealResolver {
             return Ok(());
         }
         let f: Function = h.get("add_path")?;
-        if let Some(root) = &self.root {
-            f.call::<()>(root.to_string_lossy().as_ref())?;
-        }
-        for p in &self.checker_paths {
+        // Back to front: `add_path` prepends, so this leaves the sandbox root consulted
+        // first (a module resolving its siblings) and the project's paths behind it, in
+        // the order `search_paths` states. Adding them front to back reversed both.
+        for p in self.checker_paths.iter().rev() {
             if p.is_dir() {
                 f.call::<()>(p.to_string_lossy().as_ref())?;
             }
+        }
+        if let Some(root) = &self.root {
+            f.call::<()>(root.to_string_lossy().as_ref())?;
         }
         let _ = lua;
         Ok(())
