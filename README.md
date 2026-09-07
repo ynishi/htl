@@ -44,7 +44,8 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 | `htl fmt [paths] [--check] [--indent N]` | whitespace formatter (indentation from the syntax tree, blank lines, trailing space) |
 | `htl gen <file.tl> [-o out.lua]` | readable Lua, the escape hatch out of htl |
 | `htl build <entry.tl> -o app.hb [--debug] [--source] [--extra a,b] [--host x,y]` | link the entry's `require` closure into one bundle (see Bundles) |
-| `htl pkg <args>` | passthrough to `mlua-pkg` at the nearest `mlua-pkg.toml` root |
+| `htl pkg <args>` | passthrough to `mlua-pkg` at the nearest `mlua-pkg.toml` root; after a successful run, the deps' own `types/` are copied into the project's (see `types/`) |
+| `htl types add <library> [--from dir] [--force]` | the declarations a library never shipped, from [teal-types](https://github.com/teal-language/teal-types), into `types/` with the commit they came from recorded beside each |
 | `htl cache status [path] [--entries]` / `htl cache clear [path]` | report what the store holds, or empty it (see Caching) |
 | `htl dts [dir]` | write the `.d.tl` files this project declares: from Rust source, the ones `#[host_module]` / `#[derive(TealRecord)]` ask for, no build needed; from Teal, the module each `---@contract` type is declared in. `check` / `run` / `test` / `build` do this automatically; exits non-zero when something it was asked to write could not be |
 
@@ -368,14 +369,27 @@ checker would not look (an SDK cache, a mods dir): the CLI, `include_tl!` and
 declarations the module's author did not ship), searched without any configuration;
 `htl new` creates it.
 
-Two kinds arrive there. The ones written by hand, and the ones a dependency published:
-a package keeps its own declarations at `types/` in its root, which is outside the entry
-directory `require` resolves through, so `htl pkg` copies them in and writes beside each
-one the dep and the revision it came from. Copying rather than searching the installed
-deps is what makes them survive a fresh clone — `.htl/` is gitignored and empty until
-someone installs, `types/` is committed. A name `types/` already has is reported and left
-alone: two libraries publishing a module of the same name is a real situation, and there
-is no registry to arbitrate it with.
+Three kinds arrive there. The ones written by hand; the ones a dependency published; and
+the ones for a library that published none of its own.
+
+A package keeps its own declarations at `types/` in its root, which is outside the entry
+directory `require` resolves through, so `htl pkg` copies them in. `htl types add
+<library>` is the other half: teal-types is where the Teal ecosystem collects declarations
+for libraries that ship none, as `types/<library>/<module>.d.tl`, and `add` takes one
+library's worth. The library's own directory is dropped and the path below it kept, since
+that path is the module name — `socket/http.d.tl` stays `require("socket.http")`.
+
+Both write a `.src` note beside each file: what published it, at which commit, and the
+path it had there. Nothing else records that. `luasocket-tl-type` is versioned `0.0.2-1`
+against a luasocket at 3.x, its rockspec declares no dependency on luasocket, and its
+source names no revision — so without the note, a declaration carries no evidence of what
+it was written against.
+
+Copying rather than searching the installed deps is what makes them survive a fresh clone:
+`.htl/` is gitignored and empty until someone installs, `types/` is committed. A name
+`types/` already has is reported and left alone (`--force` replaces it): two libraries
+publishing a module of the same name is a real situation, and there is no registry to
+arbitrate it with.
 
 Source beats declaration: when both `defs.tl` and a `defs.d.tl` are reachable, the
 checker reads the `.tl`, wherever the two sit on the path (Teal's own order is `.d.tl`

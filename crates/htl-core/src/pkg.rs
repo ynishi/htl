@@ -529,35 +529,75 @@ impl Project {
         let lock = mlua_pkg::lockfile::Lockfile::read(&self.lockfile)?;
         let dest = self.root.join("types");
         for p in &lock.pkg {
-            let Some(published) = self.package_root(p).map(|r| r.join("types")) else {
+            let Some(root) = self.package_root(p) else {
                 continue;
             };
-            if !published.is_dir() {
-                continue;
-            }
-            let mut found: Vec<PathBuf> = std::fs::read_dir(&published)?
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|f| crate::is_declaration(f))
-                .collect();
-            found.sort();
-            for src in found {
-                let Some(name) = src.file_name() else { continue };
-                let target = dest.join(name);
-                if target.exists() {
-                    out.taken.push((target, p.name.clone()));
-                    continue;
-                }
-                std::fs::create_dir_all(&dest)?;
-                std::fs::copy(&src, &target)?;
-                // Beside it, the one thing the Lua ecosystem does not record: which
-                // revision of which dep this declaration was taken from. Without it,
-                // staleness is not a question anyone can ask.
-                let mut note = target.clone().into_os_string();
-                note.push(".src");
-                std::fs::write(PathBuf::from(note), format!("{} {}\n", p.name, p.sha))?;
-                out.written.push((target, p.name.clone()));
-            }
+            copy_declarations(
+                &root.join("types"),
+                &dest,
+                &Origin {
+                    name: p.name.clone(),
+                    sha: p.sha.clone(),
+                    under: PathBuf::from("types"),
+                },
+                false,
+                &mut out,
+            )?;
         }
+        Ok(out)
+    }
+
+    /// Copy one library's declarations out of teal-types into `types/`.
+    ///
+    /// teal-types is where the Teal ecosystem collects declarations for libraries that
+    /// ship none of their own, laid out as `types/<library>/<module>.d.tl`. Nothing there
+    /// ties a declaration to a version of the library it describes: the rocks are
+    /// versioned on their own count, declare no dependency on the library, and name no
+    /// revision of it. So the `.src` note beside each file is the whole of the record —
+    /// what was taken, and from which commit of the collection.
+    pub fn add_types(&self, library: &str, force: bool) -> anyhow::Result<TypesSync> {
+        let cache = pkgs_dir(&self.root).cache();
+        std::fs::create_dir_all(&cache)?;
+        let fetcher = mlua_pkg::fetcher::GitFetcher::new(cache);
+        let got = mlua_pkg::fetcher::Fetcher::fetch(
+            &fetcher,
+            &mlua_pkg::manifest::Dep {
+                git: TEAL_TYPES_GIT.to_string(),
+                tag: None,
+                rev: None,
+                branch: None,
+                entry: None,
+                target_dir: None,
+            },
+        )?;
+        self.add_types_from(&got.cache_path, library, &got.sha, force)
+    }
+
+    /// The same from a checkout already on disk, recording `sha` as the revision it is at.
+    pub fn add_types_from(
+        &self,
+        checkout: &Path,
+        library: &str,
+        sha: &str,
+        force: bool,
+    ) -> anyhow::Result<TypesSync> {
+        let under = Path::new("types").join(library);
+        let published = checkout.join(&under);
+        if !published.is_dir() {
+            anyhow::bail!("{}", no_such_library(checkout, library));
+        }
+        let mut out = TypesSync::default();
+        copy_declarations(
+            &published,
+            &self.root.join("types"),
+            &Origin {
+                name: TEAL_TYPES_NAME.to_string(),
+                sha: sha.to_string(),
+                under,
+            },
+            force,
+            &mut out,
+        )?;
         Ok(out)
     }
 
@@ -579,14 +619,113 @@ impl Project {
     }
 }
 
-/// What [`Project::sync_types`] did: one entry per declaration a dep publishes.
+/// Where the Teal ecosystem collects declarations for libraries that ship none of their
+/// own: `types/<library>/<module>.d.tl`, published to LuaRocks one library at a time as
+/// `<library>-tl-type`.
+pub const TEAL_TYPES_GIT: &str = "https://github.com/teal-language/teal-types";
+
+/// What the `.src` notes call it.
+const TEAL_TYPES_NAME: &str = "teal-types";
+
+/// What [`Project::sync_types`] and [`Project::add_types`] did: one entry per declaration
+/// they were offered.
 #[derive(Debug, Default)]
 pub struct TypesSync {
-    /// Written into `types/`, with the dep it came from.
+    /// Written into `types/`, with what published it.
     pub written: Vec<(PathBuf, String)>,
-    /// Left as it was, because `types/` already had that name — with the dep that offered
-    /// one too.
+    /// Left as it was, because `types/` already had that name — with what offered one too.
     pub taken: Vec<(PathBuf, String)>,
+}
+
+/// Where a declaration came from, as the `.src` note beside it records it: what published
+/// it, at which revision, and the path it had there.
+struct Origin {
+    name: String,
+    sha: String,
+    under: PathBuf,
+}
+
+/// Copy every `.d.tl` under `from` into `to`, keeping the path below `from`.
+///
+/// Keeping it is what keeps the module name: `socket/http.d.tl` is
+/// `require("socket.http")`, and flattening it into `types/http.d.tl` would rename the
+/// module to one the library never had.
+fn copy_declarations(
+    from: &Path,
+    to: &Path,
+    origin: &Origin,
+    force: bool,
+    out: &mut TypesSync,
+) -> anyhow::Result<()> {
+    if !from.is_dir() {
+        return Ok(());
+    }
+    let mut found: Vec<PathBuf> = walkdir::WalkDir::new(from)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+        .map(walkdir::DirEntry::into_path)
+        .filter(|p| crate::is_declaration(p))
+        .collect();
+    found.sort();
+    for src in found {
+        let rel = src.strip_prefix(from).unwrap_or(&src).to_path_buf();
+        let target = to.join(&rel);
+        if target.exists() && !force {
+            out.taken.push((target, origin.name.clone()));
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(&src, &target)?;
+        // Beside it, the one thing the Lua ecosystem records nowhere: which revision of
+        // what this declaration was taken from. Without it, staleness is not a question
+        // anyone can ask.
+        let mut note = target.clone().into_os_string();
+        note.push(".src");
+        std::fs::write(
+            PathBuf::from(note),
+            format!(
+                "{} {} {}\n",
+                origin.name,
+                origin.sha,
+                origin.under.join(&rel).display()
+            ),
+        )?;
+        out.written.push((target, origin.name.clone()));
+    }
+    Ok(())
+}
+
+/// What to say when the collection has no such library: the names it does have that look
+/// related, or how many it holds at all — a list of every one of them is not an error
+/// message.
+fn no_such_library(checkout: &Path, library: &str) -> String {
+    let mut names: Vec<String> = std::fs::read_dir(checkout.join("types"))
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    let near: Vec<&str> = names
+        .iter()
+        .filter(|n| n.contains(library) || library.contains(n.as_str()))
+        .map(String::as_str)
+        .collect();
+    if near.is_empty() {
+        format!(
+            "teal-types has no declarations for `{library}` ({} libraries there)",
+            names.len()
+        )
+    } else {
+        format!(
+            "teal-types has no declarations for `{library}` — it has {}",
+            near.join(", ")
+        )
+    }
 }
 
 /// One [`TealResolver`] per `[[contract]]` in `htl.toml`, in declaration order, so the

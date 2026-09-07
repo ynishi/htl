@@ -29,6 +29,22 @@ enum CacheModeArg {
 }
 
 #[derive(Subcommand)]
+enum TypesCmd {
+    /// Copy a library's declarations from teal-types into `types/`, and record which
+    /// commit they came from
+    Add {
+        /// The library as teal-types names it (`luasocket`, `lpeg`, …)
+        library: String,
+        /// Take them from a checkout of teal-types already on disk instead of fetching
+        #[arg(long)]
+        from: Option<PathBuf>,
+        /// Replace declarations that are already in `types/`
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum CacheCmd {
     /// Delete this project's stored check results
     Clear {
@@ -209,6 +225,11 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Bring declarations for a library into `types/`
+    Types {
+        #[command(subcommand)]
+        cmd: TypesCmd,
+    },
     /// Manage the check cache (see README, "Caching")
     Cache {
         #[command(subcommand)]
@@ -345,6 +366,13 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
             },
         ),
         Cmd::Pkg { args } => cmd_pkg(&args),
+        Cmd::Types { cmd } => match cmd {
+            TypesCmd::Add {
+                library,
+                from,
+                force,
+            } => cmd_types_add(&library, from.as_deref(), force),
+        },
         Cmd::Cache { cmd } => match cmd {
             CacheCmd::Clear { path } => cmd_cache_clear(path.as_deref()),
             CacheCmd::Status {
@@ -607,6 +635,25 @@ fn report_types_sync(sync: &htl::pkg::TypesSync, root: &Path) {
     for (path, dep) in &sync.taken {
         eprintln!("  kept    {} ({dep} publishes one too)", rel(path));
     }
+}
+
+/// `htl types add <library>`: the declarations a library did not ship, from the collection
+/// that has them. The revision is recorded because nothing else in that ecosystem does —
+/// see `Project::add_types`.
+fn cmd_types_add(library: &str, from: Option<&Path>, force: bool) -> Result<ExitCode> {
+    let cwd = std::env::current_dir()?;
+    let project = htl::pkg::Project::find(&cwd).context(
+        "no mlua-pkg.toml above the current directory: `types/` is a project's, so this runs in one",
+    )?;
+    let sync = match from {
+        Some(dir) => project.add_types_from(dir, library, "local", force)?,
+        None => project.add_types(library, force)?,
+    };
+    report_types_sync(&sync, &project.root);
+    if sync.written.is_empty() && !sync.taken.is_empty() {
+        eprintln!("htl: nothing written; --force replaces what is already there");
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// What `htl check` was asked for, beyond the paths and the lint selection.
