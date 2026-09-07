@@ -53,6 +53,28 @@ fn project_with_dep(name: &str, entry: &str, decls: &[(&str, &str)]) -> PathBuf 
     root
 }
 
+/// A project with nothing installed: `types/` is a project's either way.
+fn bare_project(name: &str) -> PathBuf {
+    let root = scratch(name);
+    write(
+        &root.join("mlua-pkg.toml"),
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[deps]\n",
+    );
+    root
+}
+
+/// A checkout shaped like teal-types: `types/<library>/<module>.d.tl`, with a nested
+/// module and a file that is not a declaration at all.
+fn teal_types_checkout(name: &str) -> PathBuf {
+    let root = scratch(name);
+    write(&root.join("types/luasocket/socket.d.tl"), DECL);
+    write(&root.join("types/luasocket/ltn12.d.tl"), DECL);
+    write(&root.join("types/luasocket/socket/http.d.tl"), DECL);
+    write(&root.join("types/luasocket/README.md"), "how these were written\n");
+    write(&root.join("types/lpeg/lpeg.d.tl"), DECL);
+    root
+}
+
 #[test]
 fn a_deps_published_declarations_land_in_types() {
     let root = project_with_dep("published", "src", &[("mathx.d.tl", DECL)]);
@@ -60,9 +82,25 @@ fn a_deps_published_declarations_land_in_types() {
     assert_eq!(sync.written.len(), 1, "{sync:?}");
     assert!(sync.taken.is_empty(), "{sync:?}");
     assert!(root.join("types/mathx.d.tl").is_file());
-    let note = std::fs::read_to_string(root.join("types/mathx.d.tl.src")).unwrap();
-    assert!(note.starts_with("mathx "), "names the dep it came from: {note}");
-    assert!(note.contains(&"a".repeat(40)), "and the revision: {note}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("types/mathx.d.tl.src")).unwrap(),
+        format!("mathx {} types/mathx.d.tl\n", "a".repeat(40)),
+        "what published it, at which revision, and the path it had there"
+    );
+}
+
+/// A dep may publish a module of its own below `types/`, and the path below it is the
+/// module name: `mathx/vec.d.tl` is `require("mathx.vec")`.
+#[test]
+fn a_nested_module_a_dep_publishes_keeps_its_path() {
+    let root = project_with_dep(
+        "nested",
+        "src",
+        &[("mathx.d.tl", DECL), ("mathx/vec.d.tl", DECL)],
+    );
+    let sync = Project::at(&root).sync_types().unwrap();
+    assert_eq!(sync.written.len(), 2, "{sync:?}");
+    assert!(root.join("types/mathx/vec.d.tl").is_file());
 }
 
 /// `entry = "."` (a package whose root is what `require` resolves through): the root is
@@ -124,5 +162,64 @@ fn nothing_happens_before_an_install() {
     assert!(
         !root.join("types").exists(),
         "an empty types/ is not created on the way"
+    );
+}
+
+/// `htl types add luasocket`: the library's directory in the collection is dropped, and
+/// everything below it keeps the path it had — that path is the module name.
+#[test]
+fn add_drops_the_library_dir_and_keeps_what_is_below_it() {
+    let root = bare_project("add");
+    let checkout = teal_types_checkout("collection");
+    let sync = Project::at(&root)
+        .add_types_from(&checkout, "luasocket", "beef", false)
+        .unwrap();
+    assert_eq!(sync.written.len(), 3, "{sync:?}");
+    assert!(root.join("types/socket.d.tl").is_file());
+    assert!(root.join("types/ltn12.d.tl").is_file());
+    assert!(
+        root.join("types/socket/http.d.tl").is_file(),
+        "socket.http is a module of its own; flattening it would rename it"
+    );
+    assert!(!root.join("types/README.md").exists());
+    assert!(!root.join("types/lpeg.d.tl").exists(), "only the library asked for");
+    assert_eq!(
+        std::fs::read_to_string(root.join("types/socket/http.d.tl.src")).unwrap(),
+        "teal-types beef types/luasocket/socket/http.d.tl\n",
+        "the note names the collection, the revision, and the path it had there"
+    );
+}
+
+#[test]
+fn a_library_the_collection_does_not_have_names_the_near_ones() {
+    let root = bare_project("missing");
+    let checkout = teal_types_checkout("collection-near");
+    let err = Project::at(&root)
+        .add_types_from(&checkout, "socket", "beef", false)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("luasocket"), "{err}");
+}
+
+#[test]
+fn add_keeps_what_is_there_until_it_is_forced() {
+    let root = bare_project("forced");
+    let checkout = teal_types_checkout("collection-force");
+    write(&root.join("types/socket.d.tl"), "-- by hand\n");
+    let p = Project::at(&root);
+
+    let kept = p.add_types_from(&checkout, "luasocket", "beef", false).unwrap();
+    assert_eq!(kept.taken.len(), 1, "{kept:?}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("types/socket.d.tl")).unwrap(),
+        "-- by hand\n"
+    );
+
+    let forced = p.add_types_from(&checkout, "luasocket", "beef", true).unwrap();
+    assert_eq!(forced.written.len(), 3, "{forced:?}");
+    assert_ne!(
+        std::fs::read_to_string(root.join("types/socket.d.tl")).unwrap(),
+        "-- by hand\n",
+        "--force is what replaces it"
     );
 }
