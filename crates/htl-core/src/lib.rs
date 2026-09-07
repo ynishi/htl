@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 pub mod bundle;
 pub mod config;
+pub mod contract;
 #[cfg(feature = "dts")]
 pub mod dts;
 pub mod fix;
@@ -212,13 +213,17 @@ impl Htl {
     }
 }
 
-/// `contract` lint for one file: when `file` sits directly under a `[[contract]]` dir
-/// of `cfg` (relative to `root`, the directory holding `htl.toml`), check it against
-/// that contract statically. Returns lint lines (empty when no contract applies).
+/// `contract` lint for one file: when `file` sits directly under the directory a
+/// contract holds (relative to `root`, the directory holding `htl.toml`), check it
+/// against that contract statically. Returns lint lines (empty when none applies).
+///
+/// `contracts` comes from [`contract::resolve`], which reads the `---@contract` markers;
+/// resolving once per run rather than once per file is the caller's job.
 pub fn contract_lints(
     h: &Htl,
     root: &Path,
     cfg: &config::HtlConfig,
+    contracts: &[contract::Resolved],
     file: &Path,
 ) -> Result<Vec<String>> {
     let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
@@ -232,7 +237,7 @@ pub fn contract_lints(
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_string();
-    for c in &cfg.contract {
+    for c in contracts {
         let Some(dir) = c
             .dirs(root)
             .into_iter()
@@ -251,13 +256,12 @@ pub fn contract_lints(
         h.apply_config(root, cfg)?;
         let r = h.contract_check(&file_abs, &modname, &c.type_path, &c.require_fields)?;
         if !r.bad_require_fields.is_empty() {
-            // Nothing under the dir can satisfy a field the type has no room for, so the
-            // finding is about htl.toml even though a module is what surfaced it.
+            // A `---@required` the checker cannot see as a field of the record: the
+            // marker is on something else, and no module under the dir can satisfy it.
             out.push(format!(
-                "{}:1:1: htl.toml [[contract]] for {}: require_fields names field(s) that {} \
-                 does not declare: {} [htl contract]",
-                file.display(),
-                c.dir,
+                "{}:{}:1: ---@required on field(s) {} does not declare: {} [htl contract]",
+                c.declared_in.display(),
+                c.declared_at,
                 c.type_path,
                 r.bad_require_fields.join(", ")
             ));
@@ -339,20 +343,28 @@ pub fn declaration_conflict_lints(h: &Htl, file: &Path, info: &CheckInfo) -> Res
     Ok(out)
 }
 
-/// `contract-unenforced` lint: a `[[contract]]` in `htl.toml` only becomes a run-time
-/// guarantee when the host builds its resolver with it. Scan the host crate's Rust
-/// sources (under `cargo_root`) for `expect_type("<type>")` (plus `require_fields()` when
-/// required) or for the config-driven `contract_resolvers(` / `for_contract(` helpers.
-/// No host crate (`cargo_root` = None) means a script-only project: nothing to enforce.
+/// `contract-unenforced` lint: a contract only becomes a run-time guarantee when the
+/// host builds its resolver from it. Scan the host crate's Rust sources (under
+/// `cargo_root`) for `contract_resolvers(`. No host crate (`cargo_root` = None) means a
+/// script-only project: nothing to enforce.
+///
+/// One call to look for, not four. `contract_resolvers(root, &config)` is what the README
+/// documents and what keeps the host and `htl check` reading the same markers; a resolver
+/// assembled by hand from `expect_type` / `require_fields` now has to restate what the
+/// record already says, so recognising it would be recognising the drift this lint
+/// exists to prevent. Enforcement the scan cannot see at all — a Lua-side validator, a
+/// resolver in a sibling crate — is what `enforced_by` is for.
 pub fn contract_enforcement_lints(
     cfg: &config::HtlConfig,
     cfg_path: &Path,
+    contracts: &[contract::Resolved],
     cargo_root: Option<&Path>,
 ) -> Vec<String> {
     let mut out = Vec::new();
-    if cfg.contract.is_empty() {
+    if contracts.is_empty() {
         return out;
     }
+    let _ = cfg;
     let Some(root) = cargo_root else { return out };
     let mut sources = String::new();
     for sub in ["src", "examples", "tests", "benches"] {
@@ -371,59 +383,24 @@ pub fn contract_enforcement_lints(
             }
         }
     }
-    // `for_contract_dir(` does not contain `for_contract(` as a substring: list it.
-    let by_config = ["contract_resolvers(", "for_contract(", "for_contract_dir("]
-        .iter()
-        .any(|api| sources.contains(api));
-    for c in &cfg.contract {
+    if sources.contains("contract_resolvers(") {
+        return out;
+    }
+    for c in contracts {
         // A contract with nothing under it is not enforced by anyone; the dir may be
         // populated later (glob dirs especially), so say nothing about the host.
         if c.dirs(root_of(cfg_path)).is_empty() {
             continue;
         }
-        let by_hand = sources.contains(&format!("expect_type(\"{}\")", c.type_path));
-        let want_fields = match &c.require_fields {
-            config::RequireFields::All(false) => String::new(),
-            config::RequireFields::All(true) => ".require_all_fields()".to_string(),
-            config::RequireFields::Named(names) => format!(
-                ".require_fields([{}])",
-                names
-                    .iter()
-                    .map(|n| format!("{n:?}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        };
-        if !(by_config || by_hand) {
-            let by_hand_hint = if c.dir.contains('*') {
-                String::new() // one resolver per matched dir: not a one-liner by hand
-            } else {
-                format!(
-                    "add TealResolver::new(\"{}\").expect_type(\"{}\"){} in the Rust host, or ",
-                    c.dir, c.type_path, want_fields
-                )
-            };
-            out.push(format!(
-                "{}:1:1: contract `{}` -> {} is declared but the host does not enforce it: {}build resolvers with \
-                 htl::pkg::contract_resolvers(root, &config) [htl contract-unenforced]",
-                cfg_path.display(),
-                c.dir,
-                c.type_path,
-                by_hand_hint
-            ));
-        } else if c.require_fields.is_on()
-            && !by_config
-            && !sources.contains("require_fields(")
-            && !sources.contains("require_all_fields(")
-        {
-            out.push(format!(
-                "{}:1:1: contract `{}` -> {} requires fields but the host never calls .require_fields(...) \
-                 or .require_all_fields(): missing fields will pass at run time [htl contract-unenforced]",
-                cfg_path.display(),
-                c.dir,
-                c.type_path
-            ));
-        }
+        out.push(format!(
+            "{}:{}:1: contract {} -> {} is declared but the host does not enforce it: \
+             build resolvers with htl::pkg::contract_resolvers(root, &config) \
+             [htl contract-unenforced]",
+            c.declared_in.display(),
+            c.declared_at,
+            c.dir,
+            c.type_path,
+        ));
     }
     out
 }
@@ -1374,7 +1351,7 @@ pub fn is_skipped_dir(path: &Path, extra: &[PathBuf]) -> bool {
 
 /// The two paths name the same thing on disk, `..` and symlinks resolved. Falls back to
 /// comparing them as written when either cannot be canonicalised (it does not exist).
-fn same_file(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(x), Ok(y)) => x == y,
         _ => a == b,

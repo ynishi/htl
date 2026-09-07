@@ -121,8 +121,11 @@ fn t_types_readme() -> String {
      `include_tl!`. Consulted after the project root and `src/`, before `[check] paths`;\n\
      a `.tl` source anywhere on the path beats a declaration, so nothing here can shadow\n\
      an implementation, and a second declaration of the same module is reported\n\
-     (`duplicate-declaration`) rather than silently losing to one of them. Declarations\n\
-     generated from Rust (`#[host_module]`) are written next to the scripts, not here.\n"
+     (`duplicate-declaration`) rather than silently losing to one of them.\n\n\
+     Files htl writes here are the ones the project *publishes*: the module a\n\
+     `---@contract` type is declared in, for the authors of the modules that contract\n\
+     holds. Declarations generated from Rust (`#[host_module]`) are written next to the\n\
+     scripts, not here. Both are committed.\n"
         .to_string()
 }
 
@@ -138,17 +141,24 @@ fn t_htl_toml() -> String {
      [check]\n\
      # paths = [\"mods\", \"~/.cache/sdk\"]   # extra dirs require() resolves from while checking\n\
      # (src/ and types/ are always searched; hand-written .d.tl go under types/)\n\n\
-     # Contract for a directory of modules (static form of TealResolver::expect_type):\n\
+     # Where this project accepts modules written outside it:\n\
      # [[contract]]\n\
      # dir = \"mods\"             # relative to this file; \"sites/*\" = each subdirectory\n\
-     # type = \"defs.Mod\"        # every module under `dir` must return this record\n\
-     # require_fields = [\"name\"] # these must be present; a field added to the record\n\
-     #                          # later stays optional until it is listed. true = all\n\
-     # exclude = [\"modkit\"]     # modules in `dir` not held to it (an SDK the host writes there)\n\
-     # module = \"Site\"          # or: only this module name is held to it\n\
-     # The host must enforce it too: htl::pkg::contract_resolvers(root, &config), or\n\
-     # TealResolver::new(\"mods\").expect_type(\"defs.Mod\").require_fields([\"name\"]) by hand.\n\
-     # `htl check` reports `contract-unenforced` when neither appears in the Rust sources.\n"
+     # module = \"Site\"          # optional: only this module name in each dir\n\
+     #\n\
+     # The shape those modules must have is declared on the record itself, so the two\n\
+     # cannot drift apart:\n\
+     #\n\
+     #   local record defs\n\
+     #      record Mod              ---@contract     -- inherits `dir` above;\n\
+     #         name: string         ---@required     -- ---@contract(\"other\") overrides it\n\
+     #         monsters: {Monster}  ---@required\n\
+     #         factions: {Faction}                   -- unmarked: for the mods that want it\n\
+     #      end\n\
+     #   end\n\
+     #\n\
+     # The host must enforce it too: htl::pkg::contract_resolvers(root, &config).\n\
+     # `htl check` reports `contract-unenforced` when that call is not in the Rust sources.\n"
         .to_string()
 }
 

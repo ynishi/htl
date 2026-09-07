@@ -1,7 +1,7 @@
 //! `htl.toml`: parsing / discovery, the static `contract` lint, the `contract-unenforced`
 //! host scan, and `contract_resolvers` giving the host the same contract at run time.
 
-use htl_core::config::{HtlConfig, RequireFields, join_specs};
+use htl_core::config::{HtlConfig, join_specs};
 use htl_core::pkg::TealResolver as Resolver;
 use htl_core::{Htl, contract_enforcement_lints, contract_lints};
 use std::path::{Path, PathBuf};
@@ -24,18 +24,33 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
-const CONTRACT_TOML: &str =
-    "[[contract]]\ndir = \"mods\"\ntype = \"defs.Mod\"\nrequire_fields = true\n";
+const CONTRACT_TOML: &str = "[[contract]]\ndir = \"mods\"\n";
+
+/// `defs.Mod` with both fields required, written the way a project declares a contract:
+/// the marker on the record, `---@required` on what a module must set.
+fn defs_src(marks: [&str; 2]) -> String {
+    format!(
+        "local record defs\n   record Mod   ---@contract\n      name: string   {}\n      \
+         hp: integer   {}\n   end\nend\nreturn defs\n",
+        marks[0], marks[1]
+    )
+}
+
+const REQUIRED: &str = "---@required";
 
 /// Project with `htl.toml`, `src/defs.tl` and three mods: conforming, wrong field
-/// type, and one that leaves a declared field out.
+/// type, and one that leaves a required field out.
 fn project(name: &str) -> (PathBuf, HtlConfig) {
+    project_declaring_at(name, "src/defs.tl", CONTRACT_TOML)
+}
+
+/// The same project, with the contract type wherever the caller puts it: `decl` is the
+/// path to write it to (relative to the root), and `toml` the whole `htl.toml`, so a
+/// caller can point `[check] paths` at wherever it put the declaration.
+fn project_declaring_at(name: &str, decl: &str, toml: &str) -> (PathBuf, HtlConfig) {
     let root = scratch(name);
-    write(&root.join("htl.toml"), CONTRACT_TOML);
-    write(
-        &root.join("src").join("defs.tl"),
-        "local record defs\n   record Mod\n      name: string\n      hp: integer\n   end\nend\nreturn defs\n",
-    );
+    write(&root.join("htl.toml"), toml);
+    write(&root.join(decl), &defs_src([REQUIRED, REQUIRED]));
     write(
         &root.join("mods").join("good.tl"),
         "return { name = \"swarm\", hp = 3 }\n",
@@ -54,28 +69,17 @@ fn project(name: &str) -> (PathBuf, HtlConfig) {
     (root, cfg)
 }
 
-const DEFS_SRC: &str =
-    "local record defs\n   record Mod\n      name: string\n      hp: integer\n   end\nend\nreturn defs\n";
+/// The contracts a project declares, with anything wrong about them raised rather than
+/// returned: a fixture that cannot be resolved is a broken fixture.
+fn contracts(root: &Path, cfg: &HtlConfig) -> Vec<htl_core::contract::Resolved> {
+    let (found, problems) = htl_core::contract::resolve(root, cfg);
+    assert!(problems.is_empty(), "{problems:?}");
+    found
+}
 
-/// The same project, with the contract type somewhere other than `src/`: `decl` is the
-/// path to write it to (relative to the root), and `toml` the whole `htl.toml`, so a
-/// caller can point `[check] paths` at wherever it put the declaration.
-fn project_declaring_at(name: &str, decl: &str, toml: &str) -> (PathBuf, HtlConfig) {
-    let root = scratch(name);
-    write(&root.join("htl.toml"), toml);
-    write(&root.join(decl), DEFS_SRC);
-    write(
-        &root.join("mods").join("good.tl"),
-        "return { name = \"swarm\", hp = 3 }\n",
-    );
-    write(
-        &root.join("mods").join("partial.tl"),
-        "return { name = \"half\" }\n",
-    );
-    let (_, cfg) = HtlConfig::find(&root)
-        .unwrap()
-        .expect("htl.toml just written");
-    (root, cfg)
+/// `contract_lints` for one file of a project, resolving the markers first.
+fn lints_for(h: &Htl, root: &Path, cfg: &HtlConfig, rel: &str) -> Vec<String> {
+    contract_lints(h, root, cfg, &contracts(root, cfg), &root.join(rel)).unwrap()
 }
 
 /// Load each mod through resolvers the caller built, and say what happened: `Ok` for a
@@ -99,7 +103,7 @@ fn verdicts(h: &Htl, resolvers: Vec<htl_core::pkg::TealResolver>) -> [Result<(),
 fn parse_sections_and_lint_spec() {
     let cfg = HtlConfig::parse(
         "[lint]\nenable = [\"class-record\", \"explicit-number\"]\ndisable = [\"shadow-local\"]\nstrict = true\n\
-         [fmt]\nindent = 2\n[[contract]]\ndir = \"mods\"\ntype = \"defs.Mod\"\n",
+         [fmt]\nindent = 2\n[[contract]]\ndir = \"mods\"\n",
     )
     .unwrap();
     assert_eq!(
@@ -109,8 +113,8 @@ fn parse_sections_and_lint_spec() {
     assert_eq!(cfg.lint.strict, Some(true));
     assert_eq!(cfg.fmt.indent, Some(2));
     assert_eq!(cfg.contract.len(), 1);
-    assert_eq!(cfg.contract[0].type_path, "defs.Mod");
-    assert!(!cfg.contract[0].require_fields.is_on(), "defaults to off");
+    assert_eq!(cfg.contract[0].dir, "mods");
+    assert_eq!(cfg.contract[0].module, None);
     assert_eq!(
         join_specs([cfg.lint_spec().as_str(), "", "+shadow-local"]),
         "+class-record,+explicit-number,-shadow-local,+shadow-local"
@@ -140,10 +144,10 @@ fn contract_lint_flags_wrong_type_and_missing_field_only() {
     let (root, cfg) = project("lint");
     let h = Htl::new().unwrap();
 
-    let good = contract_lints(&h, &root, &cfg, &root.join("mods/good.tl")).unwrap();
+    let good = lints_for(&h, &root, &cfg, "mods/good.tl");
     assert!(good.is_empty(), "{good:?}");
 
-    let bad = contract_lints(&h, &root, &cfg, &root.join("mods/bad.tl")).unwrap();
+    let bad = lints_for(&h, &root, &cfg, "mods/bad.tl");
     assert_eq!(bad.len(), 1, "{bad:?}");
     assert!(
         bad[0].contains("does not satisfy contract defs.Mod"),
@@ -152,7 +156,7 @@ fn contract_lint_flags_wrong_type_and_missing_field_only() {
     );
     assert!(bad[0].contains("[htl contract]"), "{}", bad[0]);
 
-    let partial = contract_lints(&h, &root, &cfg, &root.join("mods/partial.tl")).unwrap();
+    let partial = lints_for(&h, &root, &cfg, "mods/partial.tl");
     assert_eq!(partial.len(), 1, "{partial:?}");
     assert!(
         partial[0].contains("lacks declared field(s) of defs.Mod: hp"),
@@ -166,38 +170,38 @@ fn contract_lint_flags_wrong_type_and_missing_field_only() {
     );
 
     // Outside the contract dir: nothing to say.
-    let defs = contract_lints(&h, &root, &cfg, &root.join("src/defs.tl")).unwrap();
+    let defs = lints_for(&h, &root, &cfg, "src/defs.tl");
     assert!(defs.is_empty(), "{defs:?}");
 }
 
+/// An unmarked field is optional. Nothing is required until something says so, which is
+/// what lets a contract type grow without breaking the modules that predate a new field.
 #[test]
-fn contract_lint_without_require_fields_accepts_partial() {
-    let (root, mut cfg) = project("lenient");
-    cfg.contract[0].require_fields = RequireFields::All(false);
+fn an_unmarked_field_is_not_required() {
+    let (root, cfg) = project("lenient");
+    write(&root.join("src/defs.tl"), &defs_src(["", ""]));
     let h = Htl::new().unwrap();
-    let partial = contract_lints(&h, &root, &cfg, &root.join("mods/partial.tl")).unwrap();
+    let partial = lints_for(&h, &root, &cfg, "mods/partial.tl");
     assert!(
         partial.is_empty(),
         "every record field is nilable: {partial:?}"
     );
 }
 
-/// `require_fields = ["name"]`: the named field is mandatory, the rest of the record is
-/// not. This is what lets a contract type grow without breaking the modules that predate
-/// the new fields.
+/// `---@required` on one field of two: that one is mandatory, the other is not.
 #[test]
-fn contract_lint_with_named_require_fields_holds_only_those() {
-    let (root, mut cfg) = project("named");
-    cfg.contract[0].require_fields = RequireFields::Named(vec!["name".into()]);
+fn required_holds_the_marked_fields_only() {
+    let (root, cfg) = project("named");
+    write(&root.join("src/defs.tl"), &defs_src([REQUIRED, ""]));
     let h = Htl::new().unwrap();
-    let partial = contract_lints(&h, &root, &cfg, &root.join("mods/partial.tl")).unwrap();
+    let partial = lints_for(&h, &root, &cfg, "mods/partial.tl");
     assert!(
         partial.is_empty(),
         "hp is declared but not required: {partial:?}"
     );
 
-    cfg.contract[0].require_fields = RequireFields::Named(vec!["name".into(), "hp".into()]);
-    let both = contract_lints(&h, &root, &cfg, &root.join("mods/partial.tl")).unwrap();
+    write(&root.join("src/defs.tl"), &defs_src([REQUIRED, REQUIRED]));
+    let both = lints_for(&h, &root, &cfg, "mods/partial.tl");
     assert_eq!(both.len(), 1, "{both:?}");
     assert!(
         both[0].contains("returned table lacks declared field(s) of defs.Mod: hp"),
@@ -206,28 +210,18 @@ fn contract_lint_with_named_require_fields_holds_only_those() {
     );
 }
 
-/// A name the type does not declare is a mistake in `htl.toml`, and is reported rather
-/// than passed over: a list that reads as a contract must be one.
+/// The marker may sit on the line above the field as well as after it, which is how
+/// `---@struct` / `---@optional` are written too.
 #[test]
-fn contract_lint_rejects_a_required_field_the_type_lacks() {
-    let (root, mut cfg) = project("unknown-field");
-    cfg.contract[0].require_fields = RequireFields::Named(vec!["name".into(), "hitpoints".into()]);
-    let h = Htl::new().unwrap();
-    let good = contract_lints(&h, &root, &cfg, &root.join("mods/good.tl")).unwrap();
-    assert_eq!(good.len(), 1, "{good:?}");
-    assert!(
-        good[0].contains("does not declare: hitpoints"),
-        "names the entry to fix: {}",
-        good[0]
+fn required_is_read_from_the_line_above_as_well() {
+    let (root, cfg) = project("above");
+    write(
+        &root.join("src/defs.tl"),
+        "local record defs\n   record Mod   ---@contract\n      name: string\n      \
+         ---@required\n      hp: integer\n   end\nend\nreturn defs\n",
     );
-}
-
-/// `require_fields = true` still means every declared field.
-#[test]
-fn contract_lint_with_require_fields_true_is_unchanged() {
-    let (root, cfg) = project("all");
     let h = Htl::new().unwrap();
-    let partial = contract_lints(&h, &root, &cfg, &root.join("mods/partial.tl")).unwrap();
+    let partial = lints_for(&h, &root, &cfg, "mods/partial.tl");
     assert_eq!(partial.len(), 1, "{partial:?}");
     assert!(
         partial[0].contains("lacks declared field(s) of defs.Mod: hp"),
@@ -236,21 +230,20 @@ fn contract_lint_with_require_fields_true_is_unchanged() {
     );
 }
 
-/// The static form and the runtime form are a pair, and a list has to keep them one:
-/// the same fixture, the same list, the same verdict from `htl check` and from `require`.
+/// The static form and the runtime form are a pair, and one set of markers has to keep
+/// them one: the same fixture, the same marks, the same verdict from `htl check` and
+/// from `require`.
 #[test]
 fn the_static_and_runtime_forms_agree_on_the_same_fixture() {
     use htl_core::pkg::{TealResolver, mlua_pkg::Registry};
 
-    let (root, mut cfg) = project("agree");
-    let verdicts = |cfg: &HtlConfig| {
+    let (root, cfg) = project("agree");
+    let verdicts = || {
         let h = Htl::new().unwrap();
-        let statically = !contract_lints(&h, &root, cfg, &root.join("mods/partial.tl"))
-            .unwrap()
-            .is_empty();
+        let statically = !lints_for(&h, &root, &cfg, "mods/partial.tl").is_empty();
         let h2 = Htl::new().unwrap();
         let mut reg = Registry::new();
-        for r in TealResolver::for_contract(&root, cfg, &cfg.contract[0]).unwrap() {
+        for r in TealResolver::for_contract(&root, &cfg, &contracts(&root, &cfg)[0]).unwrap() {
             reg.add(r);
         }
         reg.install(h2.lua()).unwrap();
@@ -262,75 +255,67 @@ fn the_static_and_runtime_forms_agree_on_the_same_fixture() {
         (statically, at_runtime)
     };
 
-    cfg.contract[0].require_fields = RequireFields::Named(vec!["name".into()]);
-    assert_eq!(verdicts(&cfg), (false, false), "hp is not in the list");
+    write(&root.join("src/defs.tl"), &defs_src([REQUIRED, ""]));
+    assert_eq!(verdicts(), (false, false), "hp is not marked");
 
-    cfg.contract[0].require_fields = RequireFields::Named(vec!["name".into(), "hp".into()]);
-    assert_eq!(verdicts(&cfg), (true, true), "hp is in the list");
+    write(&root.join("src/defs.tl"), &defs_src([REQUIRED, REQUIRED]));
+    assert_eq!(verdicts(), (true, true), "hp is marked");
 }
 
+/// The keys that moved onto the record are not quietly ignored: the message says where
+/// they went, rather than serde's "unknown field".
 #[test]
-fn require_fields_parses_as_a_list_and_as_a_bool() {
-    let cfg = HtlConfig::parse(
-        "[[contract]]\ndir = \"mods\"\ntype = \"defs.Mod\"\nrequire_fields = [\"name\", \"hp\"]\n",
-    )
-    .unwrap();
-    assert_eq!(
-        cfg.contract[0].require_fields,
-        RequireFields::Named(vec!["name".into(), "hp".into()])
-    );
-    let all =
-        HtlConfig::parse("[[contract]]\ndir = \"mods\"\ntype = \"defs.Mod\"\nrequire_fields = true\n")
-            .unwrap();
-    assert_eq!(all.contract[0].require_fields, RequireFields::All(true));
+fn a_config_that_still_declares_the_type_says_where_it_moved() {
+    for key in ["type = \"defs.Mod\"", "require_fields = [\"name\"]"] {
+        let e = HtlConfig::parse(&format!("[[contract]]\ndir = \"mods\"\n{key}\n"))
+            .expect_err("the key is gone")
+            .to_string();
+        let chain = format!(
+            "{e}: {}",
+            HtlConfig::parse(&format!("[[contract]]\ndir = \"mods\"\n{key}\n"))
+                .unwrap_err()
+                .root_cause()
+        );
+        assert!(chain.contains("---@contract"), "{key}: {chain}");
+    }
 }
 
 #[test]
 fn unenforced_contract_is_reported_against_host_sources() {
     let (root, cfg) = project("host");
     let cfg_path = root.join("htl.toml");
+    let found = contracts(&root, &cfg);
     let host = |body: &str| {
         write(&root.join("src").join("main.rs"), body);
-        contract_enforcement_lints(&cfg, &cfg_path, Some(&root))
+        contract_enforcement_lints(&cfg, &cfg_path, &found, Some(&root))
     };
 
     let none = host("fn main() {}\n");
     assert_eq!(none.len(), 1, "{none:?}");
     assert!(none[0].contains("contract-unenforced"), "{}", none[0]);
     assert!(
-        none[0]
-            .contains("TealResolver::new(\"mods\").expect_type(\"defs.Mod\").require_all_fields()"),
+        none[0].contains("htl::pkg::contract_resolvers(root, &config)"),
         "tells the host what to write: {}",
         none[0]
     );
-
-    let no_fields = host("let r = TealResolver::new(\"mods\")?.expect_type(\"defs.Mod\");\n");
-    assert_eq!(no_fields.len(), 1, "{no_fields:?}");
     assert!(
-        no_fields[0].contains("never calls .require_fields(...)"),
-        "{}",
-        no_fields[0]
+        none[0].contains("src/defs.tl:2:"),
+        "points at the marker, not at htl.toml: {}",
+        none[0]
     );
 
+    // One call to look for. A resolver assembled by hand still works, but it restates
+    // what the record says, so it is not what the lint is satisfied by.
     let by_hand = host(
         "let r = TealResolver::new(\"mods\")?.expect_type(\"defs.Mod\").require_all_fields();\n",
     );
-    assert!(by_hand.is_empty(), "{by_hand:?}");
-
-    let by_list = host(
-        "let r = TealResolver::new(\"mods\")?.expect_type(\"defs.Mod\").require_fields([\"name\"]);\n",
-    );
-    assert!(by_list.is_empty(), "the list form enforces it too: {by_list:?}");
+    assert_eq!(by_hand.len(), 1, "not the call this looks for: {by_hand:?}");
 
     let by_config = host("for r in htl::pkg::contract_resolvers(&root, &cfg)? { reg.add(r); }\n");
     assert!(by_config.is_empty(), "{by_config:?}");
-    // A host that picks one contract dir at a time (a site chosen on the command line).
-    let one_dir =
-        host("reg.add(TealResolver::for_contract_dir(&root, &site_dir, &cfg.contract[0])?);\n");
-    assert!(one_dir.is_empty(), "{one_dir:?}");
 
     // No host crate at all: a script-only project has nothing to enforce.
-    assert!(contract_enforcement_lints(&cfg, &cfg_path, None).is_empty());
+    assert!(contract_enforcement_lints(&cfg, &cfg_path, &found, None).is_empty());
 }
 
 #[test]
@@ -356,7 +341,7 @@ fn contract_lint_reads_annotated_cast_and_field_assignment_forms() {
     );
     let h = Htl::new().unwrap();
     for f in ["annot", "cast", "reassign"] {
-        let l = contract_lints(&h, &root, &cfg, &root.join(format!("mods/{f}.tl"))).unwrap();
+        let l = lints_for(&h, &root, &cfg, &format!("mods/{f}.tl"));
         assert_eq!(l.len(), 1, "{f}: {l:?}");
         assert!(
             l[0].contains("lacks declared field(s) of defs.Mod: hp"),
@@ -364,23 +349,26 @@ fn contract_lint_reads_annotated_cast_and_field_assignment_forms() {
             l[0]
         );
     }
-    let late = contract_lints(&h, &root, &cfg, &root.join("mods/late.tl")).unwrap();
+    let late = lints_for(&h, &root, &cfg, "mods/late.tl");
     assert!(late.is_empty(), "`m.hp = 2` counts as present: {late:?}");
 }
 
+/// Two contracts in one project, so both markers name their own directory: a glob dir
+/// with a module filter, and a plain one. The `[[contract]]` block is then only there
+/// for a project that has a single contract to inherit.
 #[test]
-fn contract_exclude_glob_dir_and_module_filter() {
+fn contract_glob_dir_and_module_filter() {
     let root = scratch("glob");
-    write(
-        &root.join("htl.toml"),
-        "[[contract]]\ndir = \"mods\"\ntype = \"defs.Mod\"\nrequire_fields = true\nexclude = [\"modkit\"]\n\n\
-         [[contract]]\ndir = \"sites/*\"\ntype = \"defs.Site\"\nmodule = \"Site\"\n",
-    );
+    write(&root.join("htl.toml"), "[lint]\n");
     write(
         &root.join("src/defs.tl"),
-        "local record defs\n   record Mod\n      name: string\n      hp: integer\n   end\n   record Site\n      title: string\n   end\nend\nreturn defs\n",
+        "local record defs\n   record Mod   ---@contract(\"mods\", exclude = \"modkit\")\n      \
+         name: string   ---@required\n      hp: integer   ---@required\n   end\n   \
+         record Site   ---@contract(\"sites/*\", module = \"Site\")\n      \
+         title: string\n   end\nend\nreturn defs\n",
     );
-    // An SDK the host drops into the contract dir: not a Mod, and must not be held to it.
+    // An SDK the host drops into the contract dir as a source: it is a `.tl` beside the
+    // modules, so without `exclude` it would be held to the contract like one.
     write(
         &root.join("mods/modkit.tl"),
         "local record modkit\nend\nfunction modkit.define(t: table): table\n   return t\nend\nreturn modkit\n",
@@ -399,14 +387,21 @@ fn contract_exclude_glob_dir_and_module_filter() {
         "return { title = \"docs\" }\n",
     );
     let (_, cfg) = HtlConfig::find(&root).unwrap().unwrap();
+    let found = contracts(&root, &cfg);
+    assert_eq!(found.len(), 2, "{found:?}");
+    let site = found.iter().find(|c| c.dir == "sites/*").unwrap();
 
-    let dirs = cfg.contract[1].dirs(&root);
-    assert_eq!(dirs, vec![root.join("sites/blog"), root.join("sites/docs")]);
-    assert!(!cfg.contract[0].applies_to("modkit") && !cfg.contract[0].applies_to("defs"));
-    assert!(cfg.contract[1].applies_to("Site") && !cfg.contract[1].applies_to("helper"));
+    assert_eq!(
+        site.dirs(&root),
+        vec![root.join("sites/blog"), root.join("sites/docs")]
+    );
+    let mods = found.iter().find(|c| c.dir == "mods").unwrap();
+    assert!(!mods.applies_to("defs"), "the declaring module is exempt");
+    assert!(!mods.applies_to("modkit"), "excluded on the marker");
+    assert!(site.applies_to("Site") && !site.applies_to("helper"));
 
     let h = Htl::new().unwrap();
-    let lint = |rel: &str| contract_lints(&h, &root, &cfg, &root.join(rel)).unwrap();
+    let lint = |rel: &str| contract_lints(&h, &root, &cfg, &found, &root.join(rel)).unwrap();
     assert!(
         lint("mods/modkit.tl").is_empty(),
         "excluded SDK held to contract"
@@ -695,7 +690,7 @@ fn a_contract_type_under_types_resolves_at_run_time() {
     let (root, cfg) = project_declaring_at("types-decl", "types/defs.d.tl", CONTRACT_TOML);
     let h = Htl::new().unwrap();
     let [good, partial] =
-        verdicts(&h, Resolver::for_contract(&root, &cfg, &cfg.contract[0]).unwrap());
+        verdicts(&h, Resolver::for_contract(&root, &cfg, &contracts(&root, &cfg)[0]).unwrap());
     assert!(good.is_ok(), "conforming mod: {good:?}");
     assert!(
         partial.as_ref().is_err_and(|e| e.contains("hp")),
@@ -710,16 +705,188 @@ fn a_contract_type_under_a_check_path_resolves_at_run_time() {
     let (root, cfg) = project_declaring_at(
         "check-path-decl",
         "sdk/defs.tl",
-        "[check]\npaths = [\"sdk\"]\n[[contract]]\ndir = \"mods\"\ntype = \"defs.Mod\"\nrequire_fields = true\n",
+        "[check]\npaths = [\"sdk\"]\n[[contract]]\ndir = \"mods\"\n",
     );
     let h = Htl::new().unwrap();
     let [good, partial] =
-        verdicts(&h, Resolver::for_contract(&root, &cfg, &cfg.contract[0]).unwrap());
+        verdicts(&h, Resolver::for_contract(&root, &cfg, &contracts(&root, &cfg)[0]).unwrap());
     assert!(good.is_ok(), "conforming mod: {good:?}");
     assert!(
         partial.as_ref().is_err_and(|e| e.contains("hp")),
         "missing field named: {partial:?}"
     );
+}
+
+/// The module a contract type is declared in is what an outside author writes against,
+/// so it is published: `types/<module>.d.tl` by default, since `types/` is where a
+/// project keeps declarations for other people and is searched with no configuration.
+#[test]
+fn a_contract_type_is_published_under_types() {
+    let (root, cfg) = project("publish");
+    let found = contracts(&root, &cfg);
+    let target = root.join("types/defs.d.tl");
+    assert_eq!(
+        htl_core::contract::dts_target(&root, &found[0]),
+        Some(target.clone())
+    );
+
+    let (written, problems) = htl_core::contract::publish(&root, &found);
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(written, vec![(target.clone(), true)]);
+    // The declaring module as it is, but for the marker: a bare `---@contract` inherits
+    // its directory from an htl.toml the reader of the declaration does not have.
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        std::fs::read_to_string(root.join("src/defs.tl"))
+            .unwrap()
+            .replace("---@contract", "---@contract(\"mods\")"),
+        "the declaring module, with the directory written out"
+    );
+
+    // Idempotent: a second run has nothing to write.
+    let (again, _) = htl_core::contract::publish(&root, &found);
+    assert_eq!(again, vec![(target, false)]);
+
+    // And the published copy carries the marker, so it is found again by the scan. It is
+    // the same contract, not a second one claiming the same directory.
+    let found_again = contracts(&root, &cfg);
+    assert_eq!(found_again.len(), 1, "{found_again:?}");
+    assert!(
+        found_again[0].declared_in.ends_with("src/defs.tl"),
+        "the source is the one kept: {:?}",
+        found_again[0].declared_in
+    );
+}
+
+/// `---@contract(dts = "…")` sends it somewhere else, relative to the project root.
+#[test]
+fn the_publish_target_can_be_named() {
+    let (root, cfg) = project("publish-where");
+    write(
+        &root.join("src/defs.tl"),
+        "local record defs\n   record Mod   ---@contract(dts = \"sdk/defs.d.tl\")\n      \
+         name: string   ---@required\n      hp: integer   ---@required\n   end\nend\nreturn defs\n",
+    );
+    let found = contracts(&root, &cfg);
+    let (written, problems) = htl_core::contract::publish(&root, &found);
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(written, vec![(root.join("sdk/defs.d.tl"), true)]);
+    assert!(!root.join("types/defs.d.tl").exists(), "not the default too");
+}
+
+/// A module with bodies in it is published as a declaration: the bodies go, and each
+/// function that was part of the interface becomes a field of its record, which is what
+/// a hand-written `.d.tl` says. A `local function` is not part of the interface and
+/// leaves nothing behind.
+#[test]
+fn a_module_with_implementations_is_published_as_a_declaration() {
+    let (root, cfg) = project("publish-impl");
+    write(
+        &root.join("src/defs.tl"),
+        "local record defs\n   record Mod   ---@contract\n      name: string   ---@required\n   \
+         end\nend\n\n\
+         local function round(n: number): integer\n   return n // 1 as integer\nend\n\n\
+         function defs.helper(n: integer): integer\n   return round(n)\nend\n\n\
+         function defs.Mod.rename(m: defs.Mod, to: string): defs.Mod\n   m.name = to\n   \
+         return m\nend\n\nreturn defs\n",
+    );
+    let found = contracts(&root, &cfg);
+    let (written, problems) = htl_core::contract::publish(&root, &found);
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(written.len(), 1, "{written:?}");
+
+    let d = std::fs::read_to_string(root.join("types/defs.d.tl")).unwrap();
+    assert_eq!(
+        d,
+        "local record defs\n   record Mod   ---@contract(\"mods\")\n      name: string   ---@required\n      \
+         rename: function(m: defs.Mod, to: string): defs.Mod\n   end\n   \
+         helper: function(n: integer): integer\nend\n\nreturn defs\n",
+        "got:\n{d}"
+    );
+
+    // And what it wrote is a declaration Teal accepts, checked as one.
+    write(
+        &root.join("mods/use.tl"),
+        "local defs = require(\"defs\")\nreturn { name = defs.helper(1) }\n",
+    );
+    let h = Htl::new().unwrap();
+    h.add_path(&root.join("types")).unwrap();
+    let ci = h.check(&root.join("types/defs.d.tl")).unwrap();
+    assert!(ci.ok(), "the published declaration checks: {:?}", ci.errors);
+}
+
+/// A method keeps the receiver its definition left implicit.
+#[test]
+fn a_method_gains_its_self_parameter() {
+    let (root, cfg) = project("publish-method");
+    write(
+        &root.join("src/defs.tl"),
+        "local record defs\n   record Mod   ---@contract\n      name: string   ---@required\n   \
+         end\nend\n\nfunction defs.Mod:label(): string\n   return self.name\nend\n\nreturn defs\n",
+    );
+    let found = contracts(&root, &cfg);
+    let (_, problems) = htl_core::contract::publish(&root, &found);
+    assert!(problems.is_empty(), "{problems:?}");
+    let d = std::fs::read_to_string(root.join("types/defs.d.tl")).unwrap();
+    assert!(
+        d.contains("label: function(self: Mod): string"),
+        "got:\n{d}"
+    );
+}
+
+/// A signature over more than one line is carried over as written.
+#[test]
+fn a_multi_line_signature_survives() {
+    let (root, cfg) = project("publish-wrapped");
+    write(
+        &root.join("src/defs.tl"),
+        "local record defs\n   record Mod   ---@contract\n      name: string   ---@required\n   \
+         end\nend\n\nfunction defs.make(name: string,\n                   hp: integer): defs.Mod\n   \
+         return { name = name }\nend\n\nreturn defs\n",
+    );
+    let found = contracts(&root, &cfg);
+    let (_, problems) = htl_core::contract::publish(&root, &found);
+    assert!(problems.is_empty(), "{problems:?}");
+    let d = std::fs::read_to_string(root.join("types/defs.d.tl")).unwrap();
+    assert!(
+        d.contains("make: function(name: string,\n                   hp: integer): defs.Mod"),
+        "got:\n{d}"
+    );
+}
+
+/// A function on a record nothing declares cannot be placed, and is reported rather than
+/// dropped: a declaration missing a function is worse than one that was not written.
+#[test]
+fn a_function_with_no_record_to_join_is_reported() {
+    let (root, cfg) = project("publish-orphan");
+    write(
+        &root.join("src/defs.tl"),
+        "local record defs\n   record Mod   ---@contract\n      name: string   ---@required\n   \
+         end\nend\n\nfunction other.f(n: integer): integer\n   return n\nend\n\nreturn defs\n",
+    );
+    let found = contracts(&root, &cfg);
+    let (written, problems) = htl_core::contract::publish(&root, &found);
+    assert!(written.is_empty(), "{written:?}");
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].contains("nothing declares a record other"),
+        "{}",
+        problems[0]
+    );
+    assert!(
+        !root.join("types/defs.d.tl").exists(),
+        "nothing half-written"
+    );
+}
+
+/// A contract already declared in a `.d.tl` is its own publication: writing it to itself
+/// would be a copy onto the file it was read from.
+#[test]
+fn a_contract_declared_in_types_is_not_republished() {
+    let (root, cfg) = project_declaring_at("publish-self", "types/defs.d.tl", CONTRACT_TOML);
+    let found = contracts(&root, &cfg);
+    let (written, problems) = htl_core::contract::publish(&root, &found);
+    assert!(written.is_empty() && problems.is_empty(), "{written:?}");
 }
 
 /// The three constructors build one thing, so they resolve from one set of paths. This
@@ -728,7 +895,8 @@ fn a_contract_type_under_a_check_path_resolves_at_run_time() {
 #[test]
 fn the_three_constructors_resolve_the_same_way() {
     let (root, cfg) = project_declaring_at("same-paths", "types/defs.d.tl", CONTRACT_TOML);
-    let c = &cfg.contract[0];
+    let found = contracts(&root, &cfg);
+    let c = &found[0];
     let dir = root.join("mods");
 
     let by_config = verdicts(
