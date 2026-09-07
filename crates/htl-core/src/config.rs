@@ -227,11 +227,19 @@ impl HtlConfig {
         parts.join(",")
     }
 
-    /// Directories the checker should search, in order: `root`, `root/src`, `root/types`
-    /// (hand-written `.d.tl` for modules the host provides, the DefinitelyTyped shape),
-    /// then `[check] paths` (resolved against `root`, `~` expanded). Only existing dirs.
+    /// Directories the checker should search, in the order it consults them: `root`,
+    /// `root/src`, `root/types` (hand-written `.d.tl` for modules the host provides, the
+    /// DefinitelyTyped shape), then `[check] paths` (resolved against `root`, `~`
+    /// expanded). Only existing dirs. The project's own code comes before declarations
+    /// it keeps for other people's, and both come before anything supplied from outside.
+    ///
+    /// Put them on the path with [`Htl::add_search_paths`](crate::Htl::add_search_paths),
+    /// which preserves this order; `add_path` alone prepends, so adding the list front to
+    /// back reverses it.
+    ///
     /// A `.tl` source anywhere on the path beats a `.d.tl`, so a declaration under
-    /// `types/` never shadows an implementation.
+    /// `types/` never shadows an implementation, and the order only decides between two
+    /// declarations of one module — which `duplicate-declaration` reports.
     pub fn search_paths(&self, root: &Path) -> Vec<PathBuf> {
         let mut out = vec![root.to_path_buf(), root.join("src"), root.join("types")];
         for p in &self.check.paths {

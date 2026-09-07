@@ -148,8 +148,20 @@ impl Htl {
     /// Make an `htl.toml` project's dirs visible to the checker: `root`, `root/src` and
     /// `[check] paths`. `root` is the directory holding `htl.toml`.
     pub fn apply_config(&self, root: &Path, cfg: &config::HtlConfig) -> Result<()> {
-        for p in cfg.search_paths(root) {
-            self.add_path(&p)?;
+        self.add_search_paths(&cfg.search_paths(root))
+    }
+
+    /// Put `dirs` on the search path so they are consulted **in the order given** — the
+    /// order [`search_paths`](config::HtlConfig::search_paths) documents, and the one a
+    /// reader assumes from a list. [`add_path`](Self::add_path) prepends, so adding the
+    /// list front to back would leave its last entry first; this adds it back to front.
+    ///
+    /// It decides one thing: which of two declarations of the same module is read. A
+    /// `.tl` source beats a `.d.tl` wherever the two sit, so until neither is a source
+    /// the order is invisible.
+    pub fn add_search_paths(&self, dirs: &[PathBuf]) -> Result<()> {
+        for p in dirs.iter().rev() {
+            self.add_path(p)?;
         }
         Ok(())
     }
@@ -273,6 +285,56 @@ pub fn contract_lints(
                 missing.join(", ")
             ));
         }
+    }
+    Ok(out)
+}
+
+/// `duplicate-declaration` lint: a module `file` requires resolved to a `.d.tl` while
+/// another `.d.tl` for the same module was reachable further along the search path. One
+/// was read and the other was not, decided by position, and until now nothing said so —
+/// the case this catches is a host publishing a declaration into a project that also
+/// keeps a hand-written one for the same module.
+///
+/// Only declarations collide. A `.tl` source beats every `.d.tl` wherever the two sit
+/// (`prelude.lua` searches sources across the whole path first), so a require that
+/// landed on a source is not reported, and neither is a module declared once.
+///
+/// Call it with the search path the file was checked under: the answer depends on it.
+pub fn declaration_conflict_lints(h: &Htl, file: &Path, info: &CheckInfo) -> Result<Vec<String>> {
+    let f: Function = h.h.get("declaration_sites")?;
+    let mut out = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
+    for site in &info.requires {
+        let Some(read) = site.path.as_ref().filter(|p| is_declaration(p)) else {
+            continue;
+        };
+        // One report per module, not one per `require` of it.
+        if seen.contains(&site.module.as_str()) {
+            continue;
+        }
+        let sites: Vec<String> = f
+            .call::<Table>(site.module.as_str())?
+            .sequence_values::<String>()
+            .collect::<mlua::Result<_>>()?;
+        let shadowed: Vec<&str> = sites
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|s| !same_file(Path::new(s), read))
+            .collect();
+        if shadowed.is_empty() {
+            continue;
+        }
+        seen.push(&site.module);
+        out.push(format!(
+            "{}:{}:{}: {} is declared more than once on the search path: {} is read, {} {} not [htl duplicate-declaration]",
+            file.display(),
+            site.line,
+            site.col,
+            site.module,
+            read.display(),
+            shadowed.join(" and "),
+            if shadowed.len() == 1 { "is" } else { "are" },
+        ));
     }
     Ok(out)
 }
@@ -874,22 +936,23 @@ impl Htl {
         Ok(())
     }
 
-    /// Search paths implied by where `file` sits in the scaffold layout: its own
-    /// directory, and for a file under `tests/` also the project root and `<root>/src`
-    /// (the test runner's rule, so `htl check tests` sees what `htl test` sees).
+    /// Search paths implied by where `file` sits in the scaffold layout, in the order
+    /// they are consulted: its own directory first, and for a file under `tests/` then
+    /// the project root and `<root>/src` (the test runner's rule, so `htl check tests`
+    /// sees what `htl test` sees).
     pub fn add_layout_paths(&self, file: &Path) -> Result<()> {
         let dir = parent_dir(file);
-        self.add_path(&dir)?;
+        let mut dirs = vec![dir.clone()];
         if dir.file_name().is_some_and(|n| n == "tests")
             && let Some(root) = dir.parent()
         {
-            self.add_path(root)?;
+            dirs.push(root.to_path_buf());
             let src = root.join("src");
             if src.is_dir() {
-                self.add_path(&src)?;
+                dirs.push(src);
             }
         }
-        Ok(())
+        self.add_search_paths(&dirs)
     }
 
     /// Prepend `dir/?.tl;dir/?/init.tl` to `package.path` (Teal resolves requires through it).
@@ -1284,6 +1347,13 @@ pub fn is_tl_source(p: &Path) -> bool {
     p.is_file() && name.ends_with(".tl") && !name.ends_with(".d.tl")
 }
 
+/// `true` for `foo.d.tl`: a declaration, with the implementation somewhere else.
+pub fn is_declaration(p: &Path) -> bool {
+    p.file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|n| n.ends_with(".d.tl"))
+}
+
 /// Directories never descended into when collecting sources under a root: build output,
 /// installed packages, VCS and tool state. A root passed explicitly is always walked.
 pub const SKIP_DIRS: &[&str] = &["target", "node_modules", ".mlua-pkgs", ".git"];
@@ -1299,10 +1369,12 @@ pub fn is_skipped_dir(path: &Path, extra: &[PathBuf]) -> bool {
     if SKIP_DIRS.contains(&name) || (name.starts_with('.') && name.len() > 1) {
         return true;
     }
-    extra.iter().any(|e| same_dir(path, e))
+    extra.iter().any(|e| same_file(path, e))
 }
 
-fn same_dir(a: &Path, b: &Path) -> bool {
+/// The two paths name the same thing on disk, `..` and symlinks resolved. Falls back to
+/// comparing them as written when either cannot be canonicalised (it does not exist).
+fn same_file(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(x), Ok(y)) => x == y,
         _ => a == b,

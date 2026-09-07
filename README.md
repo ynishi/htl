@@ -344,6 +344,13 @@ first). So a `.d.tl` a host writes out for external script authors never shadows
 source it was made from inside the repo, and a check that runs before the host has
 rewritten it still sees the current types.
 
+Between two *declarations* of one module there is no such rule, only position: the
+directories above are consulted in the order they are listed, and the first hit is the
+one read. `duplicate-declaration` reports it — a project that keeps a hand-written
+`xlib.d.tl` under `types/` and also has one arriving from a `[check] paths` directory is
+told which is in effect and which is not, rather than being left to work out why a type
+is not what the file in front of it says.
+
 A `[[contract]]` adds two lints:
 
 - `contract` — a module under `dir` whose return value is not assignable to `type`, or

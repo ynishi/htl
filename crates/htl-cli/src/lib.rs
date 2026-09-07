@@ -1611,6 +1611,12 @@ fn check_one(
     let c = h.check(f)?;
     sink.checkinfo(&c);
     let mut lints = c.lints.len();
+    // Two declarations of one module on the path: one was read, the other silently was
+    // not. Asked here, while the path this file was checked under is still in place.
+    for l in htl::declaration_conflict_lints(h, f, &c)? {
+        sink.diag("lint", &l);
+        lints += 1;
+    }
     // `[[contract]]`: static expect_type / require_fields for files under each dir.
     if let Some((root, _, cfg)) = cfg
         && c.ok()
