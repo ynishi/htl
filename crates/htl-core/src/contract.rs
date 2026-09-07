@@ -145,7 +145,14 @@ pub fn resolve(root: &Path, cfg: &HtlConfig) -> (Vec<Resolved>, Vec<String>) {
             Err(msgs) => problems.extend(msgs),
         }
     }
-    // Two contracts for one directory would each have to be the one enforced there.
+    // A published declaration carries the marker it was copied from, so the same contract
+    // is found twice — once in the source, once in `types/`. That is one contract, and
+    // the source is the one to keep (a `.tl` beats a `.d.tl` everywhere else too).
+    out.sort_by_key(|c| crate::is_declaration(&c.declared_in));
+    out.dedup_by(|a, b| a.dir == b.dir && a.type_path == b.type_path);
+
+    // Two *different* types for one directory would each have to be the one enforced
+    // there.
     for i in 0..out.len() {
         if let Some(j) = out[..i].iter().position(|c| c.dir == out[i].dir) {
             problems.push(format!(
@@ -162,6 +169,338 @@ pub fn resolve(root: &Path, cfg: &HtlConfig) -> (Vec<Resolved>, Vec<String>) {
         }
     }
     (out, problems)
+}
+
+/// Where a contract publishes its declaration: `---@contract(dts = "…")` relative to the
+/// project root, or `types/<module>.d.tl` by default — `types/` being the directory a
+/// project keeps declarations for other people in, searched with no configuration.
+pub fn dts_target(root: &Path, c: &Resolved) -> Option<PathBuf> {
+    let module = c.type_path.split_once('.')?.0;
+    Some(match &c.dts {
+        Some(p) => crate::config::resolve_path(root, p),
+        None => root.join("types").join(format!("{module}.d.tl")),
+    })
+}
+
+/// Publish each contract's declaration: the module that declares the contract type is
+/// what an outside author writes against, so `htl` writes it out rather than leaving the
+/// host to copy the file at run time. Returns the targets it wrote (`true`) or found
+/// already current (`false`), and what it could not publish.
+///
+/// The declaring module is written out as a declaration: bodies removed, and each
+/// function that was part of the module's interface folded into its record as a field
+/// (`function m.f(a: integer): string` -> `f: function(a: integer): string`), which is
+/// what a hand-written `.d.tl` says. A module of declarations is copied unchanged,
+/// because there is nothing to remove.
+pub fn publish(root: &Path, contracts: &[Resolved]) -> (Vec<(PathBuf, bool)>, Vec<String>) {
+    let mut written = Vec::new();
+    let mut problems = Vec::new();
+    for c in contracts {
+        let Some(target) = dts_target(root, c) else {
+            continue;
+        };
+        // A contract already declared in a `.d.tl` is its own publication.
+        if crate::same_file(&target, &c.declared_in) {
+            continue;
+        }
+        let Ok(src) = std::fs::read_to_string(&c.declared_in) else {
+            continue;
+        };
+        let src = self_contained_marker(&src, c);
+        let text = match declaration_of(&src) {
+            Ok(t) => t,
+            Err(msgs) => {
+                problems.extend(msgs.into_iter().map(|m| {
+                    format!(
+                        "{}:{m} publishing {} to {} [htl contract]",
+                        c.declared_in.display(),
+                        c.type_path,
+                        target.display()
+                    )
+                }));
+                continue;
+            }
+        };
+        match crate::write_if_changed(&target, &text) {
+            Ok(w) => written.push((target, w)),
+            Err(e) => problems.push(format!(
+                "{}:1:1: writing {}: {e} [htl contract]",
+                c.declared_in.display(),
+                target.display()
+            )),
+        }
+    }
+    (written, problems)
+}
+
+/// The source with its `---@contract` rewritten so the published copy stands on its own:
+/// the directory written out (a bare marker inherits from an `htl.toml` the reader of the
+/// declaration does not have), and `dts` dropped (the copy is not itself a publisher, and
+/// the path was the publisher's).
+fn self_contained_marker(src: &str, c: &Resolved) -> String {
+    let mut args = format!("{:?}", c.dir);
+    if let Some(m) = &c.module {
+        args.push_str(&format!(", module = {m:?}"));
+    }
+    if !c.exclude.is_empty() {
+        args.push_str(&format!(", exclude = {:?}", c.exclude.join(" ")));
+    }
+    let want = format!("---@contract({args})");
+    let mut lines: Vec<String> = src.lines().map(str::to_string).collect();
+    // The marker is on the record's line or the one above it, the same two places it was
+    // read from.
+    for i in [c.declared_at.saturating_sub(1), c.declared_at.saturating_sub(2)] {
+        let Some(line) = lines.get_mut(i) else { continue };
+        let Some(at) = line.find("---@contract") else {
+            continue;
+        };
+        let tail = &line[at + "---@contract".len()..];
+        let rest = match tail.split_once(')') {
+            Some((_, after)) if tail.trim_start().starts_with('(') => after.to_string(),
+            _ => tail.to_string(),
+        };
+        *line = format!("{}{want}{rest}", &line[..at]);
+        break;
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+/// One `function` statement of a module: where it sits, what to write instead, and where
+/// that goes.
+struct Implementation {
+    /// Lines to remove, `[first, last]`, zero-based, doc comment included.
+    span: (usize, usize),
+    /// The doc comment, trimmed, to reindent above the field.
+    doc: Vec<String>,
+    /// `Some((record path, field text))` for a function on the module's own table, `None`
+    /// for a `local function` — module-local, and not part of what the module declares.
+    field: Option<(Vec<String>, String)>,
+}
+
+/// The `.d.tl` for a module's source: every function body removed and its signature moved
+/// into the record it belongs to. `Err` when a `function` statement cannot be placed,
+/// rather than a file with a silently missing function in it.
+pub fn declaration_of(src: &str) -> Result<String, Vec<String>> {
+    let lines: Vec<&str> = src.lines().collect();
+    let mut problems = Vec::new();
+    let mut found: Vec<Implementation> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let Some(kind) = function_start(lines[i]) else {
+            i += 1;
+            continue;
+        };
+        // The doc comment above a function is part of it, and belongs wherever it goes.
+        let mut first = i;
+        while first > 0 && lines[first - 1].trim_start().starts_with("--") {
+            first -= 1;
+        }
+        let Some(end) = body_end(&lines, i) else {
+            problems.push(format!(
+                "{}:1: this function has no `end` at its own indentation, so its body \
+                 cannot be told from what follows:",
+                i + 1
+            ));
+            break;
+        };
+        match kind {
+            FnKind::Local => found.push(Implementation {
+                span: (first, end),
+                doc: Vec::new(),
+                field: None,
+            }),
+            FnKind::Exported => match signature(&lines, i) {
+                Ok((path, field)) => found.push(Implementation {
+                    span: (first, end),
+                    doc: lines[first..i].iter().map(|l| l.trim().to_string()).collect(),
+                    field: Some((path, field)),
+                }),
+                Err(e) => problems.push(format!("{}:1: {e}:", i + 1)),
+            },
+        }
+        i = end + 1;
+    }
+    if !problems.is_empty() {
+        return Err(problems);
+    }
+    if found.is_empty() {
+        // Already a declaration: nothing to strip, and copying it as it is keeps the
+        // comments and the layout the author wrote.
+        return Ok(src.to_string());
+    }
+
+    let mut out: Vec<Option<String>> = lines.iter().map(|l| Some(l.to_string())).collect();
+    // Fields first, while the line numbers still mean what they meant.
+    for imp in &found {
+        let Some((path, field)) = &imp.field else {
+            continue;
+        };
+        match record_close(&lines, path) {
+            Some(at) => {
+                // A record that already declares the field has the author's own version
+                // of this signature; a second one would be a duplicate key.
+                let name = field.split(':').next().unwrap_or_default();
+                if declares_field(&lines, at, name) {
+                    continue;
+                }
+                let indent = " ".repeat(indent_of(lines[at]) + 3);
+                let existing = out[at].take().unwrap_or_default();
+                let doc: String = imp
+                    .doc
+                    .iter()
+                    .map(|l| format!("{indent}{l}\n"))
+                    .collect();
+                out[at] = Some(format!("{doc}{indent}{field}\n{existing}"));
+            }
+            None => problems.push(format!(
+                "{}:1: nothing declares a record {} for this function to be a field of:",
+                imp.span.0 + 1,
+                path.join(".")
+            )),
+        }
+    }
+    if !problems.is_empty() {
+        return Err(problems);
+    }
+    for imp in &found {
+        let (first, last) = imp.span;
+        for l in out.iter_mut().take(last + 1).skip(first) {
+            *l = None;
+        }
+        // The blank line that separated this function from the next belongs to it: left
+        // behind, every removal leaves a gap where a function used to be.
+        if (first == 0 || lines[first - 1].trim().is_empty())
+            && let Some(after) = out.get_mut(last + 1)
+            && after.as_deref().is_some_and(|l| l.trim().is_empty())
+        {
+            *after = None;
+        }
+    }
+    let mut text: String = out
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_string();
+    text.push('\n');
+    Ok(text)
+}
+
+enum FnKind {
+    Exported,
+    Local,
+}
+
+fn function_start(line: &str) -> Option<FnKind> {
+    let t = line.trim_start();
+    if t.starts_with("local function ") {
+        Some(FnKind::Local)
+    } else if t.starts_with("function ") {
+        Some(FnKind::Exported)
+    } else {
+        None
+    }
+}
+
+/// The line closing the function that starts at `i`: the first `end` indented no deeper
+/// than the `function` itself.
+fn body_end(lines: &[&str], i: usize) -> Option<usize> {
+    let base = indent_of(lines[i]);
+    (i + 1..lines.len()).find(|&j| {
+        let t = lines[j].trim_start();
+        (t == "end" || t.starts_with("end ") || t.starts_with("end-")) && indent_of(lines[j]) <= base
+    })
+}
+
+/// `function m.f(a: integer): string` -> (`["m"]`, `f: function(a: integer): string`).
+///
+/// The signature is taken as written, over as many lines as it spans: a `.d.tl` names
+/// parameters in a function type just as the implementation does, so there is nothing to
+/// rewrite. A `:` method gains the `self` its definition left implicit.
+fn signature(lines: &[&str], i: usize) -> Result<(Vec<String>, String), String> {
+    let head = lines[i].trim_start().strip_prefix("function ").unwrap();
+    let (name, rest) = head
+        .split_once('(')
+        .ok_or("a function with no parameter list")?;
+    let method = name.contains(':');
+    let mut path: Vec<String> = name
+        .split(['.', ':'])
+        .map(|s| s.trim().to_string())
+        .collect();
+    let field = path.pop().filter(|f| !f.is_empty()).ok_or("no name")?;
+    if path.is_empty() {
+        return Err("a function on no module table".into());
+    }
+    // Parameters may run over several lines; the signature ends with the line on which
+    // the parentheses close, return type and all.
+    let mut sig = rest.to_string();
+    let mut depth = 1i32 + count(rest);
+    let mut j = i;
+    while depth > 0 {
+        j += 1;
+        let next = *lines.get(j).ok_or("a parameter list that never closes")?;
+        depth += count(next);
+        sig.push('\n');
+        sig.push_str(next);
+    }
+    let sig = sig.trim_end();
+    let self_arg = if !method {
+        String::new()
+    } else if sig.trim_start().starts_with(')') {
+        // `function M:f()` takes only its receiver: no comma to separate it from.
+        format!("self: {}", path.last().unwrap())
+    } else {
+        format!("self: {}, ", path.last().unwrap())
+    };
+    Ok((path, format!("{field}: function({self_arg}{sig}")))
+}
+
+/// Net change in parenthesis depth over a line, ignoring what is inside a comment.
+fn count(line: &str) -> i32 {
+    let code = line.split("--").next().unwrap_or(line);
+    code.chars().filter(|c| *c == '(').count() as i32
+        - code.chars().filter(|c| *c == ')').count() as i32
+}
+
+/// Does the record closed at `close` already declare a field called `name`? Its body is
+/// what lies between its `record` line and that `end`, at one level of nesting.
+fn declares_field(lines: &[&str], close: usize, name: &str) -> bool {
+    let base = indent_of(lines[close]);
+    for j in (0..close).rev() {
+        let t = lines[j].trim_start();
+        // Its own `record` line: the body is behind us, and a field of that name further
+        // up belongs to some other record.
+        if indent_of(lines[j]) <= base
+            && (t.starts_with("record ") || t.starts_with("local record "))
+        {
+            return false;
+        }
+        if t.strip_prefix(name)
+            .is_some_and(|r| r.trim_start().starts_with(':'))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// The `end` closing the record named by `path` (`["defs", "Mod"]` = `Mod` inside
+/// `defs`), searched from the outside in.
+fn record_close(lines: &[&str], path: &[String]) -> Option<usize> {
+    let mut from = 0usize;
+    let mut to = lines.len();
+    for name in path {
+        let at = (from..to).find(|&j| record_name(lines[j]).as_deref() == Some(name.as_str()))?;
+        let base = indent_of(lines[at]);
+        to = (at + 1..to).find(|&j| {
+            lines[j].trim_start().starts_with("end") && indent_of(lines[j]) <= base
+        })?;
+        from = at + 1;
+    }
+    Some(to)
 }
 
 /// Files a marker can be found in: those directly under a search path, and the

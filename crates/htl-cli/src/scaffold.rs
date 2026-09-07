@@ -121,8 +121,11 @@ fn t_types_readme() -> String {
      `include_tl!`. Consulted after the project root and `src/`, before `[check] paths`;\n\
      a `.tl` source anywhere on the path beats a declaration, so nothing here can shadow\n\
      an implementation, and a second declaration of the same module is reported\n\
-     (`duplicate-declaration`) rather than silently losing to one of them. Declarations\n\
-     generated from Rust (`#[host_module]`) are written next to the scripts, not here.\n"
+     (`duplicate-declaration`) rather than silently losing to one of them.\n\n\
+     Files htl writes here are the ones the project *publishes*: the module a\n\
+     `---@contract` type is declared in, for the authors of the modules that contract\n\
+     holds. Declarations generated from Rust (`#[host_module]`) are written next to the\n\
+     scripts, not here. Both are committed.\n"
         .to_string()
 }
 

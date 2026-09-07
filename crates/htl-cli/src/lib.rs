@@ -414,23 +414,42 @@ fn print_checkinfo(c: &CheckInfo) {
     }
 }
 
-/// If `start` is inside a Rust crate, (re)generate the `.d.tl` files its
-/// `#[host_module]` / `#[derive(TealRecord)]` declare, so the checker sees Rust-side
-/// modules before any `cargo build`. Quiet unless something was written.
+/// (Re)generate the `.d.tl` files this project declares: the ones a Rust crate's
+/// `#[host_module]` / `#[derive(TealRecord)]` ask for, so the checker sees Rust-side
+/// modules before any `cargo build`, and the module each `---@contract` type is declared
+/// in, which is what an outside author writes their modules against. Quiet unless
+/// something was written.
+///
+/// A contract that could not be published is said here, on every command that generates:
+/// `htl check` reports it again as a lint (which `strict` makes fatal) and `htl dts`
+/// exits non-zero on it, but `run` / `test` / `build` have neither, and a declaration
+/// that is quietly not written is one an outside author finds missing later.
 fn auto_dts(start: &Path) -> Result<()> {
+    if let Some((root, _, cfg)) = load_config(start)? {
+        let (contracts, _) = htl::contract::resolve(&root, &cfg);
+        let (results, problems) = htl::contract::publish(&root, &contracts);
+        announce_dts(&results, &root);
+        for p in &problems {
+            eprintln!("dts: {p}");
+        }
+    }
     let Some(root) = htl::dts::find_cargo_package_root(start) else {
         return Ok(());
     };
     let results = htl::dts::generate_crate(&root).map_err(|e| anyhow::anyhow!("htl dts: {e}"))?;
+    announce_dts(&results, &root);
+    Ok(())
+}
+
+fn announce_dts(results: &[(PathBuf, bool)], root: &Path) {
     for (target, written) in results {
-        if written {
+        if *written {
             eprintln!(
                 "dts: wrote {}",
-                target.strip_prefix(&root).unwrap_or(&target).display()
+                target.strip_prefix(root).unwrap_or(target).display()
             );
         }
     }
-    Ok(())
 }
 
 fn cmd_dts(dir: Option<&Path>) -> Result<ExitCode> {
@@ -438,16 +457,48 @@ fn cmd_dts(dir: Option<&Path>) -> Result<ExitCode> {
         Some(d) => d.to_path_buf(),
         None => std::env::current_dir()?,
     };
-    let Some(root) = htl::dts::find_cargo_package_root(&start) else {
-        bail!(
-            "no Cargo.toml with a [package] section found at or above {}",
-            start.display()
-        );
+    // The contract types first: a project may publish one without having a Rust host at
+    // all, and the `bail!` below would then be wrong about there being nothing to do.
+    let mut results = Vec::new();
+    let mut failed = false;
+    if let Some((croot, _, cfg)) = load_config(&start)? {
+        let (contracts, _) = htl::contract::resolve(&croot, &cfg);
+        let (published, problems) = htl::contract::publish(&croot, &contracts);
+        for p in &problems {
+            eprintln!("  {p}");
+        }
+        // Asked to generate and did not: the command says so in its exit code, or a CI
+        // step that regenerates declarations would pass having written nothing.
+        failed = !problems.is_empty();
+        results.extend(published);
+    }
+    let code = |failed: bool| {
+        if failed {
+            ExitCode::FAILURE
+        } else {
+            ExitCode::SUCCESS
+        }
     };
-    let results = htl::dts::generate_crate(&root).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let Some(root) = htl::dts::find_cargo_package_root(&start) else {
+        if results.is_empty() && !failed {
+            bail!(
+                "no Cargo.toml with a [package] section, and no ---@contract type to publish, \
+                 at or above {}",
+                start.display()
+            );
+        }
+        report_dts(&results, &start);
+        return Ok(code(failed));
+    };
+    results.extend(htl::dts::generate_crate(&root).map_err(|e| anyhow::anyhow!("{e}"))?);
+    report_dts(&results, &root);
+    Ok(code(failed))
+}
+
+fn report_dts(results: &[(PathBuf, bool)], root: &Path) {
     let mut written = 0usize;
-    for (target, w) in &results {
-        let rel = target.strip_prefix(&root).unwrap_or(target).display();
+    for (target, w) in results {
+        let rel = target.strip_prefix(root).unwrap_or(target).display();
         eprintln!("  {} {}", if *w { "wrote    " } else { "unchanged" }, rel);
         written += usize::from(*w);
     }
@@ -457,7 +508,6 @@ fn cmd_dts(dir: Option<&Path>) -> Result<ExitCode> {
         root.display(),
         written
     );
-    Ok(ExitCode::SUCCESS)
 }
 
 /// If `start` is inside an `mlua-pkg.toml` project, expose its vendored deps to the
@@ -1371,10 +1421,14 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
         sink.diag("lint", &cyc);
         n_lint += 1;
     }
-    // A marker that could not be turned into a contract: reported once for the run, and
-    // before the enforcement question, which cannot be asked about a contract there is no
-    // agreement on.
-    for p in &contract_problems {
+    // A marker that could not be turned into a contract, and a contract that could not be
+    // published: reported once for the run, and before the enforcement question, which
+    // cannot be asked about a contract there is no agreement on.
+    let publish_problems = match &cfg {
+        Some((r, _, _)) => htl::contract::publish(r, &contracts).1,
+        None => Vec::new(),
+    };
+    for p in contract_problems.iter().chain(&publish_problems) {
         sink.diag("lint", p);
         n_lint += 1;
     }

@@ -1351,7 +1351,7 @@ pub fn is_skipped_dir(path: &Path, extra: &[PathBuf]) -> bool {
 
 /// The two paths name the same thing on disk, `..` and symlinks resolved. Falls back to
 /// comparing them as written when either cannot be canonicalised (it does not exist).
-fn same_file(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(x), Ok(y)) => x == y,
         _ => a == b,

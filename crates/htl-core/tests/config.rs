@@ -717,6 +717,178 @@ fn a_contract_type_under_a_check_path_resolves_at_run_time() {
     );
 }
 
+/// The module a contract type is declared in is what an outside author writes against,
+/// so it is published: `types/<module>.d.tl` by default, since `types/` is where a
+/// project keeps declarations for other people and is searched with no configuration.
+#[test]
+fn a_contract_type_is_published_under_types() {
+    let (root, cfg) = project("publish");
+    let found = contracts(&root, &cfg);
+    let target = root.join("types/defs.d.tl");
+    assert_eq!(
+        htl_core::contract::dts_target(&root, &found[0]),
+        Some(target.clone())
+    );
+
+    let (written, problems) = htl_core::contract::publish(&root, &found);
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(written, vec![(target.clone(), true)]);
+    // The declaring module as it is, but for the marker: a bare `---@contract` inherits
+    // its directory from an htl.toml the reader of the declaration does not have.
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        std::fs::read_to_string(root.join("src/defs.tl"))
+            .unwrap()
+            .replace("---@contract", "---@contract(\"mods\")"),
+        "the declaring module, with the directory written out"
+    );
+
+    // Idempotent: a second run has nothing to write.
+    let (again, _) = htl_core::contract::publish(&root, &found);
+    assert_eq!(again, vec![(target, false)]);
+
+    // And the published copy carries the marker, so it is found again by the scan. It is
+    // the same contract, not a second one claiming the same directory.
+    let found_again = contracts(&root, &cfg);
+    assert_eq!(found_again.len(), 1, "{found_again:?}");
+    assert!(
+        found_again[0].declared_in.ends_with("src/defs.tl"),
+        "the source is the one kept: {:?}",
+        found_again[0].declared_in
+    );
+}
+
+/// `---@contract(dts = "…")` sends it somewhere else, relative to the project root.
+#[test]
+fn the_publish_target_can_be_named() {
+    let (root, cfg) = project("publish-where");
+    write(
+        &root.join("src/defs.tl"),
+        "local record defs\n   record Mod   ---@contract(dts = \"sdk/defs.d.tl\")\n      \
+         name: string   ---@required\n      hp: integer   ---@required\n   end\nend\nreturn defs\n",
+    );
+    let found = contracts(&root, &cfg);
+    let (written, problems) = htl_core::contract::publish(&root, &found);
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(written, vec![(root.join("sdk/defs.d.tl"), true)]);
+    assert!(!root.join("types/defs.d.tl").exists(), "not the default too");
+}
+
+/// A module with bodies in it is published as a declaration: the bodies go, and each
+/// function that was part of the interface becomes a field of its record, which is what
+/// a hand-written `.d.tl` says. A `local function` is not part of the interface and
+/// leaves nothing behind.
+#[test]
+fn a_module_with_implementations_is_published_as_a_declaration() {
+    let (root, cfg) = project("publish-impl");
+    write(
+        &root.join("src/defs.tl"),
+        "local record defs\n   record Mod   ---@contract\n      name: string   ---@required\n   \
+         end\nend\n\n\
+         local function round(n: number): integer\n   return n // 1 as integer\nend\n\n\
+         function defs.helper(n: integer): integer\n   return round(n)\nend\n\n\
+         function defs.Mod.rename(m: defs.Mod, to: string): defs.Mod\n   m.name = to\n   \
+         return m\nend\n\nreturn defs\n",
+    );
+    let found = contracts(&root, &cfg);
+    let (written, problems) = htl_core::contract::publish(&root, &found);
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(written.len(), 1, "{written:?}");
+
+    let d = std::fs::read_to_string(root.join("types/defs.d.tl")).unwrap();
+    assert_eq!(
+        d,
+        "local record defs\n   record Mod   ---@contract(\"mods\")\n      name: string   ---@required\n      \
+         rename: function(m: defs.Mod, to: string): defs.Mod\n   end\n   \
+         helper: function(n: integer): integer\nend\n\nreturn defs\n",
+        "got:\n{d}"
+    );
+
+    // And what it wrote is a declaration Teal accepts, checked as one.
+    write(
+        &root.join("mods/use.tl"),
+        "local defs = require(\"defs\")\nreturn { name = defs.helper(1) }\n",
+    );
+    let h = Htl::new().unwrap();
+    h.add_path(&root.join("types")).unwrap();
+    let ci = h.check(&root.join("types/defs.d.tl")).unwrap();
+    assert!(ci.ok(), "the published declaration checks: {:?}", ci.errors);
+}
+
+/// A method keeps the receiver its definition left implicit.
+#[test]
+fn a_method_gains_its_self_parameter() {
+    let (root, cfg) = project("publish-method");
+    write(
+        &root.join("src/defs.tl"),
+        "local record defs\n   record Mod   ---@contract\n      name: string   ---@required\n   \
+         end\nend\n\nfunction defs.Mod:label(): string\n   return self.name\nend\n\nreturn defs\n",
+    );
+    let found = contracts(&root, &cfg);
+    let (_, problems) = htl_core::contract::publish(&root, &found);
+    assert!(problems.is_empty(), "{problems:?}");
+    let d = std::fs::read_to_string(root.join("types/defs.d.tl")).unwrap();
+    assert!(
+        d.contains("label: function(self: Mod): string"),
+        "got:\n{d}"
+    );
+}
+
+/// A signature over more than one line is carried over as written.
+#[test]
+fn a_multi_line_signature_survives() {
+    let (root, cfg) = project("publish-wrapped");
+    write(
+        &root.join("src/defs.tl"),
+        "local record defs\n   record Mod   ---@contract\n      name: string   ---@required\n   \
+         end\nend\n\nfunction defs.make(name: string,\n                   hp: integer): defs.Mod\n   \
+         return { name = name }\nend\n\nreturn defs\n",
+    );
+    let found = contracts(&root, &cfg);
+    let (_, problems) = htl_core::contract::publish(&root, &found);
+    assert!(problems.is_empty(), "{problems:?}");
+    let d = std::fs::read_to_string(root.join("types/defs.d.tl")).unwrap();
+    assert!(
+        d.contains("make: function(name: string,\n                   hp: integer): defs.Mod"),
+        "got:\n{d}"
+    );
+}
+
+/// A function on a record nothing declares cannot be placed, and is reported rather than
+/// dropped: a declaration missing a function is worse than one that was not written.
+#[test]
+fn a_function_with_no_record_to_join_is_reported() {
+    let (root, cfg) = project("publish-orphan");
+    write(
+        &root.join("src/defs.tl"),
+        "local record defs\n   record Mod   ---@contract\n      name: string   ---@required\n   \
+         end\nend\n\nfunction other.f(n: integer): integer\n   return n\nend\n\nreturn defs\n",
+    );
+    let found = contracts(&root, &cfg);
+    let (written, problems) = htl_core::contract::publish(&root, &found);
+    assert!(written.is_empty(), "{written:?}");
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].contains("nothing declares a record other"),
+        "{}",
+        problems[0]
+    );
+    assert!(
+        !root.join("types/defs.d.tl").exists(),
+        "nothing half-written"
+    );
+}
+
+/// A contract already declared in a `.d.tl` is its own publication: writing it to itself
+/// would be a copy onto the file it was read from.
+#[test]
+fn a_contract_declared_in_types_is_not_republished() {
+    let (root, cfg) = project_declaring_at("publish-self", "types/defs.d.tl", CONTRACT_TOML);
+    let found = contracts(&root, &cfg);
+    let (written, problems) = htl_core::contract::publish(&root, &found);
+    assert!(written.is_empty() && problems.is_empty(), "{written:?}");
+}
+
 /// The three constructors build one thing, so they resolve from one set of paths. This
 /// is the property the split hid: `contract_resolvers` used to add `search_paths` itself
 /// on top of what `for_contract_dir` hard-coded, so only the outermost one was whole.
