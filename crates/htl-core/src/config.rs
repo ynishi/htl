@@ -124,6 +124,16 @@ pub struct Contract {
     /// `---@contract(exclude = "a b")` says the same thing on the record.
     #[serde(default)]
     pub exclude: Vec<String>,
+    /// Where this contract is enforced at run time, when it is somewhere `htl check`
+    /// cannot see: a Lua-side validator, a resolver in a sibling crate, generated code,
+    /// or a resolver built by hand. Relative to `htl.toml` (`~` and absolute paths
+    /// resolve as `[check] paths` does). Turns `contract-unenforced` off for this
+    /// contract and no other.
+    ///
+    /// A path rather than a flag on purpose: the file has to exist, so the claim is one
+    /// the check can hold to something, and a missing one is reported under the same
+    /// rule. This is not a per-contract off switch.
+    pub enforced_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

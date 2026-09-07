@@ -158,7 +158,10 @@ fn t_htl_toml() -> String {
      #   end\n\
      #\n\
      # The host must enforce it too: htl::pkg::contract_resolvers(root, &config).\n\
-     # `htl check` reports `contract-unenforced` when that call is not in the Rust sources.\n"
+     # `htl check` reports `contract-unenforced` when that call is not in the Rust sources.\n\
+     # enforced_by = \"mods/_validate.lua\"   # ...or name where it is enforced instead,\n\
+     #                          # for a Lua-side validator, a sibling crate, generated\n\
+     #                          # code. The file has to exist; a missing one is reported.\n"
         .to_string()
 }
 

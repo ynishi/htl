@@ -446,8 +446,8 @@ Two lints follow:
   markers claiming one directory, a marker on the record a module returns rather than on
   one inside it — is reported here too.
 - `contract-unenforced` — a contract is only a guarantee if the host enforces it. When a
-  Cargo package is found, `htl check` scans its Rust sources for
-  `contract_resolvers(` and otherwise tells you to add it.
+  Cargo package is found, `htl check` scans its Rust sources for `contract_resolvers(`
+  and otherwise tells you to add it, or to say where it is enforced with `enforced_by`.
 
 Hosts build their resolvers from the same markers, so the two cannot drift:
 
@@ -463,6 +463,22 @@ for r in htl::pkg::contract_resolvers(&htl::parent_dir(&path), &cfg)? {
 That one call is what `contract-unenforced` looks for. A resolver assembled by hand from
 `TealResolver::new(…).expect_type(…).require_fields([…])` still works, but it restates
 what the record already says, which is the drift the marker exists to remove.
+
+Enforcement the scan cannot see — a Lua-side validator that checks the table before the
+host uses it, a resolver in a sibling crate, generated code, or one built by hand on
+purpose — is named instead:
+
+```toml
+[[contract]]
+dir = "mods"
+enforced_by = "mods/_validate.lua"   # relative to htl.toml; ~ and absolute paths work
+```
+
+That contract is then not held to the scan, and the others in the project still are. It
+takes a path rather than a `true` because the file has to exist: a name that points at
+nothing is reported under the same rule, whether or not the call was found elsewhere, so
+the key stays a claim `htl check` can hold to something rather than a per-contract off
+switch.
 
 ## Tests
 
