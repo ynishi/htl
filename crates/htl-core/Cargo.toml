@@ -17,7 +17,9 @@ include = ["src/**/*", "lua/**/*", "vendor/**/*"]
 [features]
 default = ["pkg"]
 # `htl_core::pkg::TealResolver` / `Project` for mlua-pkg's Registry (pulls git2 via mlua-pkg's package manager).
-pkg = ["dep:mlua-pkg"]
+# toml_edit comes with it: `Project::patch` writes one key into a manifest a person wrote,
+# and the rest of that file — its comments, its order, its spacing — has to survive it.
+pkg = ["dep:mlua-pkg", "dep:toml_edit"]
 # `htl_core::dts`: `.d.tl` generation from Rust source (`#[host_module]` / `#[derive(TealRecord)]`),
 # shared by the proc macros and `htl dts`.
 dts = ["dep:syn"]
@@ -33,6 +35,7 @@ walkdir = { workspace = true }
 syn = { version = "2", features = ["full"], optional = true }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+toml_edit = { version = "0.22", optional = true }
 
 [dev-dependencies]
 criterion = "0.8"

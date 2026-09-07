@@ -1397,14 +1397,43 @@ pub fn project_skip_dirs(_root: &Path) -> Vec<PathBuf> {
     Vec::new()
 }
 
+/// The `patch_dir` deps below `root`: a dependency's source taken into the tree, which the
+/// project edits and commits (`htl pkg patch`).
+///
+/// Not in [`project_skip_dirs`], because whether to walk one depends on what the walk is
+/// for. Its errors are the project's to fix, so `htl check` reports them; but the change
+/// it holds is a diff against the revision it was taken from, so `htl fmt` would bury that
+/// change under a reformatting of every file, and its `*_test.tl` are the dependency's
+/// suite rather than the project's. Those two skip it, and pass this to
+/// [`collect_tl_skipping`] / [`testing::discover_tests_skipping`] to say so.
+#[cfg(feature = "pkg")]
+pub fn patched_dirs(root: &Path) -> Vec<PathBuf> {
+    match pkg::Project::find(root) {
+        Some(p) => p.patch_dirs(),
+        None => Vec::new(),
+    }
+}
+
+#[cfg(not(feature = "pkg"))]
+pub fn patched_dirs(_root: &Path) -> Vec<PathBuf> {
+    Vec::new()
+}
+
 /// Collect `.tl` sources from files and directories (sorted, recursive). Directories in
 /// [`SKIP_DIRS`], dot-directories and the project's package dir are not entered unless
 /// given as a root themselves.
 pub fn collect_tl(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    collect_tl_skipping(paths, &[])
+}
+
+/// [`collect_tl`], not entering `skip` either — directories named by path rather than by
+/// name, for what the caller knows and a name cannot say ([`patched_dirs`]).
+pub fn collect_tl_skipping(paths: &[PathBuf], skip: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for p in paths {
         if p.is_dir() {
-            let extra = project_skip_dirs(p);
+            let mut extra = project_skip_dirs(p);
+            extra.extend(skip.iter().cloned());
             let root = p.clone();
             let walker = walkdir::WalkDir::new(p)
                 .sort_by_file_name()

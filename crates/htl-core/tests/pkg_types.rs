@@ -20,8 +20,9 @@ fn write(path: &Path, text: &str) {
 const DECL: &str = "local record mathx\n   twice: function(n: number): number\nend\nreturn mathx\n";
 
 /// A project with one dep installed the way `mlua-pkg install` leaves it: the package in
-/// the cache, `vendored/<name>` a symlink to its entry directory, and a lockfile saying
-/// which directory that entry was.
+/// the cache, `vendored/<name>` a symlink to its *package root*, and a lockfile saying
+/// which directory below that root the entry is. (mlua-pkg pointed the symlink at the
+/// entry directory until 0.11 and points it at the root from there on.)
 fn project_with_dep(name: &str, entry: &str, decls: &[(&str, &str)]) -> PathBuf {
     let root = scratch(name);
     write(
@@ -35,7 +36,7 @@ fn project_with_dep(name: &str, entry: &str, decls: &[(&str, &str)]) -> PathBuf 
     }
     let vendored = root.join(".htl/modules/vendored");
     std::fs::create_dir_all(&vendored).unwrap();
-    std::os::unix::fs::symlink(pkg_root.join(entry), vendored.join("mathx")).unwrap();
+    std::os::unix::fs::symlink(&pkg_root, vendored.join("mathx")).unwrap();
     Lockfile {
         version: 1,
         pkg: vec![LockedPkg {
@@ -46,6 +47,8 @@ fn project_with_dep(name: &str, entry: &str, decls: &[(&str, &str)]) -> PathBuf 
             branch: None,
             sha: "a".repeat(40),
             entry: PathBuf::from(entry),
+            patch_dir: None,
+            patch_base: None,
         }],
     }
     .write(root.join("mlua-pkg.lock"))
@@ -70,7 +73,10 @@ fn teal_types_checkout(name: &str) -> PathBuf {
     write(&root.join("types/luasocket/socket.d.tl"), DECL);
     write(&root.join("types/luasocket/ltn12.d.tl"), DECL);
     write(&root.join("types/luasocket/socket/http.d.tl"), DECL);
-    write(&root.join("types/luasocket/README.md"), "how these were written\n");
+    write(
+        &root.join("types/luasocket/README.md"),
+        "how these were written\n",
+    );
     write(&root.join("types/lpeg/lpeg.d.tl"), DECL);
     root
 }
@@ -103,8 +109,9 @@ fn a_nested_module_a_dep_publishes_keeps_its_path() {
     assert!(root.join("types/mathx/vec.d.tl").is_file());
 }
 
-/// `entry = "."` (a package whose root is what `require` resolves through): the root is
-/// the symlink target itself, not its parent.
+/// `entry = "."` — a package whose root is what `require` resolves through. It lands the
+/// same way a `src/` one does: the symlink is the root in both cases, and the entry is not
+/// subtracted from it.
 #[test]
 fn a_flat_package_root_is_found_through_its_entry() {
     let root = project_with_dep("flat", ".", &[("mathx.d.tl", DECL)]);
@@ -182,7 +189,10 @@ fn add_drops_the_library_dir_and_keeps_what_is_below_it() {
         "socket.http is a module of its own; flattening it would rename it"
     );
     assert!(!root.join("types/README.md").exists());
-    assert!(!root.join("types/lpeg.d.tl").exists(), "only the library asked for");
+    assert!(
+        !root.join("types/lpeg.d.tl").exists(),
+        "only the library asked for"
+    );
     assert_eq!(
         std::fs::read_to_string(root.join("types/socket/http.d.tl.src")).unwrap(),
         "teal-types beef types/luasocket/socket/http.d.tl\n",
@@ -208,14 +218,18 @@ fn add_keeps_what_is_there_until_it_is_forced() {
     write(&root.join("types/socket.d.tl"), "-- by hand\n");
     let p = Project::at(&root);
 
-    let kept = p.add_types_from(&checkout, "luasocket", "beef", false).unwrap();
+    let kept = p
+        .add_types_from(&checkout, "luasocket", "beef", false)
+        .unwrap();
     assert_eq!(kept.taken.len(), 1, "{kept:?}");
     assert_eq!(
         std::fs::read_to_string(root.join("types/socket.d.tl")).unwrap(),
         "-- by hand\n"
     );
 
-    let forced = p.add_types_from(&checkout, "luasocket", "beef", true).unwrap();
+    let forced = p
+        .add_types_from(&checkout, "luasocket", "beef", true)
+        .unwrap();
     assert_eq!(forced.written.len(), 3, "{forced:?}");
     assert_ne!(
         std::fs::read_to_string(root.join("types/socket.d.tl")).unwrap(),

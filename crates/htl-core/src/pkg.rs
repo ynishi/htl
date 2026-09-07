@@ -18,6 +18,7 @@
 //! `.tl` never silently falls through to a later resolver.
 
 use crate::PRELUDE_REGISTRY_KEY;
+use anyhow::Context;
 use mlua::{Function, Lua, Table, Value};
 use mlua_pkg::Resolver;
 use mlua_pkg::sandbox::{FsSandbox, InitError, ReadError, SandboxedFs, SymlinkAwareSandbox};
@@ -125,10 +126,7 @@ impl TealResolver {
     ///
     /// [`require_all_fields`](Self::require_all_fields) is the every-field form, and the
     /// static counterpart of both is `require_fields` in `[[contract]]`.
-    pub fn require_fields(
-        mut self,
-        names: impl IntoIterator<Item = impl Into<String>>,
-    ) -> Self {
+    pub fn require_fields(mut self, names: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.require_fields =
             crate::config::RequireFields::Named(names.into_iter().map(Into::into).collect());
         self
@@ -397,10 +395,51 @@ pub struct Project {
     /// the manifest, e.g. `target_dir = "lua/lshape"` -> `<root>/lua`), so
     /// `require("lshape")` resolves to `<root>/lua/lshape/init.*` like a vendored dep.
     pub target_dirs: Vec<PathBuf>,
+    /// The `patch_dir` deps: a dependency's source taken into the tree, and what the
+    /// manifest calls it. Unlike a `target_dir` copy, which install rewrites, this one is
+    /// the project's own code — [`Project::patch`] wrote it once and the project edits it
+    /// from then on. What that means for the walkers is in [`crate::patched_dirs`].
+    pub patches: Vec<Patched>,
+}
+
+/// A dependency the project took into its tree: the name the manifest declares it under,
+/// and the directory `patch_dir` points at, absolute.
+///
+/// The name is carried beside the directory because it is what a report says. htl's own
+/// layout puts mathx in `patches/mathx`, but the manifest may name any directory, and a
+/// type error in there is the dependency's name to report either way.
+#[derive(Debug, Clone)]
+pub struct Patched {
+    pub name: String,
+    pub dir: PathBuf,
+}
+
+/// Where a patched dependency stands after an install: whether the copy is what the
+/// dependency resolves from, and the two revisions the answer rests on.
+///
+/// `in_use` is false when the directory is gone, when the lockfile records no base for it,
+/// or when the pin has moved on from that base — the dependency then resolves to the
+/// upstream revision, and the copy sits in the tree unused until it is refreshed or
+/// removed. See [`Project::patch_status`].
+#[derive(Debug, Clone)]
+pub struct PatchStatus {
+    pub name: String,
+    pub dir: PathBuf,
+    /// The revision the copy was taken from (`patch_base`), when the lockfile has one.
+    pub base: Option<String>,
+    /// The revision the pin resolves to, as the last install recorded it.
+    pub locked: Option<String>,
+    pub in_use: bool,
 }
 
 pub const MANIFEST_NAME: &str = mlua_pkg::project::MANIFEST_FILE_NAME;
 pub const LOCKFILE_NAME: &str = mlua_pkg::project::LOCKFILE_FILE_NAME;
+
+/// Where [`Project::patch`] puts a dependency it takes into the tree: `patches/<dep>`,
+/// beside the project's own sources rather than under [`pkgs_dir`]. One directory per
+/// dependency, named after it, so the path a diagnostic carries names the dependency it
+/// is in.
+pub const PATCHES_DIR: &str = "patches";
 
 /// Where a project's installed deps go: `<root>/.htl/modules`, always.
 ///
@@ -442,11 +481,13 @@ impl Project {
     pub fn at(root: &Path) -> Self {
         let inner = mlua_pkg::Project::in_dir(root, pkgs_dir(root));
         let manifest = inner.manifest_path().to_path_buf();
-        // `target_dir` deps: collect the parent of each declared copy target. A manifest
+        // `target_dir` deps: collect the parent of each declared copy target. `patch_dir`
+        // deps: the directory itself, which is what a walker is asked about. A manifest
         // that fails to parse contributes nothing here (mlua-pkg itself reports it).
         let mut target_dirs: Vec<PathBuf> = Vec::new();
+        let mut patches: Vec<Patched> = Vec::new();
         if let Ok(m) = mlua_pkg::manifest::Manifest::from_path(&manifest) {
-            for dep in m.deps.values() {
+            for (name, dep) in &m.deps {
                 if let Some(td) = &dep.target_dir {
                     let abs = root.join(td);
                     let parent = abs
@@ -457,6 +498,12 @@ impl Project {
                         target_dirs.push(parent);
                     }
                 }
+                if let Some(pd) = &dep.patch_dir {
+                    patches.push(Patched {
+                        name: name.clone(),
+                        dir: root.join(pd),
+                    });
+                }
             }
         }
         Self {
@@ -466,7 +513,13 @@ impl Project {
             vendored: inner.pkg_dir().vendored(),
             pkgs_dir: inner.pkg_dir().base().to_path_buf(),
             target_dirs,
+            patches,
         }
+    }
+
+    /// Where the patched deps are, for a walker that only asks whether it may enter.
+    pub fn patch_dirs(&self) -> Vec<PathBuf> {
+        self.patches.iter().map(|p| p.dir.clone()).collect()
     }
 
     /// `true` once `mlua-pkg install` has produced the lockfile.
@@ -568,6 +621,8 @@ impl Project {
                 branch: None,
                 entry: None,
                 target_dir: None,
+                patch_dir: None,
+                patch_drift: None,
             },
         )?;
         self.add_types_from(&got.cache_path, library, &got.sha, force)
@@ -601,22 +656,213 @@ impl Project {
         Ok(out)
     }
 
-    /// The package root behind `vendored/<name>`: that symlink points at the dep's *entry*
-    /// directory, and the lockfile is what says how far below the root the entry sits.
-    fn package_root(&self, p: &mlua_pkg::lockfile::LockedPkg) -> Option<PathBuf> {
-        let mut root = std::fs::canonicalize(self.vendored.join(&p.name)).ok()?;
-        let depth = p
-            .entry
-            .components()
-            .filter(|c| !matches!(c, std::path::Component::CurDir))
-            .count();
-        for _ in 0..depth {
-            if !root.pop() {
-                return None;
+    /// Take a dependency's source into `patches/<dep>/`, where the project owns it.
+    ///
+    /// The whole package root is copied, so the dep's `types/` comes with it, and
+    /// `patch_dir` on that dependency in the manifest says which dependency the directory
+    /// stands in for. There is no patch file and nothing is applied: from here the
+    /// directory is the project's code, edited and committed with git like the rest of the
+    /// tree, and install resolves the dependency from it for as long as the pin still
+    /// resolves to the revision the copy was taken from (`patch_base` in the lockfile).
+    /// When the pin moves on, install uses the new revision, leaves the copy alone and
+    /// says so on every install until the patch is refreshed or removed.
+    ///
+    /// On a dependency that is already patched this refreshes the copy from the revision
+    /// the pin now resolves to and records that as the new base. The copy is overwritten
+    /// rather than merged — carrying the project's own change forward onto it is a merge
+    /// git performs, and it can only do that if the change is committed — so a directory
+    /// with uncommitted changes is refused unless `force`.
+    pub fn patch(&self, name: &str, force: bool) -> anyhow::Result<mlua_pkg::ops::PatchReport> {
+        let manifest = mlua_pkg::manifest::Manifest::from_path(&self.manifest)?;
+        let dep = manifest.deps.get(name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "no dependency '{name}' in {}: `htl pkg patch` takes a name the manifest declares",
+                self.manifest.display()
+            )
+        })?;
+        // Where the copy goes. htl's own layout is `patches/<dep>`; a manifest that
+        // already names a directory keeps the one it names.
+        let declared = dep.patch_dir.is_some();
+        let rel = match &dep.patch_dir {
+            Some(p) => p.clone(),
+            None => PathBuf::from(format!("{PATCHES_DIR}/{name}")),
+        };
+        let dir = self.root.join(&rel);
+        if dir.exists() && !force {
+            refuse_if_uncommitted(&self.root, &rel)?;
+        }
+
+        let before = std::fs::read_to_string(&self.manifest)?;
+        if !declared {
+            let mut doc = before.parse::<toml_edit::DocumentMut>()?;
+            let deps = doc
+                .get_mut("deps")
+                .and_then(|i| i.as_table_like_mut())
+                .with_context(|| format!("no [deps] table in {}", self.manifest.display()))?;
+            let entry = deps
+                .get_mut(name)
+                .and_then(|i| i.as_table_like_mut())
+                .with_context(|| format!("[deps.{name}] is not a table"))?;
+            entry.insert(
+                "patch_dir",
+                toml_edit::value(rel.to_string_lossy().as_ref()),
+            );
+            std::fs::write(&self.manifest, doc.to_string())?;
+        }
+
+        // mlua-pkg does the copy and the bookkeeping: it fetches the pin, copies the
+        // package root into `patch_dir`, and records the commit it came from as
+        // `patch_base`. `force` there is the "directory already exists" refusal, which is
+        // the question already answered above against git rather than against the
+        // directory's existence.
+        let cfg =
+            mlua_pkg::Config::new(mlua_pkg::Project::in_dir(&self.root, pkgs_dir(&self.root)));
+        let opts = mlua_pkg::ops::PatchOpts {
+            name: name.to_string(),
+            force: true,
+        };
+        match mlua_pkg::ops::patch(&cfg, opts) {
+            Ok(report) => {
+                drop_dot_git(&report.patch_dir)?;
+                Ok(report)
+            }
+            Err(e) => {
+                // A `patch_dir` naming a directory that was never written turns every
+                // later install into a drift report, so the manifest goes back as it was.
+                if !declared {
+                    let _ = std::fs::write(&self.manifest, &before);
+                }
+                Err(e.into())
             }
         }
-        Some(root)
     }
+
+    /// Where each patched dependency stands, read back from the manifest and the lockfile.
+    ///
+    /// A patch is bound to the revision it was taken from. Install compares the two itself
+    /// and falls back to upstream when they differ; this reads the same two values
+    /// afterwards so htl can say what happened in its own verbs — mlua-pkg's warning names
+    /// `mlua-pkg patch --force`, which skips the question htl asks git and leaves the
+    /// dependency's `.git` in the copy.
+    pub fn patch_status(&self) -> Vec<PatchStatus> {
+        let lock = mlua_pkg::lockfile::Lockfile::read(&self.lockfile).ok();
+        self.patches
+            .iter()
+            .map(|p| {
+                let locked = lock
+                    .as_ref()
+                    .and_then(|l| l.pkg.iter().find(|e| e.name == p.name));
+                let base = locked.and_then(|e| e.patch_base.clone());
+                let sha = locked.map(|e| e.sha.clone());
+                let in_use = p.dir.is_dir() && base.is_some() && base == sha;
+                PatchStatus {
+                    name: p.name.clone(),
+                    dir: p.dir.clone(),
+                    base,
+                    locked: sha,
+                    in_use,
+                }
+            })
+            .collect()
+    }
+
+    /// The package root behind `vendored/<name>`.
+    ///
+    /// That symlink points at the package root itself, and the lockfile's `entry` says
+    /// where below it `require` looks — so what a dep publishes beside its entry, `types/`
+    /// among it, is reached from here without subtracting the entry again. mlua-pkg moved
+    /// the symlink from the entry directory to the root in 0.11; a dep whose entry is
+    /// `src/` used to need the difference popped off and now must not.
+    fn package_root(&self, p: &mlua_pkg::lockfile::LockedPkg) -> Option<PathBuf> {
+        std::fs::canonicalize(self.vendored.join(&p.name)).ok()
+    }
+}
+
+/// Take the dependency's own `.git` out of the copy.
+///
+/// The copy is made from a checkout, so it arrives with the repository it was checked out
+/// of. Left in place, git reads `patches/<dep>` as an embedded repository and records it as
+/// a gitlink — a commit id pointing at a repository nobody else has, with none of the files
+/// in this project's history. What the patch is for is the opposite of that: ordinary
+/// files, committed here, diffed and reviewed here.
+fn drop_dot_git(dir: &Path) -> anyhow::Result<()> {
+    let dot_git = dir.join(".git");
+    let meta = match std::fs::symlink_metadata(&dot_git) {
+        Ok(m) => m,
+        Err(_) => return Ok(()),
+    };
+    if meta.is_dir() {
+        std::fs::remove_dir_all(&dot_git)
+    } else {
+        // A worktree checkout has a `.git` file pointing elsewhere.
+        std::fs::remove_file(&dot_git)
+    }
+    .with_context(|| format!("removing {}", dot_git.display()))
+}
+
+/// Refuse to overwrite a patched copy that git has not been told about.
+///
+/// The refresh replaces the directory with the pinned upstream, and the project's own
+/// change survives that only through git: it is carried forward by merging the new copy
+/// with the history of the old one. A change git cannot see is a change that cannot be
+/// carried forward, so it is named here and the refresh does not happen.
+fn refuse_if_uncommitted(root: &Path, rel: &Path) -> anyhow::Result<()> {
+    match uncommitted(root, rel) {
+        Ok(changes) if changes.is_empty() => Ok(()),
+        Ok(changes) => {
+            let mut msg = format!(
+                "{} has uncommitted changes, and refreshing it from the pin overwrites \
+                 them. Commit them first — git is what carries them onto the refreshed \
+                 copy — or pass --force to discard them:",
+                rel.display()
+            );
+            for c in changes.iter().take(10) {
+                msg.push_str("\n  ");
+                msg.push_str(c);
+            }
+            if changes.len() > 10 {
+                msg.push_str(&format!("\n  and {} more", changes.len() - 10));
+            }
+            anyhow::bail!("{msg}")
+        }
+        Err(why) => anyhow::bail!(
+            "cannot tell whether {} has uncommitted changes ({why}), and refreshing it \
+             from the pin overwrites whatever is in it. Pass --force to refresh it anyway.",
+            rel.display()
+        ),
+    }
+}
+
+/// What `git status` reports under `rel`, one entry per line as it prints them.
+///
+/// Untracked files count: the question is what would be lost, and a file git was never
+/// told about is lost the same way an edited one is. `Err` is what could not be asked
+/// rather than what came back dirty — no `git` on PATH, or a tree that is not a
+/// repository. The pathspec is the manifest-relative one and the command runs at the
+/// project root, so git reads it the way it reads any path a person types there.
+fn uncommitted(root: &Path, rel: &Path) -> Result<Vec<String>, String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["status", "--porcelain", "--"])
+        .arg(rel)
+        .output()
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => "no `git` on PATH".to_string(),
+            _ => e.to_string(),
+        })?;
+    if !out.status.success() {
+        let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if why.is_empty() {
+            format!("git exited {}", out.status)
+        } else {
+            why
+        });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim_end().to_string())
+        .collect())
 }
 
 /// Where the Teal ecosystem collects declarations for libraries that ship none of their
