@@ -353,9 +353,12 @@ pub fn declaration_conflict_lints(h: &Htl, file: &Path, info: &CheckInfo) -> Res
 /// assembled by hand from `expect_type` / `require_fields` now has to restate what the
 /// record already says, so recognising it would be recognising the drift this lint
 /// exists to prevent. Enforcement the scan cannot see at all — a Lua-side validator, a
-/// resolver in a sibling crate — is what `enforced_by` is for.
+/// resolver in a sibling crate, generated code, or a resolver built by hand — is what
+/// `[[contract]] enforced_by` is for: it names the file the enforcement lives in, and
+/// that contract is then not held to the scan. The file has to exist, which is what
+/// separates the key from a per-contract off switch, and a name that points at nothing is
+/// reported under this same rule whether or not the call was found.
 pub fn contract_enforcement_lints(
-    cfg: &config::HtlConfig,
     cfg_path: &Path,
     contracts: &[contract::Resolved],
     cargo_root: Option<&Path>,
@@ -364,7 +367,6 @@ pub fn contract_enforcement_lints(
     if contracts.is_empty() {
         return out;
     }
-    let _ = cfg;
     let Some(root) = cargo_root else { return out };
     let mut sources = String::new();
     for sub in ["src", "examples", "tests", "benches"] {
@@ -383,24 +385,45 @@ pub fn contract_enforcement_lints(
             }
         }
     }
-    if sources.contains("contract_resolvers(") {
-        return out;
-    }
+    let by_config = sources.contains("contract_resolvers(");
     for c in contracts {
         // A contract with nothing under it is not enforced by anyone; the dir may be
         // populated later (glob dirs especially), so say nothing about the host.
         if c.dirs(root_of(cfg_path)).is_empty() {
             continue;
         }
-        out.push(format!(
-            "{}:{}:1: contract {} -> {} is declared but the host does not enforce it: \
-             build resolvers with htl::pkg::contract_resolvers(root, &config) \
-             [htl contract-unenforced]",
-            c.declared_in.display(),
-            c.declared_at,
-            c.dir,
-            c.type_path,
-        ));
+        match &c.enforced_by {
+            // The path is the whole of what makes `enforced_by` a claim rather than an
+            // off switch, so it is checked whether or not the scan found the call: a name
+            // that points at nothing is a broken statement either way.
+            Some(p) => {
+                let at = config::resolve_path(root_of(cfg_path), p);
+                if !at.exists() {
+                    out.push(format!(
+                        "{}:1:1: contract {} -> {} says it is enforced by {:?}, and there \
+                         is no such file: name where the enforcement lives, or drop the \
+                         key and let the scan look for \
+                         htl::pkg::contract_resolvers(root, &config) \
+                         [htl contract-unenforced]",
+                        cfg_path.display(),
+                        c.dir,
+                        c.type_path,
+                        p,
+                    ));
+                }
+            }
+            None if !by_config => out.push(format!(
+                "{}:{}:1: contract {} -> {} is declared but the host does not enforce it: \
+                 build resolvers with htl::pkg::contract_resolvers(root, &config), or say \
+                 where it is enforced with [[contract]] enforced_by \
+                 [htl contract-unenforced]",
+                c.declared_in.display(),
+                c.declared_at,
+                c.dir,
+                c.type_path,
+            )),
+            None => {}
+        }
     }
     out
 }

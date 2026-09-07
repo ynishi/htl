@@ -55,6 +55,10 @@ pub struct Resolved {
     pub exclude: Vec<String>,
     /// Where to publish the declaration, from `---@contract(dts = "…")`.
     pub dts: Option<String>,
+    /// Where this contract is enforced when the scan cannot see it, from
+    /// `[[contract]] enforced_by`. Not a marker argument: enforcement is the host's
+    /// business, and the record is published to authors who have no use for the path.
+    pub enforced_by: Option<String>,
     /// The file the marker is in, and the line it is on: where to point when something
     /// about this contract is wrong.
     pub declared_in: PathBuf,
@@ -620,6 +624,7 @@ fn read_file(file: &Path, src: &str, cfg: &HtlConfig) -> Result<Vec<Resolved>, V
                 .or_else(|| inherited.map(|c| c.exclude.clone()))
                 .unwrap_or_default(),
             dts: marker.dts,
+            enforced_by: inherited.and_then(|c| c.enforced_by.clone()),
             declared_in: file.to_path_buf(),
             declared_at: i + 1,
         });

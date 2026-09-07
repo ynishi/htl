@@ -1434,9 +1434,9 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
         n_lint += 1;
     }
     // A contract the host never enforces is documentation, not a guarantee.
-    if let Some((_, cfg_path, cfg)) = &cfg {
+    if let Some((_, cfg_path, _)) = &cfg {
         let cargo_root = htl::dts::find_cargo_package_root(&paths[0]);
-        for l in htl::contract_enforcement_lints(cfg, cfg_path, &contracts, cargo_root.as_deref())
+        for l in htl::contract_enforcement_lints(cfg_path, &contracts, cargo_root.as_deref())
         {
             sink.diag("lint", &l);
             n_lint += 1;

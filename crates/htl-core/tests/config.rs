@@ -280,7 +280,7 @@ fn unenforced_contract_is_reported_against_host_sources() {
     let found = contracts(&root, &cfg);
     let host = |body: &str| {
         write(&root.join("src").join("main.rs"), body);
-        contract_enforcement_lints(&cfg, &cfg_path, &found, Some(&root))
+        contract_enforcement_lints(&cfg_path, &found, Some(&root))
     };
 
     let none = host("fn main() {}\n");
@@ -308,7 +308,112 @@ fn unenforced_contract_is_reported_against_host_sources() {
     assert!(by_config.is_empty(), "{by_config:?}");
 
     // No host crate at all: a script-only project has nothing to enforce.
-    assert!(contract_enforcement_lints(&cfg, &cfg_path, &found, None).is_empty());
+    assert!(contract_enforcement_lints(&cfg_path, &found, None).is_empty());
+}
+
+/// `enforced_by` names where the enforcement lives when it is somewhere the scan cannot
+/// reach — a Lua-side validator, a sibling crate, generated code, a resolver built by
+/// hand. The contract that carries it is not held to the scan; the others still are.
+#[test]
+fn enforced_by_exempts_the_contract_that_carries_it() {
+    let (root, _) = project("enforced");
+    let cfg_path = root.join("htl.toml");
+    write(&root.join("src/main.rs"), "fn main() {}\n");
+    write(&root.join("mods/_validate.lua"), "return function() end\n");
+    write(
+        &cfg_path,
+        "[[contract]]\ndir = \"mods\"\nenforced_by = \"mods/_validate.lua\"\n",
+    );
+    let (_, cfg) = HtlConfig::find(&root).unwrap().unwrap();
+    let found = contracts(&root, &cfg);
+    assert_eq!(
+        found[0].enforced_by.as_deref(),
+        Some("mods/_validate.lua"),
+        "carried onto the resolved contract"
+    );
+    let out = contract_enforcement_lints(&cfg_path, &found, Some(&root));
+    assert!(out.is_empty(), "no call in the Rust sources, and none needed: {out:?}");
+}
+
+/// The path is what makes the key a claim rather than an off switch: it has to exist, and
+/// a name that points at nothing is reported under the same rule — including when the
+/// scan did find the call, because the statement is broken either way.
+#[test]
+fn enforced_by_naming_nothing_is_reported() {
+    let (root, _) = project("enforced-missing");
+    let cfg_path = root.join("htl.toml");
+    write(
+        &cfg_path,
+        "[[contract]]\ndir = \"mods\"\nenforced_by = \"mods/_gone.lua\"\n",
+    );
+    let (_, cfg) = HtlConfig::find(&root).unwrap().unwrap();
+    let found = contracts(&root, &cfg);
+
+    for body in [
+        "fn main() {}\n",
+        "for r in htl::pkg::contract_resolvers(&root, &cfg)? { reg.add(r); }\n",
+    ] {
+        write(&root.join("src/main.rs"), body);
+        let out = contract_enforcement_lints(&cfg_path, &found, Some(&root));
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(
+            out[0].contains("no such file") && out[0].contains("_gone.lua"),
+            "says the named file is missing, not that the host does not enforce it: {}",
+            out[0]
+        );
+        assert!(
+            out[0].contains("htl.toml:1:1"),
+            "points at the config, where the key is: {}",
+            out[0]
+        );
+    }
+}
+
+/// An absolute path is taken as it is, the way `[check] paths` takes one — enforcement
+/// may sit outside the project (a sibling crate reached by path, a shared validator).
+#[test]
+fn enforced_by_takes_an_absolute_path() {
+    let (root, _) = project("enforced-abs");
+    let elsewhere = scratch("enforced-abs-target").join("validate.lua");
+    write(&elsewhere, "return function() end\n");
+    let cfg_path = root.join("htl.toml");
+    write(
+        &cfg_path,
+        &format!(
+            "[[contract]]\ndir = \"mods\"\nenforced_by = {:?}\n",
+            elsewhere.to_string_lossy()
+        ),
+    );
+    write(&root.join("src/main.rs"), "fn main() {}\n");
+    let (_, cfg) = HtlConfig::find(&root).unwrap().unwrap();
+    let out = contract_enforcement_lints(&cfg_path, &contracts(&root, &cfg), Some(&root));
+    assert!(out.is_empty(), "{out:?}");
+}
+
+/// One contract's `enforced_by` does not answer for another.
+#[test]
+fn enforced_by_is_per_contract() {
+    let root = scratch("enforced-two");
+    write(
+        &root.join("htl.toml"),
+        "[[contract]]\ndir = \"mods\"\nenforced_by = \"validate.lua\"\n\n\
+         [[contract]]\ndir = \"plugins\"\n",
+    );
+    write(&root.join("validate.lua"), "return function() end\n");
+    write(&root.join("src/main.rs"), "fn main() {}\n");
+    write(
+        &root.join("src/defs.tl"),
+        "local record defs\n   record Mod   ---@contract(\"mods\")\n      name: string   ---@required\n   \
+         end\n   record Plug   ---@contract(\"plugins\")\n      id: string   ---@required\n   end\nend\nreturn defs\n",
+    );
+    write(&root.join("mods/a.tl"), "return { name = \"a\" }\n");
+    write(&root.join("plugins/b.tl"), "return { id = \"b\" }\n");
+    let (cfg_path, cfg) = HtlConfig::find(&root).unwrap().unwrap();
+    let found = contracts(&root, &cfg);
+
+    let out = contract_enforcement_lints(&cfg_path, &found, Some(&root));
+    assert_eq!(out.len(), 1, "only the one without the key: {out:?}");
+    assert!(out[0].contains("defs.Plug"), "{}", out[0]);
 }
 
 #[test]
