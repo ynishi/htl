@@ -45,6 +45,22 @@ enum TypesCmd {
 }
 
 #[derive(Subcommand)]
+enum PkgCmd {
+    /// Take a dependency's source into `patches/<dep>/`: a copy the project owns, edits
+    /// and commits, which install resolves the dependency from
+    Patch {
+        /// The dependency as `mlua-pkg.toml` names it
+        dep: String,
+        /// Refresh the copy even when it has uncommitted changes (they are discarded)
+        #[arg(long)]
+        force: bool,
+    },
+    /// install / add / update / clean: given to `mlua-pkg` as written
+    #[command(external_subcommand)]
+    Passthrough(Vec<String>),
+}
+
+#[derive(Subcommand)]
 enum CacheCmd {
     /// Delete this project's stored check results
     Clear {
@@ -219,11 +235,12 @@ enum Cmd {
         #[arg(long)]
         embed: bool,
     },
-    /// Package management: passthrough to `mlua-pkg` (install / add / update / clean),
-    /// run at the nearest `mlua-pkg.toml` project root
+    /// Package management, run at the nearest `mlua-pkg.toml` project root: `patch` is
+    /// htl's own, every other verb is passed through to `mlua-pkg` (install / add /
+    /// update / clean)
     Pkg {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+        #[command(subcommand)]
+        cmd: Option<PkgCmd>,
     },
     /// Bring declarations for a library into `types/`
     Types {
@@ -365,7 +382,11 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
                 seed,
             },
         ),
-        Cmd::Pkg { args } => cmd_pkg(&args),
+        Cmd::Pkg { cmd } => match cmd {
+            Some(PkgCmd::Patch { dep, force }) => cmd_pkg_patch(&dep, force),
+            Some(PkgCmd::Passthrough(args)) => cmd_pkg(&args),
+            None => cmd_pkg(&[]),
+        },
         Cmd::Types { cmd } => match cmd {
             TypesCmd::Add {
                 library,
@@ -612,7 +633,11 @@ fn cmd_pkg(args: &[String]) -> Result<ExitCode> {
             // A dep publishes its declarations at `types/` in its package root, which is
             // not where `require` looks. Bring them in so the checker sees them.
             if let Some(p) = &project {
+                // Re-read the project: an install may have added the lockfile the status
+                // below is read from, and `add` may have changed the manifest.
+                let p = htl::pkg::Project::at(&p.root);
                 report_types_sync(&p.sync_types()?, &p.root);
+                report_patch_drift(&p);
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -621,6 +646,94 @@ fn cmd_pkg(args: &[String]) -> Result<ExitCode> {
             bail!("`mlua-pkg` binary not found on PATH (install with `cargo install mlua-pkg`)")
         }
         Err(e) => Err(e.into()),
+    }
+}
+
+/// A patched copy the dependency is no longer resolved from, said after every install
+/// until it is refreshed or removed.
+///
+/// A patch is bound to the revision it was taken from, and an upgrade moves the pin off it.
+/// Install does not fail over that — the project builds against the new upstream — so the
+/// only thing that keeps the copy from being forgotten in the tree is being told about it
+/// each time. Both ways out are named, in htl's verbs: mlua-pkg's own warning points at
+/// `mlua-pkg patch --force`, which skips the question htl asks git before overwriting.
+fn report_patch_drift(project: &htl::pkg::Project) {
+    let short = |s: &str| s.chars().take(7).collect::<String>();
+    for s in project.patch_status() {
+        if s.in_use {
+            continue;
+        }
+        let rel = s
+            .dir
+            .strip_prefix(&project.root)
+            .unwrap_or(&s.dir)
+            .display();
+        let why = match (&s.base, &s.locked) {
+            _ if !s.dir.is_dir() => "the copy is not there".to_string(),
+            (None, _) => "the lockfile records no revision it was taken from".to_string(),
+            (Some(b), Some(l)) => {
+                format!("taken from {}, {} is now at {}", short(b), s.name, short(l))
+            }
+            (Some(b), None) => format!("taken from {}, and nothing is locked", short(b)),
+        };
+        eprintln!("  patch   {rel} is not in use ({why})");
+        eprintln!(
+            "          carry the change forward: commit it, then `htl pkg patch {}`",
+            s.name
+        );
+        eprintln!("          drop it: remove patch_dir from mlua-pkg.toml and delete {rel}");
+    }
+}
+
+/// `htl pkg patch <dep>`: the dependency's source, taken into `patches/<dep>/` where the
+/// project owns it. Not a passthrough — htl decides the directory, writes `patch_dir` into
+/// the manifest and answers the "may this be overwritten" question against git; the copy
+/// and the `patch_base` bookkeeping are mlua-pkg's. See `Project::patch`.
+fn cmd_pkg_patch(dep: &str, force: bool) -> Result<ExitCode> {
+    let cwd = std::env::current_dir()?;
+    let project = htl::pkg::Project::find(&cwd).context(
+        "no mlua-pkg.toml above the current directory: a patch belongs to a project, so this runs in one",
+    )?;
+    let report = project.patch(dep, force)?;
+    let rel = report
+        .patch_dir
+        .strip_prefix(&project.root)
+        .unwrap_or(&report.patch_dir);
+    let verb = if report.created { "patched" } else { "rebuilt" };
+    let base: String = report.base.chars().take(7).collect();
+    eprintln!("  {verb} {} ({dep} at {base})", rel.display());
+    eprintln!("htl: it is the project's code now — edit it, commit it, then `htl pkg install`.");
+    warn_if_pkg_binary_predates_patches();
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `htl pkg install` is a passthrough, so the installer is whichever `mlua-pkg` is on PATH
+/// — and `patch_dir` is a manifest key that arrived in 0.11.0.
+///
+/// An older binary does not ignore it: the manifest types deny unknown fields, so it
+/// refuses to parse the file at all. Said here, where the key is written, rather than left
+/// to surface as a parse error on the next install.
+fn warn_if_pkg_binary_predates_patches() {
+    let Ok(out) = std::process::Command::new("mlua-pkg")
+        .arg("--version")
+        .output()
+    else {
+        return;
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let Some(version) = text.split_whitespace().nth(1) else {
+        return;
+    };
+    let mut parts = version.split('.').map(str::parse::<u32>);
+    let (Some(Ok(major)), Some(Ok(minor))) = (parts.next(), parts.next()) else {
+        return;
+    };
+    if (major, minor) < (0, 11) {
+        eprintln!(
+            "htl: mlua-pkg on PATH is {version}, and patch_dir is read from 0.11.0 on — \
+             `htl pkg install` will not parse this manifest until it is updated \
+             (cargo install mlua-pkg)"
+        );
     }
 }
 
@@ -749,15 +862,15 @@ fn coverage_report(
     Ok(report::CoverageReport {
         modules: rows
             .into_iter()
-            .map(|(path, executed, total, unexecuted, never_ran)| {
-                report::CoverageModule {
+            .map(
+                |(path, executed, total, unexecuted, never_ran)| report::CoverageModule {
                     path,
                     executed,
                     total,
                     unexecuted,
                     never_ran,
-                }
-            })
+                },
+            )
             .collect(),
         executed: tot_exec,
         total: tot_all,
@@ -858,7 +971,10 @@ fn cmd_test(
     } else {
         Some(spec.as_str())
     };
-    let files = htl::testing::discover_tests(&paths)?;
+    // A patched dependency's `*_test.tl` are its suite, not this project's: `htl pkg patch`
+    // takes the whole package root, tests included, and running them here would report a
+    // library's own failures as the project's.
+    let files = htl::testing::discover_tests_skipping(&paths, &patched(&paths))?;
     if files.is_empty() {
         eprintln!("htl test: no test files found (looked for *_test.tl and tests/**/*.tl)");
         return Ok(ExitCode::FAILURE);
@@ -1088,6 +1204,47 @@ fn cmd_test(
     })
 }
 
+/// The patched dependencies below `paths` — `patch_dir` deps, as directories.
+///
+/// What `htl check` walks and `htl fmt` / `htl test` do not: the copy is the project's
+/// code, so its type errors are the project's to fix, but rewriting it or running its
+/// tests is doing a dependency's work in the project's name.
+fn patched(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for p in paths {
+        for d in htl::patched_dirs(p) {
+            if !out.contains(&d) {
+                out.push(d);
+            }
+        }
+    }
+    out
+}
+
+/// Name the patched dependencies this walk enters, in the shape the other reports use.
+///
+/// Only the ones actually below a given root: `htl check src` walks the project's own
+/// sources and nothing under `patches/`, and saying otherwise would be a claim about files
+/// that were not read.
+fn report_patched(paths: &[PathBuf]) {
+    let roots: Vec<PathBuf> = paths
+        .iter()
+        .filter_map(|p| std::fs::canonicalize(p).ok())
+        .collect();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let Some(project) = paths.first().and_then(|p| htl::pkg::Project::find(p)) else {
+        return;
+    };
+    for p in &project.patches {
+        let canon = std::fs::canonicalize(&p.dir).unwrap_or_else(|_| p.dir.clone());
+        if !roots.iter().any(|r| canon.starts_with(r)) {
+            continue;
+        }
+        let shown = p.dir.strip_prefix(&cwd).unwrap_or(&p.dir);
+        eprintln!("  patched {} ({})", shown.display(), p.name);
+    }
+}
+
 /// Nearest `htl.toml` above the first path: `(dir holding it, path, config)`.
 fn load_config(first: &Path) -> Result<Option<(PathBuf, PathBuf, htl::config::HtlConfig)>> {
     Ok(htl::config::HtlConfig::find(first)?.map(|(p, c)| (htl::parent_dir(&p), p, c)))
@@ -1104,7 +1261,10 @@ fn cmd_fmt(paths: &[PathBuf], check: bool, indent: Option<usize>) -> Result<Exit
         .or_else(|| cfg.as_ref().and_then(|(_, _, c)| c.fmt.indent))
         .unwrap_or(3);
     let h = Htl::new()?;
-    let files = htl::collect_tl(&paths)?;
+    // Not a patched dependency: formatting the copy would turn every one of its files into
+    // a diff against the revision it was taken from, and bury the project's own change
+    // somewhere inside that.
+    let files = htl::collect_tl_skipping(&paths, &patched(&paths))?;
     let (mut changed, mut failed) = (0usize, 0usize);
     for f in &files {
         let before = fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?;
@@ -1400,7 +1560,14 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
     if let Some(first) = paths.first() {
         auto_dts(first)?;
     }
+    // A patched dependency is walked with the project's own sources — it is the project's
+    // code, and its errors are the project's to fix. Which dependency each directory
+    // stands in for is said here, so that an error under it is read as that dependency's
+    // without the reader having to know the manifest.
     let files = htl::collect_tl(&paths)?;
+    if !json {
+        report_patched(&paths);
+    }
 
     // The `---@contract` markers, read once for the run rather than once per file: they
     // are a property of the project, and every file under a contract dir asks the same
@@ -1506,8 +1673,7 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
     // A contract the host never enforces is documentation, not a guarantee.
     if let Some((_, cfg_path, _)) = &cfg {
         let cargo_root = htl::dts::find_cargo_package_root(&paths[0]);
-        for l in htl::contract_enforcement_lints(cfg_path, &contracts, cargo_root.as_deref())
-        {
+        for l in htl::contract_enforcement_lints(cfg_path, &contracts, cargo_root.as_deref()) {
             sink.diag("lint", &l);
             n_lint += 1;
         }
