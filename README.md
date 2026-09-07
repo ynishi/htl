@@ -364,9 +364,18 @@ dir = "mods"              # relative to htl.toml; "sites/*" = every subdirectory
 `[check] paths` is for modules the host supplies at run time from somewhere the
 checker would not look (an SDK cache, a mods dir): the CLI, `include_tl!` and
 `contract_resolvers` all add them, plus the `htl.toml` dir, its `src/` and its
-`types/`. `types/` is the conventional home for hand-written `.d.tl` (the
-DefinitelyTyped shape: declarations the module's author did not ship, written by the
-user), searched without any configuration; `htl new` creates it.
+`types/`. `types/` is the conventional home for `.d.tl` (the DefinitelyTyped shape:
+declarations the module's author did not ship), searched without any configuration;
+`htl new` creates it.
+
+Two kinds arrive there. The ones written by hand, and the ones a dependency published:
+a package keeps its own declarations at `types/` in its root, which is outside the entry
+directory `require` resolves through, so `htl pkg` copies them in and writes beside each
+one the dep and the revision it came from. Copying rather than searching the installed
+deps is what makes them survive a fresh clone — `.htl/` is gitignored and empty until
+someone installs, `types/` is committed. A name `types/` already has is reported and left
+alone: two libraries publishing a module of the same name is a real situation, and there
+is no registry to arbitrate it with.
 
 Source beats declaration: when both `defs.tl` and a `defs.d.tl` are reachable, the
 checker reads the `.tl`, wherever the two sit on the path (Teal's own order is `.d.tl`
