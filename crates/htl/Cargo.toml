@@ -21,6 +21,14 @@ macros = ["dep:htl-macros"]
 pkg = ["htl-core/pkg"]
 # htl::dts (.d.tl generation from Rust source; `htl dts`)
 dts = ["htl-core/dts"]
+# `async fn` in a `#[host_module]` impl. Off by default: it turns on mlua's own `async`
+# feature, and a host with no async method should compile as it did without this.
+async = ["htl-core/async"]
+
+[dev-dependencies]
+# The async tests need something to poll the futures with: mlua yields to the caller's
+# executor and provides none of its own.
+tokio = { version = "1", features = ["rt", "macros", "time"] }
 
 [dependencies]
 htl-core = { workspace = true }

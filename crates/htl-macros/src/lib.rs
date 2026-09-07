@@ -511,6 +511,13 @@ fn expand_host_module(
             Some(_) => quote! { this.#fname(#call_args) },
             None => quote! { <#self_ty>::#fname(#call_args) },
         };
+        // An `async fn` returns a future; everything downstream — the error handling, the
+        // `value, err` convention — is about the value it resolves to.
+        let call = if m.is_async {
+            quote! { #call.await }
+        } else {
+            call
+        };
         let body = match (m.ret_is_result, hd.err_mode) {
             (false, _) => quote! { ::htl::mlua::Result::Ok(#call) },
             (true, dts::ErrMode::Raise) => quote! { #call.map_err(::htl::mlua::Error::external) },
@@ -529,10 +536,23 @@ fn expand_host_module(
             },
         };
         let pat = quote! { (#( #arg_pats, )*): (#( #arg_tys, )*) };
-        registrations.push(match m.receiver {
-            Some(false) => quote! { m.add_method(#fname_s, |_lua, this, #pat| #body); },
-            Some(true) => quote! { m.add_method_mut(#fname_s, |_lua, this, #pat| #body); },
-            None => quote! { m.add_function(#fname_s, |_lua, #pat| #body); },
+        // The async variants differ in more than the name: they take the Lua by value and
+        // the receiver as a borrow guard (`UserDataRef`) that the future holds across
+        // every await, and the future itself must be `'static`. `async move` is what
+        // makes it one — the arguments are moved in rather than borrowed from the call.
+        registrations.push(match (m.receiver, m.is_async) {
+            (Some(false), false) => quote! { m.add_method(#fname_s, |_lua, this, #pat| #body); },
+            (Some(true), false) => quote! { m.add_method_mut(#fname_s, |_lua, this, #pat| #body); },
+            (None, false) => quote! { m.add_function(#fname_s, |_lua, #pat| #body); },
+            (Some(false), true) => quote! {
+                m.add_async_method(#fname_s, |_lua, this, #pat| async move { #body });
+            },
+            (Some(true), true) => quote! {
+                m.add_async_method_mut(#fname_s, |_lua, mut this, #pat| async move { #body });
+            },
+            (None, true) => quote! {
+                m.add_async_function(#fname_s, |_lua, #pat| async move { #body });
+            },
         });
     }
 

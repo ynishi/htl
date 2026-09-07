@@ -21,6 +21,9 @@ pkg = ["dep:mlua-pkg"]
 # `htl_core::dts`: `.d.tl` generation from Rust source (`#[host_module]` / `#[derive(TealRecord)]`),
 # shared by the proc macros and `htl dts`.
 dts = ["dep:syn"]
+# mlua's async support, for `async fn` in a `#[host_module]` impl. Off by default: it
+# changes how mlua is built, and a host with no async method needs none of it.
+async = ["mlua/async"]
 
 [dependencies]
 mlua = { workspace = true }
