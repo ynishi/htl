@@ -1,8 +1,8 @@
 //! Source collection must not walk into installed packages, build output or tool state:
 //! `htl check .` / `htl fmt .` / `htl test` operate on the project's own files.
 
-use htl_core::testing::discover_tests;
-use htl_core::{collect_tl, is_skipped_dir};
+use htl_core::testing::{discover_tests, discover_tests_skipping};
+use htl_core::{collect_tl, collect_tl_skipping, is_skipped_dir, patched_dirs};
 use std::path::{Path, PathBuf};
 
 mod common;
@@ -92,6 +92,70 @@ fn an_explicit_root_inside_a_skipped_dir_is_still_walked() {
     assert!(is_skipped_dir(&root.join(".htl"), &[]));
     assert!(is_skipped_dir(&root.join(".mlua-pkgs"), &[]));
     assert!(!is_skipped_dir(&root.join("src"), &[]));
+}
+
+/// A project holding a dependency it patched: `patch_dir` on the dep, and the copy under
+/// `patches/mathx` with a source and a test of the dependency's own.
+fn patched_project() -> PathBuf {
+    let root = scratch("patched");
+    write(
+        &root.join("mlua-pkg.toml"),
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[deps.mathx]\n\
+         git = \"https://example.invalid/mathx\"\nrev = \"abc\"\npatch_dir = \"patches/mathx\"\n",
+    );
+    write(&root.join("src/main.tl"), "print(1)\n");
+    write(&root.join("patches/mathx/src/mathx.tl"), "return {}\n");
+    write(
+        &root.join("patches/mathx/tests/mathx_test.tl"),
+        "print(2)\n",
+    );
+    root
+}
+
+/// The copy is committed, project-owned code, and a type error in it is the project's to
+/// fix — so `htl check` reads it like the rest of the tree.
+#[test]
+fn a_patched_dependency_is_checked_with_the_project() {
+    let root = patched_project();
+    let files = collect_tl(std::slice::from_ref(&root)).unwrap();
+    assert_eq!(
+        rel(&root, &files),
+        vec![
+            "patches/mathx/src/mathx.tl",
+            "patches/mathx/tests/mathx_test.tl",
+            "src/main.tl"
+        ]
+    );
+}
+
+/// What the copy holds is a diff against the revision it was taken from: reformatting it
+/// would turn every file into a diff and bury the change, and its `*_test.tl` are the
+/// dependency's suite rather than the project's.
+#[test]
+fn fmt_and_test_leave_a_patched_dependency_alone() {
+    let root = patched_project();
+    let skip = patched_dirs(&root);
+    assert_eq!(skip.len(), 1, "{skip:?}");
+    assert!(skip[0].ends_with("patches/mathx"), "{skip:?}");
+
+    let files = collect_tl_skipping(std::slice::from_ref(&root), &skip).unwrap();
+    assert_eq!(rel(&root, &files), vec!["src/main.tl"]);
+
+    let tests = discover_tests_skipping(std::slice::from_ref(&root), &skip).unwrap();
+    assert!(tests.is_empty(), "{tests:?}");
+    assert_eq!(
+        rel(&root, &discover_tests(std::slice::from_ref(&root)).unwrap()),
+        vec!["patches/mathx/tests/mathx_test.tl"],
+        "and it is the skip that leaves them out, not the walk missing them"
+    );
+}
+
+/// A dependency with no `patch_dir` contributes nothing to skip: the walkers are unchanged
+/// for a project that has patched nothing.
+#[test]
+fn a_project_with_no_patches_skips_nothing_extra() {
+    let root = project();
+    assert!(patched_dirs(&root).is_empty());
 }
 
 /// A pkgs dir named by path is skipped even under a plain name: `extra` says what a name

@@ -119,13 +119,21 @@ impl FileReport {
 /// Explicit file paths are always included. Does not enter [`crate::SKIP_DIRS`],
 /// dot-directories or the project's mlua-pkg dir (dependencies' tests are theirs).
 pub fn discover_tests(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    discover_tests_skipping(paths, &[])
+}
+
+/// [`discover_tests`], not entering `skip` either — directories named by path rather than
+/// by name ([`crate::patched_dirs`]: a patched dependency's `*_test.tl` are its own suite,
+/// not the project's).
+pub fn discover_tests_skipping(paths: &[PathBuf], skip: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for p in paths {
         if p.is_file() {
             out.push(p.clone());
             continue;
         }
-        let extra = crate::project_skip_dirs(p);
+        let mut extra = crate::project_skip_dirs(p);
+        extra.extend(skip.iter().cloned());
         let root = p.clone();
         let walker = walkdir::WalkDir::new(p)
             .sort_by_file_name()

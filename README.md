@@ -45,6 +45,7 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 | `htl gen <file.tl> [-o out.lua]` | readable Lua, the escape hatch out of htl |
 | `htl build <entry.tl> -o app.hb [--debug] [--source] [--extra a,b] [--host x,y]` | link the entry's `require` closure into one bundle (see Bundles) |
 | `htl pkg <args>` | passthrough to `mlua-pkg` at the nearest `mlua-pkg.toml` root; after a successful run, the deps' own `types/` are copied into the project's (see `types/`) |
+| `htl pkg patch <dep> [--force]` | take that dependency's source into `patches/<dep>/`, where the project owns it and install resolves it from (see Patched dependencies) |
 | `htl types add <library> [--from dir] [--force]` | the declarations a library never shipped, from [teal-types](https://github.com/teal-language/teal-types), into `types/` with the commit they came from recorded beside each |
 | `htl cache status [path] [--entries]` / `htl cache clear [path]` | report what the store holds, or empty it (see Caching) |
 | `htl dts [dir]` | write the `.d.tl` files this project declares: from Rust source, the ones `#[host_module]` / `#[derive(TealRecord)]` ask for, no build needed; from Teal, the module each `---@contract` type is declared in. `check` / `run` / `test` / `build` do this automatically; exits non-zero when something it was asked to write could not be |
@@ -58,7 +59,8 @@ manifest declares and nothing does by default. When a
 directory is given, `check` / `fmt` / `build` / `test` walk the project's own files only:
 `target/`, `node_modules/`, `.mlua-pkgs/` and any
 dot-directory are not entered, so dependencies' sources and tests stay theirs. A
-directory passed explicitly is always walked. Files under `tests/` are checked with the
+directory passed explicitly is always walked. A `patch_dir` dependency is the one thing in
+between: `check` reads it, `fmt` and `test` do not (see Patched dependencies). Files under `tests/` are checked with the
 project root and `src/` on the search path, the same as `htl test`, so `htl check tests`
 and `htl test` agree.
 
@@ -508,6 +510,51 @@ nothing is reported under the same rule, whether or not the call was found elsew
 the key stays a claim `htl check` can hold to something rather than a per-contract off
 switch.
 
+## Patched dependencies (`htl pkg patch`)
+
+A dependency needs one line changed. `htl pkg patch mathx` copies its package root — the
+whole package, so its `types/` comes with it — out of the pinned revision and into
+`patches/mathx/`, writes `patch_dir = "patches/mathx"` onto that dependency in
+`mlua-pkg.toml`, and records the commit it was taken from as `patch_base` in the lockfile.
+
+```text
+  patched patches/mathx (mathx at 3f2a9c1)
+```
+
+From there the directory is the project's code: edited, diffed, reviewed and committed
+with git like anything else in the tree. There is no patch file and nothing is applied —
+`htl pkg install` leaves the directory alone and resolves the dependency from it. This is
+the shape of Cargo's `[patch]` with a `path` source, and of Go's `replace` pointing at a
+directory in the module tree. Removing `patch_dir` and the directory returns the
+dependency to its fetched form at the next install.
+
+**What is checked, and what is not.** The copy is committed, project-owned code whose
+errors are the project's to fix, so `htl check` walks it and names the dependency each
+directory stands in for. `htl fmt` and `htl test` do not touch it: formatting it would
+turn every file into a diff against its base and hide the change inside it, and its
+`*_test.tl` are the dependency's suite rather than the project's. `.htl/modules` is not
+descended into at all, patched or otherwise. The criterion is who writes the directory —
+one that install regenerates (`target_dir`) is skipped, one that the project edits is
+checked.
+
+**Upgrading.** A patch is bound to the revision it was taken from. When the pin moves —
+the dependency was upgraded — install fetches the new revision and resolves from it, the
+copy is left alone, and every install says so until the patch is refreshed or removed:
+
+```text
+  patch   patches/mathx is not in use (taken from 3f2a9c1, mathx is now at 8b07e44)
+          carry the change forward: commit it, then `htl pkg patch mathx`
+          drop it: remove patch_dir from mlua-pkg.toml and delete patches/mathx
+```
+
+Install does not fail over it; the project builds against the new upstream. `htl pkg
+patch` on an already patched dependency refreshes the copy from the revision the pin now
+resolves to and records that as the new base. The copy is overwritten rather than merged,
+so carrying the project's own change forward onto it is a merge git performs — which is
+why a directory with uncommitted changes is refused, naming them, and why `--force` (which
+discards them) is a flag rather than the default. Outside a repository the question cannot
+be asked at all, and that is said rather than guessed at.
+
 ## Tests
 
 ```lua
@@ -702,6 +749,8 @@ directory's.
 ├── src/<mod>/init.tl      the module (require("<mod>") from src/ and tests/)
 ├── types/                 .d.tl the project consumes (hand-written) and publishes
 │                          (a ---@contract type), searched by default
+├── patches/<dep>/         a dependency taken into the tree (htl pkg patch), committed;
+│                          checked, not formatted, its tests not run
 ├── src/main.tl            entry script
 └── tests/<mod>_test.tl
 ```

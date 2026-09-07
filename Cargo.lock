@@ -470,6 +470,7 @@ dependencies = [
  "serde",
  "syn 2.0.119",
  "toml",
+ "toml_edit",
  "walkdir",
 ]
 
@@ -752,9 +753,9 @@ dependencies = [
 
 [[package]]
 name = "mlua-pkg"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1dfe8a61498c775790ba1f4ed083a573232c63d526836385c9c8351ac7c18f7"
+checksum = "b1f90f6e693d3f25c6a8f90ed79483e1715e5fffddbad07b6c113e786824bc45"
 dependencies = [
  "anyhow",
  "clap",
