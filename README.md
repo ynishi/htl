@@ -578,11 +578,33 @@ local function describe(e: Monster | Item): string
 end
 ```
 
-`where` takes an expression that uses `self` once; comparing an enum-typed tag field works
-the same way and is the usual shape. Inside a narrowed branch the other variant's fields
-are not in scope — reaching for one is `invalid key 'weight' in record 'e' of type
+`where` takes an expression that uses `self` **once**; comparing an enum-typed tag field
+works the same way and is the usual shape. Inside a narrowed branch the other variant's
+fields are not in scope — reaching for one is `invalid key 'weight' in record 'e' of type
 Monster` — and a partially narrowed value keeps its remaining variants, so after `is A`
 over `A | B | C` the value is `B | C` and a field only `B` has is still an error.
+
+That "once" is the cost of the form, and it decides where the form belongs. One record
+cannot answer to two tag values:
+
+```text
+cannot use argument 'self' multiple times in macroexp
+```
+
+So a type with seven tag values needs seven records, and it is worth writing them only
+when the variants carry different data. Where several tags carry the *same* data, a union
+buys nothing an enum field on one record does not already give: the branches are guarded
+by `enum-exhaustive` either way, and the declarations are the only thing that grew.
+
+A worked example from a project that decided against one. Its `Effect` has five fields and
+seven tag values, but only four payload shapes among them — `power`, `power` + `damage`,
+`status`, and nothing at all. As a union that is seven records, four of them structurally
+identical, around thirty lines of declaration, to gain field safety at the one place it is
+read. It stayed an enum plus a record, and that was the right call.
+
+The question to ask is not "does this have a tag" — plenty of records do — but "do the
+variants hold different things". When they do, the union pays for itself at every use
+site. When they do not, the tag was already saying it.
 
 A variant nobody handled is not a type error — an `is` chain that covers `A` and `B` and
 falls through compiles, and goes on compiling when `C` joins the union — so the
