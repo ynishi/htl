@@ -46,7 +46,7 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 | `htl build <entry.tl> -o app.hb [--debug] [--source] [--extra a,b] [--host x,y]` | link the entry's `require` closure into one bundle (see Bundles) |
 | `htl pkg <args>` | passthrough to `mlua-pkg` at the nearest `mlua-pkg.toml` root |
 | `htl cache status [path] [--entries]` / `htl cache clear [path]` | report what the store holds, or empty it (see Caching) |
-| `htl dts [dir]` | write the `.d.tl` files declared by `#[host_module]` / `#[derive(TealRecord)]` from Rust source, no build needed (`check` / `run` / `test` / `build` do this automatically when inside a crate) |
+| `htl dts [dir]` | write the `.d.tl` files this project declares: from Rust source, the ones `#[host_module]` / `#[derive(TealRecord)]` ask for, no build needed; from Teal, the module each `---@contract` type is declared in. `check` / `run` / `test` / `build` do this automatically; exits non-zero when something it was asked to write could not be |
 
 `mlua-pkg.toml` is detected by walking up from the file: vendored deps become
 visible to the checker and to `run` / `test` / `build` automatically. When a
@@ -732,9 +732,11 @@ was not used).
 - No token-level formatting: `htl fmt` recomputes indentation and whitespace only.
 - No Luau: PUC Lua 5.4 / LuaJIT via mlua features; bundles are bound to the Lua
   generation of the `htl` that built them.
-- `.d.tl` files come from Rust source syntactically (`htl dts`, and the macros at
-  expansion time write the same text). There is no reflection on types: a field of
-  type `Foo` is declared as `Foo` and it is on you that a Teal `Foo` exists.
+- `.d.tl` files are written syntactically, from Rust source (`htl dts`, and the
+  macros at expansion time write the same text) and from Teal (the module a
+  `---@contract` type is declared in). There is no reflection on types either way: a
+  Rust field of type `Foo` is declared as `Foo` and it is on you that a Teal `Foo`
+  exists, and a Teal signature is carried across as it was written.
 
 ## License
 

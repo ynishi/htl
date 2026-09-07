@@ -178,8 +178,9 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
     },
-    /// Write the `.d.tl` files declared by `#[host_module(dts = ..)]` / `#[teal(dts = ..)]`
-    /// in a Rust crate, without building it (check / run / test / build do this automatically)
+    /// Write the `.d.tl` files this project declares: those `#[host_module(dts = ..)]` /
+    /// `#[teal(dts = ..)]` ask for in a Rust crate, without building it, and the module
+    /// each `---@contract` type is declared in (check / run / test / build do both)
     Dts {
         /// Crate root or any path inside it (default: current directory)
         dir: Option<PathBuf>,
