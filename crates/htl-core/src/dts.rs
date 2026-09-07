@@ -352,6 +352,11 @@ pub struct HostMethod {
     pub ret_is_result: bool,
     /// The success value is `()` (nothing to hand back but "it worked").
     pub ret_is_unit: bool,
+    /// `async fn`: registered through mlua's async variant, and callable only from inside
+    /// a Lua coroutine. The Teal declaration is the same either way — an async function
+    /// yields internally and hands back the same values — so this changes the generated
+    /// Rust, not the `.d.tl`.
+    pub is_async: bool,
 }
 
 #[derive(Clone)]
@@ -480,6 +485,7 @@ pub fn host_decl(
             ret_teal,
             ret_is_result,
             ret_is_unit,
+            is_async: f.sig.asyncness.is_some(),
         });
     }
     decl.push_str(&format!("end\n\nreturn {module}\n"));

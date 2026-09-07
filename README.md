@@ -192,6 +192,36 @@ and the next `cargo build` fails inside the `.tl` that relied on it. `&str`,
 from structs in the same source file, records from other modules via
 `uses = [Name]` + their own `.d.tl`.
 
+### `async fn` (feature `async`)
+
+A method may be `async`, in the same `impl` as the sync ones and with no annotation
+saying which the block contains. It is registered through mlua's async variant, and its
+Teal declaration is the one the same signature produces without `async` — a function that
+yields internally and hands back the same values is an ordinary call from Lua, and Teal
+has no way to say otherwise.
+
+```rust
+#[host_module(name = "api")]
+impl Api {
+    pub fn seen(&self) -> u32 { self.calls }
+    pub async fn fetch(&self, path: String) -> String { /* … */ }
+}
+```
+
+Three things follow from mlua, not from htl:
+
+- **The executor is yours.** mlua yields to whatever is polling and provides nothing of
+  its own, so an async method runs under `call_async` (which creates the coroutine for
+  you) or an `AsyncThread` you drive. Called from a plain `load(..).eval()` there is
+  nothing to suspend, and Lua raises rather than blocking.
+- **The receiver is borrowed across every await.** `add_async_method` hands over a
+  `UserDataRef<T>` that the future holds until it resolves, so nothing else may take the
+  value exclusively meanwhile. Prefer `&self` over `&mut self`.
+- **The future must be `'static`**, and `Send` as well when mlua's `send` feature is on.
+
+The feature is off by default: it turns on mlua's `async`, and a host with no async
+method should be built as it was without it.
+
 Runtime resolution through mlua-pkg:
 
 ```rust
