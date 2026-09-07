@@ -508,6 +508,85 @@ impl Project {
         }
         Ok(reg)
     }
+
+    /// Bring the declarations a dep publishes into the project's own `types/`.
+    ///
+    /// A dep that follows htl's own convention keeps its `.d.tl` under `types/` at its
+    /// package root, and that is outside the entry directory `vendored/<name>` points at —
+    /// so the checker never sees it, and the depending project writes the declaration
+    /// again by hand. Copying rather than widening the search path is what makes the
+    /// result survive a fresh clone: [`pkgs_dir`] is machine-local and empty until someone
+    /// installs, while `types/` is committed.
+    ///
+    /// A name `types/` already has is left alone and reported. Two libraries publishing a
+    /// module of the same name is a real situation, and there is no registry to arbitrate
+    /// it with, so the project decides rather than the last install winning.
+    pub fn sync_types(&self) -> anyhow::Result<TypesSync> {
+        let mut out = TypesSync::default();
+        if !self.installed() {
+            return Ok(out);
+        }
+        let lock = mlua_pkg::lockfile::Lockfile::read(&self.lockfile)?;
+        let dest = self.root.join("types");
+        for p in &lock.pkg {
+            let Some(published) = self.package_root(p).map(|r| r.join("types")) else {
+                continue;
+            };
+            if !published.is_dir() {
+                continue;
+            }
+            let mut found: Vec<PathBuf> = std::fs::read_dir(&published)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|f| crate::is_declaration(f))
+                .collect();
+            found.sort();
+            for src in found {
+                let Some(name) = src.file_name() else { continue };
+                let target = dest.join(name);
+                if target.exists() {
+                    out.taken.push((target, p.name.clone()));
+                    continue;
+                }
+                std::fs::create_dir_all(&dest)?;
+                std::fs::copy(&src, &target)?;
+                // Beside it, the one thing the Lua ecosystem does not record: which
+                // revision of which dep this declaration was taken from. Without it,
+                // staleness is not a question anyone can ask.
+                let mut note = target.clone().into_os_string();
+                note.push(".src");
+                std::fs::write(PathBuf::from(note), format!("{} {}\n", p.name, p.sha))?;
+                out.written.push((target, p.name.clone()));
+            }
+        }
+        Ok(out)
+    }
+
+    /// The package root behind `vendored/<name>`: that symlink points at the dep's *entry*
+    /// directory, and the lockfile is what says how far below the root the entry sits.
+    fn package_root(&self, p: &mlua_pkg::lockfile::LockedPkg) -> Option<PathBuf> {
+        let mut root = std::fs::canonicalize(self.vendored.join(&p.name)).ok()?;
+        let depth = p
+            .entry
+            .components()
+            .filter(|c| !matches!(c, std::path::Component::CurDir))
+            .count();
+        for _ in 0..depth {
+            if !root.pop() {
+                return None;
+            }
+        }
+        Some(root)
+    }
+}
+
+/// What [`Project::sync_types`] did: one entry per declaration a dep publishes.
+#[derive(Debug, Default)]
+pub struct TypesSync {
+    /// Written into `types/`, with the dep it came from.
+    pub written: Vec<(PathBuf, String)>,
+    /// Left as it was, because `types/` already had that name — with the dep that offered
+    /// one too.
+    pub taken: Vec<(PathBuf, String)>,
 }
 
 /// One [`TealResolver`] per `[[contract]]` in `htl.toml`, in declaration order, so the

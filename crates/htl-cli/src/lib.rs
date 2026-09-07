@@ -580,15 +580,32 @@ fn cmd_pkg(args: &[String]) -> Result<ExitCode> {
     }
     let status = cmd.status();
     match status {
-        Ok(s) => Ok(if s.success() {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::FAILURE
-        }),
+        Ok(s) if s.success() => {
+            // A dep publishes its declarations at `types/` in its package root, which is
+            // not where `require` looks. Bring them in so the checker sees them.
+            if let Some(p) = &project {
+                report_types_sync(&p.sync_types()?, &p.root);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Ok(_) => Ok(ExitCode::FAILURE),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             bail!("`mlua-pkg` binary not found on PATH (install with `cargo install mlua-pkg`)")
         }
         Err(e) => Err(e.into()),
+    }
+}
+
+/// What the deps published, in the shape `htl init` reports its scaffold. A name that was
+/// already taken is said out loud: nothing was overwritten, and the project is the one
+/// that decides which declaration it wants.
+fn report_types_sync(sync: &htl::pkg::TypesSync, root: &Path) {
+    let rel = |p: &Path| p.strip_prefix(root).unwrap_or(p).display().to_string();
+    for (path, dep) in &sync.written {
+        eprintln!("  types   {} (from {dep})", rel(path));
+    }
+    for (path, dep) in &sync.taken {
+        eprintln!("  kept    {} ({dep} publishes one too)", rel(path));
     }
 }
 
