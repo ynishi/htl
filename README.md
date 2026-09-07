@@ -48,10 +48,14 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 | `htl cache status [path] [--entries]` / `htl cache clear [path]` | report what the store holds, or empty it (see Caching) |
 | `htl dts [dir]` | write the `.d.tl` files this project declares: from Rust source, the ones `#[host_module]` / `#[derive(TealRecord)]` ask for, no build needed; from Teal, the module each `---@contract` type is declared in. `check` / `run` / `test` / `build` do this automatically; exits non-zero when something it was asked to write could not be |
 
-`mlua-pkg.toml` is detected by walking up from the file: vendored deps become
-visible to the checker and to `run` / `test` / `build` automatically. When a
+`mlua-pkg.toml` is detected by walking up from the file: installed deps become
+visible to the checker and to `run` / `test` / `build` automatically. They go under
+`.htl/modules/`, beside the check cache — htl decides that one location and hands it to
+mlua-pkg, rather than each side deciding for itself. *Vendored* is kept for the other
+thing: a copy of a dependency committed to the repo, which a `target_dir` entry in the
+manifest declares and nothing does by default. When a
 directory is given, `check` / `fmt` / `build` / `test` walk the project's own files only:
-`target/`, `node_modules/`, `.mlua-pkgs/` (or wherever `MLUA_PKG_DIR` points) and any
+`target/`, `node_modules/`, `.mlua-pkgs/` and any
 dot-directory are not entered, so dependencies' sources and tests stay theirs. A
 directory passed explicitly is always walked. Files under `tests/` are checked with the
 project root and `src/` on the search path, the same as `htl test`, so `htl check tests`
@@ -63,7 +67,8 @@ and `htl test` agree.
 whatever has not moved. The summary says how much: `[cached]` when everything came from the
 store and no checker was built at all, `[36/48 cached]` when some of it did, and nothing
 when none did. `--format json` carries the same as `summary.cached` and `summary.replayed`.
-`htl init` puts `.htl/` in `.gitignore`; add it by hand in an existing project.
+`htl init` puts `.htl/` in `.gitignore` — one line for the cache and the installed deps
+beside it; add it by hand in an existing project.
 
 There are two separate controls. **Whether to cache** is `--no-cache`, which neither reads
 nor writes. **How the cache is grained** is `--cache-mode`, or `[cache] mode` in `htl.toml`
@@ -609,7 +614,7 @@ htl check . --format json | jq -r '.diagnostics[] |
 
 `htl build src/main.tl -o app.hb` follows `require("<literal>")` from the entry and
 links everything it reaches into one file: `.tl` modules type-checked and generated,
-plain `.lua` modules (vendored dependencies) as they are. A `require` that resolves only
+plain `.lua` modules (a dependency's own sources) as they are. A `require` that resolves only
 to a `.d.tl` is recorded as **host-provided** (a Rust `#[host_module]`, a `preload`);
 any other unresolved `require` is a build error, so "module not found" happens here
 and not on the first `require` at the user's machine. `htl run app.hb` runs it; a host
@@ -786,4 +791,5 @@ was not used).
 
 ## License
 
-MIT OR Apache-2.0. Teal (`crates/htl/vendor/tl.lua`) is MIT, see `vendor/LICENSE.teal`.
+MIT OR Apache-2.0. Teal (`crates/htl-core/vendor/tl.lua`) is MIT, see
+`crates/htl-core/vendor/LICENSE.teal`.

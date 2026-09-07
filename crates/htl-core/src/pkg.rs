@@ -376,17 +376,22 @@ impl TealResolver {
 
 // ---------------------------------------------------------------- Project (mlua-pkg.toml)
 
-/// An `mlua-pkg.toml` project: where the manifest, lockfile and vendored deps live.
+/// An `mlua-pkg.toml` project: where the manifest, lockfile and installed deps live.
 ///
-/// The pkgs dir follows mlua-pkg's own rule, evaluated against the manifest's
-/// directory: `MLUA_PKG_DIR` env > `<root>/target/mlua-pkgs` when `<root>/target`
-/// exists > `<root>/.mlua-pkgs`.
+/// Installed deps go under [`pkgs_dir`] — `<root>/.htl/modules`, beside the check cache
+/// and regenerated the same way: from the manifest and the lockfile rather than from the
+/// project's own sources. Deps that are *committed* are the other thing, and they are
+/// declared: `target_dirs`.
 #[derive(Debug, Clone)]
 pub struct Project {
     pub root: PathBuf,
     pub manifest: PathBuf,
     pub lockfile: PathBuf,
     pub pkgs_dir: PathBuf,
+    /// `pkgs_dir/vendored`: one entry per installed dep, pointing at what mlua-pkg
+    /// fetched. The name is mlua-pkg's own and describes its layout, not htl's — what is
+    /// in there is installed and regenerated, while a copy that is committed to the repo
+    /// is a `target_dir` dep below.
     pub vendored: PathBuf,
     /// Parent directories of `target_dir` deps (physically vendored copies declared in
     /// the manifest, e.g. `target_dir = "lua/lshape"` -> `<root>/lua`), so
@@ -394,8 +399,22 @@ pub struct Project {
     pub target_dirs: Vec<PathBuf>,
 }
 
-pub const MANIFEST_NAME: &str = "mlua-pkg.toml";
-pub const LOCKFILE_NAME: &str = "mlua-pkg.lock";
+pub const MANIFEST_NAME: &str = mlua_pkg::project::MANIFEST_FILE_NAME;
+pub const LOCKFILE_NAME: &str = mlua_pkg::project::LOCKFILE_FILE_NAME;
+
+/// Where a project's installed deps go: `<root>/.htl/modules`, always.
+///
+/// One directory, named in one place. htl does not read the location out of the
+/// environment and does not infer it from whether `target/` happens to exist — it decides
+/// it here and hands it to mlua-pkg when it runs one (`htl pkg`), so the installer and the
+/// checker cannot name different directories.
+///
+/// What goes on *inside* is mlua-pkg's: [`mlua_pkg::PkgDir`] derives `cache/` and
+/// `vendored/` from the base, and this returns one so htl does not spell that layout out a
+/// second time.
+pub fn pkgs_dir(root: &Path) -> mlua_pkg::PkgDir {
+    mlua_pkg::PkgDir::new(root.join(".htl").join("modules"))
+}
 
 impl Project {
     /// Walk up from `start` (a file or directory) looking for `mlua-pkg.toml`.
@@ -421,12 +440,8 @@ impl Project {
 
     /// Project rooted at `root` (must contain `mlua-pkg.toml`; not checked here).
     pub fn at(root: &Path) -> Self {
-        let pkgs_dir = match std::env::var("MLUA_PKG_DIR") {
-            Ok(p) if !p.is_empty() => PathBuf::from(p),
-            _ if root.join("target").is_dir() => root.join("target").join("mlua-pkgs"),
-            _ => root.join(".mlua-pkgs"),
-        };
-        let manifest = root.join(MANIFEST_NAME);
+        let inner = mlua_pkg::Project::in_dir(root, pkgs_dir(root));
+        let manifest = inner.manifest_path().to_path_buf();
         // `target_dir` deps: collect the parent of each declared copy target. A manifest
         // that fails to parse contributes nothing here (mlua-pkg itself reports it).
         let mut target_dirs: Vec<PathBuf> = Vec::new();
@@ -447,9 +462,9 @@ impl Project {
         Self {
             root: root.to_path_buf(),
             manifest,
-            lockfile: root.join(LOCKFILE_NAME),
-            vendored: pkgs_dir.join("vendored"),
-            pkgs_dir,
+            lockfile: inner.lock_path().to_path_buf(),
+            vendored: inner.pkg_dir().vendored(),
+            pkgs_dir: inner.pkg_dir().base().to_path_buf(),
             target_dirs,
         }
     }

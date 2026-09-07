@@ -601,7 +601,7 @@ mod tests {
     }
 
     /// The macro must see the same tree as the CLI: a module vendored by mlua-pkg
-    /// (`.mlua-pkgs/vendored/<name>/init.tl`) resolves from a script under the project.
+    /// (`.htl/modules/vendored/<name>/init.tl`) resolves from a script under the project.
     #[test]
     fn include_resolves_vendored_dep_from_mlua_pkg_project() {
         let root = scratch("vendored");
@@ -610,7 +610,7 @@ mod tests {
             "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[deps]\n",
         );
         write(
-            &root.join(".mlua-pkgs/vendored/mathx/init.tl"),
+            &root.join(".htl/modules/vendored/mathx/init.tl"),
             "local record mathx\nend\nfunction mathx.twice(n: number): number\n   return n * 2\nend\nreturn mathx\n",
         );
         write(
@@ -669,7 +669,7 @@ mod tests {
             "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[deps]\n",
         );
         write(
-            &root.join(".mlua-pkgs/vendored/mathx/mathx.tl"),
+            &root.join(".htl/modules/vendored/mathx/mathx.tl"),
             "local record mathx\nend\nfunction mathx.twice(n: number): number\n   return n * 2\nend\nreturn mathx\n",
         );
         write(
@@ -805,7 +805,7 @@ mod tests {
     fn include_without_project_does_not_see_vendored_dir() {
         let root = scratch("noproject");
         write(
-            &root.join(".mlua-pkgs/vendored/mathx/init.tl"),
+            &root.join(".htl/modules/vendored/mathx/init.tl"),
             "return {}\n",
         );
         write(

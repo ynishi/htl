@@ -41,15 +41,20 @@ fn project() -> PathBuf {
     write(&root.join("tests/util_test.tl"), "print(2)\n");
     // dependency material that `htl pkg install` produces under the project
     write(
-        &root.join(".mlua-pkgs/cache/git/x/vec2/abc/src/vec2.tl"),
+        &root.join(".htl/modules/cache/git/x/vec2/abc/src/vec2.tl"),
         "return {}\n",
     );
     write(
-        &root.join(".mlua-pkgs/cache/git/x/vec2/abc/tests/vec2_test.tl"),
+        &root.join(".htl/modules/cache/git/x/vec2/abc/tests/vec2_test.tl"),
         "print(3)\n",
     );
     write(
-        &root.join(".mlua-pkgs/vendored/vec2/vec2.tl"),
+        &root.join(".htl/modules/vendored/vec2/vec2.tl"),
+        "return {}\n",
+    );
+    // and what the `mlua-pkg` binary leaves behind when it is run on its own
+    write(
+        &root.join(".mlua-pkgs/vendored/vec1/vec1.tl"),
         "return {}\n",
     );
     // build output and other tool state
@@ -79,14 +84,18 @@ fn discover_tests_skips_dependency_tests() {
 #[test]
 fn an_explicit_root_inside_a_skipped_dir_is_still_walked() {
     let root = project();
-    let inner = root.join(".mlua-pkgs/vendored/vec2");
+    let inner = root.join(".htl/modules/vendored/vec2");
     let files = collect_tl(std::slice::from_ref(&inner)).unwrap();
     assert_eq!(rel(&inner, &files), vec!["vec2.tl"]);
+    // `.htl/` by the dot-directory rule, `.mlua-pkgs/` by name for a project that ran the
+    // `mlua-pkg` binary itself.
+    assert!(is_skipped_dir(&root.join(".htl"), &[]));
     assert!(is_skipped_dir(&root.join(".mlua-pkgs"), &[]));
     assert!(!is_skipped_dir(&root.join("src"), &[]));
 }
 
-/// `MLUA_PKG_DIR`-style relocation: the project's pkgs dir is skipped even under a plain name.
+/// A pkgs dir named by path is skipped even under a plain name: `extra` says what a name
+/// cannot.
 #[test]
 fn project_pkgs_dir_is_skipped_by_path() {
     let root = project();

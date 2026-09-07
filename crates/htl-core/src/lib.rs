@@ -1359,8 +1359,8 @@ pub fn is_declaration(p: &Path) -> bool {
 pub const SKIP_DIRS: &[&str] = &["target", "node_modules", ".mlua-pkgs", ".git"];
 
 /// `true` for a directory entry that source collection should not enter: a name in
-/// [`SKIP_DIRS`], any dot-directory, or the project's mlua-pkg directory (`pkgs_dir`,
-/// which `MLUA_PKG_DIR` can move somewhere unremarkable).
+/// [`SKIP_DIRS`], any dot-directory, or one of `extra` — named by path rather than by
+/// name, for what the caller knows and a name cannot say.
 pub fn is_skipped_dir(path: &Path, extra: &[PathBuf]) -> bool {
     if !path.is_dir() {
         return false;
@@ -1381,9 +1381,9 @@ pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Extra directories to skip below `root`: the mlua-pkg package dir when `root` is
-/// inside an `mlua-pkg.toml` project (its vendored / cached sources are dependencies,
-/// not the project's own files).
+/// Extra directories to skip below `root`: where a project installed its deps, when
+/// `root` is inside an `mlua-pkg.toml` project. What is under there was fetched rather
+/// than written here — the dependencies' own sources and tests, not the project's.
 #[cfg(feature = "pkg")]
 pub fn project_skip_dirs(root: &Path) -> Vec<PathBuf> {
     match pkg::Project::find(root) {
