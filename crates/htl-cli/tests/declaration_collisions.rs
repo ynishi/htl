@@ -9,17 +9,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod common;
+
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "htl-cli-decl-{name}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    common::scratch("htl-cli-decl", name)
 }
 
 fn write(path: &Path, text: &str) {

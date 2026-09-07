@@ -5,17 +5,10 @@ use htl_core::fix::{FixOptions, fix_file, unified_diff};
 use htl_core::{Applicability, Htl};
 use std::path::{Path, PathBuf};
 
+mod common;
+
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "htl-core-fix-{name}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    common::scratch("htl-core-fix", name)
 }
 
 fn write(path: &Path, text: &str) {

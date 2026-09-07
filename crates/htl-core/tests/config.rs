@@ -6,17 +6,10 @@ use htl_core::pkg::TealResolver as Resolver;
 use htl_core::{Htl, contract_enforcement_lints, contract_lints};
 use std::path::{Path, PathBuf};
 
+mod common;
+
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "htl-core-config-{name}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    common::scratch("htl-core-config", name)
 }
 
 fn write(path: &Path, text: &str) {

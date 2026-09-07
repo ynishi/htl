@@ -6,17 +6,10 @@
 use htl_core::Htl;
 use std::path::{Path, PathBuf};
 
+mod common;
+
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "htl-core-union-{name}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    common::scratch("htl-core-union", name)
 }
 
 fn write(path: &Path, text: &str) {
