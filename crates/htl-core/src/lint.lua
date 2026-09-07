@@ -589,11 +589,18 @@ end
 -- Which record a bare `{ ... }` is being built as is type information, and this rule is
 -- run over a syntax-only parse (see L.run). `extra.struct_at(y, x)` answers it from the
 -- checker's position report; the rule only compares key sets.
--- Levenshtein, stopped as soon as it is past `bound`: the answer here is only ever
+-- Edit distance, stopped as soon as it is past `bound`: the answer here is only ever
 -- "close enough or not", and a full distance between two unrelated names is wasted work.
+--
+-- A transposition costs one, not two (optimal string alignment). `lable` for `label` is
+-- among the commonest ways to mistype a name, and plain Levenshtein charges it two, which
+-- puts it outside the bound for exactly the short names most fields have. Widening the
+-- bound instead would let in names that merely share letters; this admits the one mistake
+-- that was missing and nothing else.
 local function within(a, b, bound)
    if a == b then return true end
    if math.abs(#a - #b) > bound then return false end
+   local prev2 = nil
    local prev = {}
    for j = 0, #b do prev[j] = j end
    for i = 1, #a do
@@ -603,10 +610,14 @@ local function within(a, b, bound)
       for j = 1, #b do
          local cost = (ca == b:byte(j)) and 0 or 1
          local d = math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+         if i > 1 and j > 1 and ca == b:byte(j - 1) and a:byte(i - 1) == b:byte(j) then
+            d = math.min(d, prev2[j - 2] + 1)
+         end
          cur[j] = d
          if d < best then best = d end
       end
       if best > bound then return false end
+      prev2 = prev
       prev = cur
    end
    return prev[#b] <= bound
