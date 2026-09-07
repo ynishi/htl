@@ -568,11 +568,17 @@ fn cmd_init(dir: Option<&Path>, lib: bool, embed: bool) -> Result<ExitCode> {
 
 fn cmd_pkg(args: &[String]) -> Result<ExitCode> {
     let cwd = std::env::current_dir()?;
-    let root = htl::pkg::Project::find(&cwd).map(|p| p.root).unwrap_or(cwd);
-    let status = std::process::Command::new("mlua-pkg")
-        .args(args)
-        .current_dir(&root)
-        .status();
+    let project = htl::pkg::Project::find(&cwd);
+    let root = project.as_ref().map_or(cwd, |p| p.root.clone());
+    let mut cmd = std::process::Command::new("mlua-pkg");
+    cmd.args(args).current_dir(&root);
+    // Hand mlua-pkg the directory htl resolved instead of letting it decide again: the
+    // installer and the checker have to name the same one, and only htl has looked at
+    // where an existing checkout already installed.
+    if let Some(p) = &project {
+        cmd.env("MLUA_PKG_DIR", &p.pkgs_dir);
+    }
+    let status = cmd.status();
     match status {
         Ok(s) => Ok(if s.success() {
             ExitCode::SUCCESS
