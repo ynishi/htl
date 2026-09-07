@@ -12,14 +12,15 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// A scratch directory that will not collide with a parallel run of another benchmark.
+/// A fresh directory under the system temp dir. Counted rather than timestamped: the
+/// clock advances in microsecond steps, so two calls close together get the same value
+/// and the same directory (see `tests/common/mod.rs`).
 pub fn scratch(name: &str) -> PathBuf {
+    static NTH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
         "htl-bench-{name}-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        NTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&dir).unwrap();
     dir

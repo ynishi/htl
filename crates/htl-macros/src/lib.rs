@@ -581,14 +581,15 @@ fn expand_host_module(
 mod tests {
     use super::*;
 
+    /// A fresh directory under the system temp dir. Counted rather than timestamped: the
+    /// clock advances in microsecond steps, so two calls close together get the same
+    /// value and the same directory.
     fn scratch(name: &str) -> PathBuf {
+        static NTH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
             "htl-macros-test-{name}-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            NTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
