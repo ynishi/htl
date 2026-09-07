@@ -169,6 +169,9 @@ enum Cmd {
         /// With --coverage, also list the unexecuted line ranges of each module
         #[arg(long, requires = "coverage")]
         coverage_lines: bool,
+        /// Also write the coverage as an lcov tracefile here (implies --coverage)
+        #[arg(long, value_name = "FILE")]
+        lcov: Option<PathBuf>,
         /// Seed the random stream tests draw from; printed every run, so a failure repeats
         #[arg(long)]
         seed: Option<u64>,
@@ -359,6 +362,7 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
             update,
             coverage,
             coverage_lines,
+            lcov,
             seed,
             format,
             no_cache,
@@ -374,8 +378,9 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
                 quiet,
                 slow,
                 update,
-                coverage,
+                coverage: coverage || lcov.is_some(),
                 coverage_lines,
+                lcov,
                 json: format == Format::Json,
                 no_cache,
                 explain: explain_cache,
@@ -787,6 +792,8 @@ struct TestFlags {
     update: bool,
     coverage: bool,
     coverage_lines: bool,
+    /// Where to write the lcov tracefile, if asked for.
+    lcov: Option<PathBuf>,
     json: bool,
     no_cache: bool,
     explain: bool,
@@ -807,15 +814,7 @@ fn coverage_report(
     sources.extend(hits.keys().cloned());
     let cwd = std::env::current_dir().unwrap_or_default();
     let (mut tot_exec, mut tot_all) = (0usize, 0usize);
-    // (module, executed, all, unexecuted ranges, functions that never ran)
-    type Row = (
-        String,
-        usize,
-        usize,
-        Vec<(usize, usize)>,
-        Vec<report::NeverRan>,
-    );
-    let mut rows: Vec<Row> = Vec::new();
+    let mut rows: Vec<report::CoverageModule> = Vec::new();
     for src in &sources {
         let name = src.to_string_lossy();
         if !name.ends_with(".tl")
@@ -832,9 +831,12 @@ fn coverage_report(
         let empty = std::collections::BTreeSet::new();
         let ran = hits.get(src).unwrap_or(&empty);
         let mut missed = Vec::new();
+        let mut statements = Vec::with_capacity(ranges.len());
         let mut executed = 0usize;
         for &(a, b) in &ranges {
-            if ran.range(a..=b).next().is_some() {
+            let hit = ran.range(a..=b).next().is_some();
+            statements.push((a, hit));
+            if hit {
                 executed += 1;
             } else {
                 missed.push((a, b));
@@ -842,12 +844,19 @@ fn coverage_report(
         }
         // The body only. Defining a function runs its `function` line and its `end`
         // line, so both are silent about whether anything ever entered it.
-        let never_ran = funcs
+        let functions: Vec<(String, usize, bool)> = funcs
             .into_iter()
-            .filter(|f| ran.range(f.line + 1..=f.last - 1).next().is_none())
-            .map(|f| report::NeverRan {
-                name: f.name,
-                line: f.line,
+            .map(|f| {
+                let entered = ran.range(f.line + 1..=f.last - 1).next().is_some();
+                (f.name, f.line, entered)
+            })
+            .collect();
+        let never_ran = functions
+            .iter()
+            .filter(|(_, _, entered)| !entered)
+            .map(|(name, line, _)| report::NeverRan {
+                name: name.clone(),
+                line: *line,
             })
             .collect();
         tot_exec += executed;
@@ -857,21 +866,19 @@ fn coverage_report(
             .unwrap_or(src)
             .to_string_lossy()
             .into_owned();
-        rows.push((shown, executed, ranges.len(), missed, never_ran));
+        rows.push(report::CoverageModule {
+            path: shown,
+            executed,
+            total: ranges.len(),
+            unexecuted: missed,
+            never_ran,
+            source: src.clone(),
+            statements,
+            functions,
+        });
     }
     Ok(report::CoverageReport {
-        modules: rows
-            .into_iter()
-            .map(
-                |(path, executed, total, unexecuted, never_ran)| report::CoverageModule {
-                    path,
-                    executed,
-                    total,
-                    unexecuted,
-                    never_ran,
-                },
-            )
-            .collect(),
+        modules: rows,
         executed: tot_exec,
         total: tot_all,
     })
@@ -1151,6 +1158,17 @@ fn cmd_test(
     } else {
         None
     };
+    if let (Some(out), Some(cov)) = (&flags.lcov, &coverage) {
+        // Against the project root rather than the working directory: a tracefile is
+        // uploaded from wherever CI ran the command and resolved against the repository.
+        let root = match load_config(&paths[0])? {
+            Some((dir, _, _)) => dir,
+            None => std::env::current_dir()?,
+        };
+        let root = std::fs::canonicalize(&root).unwrap_or(root);
+        std::fs::write(out, cov.lcov(&root))
+            .with_context(|| format!("writing {}", out.display()))?;
+    }
     let skipped = files.len() - ran_files;
     explain_cache(store.as_ref(), opts);
     let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -1173,6 +1191,9 @@ fn cmd_test(
     } else {
         if let Some(cov) = &coverage {
             print_coverage(cov, flags.coverage_lines);
+            if let Some(out) = &flags.lcov {
+                eprintln!("coverage: lcov written to {}", out.display());
+            }
         }
         eprintln!(
             "htl test: {} file(s), {} passed, {} failed, {} file(s) with errors{}{} ({:.0} ms)",
