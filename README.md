@@ -40,7 +40,7 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 | `htl new <name>` / `htl init [dir]` | scaffold: `mlua-pkg.toml`, `src/<mod>/init.tl`, `src/main.tl`, `tests/`, README (`--lib`, `--embed` for a Rust host) |
 | `htl check [paths] [--strict] [--lint +rule,-rule] [--no-cache] [--cache-mode per-module\|whole-run] [--explain-cache]` | type-check; htl lints as `lint:` (advisory, `--strict` fails on them); what has not changed is replayed from `.htl/` (see Caching) |
 | `htl run <file.tl \| app.hb> [args]` | check then execute; `require` of a `.tl` with type errors fails |
-| `htl test [paths] [--filter s] [--lib mod] [--no-cache]` | `*_test.tl` and `tests/**/*.tl`, one isolated state per file; checking is replayed from `.htl/`, the run never is (see Caching) |
+| `htl test [paths] [--filter s] [--lib mod] [--coverage] [--lcov file] [--no-cache]` | `*_test.tl` and `tests/**/*.tl`, one isolated state per file; checking is replayed from `.htl/`, the run never is (see Caching) |
 | `htl fmt [paths] [--check] [--indent N]` | whitespace formatter (indentation from the syntax tree, blank lines, trailing space) |
 | `htl gen <file.tl> [-o out.lua]` | readable Lua, the escape hatch out of htl |
 | `htl build <entry.tl> -o app.hb [--debug] [--source] [--extra a,b] [--host x,y]` | link the entry's `require` closure into one bundle (see Bundles) |
@@ -557,6 +557,18 @@ both of those lines, so neither says anything about calls. A function with nothi
 between — written on one line, or with an empty body — is not reported. The hook slows
 the run, and code that runs inside a coroutine the program creates is not seen.
 
+`--lcov coverage.info` writes the same run as an lcov tracefile, which is what Codecov,
+Coveralls, GitLab, `genhtml` and editor gutters read; it implies `--coverage`, and the
+table and `--format json` are unchanged. One record per module the table lists: `FN` /
+`FNDA` from the functions above (`1` when the body was entered, `0` when not), `DA` per
+line a statement starts on, with a count of `1` or `0` — the hook records whether a line
+ran, not how often, and consumers treat any non-zero as covered. Two statements starting
+on one line share the entry, so `LF` / `LH` differ from the table's `total` / `executed`
+by exactly those lines. There is no branch data and no `BRDA`. `SF` is relative to the
+project root (the `htl.toml` directory) rather than to where the command ran, so the
+file resolves against the repository wherever CI stood; a module outside the root is
+written absolute.
+
 Randomness: the runner seeds each file before it runs, prints the seed of every run, and
 takes it back with `--seed`, so a test that draws is one whose failure can be looked at
 again:
@@ -574,7 +586,7 @@ test that calls `math.randomseed` itself takes over from there; the runner does 
 again.
 
 Runner: `htl test [paths] [--filter substr] [--fail-fast] [-v | -q] [--slow MS]
-[--update] [--seed N] [--coverage [--coverage-lines]]`. Each file runs in a fresh state; `-v` prints every test with its time,
+[--update] [--seed N] [--coverage [--coverage-lines]] [--lcov FILE]`. Each file runs in a fresh state; `-v` prints every test with its time,
 `-q` only failures (with their details), errors and the summary line, `--slow 50` the
 tests over 50 ms, `--fail-fast` stops at the first failure. The run has one checker
 (`htl::testing::TestSession`) and one fresh program state per file: globals,
