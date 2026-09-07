@@ -1,6 +1,8 @@
 /target
-.claude/
-workspace/
+# No trailing slash: a worktree gets these as symlinks to the main checkout, and a
+# `dir/` pattern matches directories only, so the slash left them staged-able there.
+.claude
+workspace
 .mlua-pkgs/
 .worktrees/
 .htl/
