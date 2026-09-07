@@ -321,14 +321,9 @@ indent = 3
 [check]
 paths = ["mods", "~/.cache/tsk/sdk"]   # extra dirs require() resolves from while checking
 
-[[contract]]              # static form of TealResolver::expect_type / require_fields
+[[contract]]              # where this project accepts modules written outside it
 dir = "mods"              # relative to htl.toml; "sites/*" = every subdirectory of sites/
-type = "defs.Mod"         # every module directly under `dir` must return this record
-require_fields = ["name", "monsters"]   # these must be present in the returned table;
-                          # a field added to the record later stays optional until it is
-                          # listed here. `true` = every declared field, for settled types
-exclude = ["modkit"]      # modules in `dir` not held to it (an SDK the host writes there)
-# module = "Site"         # or: only this module name (in each dir) is held to it
+# module = "Site"         # optional: only this module name (in each dir) is held to it
 ```
 
 `[check] paths` is for modules the host supplies at run time from somewhere the
@@ -351,29 +346,69 @@ one read. `duplicate-declaration` reports it — a project that keeps a hand-wri
 told which is in effect and which is not, rather than being left to work out why a type
 is not what the file in front of it says.
 
-A `[[contract]]` adds two lints:
+### Data from outside the program (`---@contract`)
 
-- `contract` — a module under `dir` whose return value is not assignable to `type`, or
-  (with `require_fields`) whose returned table literal leaves a required field out, is
-  reported at `htl check` time instead of at the first `require`. The literal is found
-  through `return { … }`, `return define({ … })`, `return { … } as T`, and
-  `local m: T = { … } … m.f = … return m`. A name in the list that `type` does not
-  declare is reported too: a contract that reads as one has to be one.
+`htl.toml` says *where* modules arrive; the record says *what* they must be. Marking the
+record is what makes the contract discoverable — a directory carries no evidence of which
+of a project's records is the one its modules must satisfy.
+
+```tl
+local record defs
+   record Mod              ---@contract
+      name: string         ---@required
+      monsters: {Monster}  ---@required
+      items: {Item}        ---@required
+      factions: {Faction}
+      npcs: {Npc}
+   end
+end
+return defs
+```
+
+Every module directly under `mods/` must return a value assignable to `defs.Mod` and set
+the three marked fields. `factions` and `npcs` are for the mods that want them, and that
+asymmetry is the point: a record cannot say which of its own fields are mandatory (every
+Teal record field is nilable and there is no `?` for them), and holding modules to *all*
+of them would break every one written before a field was added. Marking the mandatory
+ones lets the type grow.
+
+The default is the opposite of `---@struct`'s, and each marker says which regime its
+record is under: `---@struct` is about a record the program builds itself, where a new
+field is mandatory unless marked `---@optional`; `---@contract` is about a value arriving
+from outside, where a new field is optional unless marked `---@required`.
+
+A bare `---@contract` inherits the directory from `htl.toml`, which is what a project with
+one contract writes. `---@contract("plugins")` names its own, `---@contract(module = "S")`
+narrows a directory to one module name, and both can be given at once.
+
+Two lints follow:
+
+- `contract` — a module under the directory whose return value is not assignable to the
+  record, or whose returned table literal leaves a `---@required` field out, is reported
+  at `htl check` time instead of at the first `require`. The literal is found through
+  `return { … }`, `return define({ … })`, `return { … } as T`, and
+  `local m: T = { … } … m.f = … return m`. A marker that cannot be turned into a contract
+  — one naming no directory in a project whose `htl.toml` declares none or several, two
+  markers claiming one directory, a marker on the record a module returns rather than on
+  one inside it — is reported here too.
 - `contract-unenforced` — a contract is only a guarantee if the host enforces it. When a
   Cargo package is found, `htl check` scans its Rust sources for
-  `expect_type("<type>")` (plus `.require_fields(…)` / `.require_all_fields()` when
-  required) or for the config-driven helpers below, and otherwise tells you what to add.
+  `contract_resolvers(` and otherwise tells you to add it.
 
-Hosts get resolvers from the same file, so the two cannot drift:
+Hosts build their resolvers from the same markers, so the two cannot drift:
 
 ```rust
 let (path, cfg) = htl::config::HtlConfig::find(Path::new("."))?.expect("htl.toml");
 let mut reg = mlua_pkg::Registry::new();
 for r in htl::pkg::contract_resolvers(&htl::parent_dir(&path), &cfg)? {
-    reg.add(r); // TealResolver for <root>/mods, carrying the contract's expect_type /
-                // require_fields as written in htl.toml
+    reg.add(r); // TealResolver for <root>/mods, expecting the record marked
+                // ---@contract for that directory and its ---@required fields
 }
 ```
+
+That one call is what `contract-unenforced` looks for. A resolver assembled by hand from
+`TealResolver::new(…).expect_type(…).require_fields([…])` still works, but it restates
+what the record already says, which is the drift the marker exists to remove.
 
 ## Tests
 

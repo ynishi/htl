@@ -185,7 +185,7 @@ impl TealResolver {
     pub fn for_contract(
         root: &Path,
         cfg: &crate::config::HtlConfig,
-        c: &crate::config::Contract,
+        c: &crate::contract::Resolved,
     ) -> Result<Vec<Self>, InitError> {
         c.dirs(root)
             .into_iter()
@@ -198,7 +198,7 @@ impl TealResolver {
         root: &Path,
         dir: &Path,
         cfg: &crate::config::HtlConfig,
-        c: &crate::config::Contract,
+        c: &crate::contract::Resolved,
     ) -> Result<Self, InitError> {
         let mut r = Self::new_symlink_aware(dir)?
             .expect_type(c.type_path.clone())
@@ -503,8 +503,9 @@ pub fn contract_resolvers(
     root: &Path,
     cfg: &crate::config::HtlConfig,
 ) -> Result<Vec<TealResolver>, InitError> {
+    let (contracts, _) = crate::contract::resolve(root, cfg);
     let mut out = Vec::new();
-    for c in &cfg.contract {
+    for c in &contracts {
         out.extend(TealResolver::for_contract(root, cfg, c)?);
     }
     Ok(out)

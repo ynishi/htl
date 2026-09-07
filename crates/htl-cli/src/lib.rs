@@ -1281,6 +1281,14 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
     }
     let files = htl::collect_tl(&paths)?;
 
+    // The `---@contract` markers, read once for the run rather than once per file: they
+    // are a property of the project, and every file under a contract dir asks the same
+    // question of them.
+    let (contracts, contract_problems) = match &cfg {
+        Some((r, _, c)) => htl::contract::resolve(r, c),
+        None => (Vec::new(), Vec::new()),
+    };
+
     // The store lives at the project root, so invocations from different directories in
     // one project share it; what separates them is the key, which carries the working
     // directory and each path as written.
@@ -1329,7 +1337,7 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
             }
             None => {
                 let h = h.as_ref().expect("a module missed, so a checker was built");
-                let m = check_one(h, &mut sink, f, &cfg)?;
+                let m = check_one(h, &mut sink, f, &cfg, &contracts)?;
                 // Per-module entries are written as each one is checked; a whole-run entry
                 // cannot be written until the walk is done, so it happens below.
                 if let Some(c) = &store
@@ -1363,10 +1371,18 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
         sink.diag("lint", &cyc);
         n_lint += 1;
     }
+    // A marker that could not be turned into a contract: reported once for the run, and
+    // before the enforcement question, which cannot be asked about a contract there is no
+    // agreement on.
+    for p in &contract_problems {
+        sink.diag("lint", p);
+        n_lint += 1;
+    }
     // A contract the host never enforces is documentation, not a guarantee.
     if let Some((_, cfg_path, cfg)) = &cfg {
         let cargo_root = htl::dts::find_cargo_package_root(&paths[0]);
-        for l in htl::contract_enforcement_lints(cfg, cfg_path, cargo_root.as_deref()) {
+        for l in htl::contract_enforcement_lints(cfg, cfg_path, &contracts, cargo_root.as_deref())
+        {
             sink.diag("lint", &l);
             n_lint += 1;
         }
@@ -1599,6 +1615,7 @@ fn check_one(
     sink: &mut report::Sink,
     f: &Path,
     cfg: &Option<(PathBuf, PathBuf, htl::config::HtlConfig)>,
+    contracts: &[htl::contract::Resolved],
 ) -> Result<cache::Module> {
     // Both `add_layout_paths` and the contract lints prepend to the search path, and
     // without putting it back the Nth file would be checked against the directories of the
@@ -1617,11 +1634,11 @@ fn check_one(
         sink.diag("lint", &l);
         lints += 1;
     }
-    // `[[contract]]`: static expect_type / require_fields for files under each dir.
+    // `---@contract`: the type and required fields for files under each contract dir.
     if let Some((root, _, cfg)) = cfg
         && c.ok()
     {
-        for l in htl::contract_lints(h, root, cfg, f)? {
+        for l in htl::contract_lints(h, root, cfg, contracts, f)? {
             sink.diag("lint", &l);
             lints += 1;
         }

@@ -106,25 +106,24 @@ impl RequireFields {
     }
 }
 
+/// `[[contract]]` — where this project accepts modules from outside it. One line, in the
+/// file a reader opens first; the shape those modules must have is declared on the record
+/// itself with `---@contract` (see [`crate::contract`]).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Contract {
     /// Directory relative to `htl.toml`, e.g. `"mods"`. One path segment may be `*`
     /// (`"sites/*"`): every subdirectory at that level is a contract directory.
     pub dir: String,
-    /// `"<module>.<Type>"`, e.g. `"defs.Mod"`.
-    #[serde(rename = "type")]
-    pub type_path: String,
-    /// Which declared fields must appear in the module's returned table literal.
-    #[serde(default)]
-    pub require_fields: RequireFields,
-    /// Module names (file stems) inside `dir` that are not held to the contract, e.g.
-    /// an SDK the host writes there (`defs`, `modkit`). The module that declares `type`
-    /// is always exempt.
+    /// When set, only this module name (in each matched dir) is held to the contract.
+    /// `---@contract(module = "…")` says the same thing on the record.
+    pub module: Option<String>,
+    /// Module names (file stems) inside `dir` that are not held to the contract: a
+    /// helper, or an SDK the host writes there. A declaration (`.d.tl`) is never held to
+    /// a contract and does not need listing; a `.tl` beside the modules does.
+    /// `---@contract(exclude = "a b")` says the same thing on the record.
     #[serde(default)]
     pub exclude: Vec<String>,
-    /// When set, only this module name (in each matched dir) is held to the contract.
-    pub module: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -186,7 +185,18 @@ pub struct FixConfig {
 impl HtlConfig {
     /// Parse `htl.toml` text.
     pub fn parse(text: &str) -> Result<Self> {
-        toml::from_str(text).context("parsing htl.toml")
+        toml::from_str(text)
+            .map_err(|e| match moved_contract_key(text) {
+                // `type` / `require_fields` / `exclude` moved onto the record itself, and
+                // the serde message for an unknown key does not say where they went.
+                Some(k) => anyhow::anyhow!(
+                    "[[contract]] {k} moved onto the type: mark the record \
+                     `---@contract` and its mandatory fields `---@required`, and leave \
+                     `dir` (with `module` / `exclude` if you use them) here"
+                ),
+                None => anyhow::Error::from(e),
+            })
+            .context("parsing htl.toml")
     }
 
     /// Nearest `htl.toml` at or above `start` (a file or directory). `Ok(None)` when
@@ -251,53 +261,29 @@ impl HtlConfig {
     }
 }
 
-impl Contract {
-    /// Concrete contract directories under `root` (expands one `*` segment). Missing
-    /// directories are dropped; a literal `dir` that does not exist yields nothing.
-    pub fn dirs(&self, root: &Path) -> Vec<PathBuf> {
-        let mut acc = vec![root.to_path_buf()];
-        for seg in self.dir.split('/').filter(|s| !s.is_empty() && *s != ".") {
-            let mut next = Vec::new();
-            for base in &acc {
-                if seg == "*" {
-                    if let Ok(rd) = std::fs::read_dir(base) {
-                        let mut subs: Vec<PathBuf> = rd
-                            .flatten()
-                            .map(|e| e.path())
-                            .filter(|p| p.is_dir() && !crate::is_skipped_dir(p, &[]))
-                            .collect();
-                        subs.sort();
-                        next.extend(subs);
-                    }
-                } else {
-                    let p = base.join(seg);
-                    if p.is_dir() {
-                        next.push(p);
-                    }
-                }
+/// The first `[[contract]]` key that used to live in `htl.toml` and now lives on the
+/// record, if the text still carries one. A scan of the lines after a `[[contract]]`
+/// header, which is enough to tell a stale config from an unrelated typo.
+fn moved_contract_key(text: &str) -> Option<&'static str> {
+    let mut in_contract = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_contract = line.starts_with("[[contract]]");
+            continue;
+        }
+        if !in_contract {
+            continue;
+        }
+        for k in ["type", "require_fields"] {
+            if line
+                .strip_prefix(k)
+                .is_some_and(|r| r.trim_start().starts_with('='))
+            {
+                return Some(k);
             }
-            acc = next;
-        }
-        acc
-    }
-
-    /// Is a module with this name (file stem) held to the contract?
-    pub fn applies_to(&self, module: &str) -> bool {
-        if self
-            .type_path
-            .split_once('.')
-            .is_some_and(|(m, _)| m == module)
-        {
-            return false;
-        }
-        if self.exclude.iter().any(|e| e == module) {
-            return false;
-        }
-        match &self.module {
-            Some(only) => only == module,
-            None => true,
         }
     }
+    None
 }
 
 /// Combine specs in precedence order (later wins): `"+a,-b"` + `"+b"` -> `"+a,-b,+b"`.
