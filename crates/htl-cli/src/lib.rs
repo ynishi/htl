@@ -46,6 +46,49 @@ enum TypesCmd {
 
 #[derive(Subcommand)]
 enum PkgCmd {
+    /// Fetch every dependency `mlua-pkg.toml` declares and write `mlua-pkg.lock`
+    Install,
+    /// Write a dependency into `mlua-pkg.toml`; `install` is what fetches it
+    Add {
+        /// The name `require()` will use for it
+        name: String,
+        /// Remote git URL
+        git: String,
+        /// Pin to a tag: exact (`v1.0.0`), or a prefix that follows its patches (`v1.0`)
+        #[arg(long)]
+        tag: Option<String>,
+        /// Pin to a commit
+        #[arg(long)]
+        rev: Option<String>,
+        /// Track a branch (a build from it is not reproducible)
+        #[arg(long)]
+        branch: Option<String>,
+        /// The subdirectory `require()` resolves through, when it is not the one the
+        /// package declares
+        #[arg(long)]
+        entry: Option<PathBuf>,
+        /// Copy the package into this directory instead of linking it (manifest-relative,
+        /// rewritten by every install)
+        #[arg(long)]
+        target_dir: Option<PathBuf>,
+    },
+    /// Refresh dependencies, bump the pins that follow releases, then install
+    Update {
+        /// One dependency; every one when omitted
+        name: Option<String>,
+        /// Print the plan and write nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Bump exact tag pins too, to the highest release the remote has
+        #[arg(long)]
+        force: bool,
+    },
+    /// Remove cached packages the lockfile no longer refers to
+    Clean {
+        /// Remove the whole cache rather than the unreferenced entries
+        #[arg(long)]
+        all: bool,
+    },
     /// Take a dependency's source into `patches/<dep>/`: a copy the project owns, edits
     /// and commits, which install resolves the dependency from
     Patch {
@@ -55,9 +98,6 @@ enum PkgCmd {
         #[arg(long)]
         force: bool,
     },
-    /// install / add / update / clean: given to `mlua-pkg` as written
-    #[command(external_subcommand)]
-    Passthrough(Vec<String>),
 }
 
 #[derive(Subcommand)]
@@ -235,12 +275,11 @@ enum Cmd {
         #[arg(long)]
         embed: bool,
     },
-    /// Package management, run at the nearest `mlua-pkg.toml` project root: `patch` is
-    /// htl's own, every other verb is passed through to `mlua-pkg` (install / add /
-    /// update / clean)
+    /// Package management at the nearest `mlua-pkg.toml` project root: install / add /
+    /// update / clean / patch, through mlua-pkg's library rather than its binary
     Pkg {
         #[command(subcommand)]
-        cmd: Option<PkgCmd>,
+        cmd: PkgCmd,
     },
     /// Bring declarations for a library into `types/`
     Types {
@@ -383,9 +422,35 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
             },
         ),
         Cmd::Pkg { cmd } => match cmd {
-            Some(PkgCmd::Patch { dep, force }) => cmd_pkg_patch(&dep, force),
-            Some(PkgCmd::Passthrough(args)) => cmd_pkg(&args),
-            None => cmd_pkg(&[]),
+            PkgCmd::Install => cmd_pkg_install(),
+            PkgCmd::Add {
+                name,
+                git,
+                tag,
+                rev,
+                branch,
+                entry,
+                target_dir,
+            } => cmd_pkg_add(htl::pkg::mlua_pkg::ops::AddSpec {
+                name,
+                git,
+                tag,
+                rev,
+                branch,
+                entry,
+                target_dir,
+            }),
+            PkgCmd::Update {
+                name,
+                dry_run,
+                force,
+            } => cmd_pkg_update(htl::pkg::mlua_pkg::ops::UpdateOpts {
+                name,
+                dry_run,
+                force,
+            }),
+            PkgCmd::Clean { all } => cmd_pkg_clean(all),
+            PkgCmd::Patch { dep, force } => cmd_pkg_patch(&dep, force),
         },
         Cmd::Types { cmd } => match cmd {
             TypesCmd::Add {
@@ -615,38 +680,160 @@ fn cmd_init(dir: Option<&Path>, lib: bool, embed: bool) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn cmd_pkg(args: &[String]) -> Result<ExitCode> {
+/// The project `htl pkg` acts on: the nearest one above the working directory.
+///
+/// mlua-pkg reports a missing manifest as an I/O error that does not name the file, and the
+/// path htl looked for is the whole of the answer, so it is checked here.
+fn pkg_project() -> Result<htl::pkg::Project> {
     let cwd = std::env::current_dir()?;
-    let project = htl::pkg::Project::find(&cwd);
-    let root = project.as_ref().map_or(cwd, |p| p.root.clone());
-    let mut cmd = std::process::Command::new("mlua-pkg");
-    cmd.args(args).current_dir(&root);
-    // Hand mlua-pkg the directory htl resolved instead of letting it decide again: the
-    // installer and the checker have to name the same one, and only htl has looked at
-    // where an existing checkout already installed.
-    if let Some(p) = &project {
-        cmd.env("MLUA_PKG_DIR", &p.pkgs_dir);
+    htl::pkg::Project::find(&cwd).with_context(|| {
+        format!(
+            "no {} above {}: `htl pkg` runs in a project",
+            htl::pkg::MANIFEST_NAME,
+            cwd.display()
+        )
+    })
+}
+
+/// `htl pkg install`: fetch what the manifest declares, then bring in what the deps publish.
+fn cmd_pkg_install() -> Result<ExitCode> {
+    let project = pkg_project()?;
+    let report = project.install()?;
+    report_install(&report, &project);
+    // Re-read the project: install wrote the lockfile the two reports below are read from.
+    // A dep publishes its declarations at `types/` in its package root, which is not where
+    // `require` looks, so they are copied in for the checker to see.
+    let project = htl::pkg::Project::at(&project.root);
+    report_types_sync(&project.sync_types()?, &project.root);
+    report_patch_drift(&project);
+    Ok(ExitCode::SUCCESS)
+}
+
+/// What install did, in the shape the other reports use. The library prints nothing.
+fn report_install(report: &htl::pkg::mlua_pkg::ops::InstallReport, project: &htl::pkg::Project) {
+    use htl::pkg::mlua_pkg::ops::Placement;
+    for w in &report.warnings {
+        // A patch that was not used is reported below in htl's own verbs, where both ways
+        // out are named. The library's line points at `mlua-pkg patch --force`, which
+        // rebuilds the copy without asking git whether what is in it was committed.
+        if w.contains("patch_dir") && w.contains("not used") {
+            continue;
+        }
+        eprintln!("warning: {w}");
     }
-    let status = cmd.status();
-    match status {
-        Ok(s) if s.success() => {
-            // A dep publishes its declarations at `types/` in its package root, which is
-            // not where `require` looks. Bring them in so the checker sees them.
-            if let Some(p) = &project {
-                // Re-read the project: an install may have added the lockfile the status
-                // below is read from, and `add` may have changed the manifest.
-                let p = htl::pkg::Project::at(&p.root);
-                report_types_sync(&p.sync_types()?, &p.root);
-                report_patch_drift(&p);
+    let rel = |p: &Path| {
+        p.strip_prefix(&project.root)
+            .unwrap_or(p)
+            .display()
+            .to_string()
+    };
+    for p in &report.packages {
+        let sha: String = p.sha.chars().take(7).collect();
+        let where_it_is = match (&p.placement, p.patched) {
+            (_, true) => format!("from {}", rel(p.root())),
+            (Placement::Copied(dest), _) => format!("copied to {}", rel(dest)),
+            (Placement::Symlink(_), _) => p.entry.display().to_string(),
+        };
+        eprintln!("  install {} {sha} ({where_it_is})", p.name);
+    }
+    let n = report.packages.len();
+    if report.transitive > 0 {
+        eprintln!(
+            "htl pkg install: {n} package(s), {} of them transitive",
+            report.transitive
+        );
+    } else {
+        eprintln!("htl pkg install: {n} package(s)");
+    }
+}
+
+/// `htl pkg add <name> <git>`: the manifest entry, without fetching anything.
+///
+/// This is the one verb that may run outside a project: mlua-pkg writes a manifest when
+/// there is none, and the directory it writes it in is the working one.
+fn cmd_pkg_add(spec: htl::pkg::mlua_pkg::ops::AddSpec) -> Result<ExitCode> {
+    use htl::pkg::mlua_pkg::ops::AddOutcome;
+    let cwd = std::env::current_dir()?;
+    let project = htl::pkg::Project::find(&cwd).unwrap_or_else(|| htl::pkg::Project::at(&cwd));
+    let name = spec.name.clone();
+    let done = project.add(spec)?;
+    let manifest = project
+        .manifest
+        .strip_prefix(&project.root)
+        .unwrap_or(&project.manifest)
+        .display();
+    if done.report.manifest_created {
+        eprintln!("  created {manifest}");
+    }
+    let verb = match done.report.outcome {
+        AddOutcome::Added => "added",
+        AddOutcome::Replaced => "updated",
+    };
+    eprintln!("  {verb}   {name} in {manifest}");
+    if let Some(dir) = &done.kept_patch_dir {
+        // `add` rewrites the entry, and its spec has no room for a patch. Putting the key
+        // back is the difference between the project resolving that dependency from its own
+        // copy and resolving it from upstream with the copy left unread in the tree.
+        eprintln!(
+            "  kept    patch_dir = {} ({name} is patched)",
+            dir.display()
+        );
+    }
+    eprintln!("htl pkg add: run `htl pkg install` to fetch it");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `htl pkg update [name]`: what each pin does next, then the install that follows.
+fn cmd_pkg_update(opts: htl::pkg::mlua_pkg::ops::UpdateOpts) -> Result<ExitCode> {
+    use htl::pkg::mlua_pkg::ops::UpdateOutcome;
+    let project = pkg_project()?;
+    let dry_run = opts.dry_run;
+    let report = project.update(opts)?;
+    if report.entries.is_empty() {
+        eprintln!("htl pkg update: no dependency selected");
+        return Ok(ExitCode::SUCCESS);
+    }
+    for (name, outcome) in &report.entries {
+        match outcome {
+            UpdateOutcome::TagBumped { old, new } => {
+                eprintln!("  update  {name}: tag {old} -> {new}")
             }
-            Ok(ExitCode::SUCCESS)
+            UpdateOutcome::PrefixResolved { pin, resolved } => eprintln!(
+                "  update  {name}: prefix '{pin}' is {resolved} (the manifest keeps the prefix)"
+            ),
+            UpdateOutcome::Refresh => eprintln!("  update  {name}: refresh (branch or unpinned)"),
+            UpdateOutcome::Skipped(why) => eprintln!("  skip    {name}: {why}"),
         }
-        Ok(_) => Ok(ExitCode::FAILURE),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            bail!("`mlua-pkg` binary not found on PATH (install with `cargo install mlua-pkg`)")
-        }
-        Err(e) => Err(e.into()),
     }
+    if dry_run {
+        eprintln!("htl pkg update: dry run; nothing was written");
+        return Ok(ExitCode::SUCCESS);
+    }
+    if let Some(install) = &report.install {
+        report_install(install, &project);
+        let project = htl::pkg::Project::at(&project.root);
+        report_types_sync(&project.sync_types()?, &project.root);
+        report_patch_drift(&project);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `htl pkg clean`: the cache, which is machine-local and rebuilt by the next install.
+fn cmd_pkg_clean(all: bool) -> Result<ExitCode> {
+    use htl::pkg::mlua_pkg::ops::CleanReport;
+    let project = pkg_project()?;
+    match project.clean(all)? {
+        CleanReport::CacheRemoved => eprintln!("htl pkg clean: removed every cached package"),
+        CleanReport::NoLockfile => {
+            eprintln!("htl pkg clean: no lockfile, so nothing was ever cached")
+        }
+        CleanReport::StaleRemoved { removed: 0 } => eprintln!("htl pkg clean: nothing to remove"),
+        CleanReport::StaleRemoved { removed } => eprintln!(
+            "htl pkg clean: removed {removed} cache entr{} the lockfile no longer refers to",
+            if removed == 1 { "y" } else { "ies" }
+        ),
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// A patched copy the dependency is no longer resolved from, said after every install
@@ -703,38 +890,7 @@ fn cmd_pkg_patch(dep: &str, force: bool) -> Result<ExitCode> {
     let base: String = report.base.chars().take(7).collect();
     eprintln!("  {verb} {} ({dep} at {base})", rel.display());
     eprintln!("htl: it is the project's code now — edit it, commit it, then `htl pkg install`.");
-    warn_if_pkg_binary_predates_patches();
     Ok(ExitCode::SUCCESS)
-}
-
-/// `htl pkg install` is a passthrough, so the installer is whichever `mlua-pkg` is on PATH
-/// — and `patch_dir` is a manifest key that arrived in 0.11.0.
-///
-/// An older binary does not ignore it: the manifest types deny unknown fields, so it
-/// refuses to parse the file at all. Said here, where the key is written, rather than left
-/// to surface as a parse error on the next install.
-fn warn_if_pkg_binary_predates_patches() {
-    let Ok(out) = std::process::Command::new("mlua-pkg")
-        .arg("--version")
-        .output()
-    else {
-        return;
-    };
-    let text = String::from_utf8_lossy(&out.stdout);
-    let Some(version) = text.split_whitespace().nth(1) else {
-        return;
-    };
-    let mut parts = version.split('.').map(str::parse::<u32>);
-    let (Some(Ok(major)), Some(Ok(minor))) = (parts.next(), parts.next()) else {
-        return;
-    };
-    if (major, minor) < (0, 11) {
-        eprintln!(
-            "htl: mlua-pkg on PATH is {version}, and patch_dir is read from 0.11.0 on — \
-             `htl pkg install` will not parse this manifest until it is updated \
-             (cargo install mlua-pkg)"
-        );
-    }
 }
 
 /// What the deps published, in the shape `htl init` reports its scaffold. A name that was

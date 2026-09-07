@@ -18,7 +18,6 @@ Rust impl Host ──#[host_module]▶ UserData impl + host.d.tl   (Rust signatu
 
 ```sh
 cargo install htl-cli          # binaries: htl, cargo-htl  (so `cargo htl <verb>` works)
-cargo install mlua-pkg         # optional: `htl pkg install` delegates to it
 ```
 
 ```toml
@@ -44,7 +43,10 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 | `htl fmt [paths] [--check] [--indent N]` | whitespace formatter (indentation from the syntax tree, blank lines, trailing space) |
 | `htl gen <file.tl> [-o out.lua]` | readable Lua, the escape hatch out of htl |
 | `htl build <entry.tl> -o app.hb [--debug] [--source] [--extra a,b] [--host x,y]` | link the entry's `require` closure into one bundle (see Bundles) |
-| `htl pkg <args>` | passthrough to `mlua-pkg` at the nearest `mlua-pkg.toml` root; after a successful run, the deps' own `types/` are copied into the project's (see `types/`) |
+| `htl pkg install` | fetch every dependency `mlua-pkg.toml` declares into `.htl/modules/` and write `mlua-pkg.lock`; the deps' own `types/` are then copied into the project's (see `types/`) |
+| `htl pkg add <name> <git> [--tag t \| --rev r \| --branch b] [--entry dir] [--target-dir dir]` | write the dependency into the manifest (`install` fetches it); a `patch_dir` the entry already declared is kept |
+| `htl pkg update [name] [--dry-run] [--force]` | refresh dependencies and bump the pins that follow releases, then install |
+| `htl pkg clean [--all]` | remove cached packages the lockfile no longer refers to, or the whole cache |
 | `htl pkg patch <dep> [--force]` | take that dependency's source into `patches/<dep>/`, where the project owns it and install resolves it from (see Patched dependencies) |
 | `htl types add <library> [--from dir] [--force]` | the declarations a library never shipped, from [teal-types](https://github.com/teal-language/teal-types), into `types/` with the commit they came from recorded beside each |
 | `htl cache status [path] [--entries]` / `htl cache clear [path]` | report what the store holds, or empty it (see Caching) |
@@ -52,8 +54,11 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 
 `mlua-pkg.toml` is detected by walking up from the file: installed deps become
 visible to the checker and to `run` / `test` / `build` automatically. They go under
-`.htl/modules/`, beside the check cache — htl decides that one location and hands it to
-mlua-pkg, rather than each side deciding for itself. *Vendored* is kept for the other
+`.htl/modules/`, beside the check cache — htl decides that one location, and the installer
+is [mlua-pkg](https://github.com/ynishi/mlua-pkg)'s library rather than its binary, so
+there is no second process to agree with and nothing on `PATH` to install. `MLUA_PKG_DIR`
+and a `target/` in the working directory, which the `mlua-pkg` binary reads, are not
+consulted. *Vendored* is kept for the other
 thing: a copy of a dependency committed to the repo, which a `target_dir` entry in the
 manifest declares and nothing does by default. When a
 directory is given, `check` / `fmt` / `build` / `test` walk the project's own files only:

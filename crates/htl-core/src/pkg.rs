@@ -414,6 +414,17 @@ pub struct Patched {
     pub dir: PathBuf,
 }
 
+/// What [`Project::add`] did: mlua-pkg's own report, and what htl carried across it.
+///
+/// `add` rewrites the whole `[deps.<name>]` entry, so a patch the entry declared would be
+/// dropped by it. `kept_patch_dir` is that key, put back — named here so the report can say
+/// it happened rather than leaving the manifest quietly different from what `add` wrote.
+#[derive(Debug, Clone)]
+pub struct AddDone {
+    pub report: mlua_pkg::ops::AddReport,
+    pub kept_patch_dir: Option<PathBuf>,
+}
+
 /// Where a patched dependency stands after an install: whether the copy is what the
 /// dependency resolves from, and the two revisions the answer rests on.
 ///
@@ -656,6 +667,86 @@ impl Project {
         Ok(out)
     }
 
+    /// What mlua-pkg is handed to act on this project: htl's own directories, and the
+    /// manifest read from disk.
+    ///
+    /// The library reads neither the environment nor the working directory to decide where
+    /// packages go — it takes the [`mlua_pkg::PkgDir`] it is given — so [`pkgs_dir`] is the
+    /// only place that answer is written down, for the installer and the checker alike.
+    fn config(&self) -> mlua_pkg::Config {
+        mlua_pkg::Config::new(mlua_pkg::Project::in_dir(&self.root, pkgs_dir(&self.root)))
+    }
+
+    /// Fetch every dependency the manifest declares, and write the lockfile.
+    ///
+    /// The report says what each one resolved to and where it was placed, including
+    /// whether it came from a `patch_dir`; nothing is printed here. Declarations a
+    /// dependency publishes are a separate step ([`Project::sync_types`]) because they are
+    /// copied into the project rather than installed.
+    pub fn install(&self) -> anyhow::Result<mlua_pkg::ops::InstallReport> {
+        Ok(mlua_pkg::ops::install(&self.config())?)
+    }
+
+    /// Write a dependency into the manifest. `install` is what fetches it.
+    ///
+    /// mlua-pkg replaces the whole `[deps.<name>]` entry and `AddSpec` carries no
+    /// `patch_dir`, so adding a dependency that is already patched would drop the key that
+    /// binds `patches/<dep>` to it — the project would keep building, against upstream,
+    /// with the copy sitting unread in the tree. What the entry declared about its patch is
+    /// carried across and reported.
+    pub fn add(&self, spec: mlua_pkg::ops::AddSpec) -> anyhow::Result<AddDone> {
+        let name = spec.name.clone();
+        let previous = mlua_pkg::manifest::Manifest::from_path(&self.manifest)
+            .ok()
+            .and_then(|m| m.deps.get(&name).cloned());
+        let report = mlua_pkg::ops::add(&self.config(), spec)?;
+        let Some(dep) = previous else {
+            return Ok(AddDone {
+                report,
+                kept_patch_dir: None,
+            });
+        };
+        let Some(dir) = dep.patch_dir.clone() else {
+            return Ok(AddDone {
+                report,
+                kept_patch_dir: None,
+            });
+        };
+        set_dep_key(&self.manifest, &name, "patch_dir", &to_toml_path(&dir))?;
+        if let Some(drift) = dep.patch_drift {
+            let value = match drift {
+                mlua_pkg::manifest::PatchDrift::Warn => "warn",
+                mlua_pkg::manifest::PatchDrift::Error => "error",
+            };
+            set_dep_key(&self.manifest, &name, "patch_drift", value)?;
+        }
+        Ok(AddDone {
+            report,
+            kept_patch_dir: Some(dir),
+        })
+    }
+
+    /// Refresh dependencies, bump the pins that follow releases, and install what changed.
+    pub fn update(
+        &self,
+        opts: mlua_pkg::ops::UpdateOpts,
+    ) -> anyhow::Result<mlua_pkg::ops::UpdateReport> {
+        let mut report = mlua_pkg::ops::update(&self.config(), opts)?;
+        // mlua-pkg walks a map, so the same project reports its dependencies in a
+        // different order on every run. A report that is read by a person, and diffed
+        // against the last one, is sorted.
+        report.entries.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(report)
+    }
+
+    /// Remove cached packages the lockfile no longer refers to (`all`: the whole cache).
+    ///
+    /// Never touches what install placed under `vendored/`: a dangling link there is
+    /// repaired by the next install.
+    pub fn clean(&self, all: bool) -> anyhow::Result<mlua_pkg::ops::CleanReport> {
+        Ok(mlua_pkg::ops::clean(&self.config(), all)?)
+    }
+
     /// Take a dependency's source into `patches/<dep>/`, where the project owns it.
     ///
     /// The whole package root is copied, so the dep's `types/` comes with it, and
@@ -694,20 +785,7 @@ impl Project {
 
         let before = std::fs::read_to_string(&self.manifest)?;
         if !declared {
-            let mut doc = before.parse::<toml_edit::DocumentMut>()?;
-            let deps = doc
-                .get_mut("deps")
-                .and_then(|i| i.as_table_like_mut())
-                .with_context(|| format!("no [deps] table in {}", self.manifest.display()))?;
-            let entry = deps
-                .get_mut(name)
-                .and_then(|i| i.as_table_like_mut())
-                .with_context(|| format!("[deps.{name}] is not a table"))?;
-            entry.insert(
-                "patch_dir",
-                toml_edit::value(rel.to_string_lossy().as_ref()),
-            );
-            std::fs::write(&self.manifest, doc.to_string())?;
+            set_dep_key(&self.manifest, name, "patch_dir", &to_toml_path(&rel))?;
         }
 
         // mlua-pkg does the copy and the bookkeeping: it fetches the pin, copies the
@@ -715,13 +793,11 @@ impl Project {
         // `patch_base`. `force` there is the "directory already exists" refusal, which is
         // the question already answered above against git rather than against the
         // directory's existence.
-        let cfg =
-            mlua_pkg::Config::new(mlua_pkg::Project::in_dir(&self.root, pkgs_dir(&self.root)));
         let opts = mlua_pkg::ops::PatchOpts {
             name: name.to_string(),
             force: true,
         };
-        match mlua_pkg::ops::patch(&cfg, opts) {
+        match mlua_pkg::ops::patch(&self.config(), opts) {
             Ok(report) => {
                 drop_dot_git(&report.patch_dir)?;
                 Ok(report)
@@ -776,6 +852,36 @@ impl Project {
     fn package_root(&self, p: &mlua_pkg::lockfile::LockedPkg) -> Option<PathBuf> {
         std::fs::canonicalize(self.vendored.join(&p.name)).ok()
     }
+}
+
+/// Write one key onto `[deps.<name>]`, leaving the rest of the file as it was.
+///
+/// The manifest is a file a person wrote: its comments say why a dependency is pinned
+/// where it is, and its order is the order they put things in. `toml_edit` keeps both,
+/// where re-serialising the parsed manifest would not.
+fn set_dep_key(manifest: &Path, name: &str, key: &str, value: &str) -> anyhow::Result<()> {
+    let text = std::fs::read_to_string(manifest)?;
+    let mut doc = text.parse::<toml_edit::DocumentMut>()?;
+    let deps = doc
+        .get_mut("deps")
+        .and_then(|i| i.as_table_like_mut())
+        .with_context(|| format!("no [deps] table in {}", manifest.display()))?;
+    let entry = deps
+        .get_mut(name)
+        .and_then(|i| i.as_table_like_mut())
+        .with_context(|| format!("[deps.{name}] is not a table"))?;
+    entry.insert(key, toml_edit::value(value));
+    std::fs::write(manifest, doc.to_string())?;
+    Ok(())
+}
+
+/// A manifest-relative path as the manifest spells it: `/` on every platform, because the
+/// file is read on all of them.
+fn to_toml_path(p: &Path) -> String {
+    p.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Take the dependency's own `.git` out of the copy.
