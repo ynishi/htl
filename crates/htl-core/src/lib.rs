@@ -232,8 +232,9 @@ pub fn contract_lints(
         if !c.applies_to(&modname) {
             continue;
         }
-        // Same visibility as `TealResolver::for_contract`: the contract dir, plus the
-        // project root, its `src/` and `[check] paths`.
+        // Same visibility as `TealResolver::for_contract`: the contract dir, plus what
+        // `HtlConfig::search_paths` gives (the project root, its `src/` and `types/`,
+        // then `[check] paths`). Both sides go through that one function.
         h.add_path(&dir)?;
         h.apply_config(root, cfg)?;
         let r = h.contract_check(&file_abs, &modname, &c.type_path, &c.require_fields)?;

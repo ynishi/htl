@@ -178,12 +178,18 @@ impl TealResolver {
     /// Resolvers for one `[[contract]]` of `htl.toml`: one per concrete contract dir
     /// (a `dir` with `*` expands to every subdirectory), each with `expect_type(type)`
     /// and the contract's `require_fields` as written, its `exclude` / `module`, and
-    /// `root` + `root/src` visible to the checker. `root` is the directory holding
-    /// `htl.toml`. The `contract-unenforced` lint of `htl check` recognises this call.
-    pub fn for_contract(root: &Path, c: &crate::config::Contract) -> Result<Vec<Self>, InitError> {
+    /// the project's search paths visible to the checker
+    /// ([`search_paths`](crate::config::HtlConfig::search_paths): `root`, its `src/` and
+    /// `types/`, then `[check] paths`). `root` is the directory holding `htl.toml`. The
+    /// `contract-unenforced` lint of `htl check` recognises this call.
+    pub fn for_contract(
+        root: &Path,
+        cfg: &crate::config::HtlConfig,
+        c: &crate::config::Contract,
+    ) -> Result<Vec<Self>, InitError> {
         c.dirs(root)
             .into_iter()
-            .map(|d| Self::for_contract_dir(root, &d, c))
+            .map(|d| Self::for_contract_dir(root, &d, cfg, c))
             .collect()
     }
 
@@ -191,13 +197,17 @@ impl TealResolver {
     pub fn for_contract_dir(
         root: &Path,
         dir: &Path,
+        cfg: &crate::config::HtlConfig,
         c: &crate::config::Contract,
     ) -> Result<Self, InitError> {
         let mut r = Self::new_symlink_aware(dir)?
             .expect_type(c.type_path.clone())
-            .exclude_modules(c.exclude.iter().cloned())
-            .with_checker_path(root)
-            .with_checker_path(root.join("src"));
+            .exclude_modules(c.exclude.iter().cloned());
+        // The same paths the `contract` lint checks through (`Htl::apply_config`), so a
+        // contract type declared in `types/` resolves in the run as well as in the check.
+        for p in cfg.search_paths(root) {
+            r = r.with_checker_path(p);
+        }
         if let Some(m) = &c.module {
             r = r.only_module(m.clone());
         }
@@ -492,12 +502,7 @@ pub fn contract_resolvers(
 ) -> Result<Vec<TealResolver>, InitError> {
     let mut out = Vec::new();
     for c in &cfg.contract {
-        for mut r in TealResolver::for_contract(root, c)? {
-            for p in cfg.search_paths(root) {
-                r = r.with_checker_path(p);
-            }
-            out.push(r);
-        }
+        out.extend(TealResolver::for_contract(root, cfg, c)?);
     }
     Ok(out)
 }

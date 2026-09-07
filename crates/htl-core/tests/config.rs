@@ -2,6 +2,7 @@
 //! host scan, and `contract_resolvers` giving the host the same contract at run time.
 
 use htl_core::config::{HtlConfig, RequireFields, join_specs};
+use htl_core::pkg::TealResolver as Resolver;
 use htl_core::{Htl, contract_enforcement_lints, contract_lints};
 use std::path::{Path, PathBuf};
 
@@ -51,6 +52,47 @@ fn project(name: &str) -> (PathBuf, HtlConfig) {
         .unwrap()
         .expect("htl.toml just written");
     (root, cfg)
+}
+
+const DEFS_SRC: &str =
+    "local record defs\n   record Mod\n      name: string\n      hp: integer\n   end\nend\nreturn defs\n";
+
+/// The same project, with the contract type somewhere other than `src/`: `decl` is the
+/// path to write it to (relative to the root), and `toml` the whole `htl.toml`, so a
+/// caller can point `[check] paths` at wherever it put the declaration.
+fn project_declaring_at(name: &str, decl: &str, toml: &str) -> (PathBuf, HtlConfig) {
+    let root = scratch(name);
+    write(&root.join("htl.toml"), toml);
+    write(&root.join(decl), DEFS_SRC);
+    write(
+        &root.join("mods").join("good.tl"),
+        "return { name = \"swarm\", hp = 3 }\n",
+    );
+    write(
+        &root.join("mods").join("partial.tl"),
+        "return { name = \"half\" }\n",
+    );
+    let (_, cfg) = HtlConfig::find(&root)
+        .unwrap()
+        .expect("htl.toml just written");
+    (root, cfg)
+}
+
+/// Load each mod through resolvers the caller built, and say what happened: `Ok` for a
+/// mod that loaded, `Err(message)` for one the contract (or the checker) refused.
+fn verdicts(h: &Htl, resolvers: Vec<htl_core::pkg::TealResolver>) -> [Result<(), String>; 2] {
+    let mut reg = htl_core::pkg::mlua_pkg::Registry::new();
+    for r in resolvers {
+        reg.add(r);
+    }
+    reg.install(h.lua()).unwrap();
+    ["good", "partial"].map(|m| {
+        h.lua()
+            .load(format!("return require('{m}')"))
+            .eval::<mlua::Value>()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    })
 }
 
 #[test]
@@ -208,7 +250,7 @@ fn the_static_and_runtime_forms_agree_on_the_same_fixture() {
             .is_empty();
         let h2 = Htl::new().unwrap();
         let mut reg = Registry::new();
-        for r in TealResolver::for_contract(&root, &cfg.contract[0]).unwrap() {
+        for r in TealResolver::for_contract(&root, cfg, &cfg.contract[0]).unwrap() {
             reg.add(r);
         }
         reg.install(h2.lua()).unwrap();
@@ -599,4 +641,68 @@ fn contract_resolvers_enforce_the_same_contract_at_run_time() {
         .unwrap_err()
         .to_string();
     assert!(partial.contains("hp"), "missing field named: {partial}");
+}
+
+/// A contract type declared in `types/` — where `htl new` puts hand-written declarations
+/// and where a host publishes the one its mod authors write against. The `contract` lint
+/// resolves it because `contract_lints` goes through `apply_config`; the resolver has to
+/// ask for the same paths rather than assume `root` and `root/src`, or a mod fails at
+/// `require` with the checker's "module not found" and nothing about the contract.
+#[test]
+fn a_contract_type_under_types_resolves_at_run_time() {
+    let (root, cfg) = project_declaring_at("types-decl", "types/defs.d.tl", CONTRACT_TOML);
+    let h = Htl::new().unwrap();
+    let [good, partial] =
+        verdicts(&h, Resolver::for_contract(&root, &cfg, &cfg.contract[0]).unwrap());
+    assert!(good.is_ok(), "conforming mod: {good:?}");
+    assert!(
+        partial.as_ref().is_err_and(|e| e.contains("hp")),
+        "missing field named: {partial:?}"
+    );
+}
+
+/// The same for a declaration reachable only through `[check] paths` — an SDK cache, or
+/// any directory the host supplies at run time from outside the scaffold layout.
+#[test]
+fn a_contract_type_under_a_check_path_resolves_at_run_time() {
+    let (root, cfg) = project_declaring_at(
+        "check-path-decl",
+        "sdk/defs.tl",
+        "[check]\npaths = [\"sdk\"]\n[[contract]]\ndir = \"mods\"\ntype = \"defs.Mod\"\nrequire_fields = true\n",
+    );
+    let h = Htl::new().unwrap();
+    let [good, partial] =
+        verdicts(&h, Resolver::for_contract(&root, &cfg, &cfg.contract[0]).unwrap());
+    assert!(good.is_ok(), "conforming mod: {good:?}");
+    assert!(
+        partial.as_ref().is_err_and(|e| e.contains("hp")),
+        "missing field named: {partial:?}"
+    );
+}
+
+/// The three constructors build one thing, so they resolve from one set of paths. This
+/// is the property the split hid: `contract_resolvers` used to add `search_paths` itself
+/// on top of what `for_contract_dir` hard-coded, so only the outermost one was whole.
+#[test]
+fn the_three_constructors_resolve_the_same_way() {
+    let (root, cfg) = project_declaring_at("same-paths", "types/defs.d.tl", CONTRACT_TOML);
+    let c = &cfg.contract[0];
+    let dir = root.join("mods");
+
+    let by_config = verdicts(
+        &Htl::new().unwrap(),
+        htl_core::pkg::contract_resolvers(&root, &cfg).unwrap(),
+    );
+    let by_contract = verdicts(
+        &Htl::new().unwrap(),
+        Resolver::for_contract(&root, &cfg, c).unwrap(),
+    );
+    let by_dir = verdicts(
+        &Htl::new().unwrap(),
+        vec![Resolver::for_contract_dir(&root, &dir, &cfg, c).unwrap()],
+    );
+
+    assert_eq!(by_config, by_contract, "contract_resolvers vs for_contract");
+    assert_eq!(by_contract, by_dir, "for_contract vs for_contract_dir");
+    assert!(by_config[0].is_ok(), "conforming mod: {:?}", by_config[0]);
 }
