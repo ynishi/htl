@@ -129,16 +129,19 @@ local function struct_spec(cache, t)
    if not lines then return nil end
    if not has_marker(lines, t.y, "struct") then return nil end
    local at = field_lines(lines, t.y)
-   local required = {}
+   local required, declared = {}, {}
    local any = false
    for name in pairs(t.fields or {}) do
+      declared[name] = true
       if not has_marker(lines, at[name], "optional") then
          required[name] = true
          any = true
       end
    end
    if not any then return nil end
-   return { name = t.str or "record", required = required }
+   -- `declared` as well as `required`: a key the literal sets that the record does not
+   -- declare is how a misspelling looks from here, and the optional fields are declared.
+   return { name = t.str or "record", required = required, declared = declared }
 end
 
 -- Resolver for the `struct-fields` lint: the `---@struct` record being built at (y, x),

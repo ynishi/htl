@@ -589,6 +589,36 @@ end
 -- Which record a bare `{ ... }` is being built as is type information, and this rule is
 -- run over a syntax-only parse (see L.run). `extra.struct_at(y, x)` answers it from the
 -- checker's position report; the rule only compares key sets.
+-- Levenshtein, stopped as soon as it is past `bound`: the answer here is only ever
+-- "close enough or not", and a full distance between two unrelated names is wasted work.
+local function within(a, b, bound)
+   if a == b then return true end
+   if math.abs(#a - #b) > bound then return false end
+   local prev = {}
+   for j = 0, #b do prev[j] = j end
+   for i = 1, #a do
+      local cur = { [0] = i }
+      local best = cur[0]
+      local ca = a:byte(i)
+      for j = 1, #b do
+         local cost = (ca == b:byte(j)) and 0 or 1
+         local d = math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+         cur[j] = d
+         if d < best then best = d end
+      end
+      if best > bound then return false end
+      prev = cur
+   end
+   return prev[#b] <= bound
+end
+
+-- How far apart two names may be and still be the same intention. One edit is a typo in
+-- anything; a second is only believable once the name is long enough that two edits are
+-- still a small share of it.
+local function near_bound(name)
+   return #name >= 8 and 2 or 1
+end
+
 local function lint_struct_fields(ast, report, extra)
    local struct_at = extra and extra.struct_at
    if not struct_at then return end
@@ -612,12 +642,42 @@ local function lint_struct_fields(ast, report, extra)
       end
       if #missing == 0 then return end
       table.sort(missing)
+
+      -- Keys the literal sets that the record does not declare. One of them being a near
+      -- miss for a missing field is a misspelling, and saying so beats the standing
+      -- advice: "mark it ---@optional" is the wrong fix for a typo.
+      local stray = {}
+      for name in pairs(present) do
+         if not (spec.declared or {})[name] then stray[#stray + 1] = name end
+      end
+      table.sort(stray)
+      local hints, used = {}, {}
+      for _, want in ipairs(missing) do
+         for _, got in ipairs(stray) do
+            if not used[got] and within(want, got, near_bound(want)) then
+               used[got] = true
+               hints[#hints + 1] = { want = want, got = got }
+               break
+            end
+         end
+      end
+
+      local tail = " (set it here, or mark the field ---@optional where it is declared)"
+      if #hints == 1 and #missing == 1 then
+         tail = (" (the literal sets `%s`)"):format(hints[1].got)
+      elseif #hints > 0 then
+         local parts = {}
+         for _, h in ipairs(hints) do
+            parts[#parts + 1] = ("`%s` for %s"):format(h.got, h.want)
+         end
+         tail = (" (the literal sets %s)"):format(table.concat(parts, ", "))
+      end
+
       report(
          "struct-fields",
          n.y,
          n.x,
-         spec.name .. " is built without " .. table.concat(missing, ", ")
-            .. " (set it here, or mark the field ---@optional where it is declared)"
+         spec.name .. " is built without " .. table.concat(missing, ", ") .. tail
       )
    end)
 end

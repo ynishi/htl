@@ -278,6 +278,19 @@ be absent. Adding an unmarked field makes the construction sites that predate it
 which is the point — the default for a new field is mandatory, and `---@optional` is the
 exception you write on purpose.
 
+A misspelled field is the case where two rules each hold half the answer: the checker says
+`unknown field colour` about the key that exists, and this says `color` is missing. When
+the key the literal sets is a near miss for the one it wants, the message names it instead
+of repeating the standing advice, because "mark it `---@optional`" is the wrong fix for a
+typo:
+
+```text
+MonsterDef is built without color (the literal sets `colour`)
+```
+
+One edit counts as a near miss in any name, two once the name is at least eight characters
+long. An extra key that is nothing like the missing one is not offered.
+
 The markers go where the record is **declared**, and the report lands where it is
 **built**, so an SDK can declare the shape its mods must fill in. Both marker forms work:
 trailing on the field's own line, or on the line above it. Every construction site counts
