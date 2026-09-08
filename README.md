@@ -36,7 +36,7 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 
 | command | what it does |
 |---|---|
-| `htl new <name>` / `htl init [dir]` | scaffold: `mlua-pkg.toml`, `src/<mod>/init.tl`, `src/main.tl`, `tests/`, README (`--lib`, `--embed` for a Rust host) |
+| `htl new <name>` / `htl init [dir]` | scaffold: `mlua-pkg.toml`, `src/<mod>/init.tl`, `src/main.tl`, `tests/`, README (`--lib` for no entry script; `--host <name>` for a Rust host, `--embed` being the shorthand for `--host rust`) |
 | `htl check [paths] [--strict] [--lint +rule,-rule] [--no-cache] [--cache-mode per-module\|whole-run] [--explain-cache]` | type-check; htl lints as `lint:` (advisory, `--strict` fails on them); a module reached through `require` (an installed dep, a `[check] paths` dir) is checked with the file and its type errors are errors too, once per run, with the file that required it; what has not changed is replayed from `.htl/` (see Caching) |
 | `htl run <file.tl \| app.hb> [args]` | check then execute; `require` of a `.tl` with type errors fails |
 | `htl test [paths] [--filter s] [--lib mod] [--coverage] [--lcov file] [--no-cache]` | `*_test.tl` and `tests/**/*.tl`, one isolated state per file; checking is replayed from `.htl/`, the run never is (see Caching) |
@@ -986,6 +986,33 @@ directory's.
 mlua-pkg's `entry` is a directory, so a consumer's `require("<name>")` looks for
 `<name>/init.tl`. A flat package can instead ship `<name>/<name>.tl` (e.g. `entry = "src"`
 with `src/<name>.tl`); htl resolves that form in the checker and in `TealResolver`.
+
+### The Rust host (`--host <name>`)
+
+`--host rust`, and `--embed` which is its shorthand, add a Cargo package to that tree:
+
+```text
+├── Cargo.toml             htl + anyhow, and [profile.dev.build-override] opt-level = 3
+├── src/lib.rs             #[host_module] Host, its records, the embedded module,
+│                          and pub fn preload(&Htl) registering both
+├── src/host.d.tl          generated from src/lib.rs — by cargo build, and by
+│                          htl dts / htl check without building
+└── src/main.rs            the binary: preload, then src/main.tl (omitted with --lib)
+```
+
+The host is a library with a thin binary on top, not a binary that happens to hold a
+host. What a project grows — a second `#[host_module]`, an `extern "C"` layer, a window
+loop, a Rust test — grows in `src/lib.rs`, and every entry point reaches it through
+`preload`: `src/main.rs` is the six lines that call `preload` and `exec` the script, and
+another crate that embeds this one calls the same function. `--lib` means the project has
+no entry script, so there is nothing for the binary to run and it is not written at all —
+what is left is the library, which is the part someone else embeds.
+
+`--host` names an entry in a registry of host kinds rather than adding a flag per kind:
+`rust` is the one today, and the flag reports the rest as they arrive. A name that is not
+registered is refused with the ones that are, before the directory is created, so a typo
+leaves nothing behind. `htl init --host rust` adds the Rust side to a project that
+predates it and lists the files it kept rather than skipping them in silence.
 
 ## Unions of records (`where`)
 
