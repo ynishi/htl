@@ -81,6 +81,9 @@ pub fn teal_type(ty: &Type, self_name: &str) -> Result<String, String> {
                 "Vec" | "VecDeque" | "HashSet" | "BTreeSet" => format!("{{{}}}", arg(0)?),
                 "HashMap" | "BTreeMap" => format!("{{{}:{}}}", arg(0)?, arg(1)?),
                 "Option" | "Result" | "Box" | "Rc" | "Arc" => arg(0)?,
+                // mlua's handles to a userdata value: the Teal side sees the host type
+                // itself, which is what `open(..) -> Session` declared on the way out.
+                "UserDataRef" | "UserDataRefMut" | "UserDataOwned" => arg(0)?,
                 "Value" => "any".into(),
                 "Table" => "{any:any}".into(),
                 "Function" => "function".into(),
