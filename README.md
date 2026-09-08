@@ -384,6 +384,8 @@ every declared field, for types that are settled.
 | `nil-index` | on | `t[k].x`, `t[k]:m()`, `t[k]()`, `t[k][j]` — Teal types a map/array lookup as `V`, not `V \| nil` |
 | `struct-fields` | on | a table built for a record marked `---@struct` that leaves out a field the record declares and `---@optional` does not exempt. Silent until a record carries the marker (see below) |
 | `enum-exhaustive` | on | `if e == "a" ... elseif e == "b" ... end` over an enum with a value left unhandled and no `else`; enums nested in records and enums from required modules count |
+| `enum-cast` | on | `e as E` where `E` is an enum and the checker types `e` as `string`: `as` is erased, so the word enters the enum with nothing checking it. A string literal (`"open" as E`) and a value already typed as the enum are not reported (see below) |
+| `enum-table` | on | a table constructor whose declared type maps an enum (`{string: E}`, `{E: T}`) and that leaves a value of the enum out, or lists a word that is not one. An array of the enum (`{E}`) is a selection, not a mapping, and is not reported. `htl fix enum-table` fills a `{string: E}` one in |
 | `union-exhaustive` | on | `if x is A ... elseif x is B ... end` over a union with a variant never tested and no `else`. The variants come from the checker, so a chain that predates a variant is reported once the union gains it (see "Unions of records") |
 | `shadow-local` | on | a local / loop var / parameter reusing an enclosing local's name; when that outer local is a `require`d module the message says which module and where it was required |
 | `no-global` | on | `global` declarations |
@@ -441,6 +443,52 @@ comment; use sites still see a nilable field. What it removes is the reason to g
 the doubt about whether a field was ever set. Data arriving from outside the program — a
 mod's return value, a save file, a host — is a different question, and `[[contract]]` with
 `require_fields` is what checks that.
+
+### The string boundary of an enum (`enum-cast`, `enum-table`)
+
+A Teal enum is a string at run time and `as` is erased along with the types, so
+`h.state as defs.State` promises nothing: with `"opne"` in the store the value is false
+against every variant, drops out of every branch, and nothing raises. `enum-exhaustive`
+guards the `if` chain; it cannot see that the value never entered the set. `enum-cast`
+reports the cast when the checker types the value as `string` — a value it already types
+as the enum is a cast that restates what is known, and `"open" as defs.State` is checked
+by the literal itself, so neither is reported. `-- htl: allow(enum-cast)` keeps a cast the
+project stands behind.
+
+The hand-written answer is a table, and `enum-table` is what keeps it level with the enum:
+
+```tl
+local states: {string: defs.State} = {
+   open = "open",
+   assigned = "assigned",
+   closed = "closed",
+   missed = "missed",
+   escalated = "escalated",
+   withdrawn = "withdrawn",
+}
+
+local function stored_state(s: string): defs.State
+   return states[s] or "open"   -- total: a word nobody knows falls to the default
+end
+```
+
+The words a constructor lists are its keys, in both shapes that map the enum —
+`{string: E}` above and `{E: T}`, a table of one thing per value — and the message names
+both the values of the enum that are missing and the words that are not values of it. Add
+a value to the enum and every such table reports, which is the `enum-exhaustive` story for
+constructors.
+
+An array of the enum (`{E}`) is left alone: a list of the styles one branch uses or the
+behaviours one test walks is a selection, and asking it for every value is noise. So are
+an empty constructor (which is how a table that is filled later is written) and one whose
+keys are not all literals, since a computed key leaves the word set unknown; a table built
+by a call has no constructor to look at, the exemption `enum-exhaustive` makes as well. A
+`{string: E}` map none of whose keys is a value of the enum is some other map and not this
+lookup.
+
+`htl fix enum-table` fills a `{string: E}` table in — `name = "name"` per missing value,
+laid out where the entries already there are. For `{E: T}` it reports and changes nothing:
+what an entry maps to is not something a fix can invent.
 
 ## Project config (`htl.toml`)
 
@@ -756,8 +804,9 @@ and `--format json` carries the edits. `htl fix [paths]` applies them:
 - Every fix has an applicability: `safe` (what the program does at run time is
   unchanged), `unsafe` (it may change; applied only with `--unsafe`), `suggest` (shown,
   never applied). Today: a forward reference gets its declaration inserted into the
-  record (safe); `explicit-number` gets `: number` (safe); `no-global` becomes `local`
-  (unsafe). `htl.toml` `[fix] unsafe = ["no-global"]` promotes a rule, `disable = [..]`
+  record (safe); `explicit-number` gets `: number` (safe); `enum-table` gets the entries
+  a `{string: E}` lookup is missing (safe — the entry it adds is the identity mapping the
+  table already states for every other value); `no-global` becomes `local` (unsafe). `htl.toml` `[fix] unsafe = ["no-global"]` promotes a rule, `disable = [..]`
   turns its fix off; `--rule a,b` limits a run.
 - The working tree is the undo. A file git reports as modified or staged is refused
   (`--allow-dirty`), and so is a file outside a repository (`--allow-no-vcs`).
