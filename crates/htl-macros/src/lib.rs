@@ -4,6 +4,7 @@
 //! - `include_tl_bytes!("path.tl")`  -> `&'static [u8]` stripped Lua 5.4 bytecode, same check
 //! - `#[derive(TealRecord)]`         -> Teal `record` / `enum` / `type` decl + `IntoLua` / `FromLua`
 //! - `#[host_module(name = "...")]`  -> `UserData` impl + Teal `.d.tl` from a plain `impl` block
+//! - `#[c_export(prefix = "...")]`   -> `extern "C"` wrappers + C header from the same `impl` block
 //!
 //! Paths are relative to `CARGO_MANIFEST_DIR`. Teal type errors (and htl lints, unless
 //! `HTL_LINT=warn`) become `compile_error!`s. Every `.tl` consulted is registered with
@@ -912,6 +913,407 @@ fn expand_host_module(
         }
     }
     .into())
+}
+
+// ------------------------------------------------------------------ #[c_export]
+
+/// `#[c_export(prefix = "hello", header = "include/hello.h")]` on an `impl` block ->
+/// one `extern "C"` wrapper per `pub fn`, the handle lifecycle, and the C header.
+///
+/// The mirror of [`macro@host_module`]: the same breakdown of the `impl` block, said to
+/// a caller that is not written in Rust. What is generated, what each wrapper's shape
+/// is, and which signatures are refused is in `htl::cexport`; the runtime the generated
+/// code calls is `htl::ffi`, which needs the `ffi` feature of the `htl` crate.
+///
+/// `prefix` defaults to the type name lowercased. Without `header` the text is still
+/// `<Type>::HEADER`; with it, the file is written at expansion time relative to
+/// `CARGO_MANIFEST_DIR` and only when its contents changed, exactly as
+/// `#[host_module(dts = "..")]` writes its `.d.tl`.
+#[proc_macro_attribute]
+pub fn c_export(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let metas = match Punctuated::<Meta, Token![,]>::parse_terminated.parse(attr) {
+        Ok(m) => m,
+        Err(e) => {
+            let msg = e.to_string();
+            return quote! { compile_error!(#msg) }.into();
+        }
+    };
+    let imp = parse_macro_input!(item as ItemImpl);
+    match expand_c_export(metas, &imp) {
+        Ok(ts) => ts,
+        // The impl block is emitted even when the attribute refuses it, so that the one
+        // error the reader has to act on is not buried under "no method named .." for
+        // every call site.
+        Err(msg) => quote! { #imp compile_error!(#msg); }.into(),
+    }
+}
+
+fn expand_c_export(
+    metas: Punctuated<Meta, Token![,]>,
+    imp: &ItemImpl,
+) -> Result<TokenStream, String> {
+    let attrs = htl_core::cexport::parse_c_export_metas(metas)?;
+    if imp.trait_.is_some() {
+        return Err("c_export: put it on the inherent `impl` block, not on a trait impl".into());
+    }
+    if !imp.generics.params.is_empty() {
+        return Err(
+            "c_export: the impl block is generic; there is one C symbol per method, and a \
+             generic type has one per instantiation. Export a concrete type"
+                .into(),
+        );
+    }
+    let hd = dts::host_decl(imp, dts::TealAttrs::default(), None)?;
+    let plan = htl_core::cexport::plan(&hd, imp, attrs)?;
+    let header = plan.header();
+    if let Some(path) = &plan.header_path {
+        write_dts(path, &header)?;
+    }
+
+    let self_ty = &imp.self_ty;
+    let prefix = plan.prefix.as_str();
+    let mut fns = vec![c_runtime_fns(&plan, self_ty), c_open_fn(&plan, self_ty)];
+    for m in &plan.methods {
+        fns.push(c_method_fn(&plan, m, self_ty));
+    }
+    Ok(quote! {
+        #imp
+        impl ::htl::ffi::CExport for #self_ty {
+            const PREFIX: &'static str = #prefix;
+            const HEADER: &'static str = #header;
+            const ABI_VERSION: ::core::ffi::c_int = ::htl::ffi::ABI_VERSION;
+        }
+        #( #fns )*
+    }
+    .into())
+}
+
+/// The `# Safety` clause every generated pointer-taking function carries: one sentence
+/// per pointer it is handed, because clippy asks for it and because it is the contract.
+fn c_safety(what: &str) -> String {
+    format!("# Safety\n\n{what}")
+}
+
+/// The functions that do not come from a method: versions, the error slot, `free`, and
+/// the two ends of the handle's life.
+fn c_runtime_fns(plan: &htl_core::cexport::CPlan, self_ty: &syn::Type) -> TokenStream2 {
+    let p = plan.prefix.as_str();
+    let (abi, ver, ts) = (
+        format_ident!("{p}_abi_version"),
+        format_ident!("{p}_version"),
+        format_ident!("{p}_threadsafe"),
+    );
+    let (le, lei, ls) = (
+        format_ident!("{p}_last_error"),
+        format_ident!("{p}_last_error_into"),
+        format_ident!("{p}_last_status"),
+    );
+    let (free, close, int) = (
+        format_ident!("{p}_free"),
+        format_ident!("{p}_close"),
+        format_ident!("{p}_interrupt"),
+    );
+    let d_le = "The last error on this thread, or NULL. Owned by this library and valid \
+                until the next call on this thread; do not free it.";
+    let d_lei = c_safety("`buf` must be writable for `len` bytes.");
+    let d_free = c_safety(
+        "`p` must be NULL or a pointer this library returned and has not taken back. \
+         Freeing anything else, or the same pointer twice, is undefined behaviour.",
+    );
+    let d_close = c_safety(
+        "`h` must be NULL or a handle from `_open` that has not been closed, and no call \
+         may be in progress on it. Closing from another thread does nothing.",
+    );
+    let d_int = c_safety(
+        "`h` must be NULL or a live handle. Callable from any thread; the caller keeps \
+         the handle alive until it stops calling.",
+    );
+    quote! {
+        #[doc = "The shape of this ABI. Compare it before calling anything else."]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn #abi() -> ::core::ffi::c_int {
+            ::htl::ffi::ABI_VERSION
+        }
+
+        #[doc = "The version of the crate that was built, as a static string."]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn #ver() -> *const ::core::ffi::c_char {
+            concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const ::core::ffi::c_char
+        }
+
+        #[doc = "0: one handle per thread (the convention of sqlite3_threadsafe)."]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn #ts() -> ::core::ffi::c_int {
+            0
+        }
+
+        #[doc = #d_le]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn #le() -> *const ::core::ffi::c_char {
+            ::htl::ffi::last_error_ptr()
+        }
+
+        #[doc = #d_lei]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn #lei(
+            buf: *mut ::core::ffi::c_char,
+            len: ::core::ffi::c_int,
+        ) -> ::core::ffi::c_int {
+            unsafe { ::htl::ffi::last_error_into(buf, len) }
+        }
+
+        #[doc = "The status that went with the last error."]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn #ls() -> ::core::ffi::c_int {
+            ::htl::ffi::last_status()
+        }
+
+        #[doc = #d_free]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn #free(p: *mut ::core::ffi::c_char) {
+            unsafe { ::htl::ffi::free(p) }
+        }
+
+        #[doc = #d_close]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn #close(__handle: *mut ::core::ffi::c_void) {
+            const MAGIC: u64 = ::htl::ffi::magic(#p);
+            unsafe { ::htl::ffi::Handle::<#self_ty>::close(__handle, MAGIC) }
+        }
+
+        #[doc = #d_int]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn #int(__handle: *mut ::core::ffi::c_void) -> ::core::ffi::c_int {
+            const MAGIC: u64 = ::htl::ffi::magic(#p);
+            unsafe { ::htl::ffi::Handle::<#self_ty>::interrupt(__handle, MAGIC) }
+        }
+    }
+}
+
+/// The signature fragments, the decoding of each argument, and the call arguments.
+///
+/// Arguments are decoded *before* the handle is entered: a NULL or non-UTF-8 argument is
+/// the caller's mistake, not the handle's, and must not count as a failed call on it.
+fn c_params(
+    f: &htl_core::cexport::CFn,
+    fail: &TokenStream2,
+) -> (Vec<TokenStream2>, Vec<TokenStream2>, Vec<TokenStream2>) {
+    use htl_core::cexport::ParamKind;
+    let (mut sig, mut dec, mut call) = (Vec::new(), Vec::new(), Vec::new());
+    for p in &f.params {
+        if p.kind == ParamKind::Interrupt {
+            call.push(quote! { __interrupt });
+            continue;
+        }
+        let id = format_ident!("{}", p.name);
+        let what = p.c_name.as_str();
+        let ty = &p.ty;
+        match p.kind {
+            ParamKind::Text => {
+                sig.push(quote! { #id: *const ::core::ffi::c_char });
+                dec.push(quote! {
+                    let #id: ::std::string::String = match unsafe { ::htl::ffi::arg_str(#id, #what) } {
+                        ::core::option::Option::Some(__s) => ::std::string::String::from(__s),
+                        ::core::option::Option::None => return #fail,
+                    };
+                });
+            }
+            ParamKind::Int => {
+                sig.push(quote! { #id: ::core::ffi::c_int });
+                dec.push(quote! { let #id: i32 = #id; });
+            }
+            ParamKind::Json => {
+                sig.push(quote! { #id: *const ::core::ffi::c_char });
+                dec.push(quote! {
+                    let #id: #ty = match unsafe { ::htl::ffi::arg_str(#id, #what) } {
+                        ::core::option::Option::Some(__s) => {
+                            match ::htl::ffi::from_json::<#ty>(__s, #what) {
+                                ::core::result::Result::Ok(__v) => __v,
+                                ::core::result::Result::Err(__e) => {
+                                    ::htl::ffi::set_error(::htl::ffi::Status::Err, __e);
+                                    return #fail;
+                                }
+                            }
+                        }
+                        ::core::option::Option::None => return #fail,
+                    };
+                });
+            }
+            ParamKind::Interrupt => unreachable!("handled above"),
+        }
+        call.push(if p.by_ref {
+            quote! { &#id }
+        } else {
+            quote! { #id }
+        });
+    }
+    (sig, dec, call)
+}
+
+/// `<prefix>_open`: decode the options, build the value, hand back the handle.
+fn c_open_fn(plan: &htl_core::cexport::CPlan, self_ty: &syn::Type) -> TokenStream2 {
+    use htl_core::cexport::ParamKind;
+    let f = &plan.open;
+    let p = plan.prefix.as_str();
+    let name = format_ident!("{}", f.c_name);
+    let rust = format_ident!("{}", f.rust_name);
+    let fail = quote! { ::core::ptr::null_mut() };
+    let (sig, dec, call) = c_params(f, &fail);
+    // The flag exists whether or not the opener asked for it; naming it `_interrupt`
+    // when it did not keeps the generated code warning-free in the caller's crate.
+    let flag = if f.params.iter().any(|x| x.kind == ParamKind::Interrupt) {
+        format_ident!("__interrupt")
+    } else {
+        format_ident!("_interrupt")
+    };
+    let make = if f.is_result {
+        quote! {
+            <#self_ty>::#rust(#( #call ),*)
+                .map_err(|__e| ::std::string::ToString::to_string(&__e))
+        }
+    } else {
+        quote! {
+            ::core::result::Result::Ok::<_, ::std::string::String>(
+                <#self_ty>::#rust(#( #call ),*)
+            )
+        }
+    };
+    let doc = c_safety(
+        "Every `const char *` argument must be NULL or a NUL-terminated UTF-8 string \
+         that stays alive for the call. The returned handle belongs to this thread and \
+         is closed with `_close`; NULL means the call failed, and `_last_error` says why.",
+    );
+    quote! {
+        #[doc = #doc]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn #name(#( #sig ),*) -> *mut ::core::ffi::c_void {
+            const MAGIC: u64 = ::htl::ffi::magic(#p);
+            ::htl::ffi::clear_error();
+            #( #dec )*
+            ::htl::ffi::Handle::<#self_ty>::open(MAGIC, move |#flag| #make)
+        }
+    }
+}
+
+/// One method: the wrapper whose shape `cexport::Shape` chose.
+fn c_method_fn(
+    plan: &htl_core::cexport::CPlan,
+    m: &htl_core::cexport::CFn,
+    self_ty: &syn::Type,
+) -> TokenStream2 {
+    use htl_core::cexport::Shape;
+    let p = plan.prefix.as_str();
+    let name = format_ident!("{}", m.c_name);
+    let rust = format_ident!("{}", m.rust_name);
+    let (ret, fail) = match m.shape {
+        Shape::Void => (quote! {}, quote! {}),
+        Shape::Text | Shape::Json => (
+            quote! { -> *mut ::core::ffi::c_char },
+            quote! { ::core::ptr::null_mut() },
+        ),
+        Shape::Status | Shape::IntOut => (
+            quote! { -> ::core::ffi::c_int },
+            quote! { ::htl::ffi::Status::Err.code() },
+        ),
+    };
+    let (sig, dec, call) = c_params(m, &fail);
+    let invoke = quote! { __this.#rust(#( #call ),*) };
+    let ok = quote! { ::htl::ffi::Status::Ok.code() };
+    let body = match (m.shape, m.is_result) {
+        (Shape::Void, _) => quote! { #invoke; },
+        (Shape::Text, false) => quote! { ::htl::ffi::give(#invoke) },
+        (Shape::Text, true) => quote! {
+            match #invoke {
+                ::core::result::Result::Ok(__v) => ::htl::ffi::give(__v),
+                ::core::result::Result::Err(__e) => {
+                    ::htl::ffi::fail(__e);
+                    ::core::ptr::null_mut()
+                }
+            }
+        },
+        (Shape::Json, false) => quote! { ::htl::ffi::give_json(&#invoke) },
+        (Shape::Json, true) => quote! {
+            match #invoke {
+                ::core::result::Result::Ok(__v) => ::htl::ffi::give_json(&__v),
+                ::core::result::Result::Err(__e) => {
+                    ::htl::ffi::fail(__e);
+                    ::core::ptr::null_mut()
+                }
+            }
+        },
+        (Shape::Status, _) => quote! {
+            match #invoke {
+                ::core::result::Result::Ok(()) => #ok,
+                ::core::result::Result::Err(__e) => ::htl::ffi::fail(__e).code(),
+            }
+        },
+        (Shape::IntOut, false) => quote! {
+            let __v = #invoke;
+            unsafe { *__out = __v as ::core::ffi::c_int };
+            #ok
+        },
+        (Shape::IntOut, true) => quote! {
+            match #invoke {
+                ::core::result::Result::Ok(__v) => {
+                    unsafe { *__out = __v as ::core::ffi::c_int };
+                    #ok
+                }
+                ::core::result::Result::Err(__e) => ::htl::ffi::fail(__e).code(),
+            }
+        },
+    };
+    let (out_sig, out_check) = if m.shape == Shape::IntOut {
+        (
+            quote! { __out: *mut ::core::ffi::c_int, },
+            quote! {
+                if __out.is_null() {
+                    ::htl::ffi::set_error(::htl::ffi::Status::Err, "argument `out` is NULL");
+                    return ::htl::ffi::Status::Err.code();
+                }
+            },
+        )
+    } else {
+        (quote! {}, quote! {})
+    };
+    let enter = match m.shape {
+        Shape::Status | Shape::IntOut => quote! {
+            unsafe {
+                ::htl::ffi::Handle::<#self_ty>::enter_status(__handle, MAGIC, move |__this| { #body })
+            }
+        },
+        Shape::Void => quote! {
+            unsafe {
+                ::htl::ffi::Handle::<#self_ty>::enter(__handle, MAGIC, (), move |__this| { #body })
+            }
+        },
+        Shape::Text | Shape::Json => quote! {
+            unsafe {
+                ::htl::ffi::Handle::<#self_ty>::enter(
+                    __handle, MAGIC, ::core::ptr::null_mut(), move |__this| { #body },
+                )
+            }
+        },
+    };
+    let doc = c_safety(
+        "`h` must be NULL or a handle from `_open`, used on the thread that opened it; \
+         any `const char *` argument must be NULL or a NUL-terminated UTF-8 string alive \
+         for the call, and any out-parameter must be writable.",
+    );
+    quote! {
+        #[doc = #doc]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn #name(
+            __handle: *mut ::core::ffi::c_void,
+            #( #sig, )*
+            #out_sig
+        ) #ret {
+            const MAGIC: u64 = ::htl::ffi::magic(#p);
+            ::htl::ffi::clear_error();
+            #( #dec )*
+            #out_check
+            #enter
+        }
+    }
 }
 
 #[cfg(test)]

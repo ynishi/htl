@@ -24,8 +24,20 @@ dts = ["htl-core/dts"]
 # `async fn` in a `#[host_module]` impl. Off by default: it turns on mlua's own `async`
 # feature, and a host with no async method should compile as it did without this.
 async = ["htl-core/async"]
+# `htl::ffi` + `#[c_export]`: the C ABI a caller that is not written in Rust holds. Off
+# by default: it adds a public module and, once the attribute is used, `extern "C"`
+# symbols, and a host with no C caller wants neither.
+ffi = ["htl-core/ffi"]
 
 [dev-dependencies]
+# The C ABI tests call the generated `extern "C"` functions directly, and the generated
+# code needs the runtime they call. A crate cannot turn on its own feature for its tests
+# any other way, and leaving them out of `cargo test --workspace` would mean the ABI is
+# only ever exercised by hand.
+htl = { path = ".", features = ["ffi", "dts"] }
+# The C ABI test declares the record a method hands back as JSON, and reads it back.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # The async tests need something to poll the futures with: mlua yields to the caller's
 # executor and provides none of its own.
 tokio = { version = "1", features = ["rt", "macros", "time"] }

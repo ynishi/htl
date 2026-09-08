@@ -1011,6 +1011,24 @@ pub fn scan_rust_file(path: &Path, manifest_dir: &Path) -> Result<Vec<Generated>
                         });
                     }
                 }
+                // The C header is the same scan pointed at the other output: `htl dts`
+                // writes both, so a header can be regenerated without a `cargo build`
+                // (and reviewed in a diff, which is what `#[c_export(header = ..)]`
+                // wrote it to a file for).
+                if let Some(attrs) = crate::cexport::parse_c_export_attr(&imp.attrs)?
+                    && attrs.header.is_some()
+                {
+                    let hd = host_decl(imp, TealAttrs::default(), Some(&file.items))?;
+                    let plan = crate::cexport::plan(&hd, imp, attrs)?;
+                    if let Some(header) = &plan.header_path {
+                        out.push(Generated {
+                            target: manifest_dir.join(header),
+                            text: plan.header(),
+                            source: path.to_path_buf(),
+                            what: format!("c_export {}", plan.prefix),
+                        });
+                    }
+                }
             }
             Item::Struct(ItemStruct { attrs, .. }) | Item::Enum(ItemEnum { attrs, .. })
                 if derives_teal_record(attrs) =>

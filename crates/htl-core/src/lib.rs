@@ -17,12 +17,16 @@ use std::path::{Path, PathBuf};
 
 pub mod bundle;
 pub mod cache;
+#[cfg(feature = "dts")]
+pub mod cexport;
 pub mod config;
 pub mod contract;
 #[cfg(feature = "dts")]
 pub mod dep_dts;
 #[cfg(feature = "dts")]
 pub mod dts;
+#[cfg(feature = "ffi")]
+pub mod ffi;
 pub mod fix;
 pub mod link;
 #[cfg(feature = "pkg")]
@@ -1276,18 +1280,21 @@ fn path_str(p: &Path) -> String {
 /// ```
 /// instead of that line followed by `stack traceback: [C]: in method 'pages' ...`.
 pub fn user_message(err: &anyhow::Error) -> String {
-    fn from_mlua(e: &mlua::Error) -> String {
-        match e {
-            mlua::Error::CallbackError { cause, .. } => from_mlua(cause),
-            mlua::Error::ExternalError(ext) => ext.to_string(),
-            mlua::Error::WithContext { cause, .. } => from_mlua(cause),
-            other => strip_traceback(&other.to_string()),
-        }
-    }
     if let Some(e) = err.downcast_ref::<mlua::Error>() {
-        return from_mlua(e);
+        return user_message_lua(e);
     }
     strip_traceback(&format!("{err:#}"))
+}
+
+/// [`user_message`] for an error already held as mlua's own type, which is how a caller
+/// that catches `mlua::Result` (the C ABI in `ffi`, say) has it.
+pub fn user_message_lua(e: &mlua::Error) -> String {
+    match e {
+        mlua::Error::CallbackError { cause, .. } => user_message_lua(cause),
+        mlua::Error::ExternalError(ext) => ext.to_string(),
+        mlua::Error::WithContext { cause, .. } => user_message_lua(cause),
+        other => strip_traceback(&other.to_string()),
+    }
 }
 
 /// Remove a trailing Lua `stack traceback:` section from an error text.
