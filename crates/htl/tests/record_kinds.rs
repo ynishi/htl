@@ -55,6 +55,27 @@ pub struct Outer(pub Label);
 #[derive(TealRecord, Debug, Clone, PartialEq)]
 pub struct Boxed(pub Point);
 
+/// The Teal spelling of the variants, `#[teal(rename_all)]` with one `#[teal(name)]`
+/// override: a host enum replacing a Teal one keeps the words the project already holds.
+#[derive(TealRecord, Debug, Clone, Copy, PartialEq)]
+#[teal(rename_all = "snake_case")]
+pub enum State {
+    Open,
+    InReview,
+    #[teal(name = "done")]
+    Closed,
+}
+
+/// The same on a data-carrying enum: the `kind` tag carries the renamed word, the
+/// variant records keep their Rust names.
+#[derive(TealRecord, Debug, Clone, PartialEq)]
+#[teal(rename_all = "snake_case")]
+pub enum Step {
+    Idle,
+    InReview(f64),
+    NeedsWork { why: String },
+}
+
 fn convert<T: FromLua>(h: &Htl, expr: &str) -> htl::mlua::Result<T> {
     let v: Value = h.lua().load(expr).eval()?;
     T::from_lua(v, h.lua())
@@ -122,6 +143,90 @@ fn a_non_string_for_a_unit_enum_says_what_arrived() {
     assert_eq!(
         e.to_string(),
         "Mode: expected one of \"Fast\", \"Careful\", got integer"
+    );
+}
+
+// ---------------------------------------------------------------- renamed variants
+
+#[test]
+fn a_renamed_enum_declares_and_crosses_as_the_renamed_words() {
+    assert_eq!(
+        State::DECL,
+        "local enum State\n   \"open\"\n   \"in_review\"\n   \"done\"\nend\n\nreturn State\n"
+    );
+    let h = Htl::new().unwrap();
+    let v = State::InReview.into_lua(h.lua()).unwrap();
+    assert_eq!(
+        v.as_string()
+            .map(|s| s.to_string_lossy().to_string())
+            .as_deref(),
+        Some("in_review")
+    );
+    // The override wins over the rule, both ways across.
+    assert_eq!(
+        State::Closed
+            .into_lua(h.lua())
+            .unwrap()
+            .as_string()
+            .map(|s| s.to_string_lossy().to_string())
+            .as_deref(),
+        Some("done")
+    );
+    assert_eq!(convert::<State>(&h, "return 'open'").unwrap(), State::Open);
+    assert_eq!(
+        convert::<State>(&h, "return 'done'").unwrap(),
+        State::Closed
+    );
+    assert_eq!(round_trip(&h, State::InReview), State::InReview);
+}
+
+/// The Rust spelling is not a word the boundary knows: it is refused like any other
+/// string that is no variant, and the list is what the declaration says.
+#[test]
+fn the_rust_spelling_of_a_renamed_variant_is_refused() {
+    let h = Htl::new().unwrap();
+    let e = convert::<State>(&h, "return 'Open'").unwrap_err();
+    assert_eq!(
+        e.to_string(),
+        "State: expected one of \"open\", \"in_review\", \"done\", got \"Open\""
+    );
+    let e = convert::<State>(&h, "return 'Closed'").unwrap_err();
+    assert_eq!(
+        e.to_string(),
+        "State: expected one of \"open\", \"in_review\", \"done\", got \"Closed\""
+    );
+}
+
+#[test]
+fn a_renamed_data_enum_tags_with_the_renamed_word() {
+    assert!(
+        Step::DECL.contains(
+            "local record Step_NeedsWork\n   where self.kind == \"needs_work\"\n   kind: string\n   why: string\nend\n"
+        ),
+        "{}",
+        Step::DECL
+    );
+    let h = Htl::new().unwrap();
+    let t = Step::InReview(2.5).into_lua(h.lua()).unwrap();
+    let t = t.as_table().unwrap();
+    assert_eq!(t.get::<String>("kind").unwrap(), "in_review");
+    assert_eq!(t.get::<f64>("value").unwrap(), 2.5);
+    assert_eq!(
+        convert::<Step>(&h, "return { kind = 'idle' }").unwrap(),
+        Step::Idle
+    );
+    assert_eq!(round_trip(&h, Step::InReview(1.0)), Step::InReview(1.0));
+    // A failure inside a variant is reported under the record the value was filling,
+    // which keeps its Rust name (`record Step_NeedsWork`).
+    let e = convert::<Step>(&h, "return { kind = 'needs_work' }").unwrap_err();
+    assert_eq!(
+        e.to_string(),
+        "Step.NeedsWork.why: expected string, got nil"
+    );
+    let e = convert::<Step>(&h, "return { kind = 'InReview' }").unwrap_err();
+    assert_eq!(
+        e.to_string(),
+        "Step: expected one of \"idle\", \"in_review\", \"needs_work\", got \"InReview\""
     );
 }
 

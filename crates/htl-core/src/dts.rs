@@ -27,8 +27,17 @@
 //!   `type` form imports a record just the same, so one form serves every kind.
 //! - **The tag is `kind`, the newtype payload is `value`**, and neither is configurable:
 //!   a name that differs per host is a name the reader has to look up, and these are
-//!   what Teal's own `where` examples use. Variant names are written as in Rust, the way
-//!   record fields are; a struct variant may not carry a field named `kind`.
+//!   what Teal's own `where` examples use. A struct variant may not carry a field named
+//!   `kind`.
+//! - **A variant's word is the Rust name unless the enum says otherwise.**
+//!   `#[teal(rename_all = "snake_case")]` on the enum and `#[teal(name = "..")]` on one
+//!   variant spell what crosses — the `enum` entries, the `kind` tag, the run-time match
+//!   and the message that lists what is accepted — because a Teal project that already
+//!   holds `"open"` in its store should not have to become `"Open"` to move its enum to
+//!   the host. What the rule does *not* touch is the union's record names
+//!   (`Shape_InReview` stays): those are Teal identifiers, and `kebab-case` is not one.
+//!   Record fields are declared under their Rust names; renaming those is a separate
+//!   decision nobody has asked for, so `#[teal(..)]` on a field is refused.
 
 use std::path::{Path, PathBuf};
 use syn::punctuated::Punctuated;
@@ -113,10 +122,113 @@ pub fn is_result(ty: &Type) -> bool {
 
 // ---------------------------------------------------------------- attributes
 
+/// How an enum variant's Rust name is spelled on the Teal side: `#[teal(rename_all =
+/// "..")]`, serde's set and serde's spellings of it, so a type that is also `Serialize`
+/// can say the same thing twice and the two agree.
+///
+/// The rules are serde's, applied to a variant name (`InReview`): `lowercase` lowers the
+/// whole word, `snake_case` breaks it at each capital, and the rest follow from those
+/// two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameRule {
+    /// `InReview` -> `inreview`.
+    Lower,
+    /// `InReview` -> `INREVIEW`.
+    Upper,
+    /// `InReview` -> `InReview` (the Rust spelling; accepted so the attribute can be
+    /// written out where a `Serialize` impl already says it).
+    Pascal,
+    /// `InReview` -> `inReview`.
+    Camel,
+    /// `InReview` -> `in_review`.
+    Snake,
+    /// `InReview` -> `IN_REVIEW`.
+    ScreamingSnake,
+    /// `InReview` -> `in-review`.
+    Kebab,
+    /// `InReview` -> `IN-REVIEW`.
+    ScreamingKebab,
+}
+
+impl RenameRule {
+    /// The accepted spellings, in the order the error message lists them.
+    pub const NAMES: &'static [&'static str] = &[
+        "lowercase",
+        "UPPERCASE",
+        "PascalCase",
+        "camelCase",
+        "snake_case",
+        "SCREAMING_SNAKE_CASE",
+        "kebab-case",
+        "SCREAMING-KEBAB-CASE",
+    ];
+
+    /// Parse the attribute's string, naming the whole set when it is none of them.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        Ok(match s {
+            "lowercase" => Self::Lower,
+            "UPPERCASE" => Self::Upper,
+            "PascalCase" => Self::Pascal,
+            "camelCase" => Self::Camel,
+            "snake_case" => Self::Snake,
+            "SCREAMING_SNAKE_CASE" => Self::ScreamingSnake,
+            "kebab-case" => Self::Kebab,
+            "SCREAMING-KEBAB-CASE" => Self::ScreamingKebab,
+            other => {
+                return Err(format!(
+                    "`rename_all` must be one of {}, got {other:?}",
+                    Self::NAMES
+                        .iter()
+                        .map(|n| format!("{n:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        })
+    }
+
+    /// Apply the rule to a variant name written in Rust's `PascalCase`.
+    pub fn apply(self, variant: &str) -> String {
+        // snake_case is the one that reads the word's shape; the other separator forms
+        // are it with a different separator or a different case.
+        let snake = || {
+            let mut s = String::new();
+            for (i, ch) in variant.char_indices() {
+                if i > 0 && ch.is_uppercase() {
+                    s.push('_');
+                }
+                s.push(ch.to_ascii_lowercase());
+            }
+            s
+        };
+        match self {
+            Self::Lower => variant.to_ascii_lowercase(),
+            Self::Upper => variant.to_ascii_uppercase(),
+            Self::Pascal => variant.to_string(),
+            Self::Camel => {
+                let mut c = variant.chars();
+                match c.next() {
+                    Some(first) => first.to_ascii_lowercase().to_string() + c.as_str(),
+                    None => String::new(),
+                }
+            }
+            Self::Snake => snake(),
+            Self::ScreamingSnake => snake().to_ascii_uppercase(),
+            Self::Kebab => snake().replace('_', "-"),
+            Self::ScreamingKebab => snake().to_ascii_uppercase().replace('_', "-"),
+        }
+    }
+}
+
 /// `#[teal(...)]` / `#[host_module(...)]` arguments.
 #[derive(Debug, Clone, Default)]
 pub struct TealAttrs {
     pub name: Option<String>,
+    /// `#[teal(rename_all = "..")]` on an enum: how its variants are spelled on the Teal
+    /// side. The Rust names are unchanged, and so are the union's variant record names
+    /// (`Shape_InReview`) — a Teal identifier cannot be `kebab-case`; what the rule
+    /// spells is the word that crosses.
+    pub rename_all: Option<RenameRule>,
     /// `.d.tl` output path, relative to the crate's `CARGO_MANIFEST_DIR`.
     pub dts: Option<String>,
     /// Types declared in their own `.d.tl` module: emits `local type X = require("X")`.
@@ -163,7 +275,10 @@ fn type_list(arr: &syn::ExprArray, key: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// Parse `name = "..", dts = "..", uses = [A, B], records = [C]`.
+/// Parse `name = "..", rename_all = "..", dts = "..", uses = [A, B], records = [C]`.
+///
+/// Every key is parsed here whatever it sits on; where a key is meaningful is decided by
+/// the caller (`rename_all` on an enum, `name` alone on a variant).
 pub fn parse_attr_metas(metas: impl IntoIterator<Item = Meta>) -> Result<TealAttrs, String> {
     let mut out = TealAttrs::default();
     for meta in metas {
@@ -177,6 +292,9 @@ pub fn parse_attr_metas(metas: impl IntoIterator<Item = Meta>) -> Result<TealAtt
             .unwrap_or_default();
         match (key.as_str(), &nv.value) {
             ("name", Expr::Lit(l)) => out.name = Some(lit_str(&l.lit)?),
+            ("rename_all", Expr::Lit(l)) => {
+                out.rename_all = Some(RenameRule::parse(&lit_str(&l.lit)?)?)
+            }
             ("dts", Expr::Lit(l)) => out.dts = Some(lit_str(&l.lit)?),
             ("uses", Expr::Array(arr)) => out.uses = type_list(arr, "uses")?,
             ("records", Expr::Array(arr)) => out.records = type_list(arr, "records")?,
@@ -269,7 +387,8 @@ pub enum RecordKind {
     Record { fields: Vec<(String, String)> },
     /// `struct N(T)`: `type N = T`, crossing as `T` does.
     Alias { inner: String },
-    /// An enum of unit variants: `enum N "A" "B" end`, crossing as the variant name.
+    /// An enum of unit variants: `enum N "A" "B" end`, crossing as the variant name —
+    /// as `#[teal(rename_all)]` / `#[teal(name)]` spell it, in declaration order.
     Enum { variants: Vec<String> },
     /// An enum with a data variant: one `where`-discriminated record per variant and
     /// `type N = N_A | N_B`, crossing as a table whose `kind` names the variant.
@@ -279,7 +398,14 @@ pub enum RecordKind {
 /// One variant of a data-carrying enum.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnionVariant {
+    /// The Rust name, which is also the record's (`Shape_InReview`) and the segment an
+    /// error inside the variant is reported under (`Shape.InReview.h`): a Teal
+    /// identifier cannot hold every `rename_all` spelling, and the record is what a
+    /// caller narrows with by name.
     pub name: String,
+    /// The word the `kind` tag carries: `where self.kind == "in_review"`, and what the
+    /// value crossing the boundary must say. Equals `name` unless renamed.
+    pub word: String,
     pub shape: VariantShape,
 }
 
@@ -324,6 +450,14 @@ fn record_fields(
     let mut out = Vec::new();
     for f in &fields.named {
         let fi = f.ident.as_ref().unwrap().to_string();
+        // A field carries no `#[teal(..)]`: renaming one is a decision nobody has taken,
+        // and an attribute that is quietly ignored is worse than one that is refused.
+        if f.attrs.iter().any(|a| a.path().is_ident("teal")) {
+            return Err(format!(
+                "TealRecord: {self_name}.{fi}: `#[teal(..)]` on a record field is not supported; \
+                 fields are declared under their Rust names"
+            ));
+        }
         let tt = teal_type(&f.ty, self_name)?;
         out.push((fi, tt));
     }
@@ -348,25 +482,77 @@ fn struct_kind(st: &ItemStruct, name: &str) -> Result<RecordKind, String> {
     }
 }
 
+/// The Teal spelling of one variant: `#[teal(name = "..")]` on it, else the enum's
+/// `#[teal(rename_all = "..")]`, else the Rust name. `name` on a variant is the override,
+/// so it wins; nothing else may be written there (a variant has no `.d.tl` of its own to
+/// ask for, and `rename_all` over one variant is what `name` already is).
+fn variant_word(
+    v: &syn::Variant,
+    rule: Option<RenameRule>,
+    enum_name: &str,
+) -> Result<String, String> {
+    let attrs = parse_teal_attrs(&v.attrs)
+        .map_err(|e| format!("TealRecord: {enum_name}::{}: {e}", v.ident))?;
+    if attrs.rename_all.is_some()
+        || attrs.dts.is_some()
+        || !attrs.uses.is_empty()
+        || !attrs.records.is_empty()
+        || attrs.errors.is_some()
+    {
+        return Err(format!(
+            "TealRecord: {enum_name}::{}: only `#[teal(name = \"..\")]` applies to a variant \
+             (`rename_all` goes on the enum)",
+            v.ident
+        ));
+    }
+    Ok(match attrs.name {
+        Some(n) => n,
+        None => match rule {
+            Some(r) => r.apply(&v.ident.to_string()),
+            None => v.ident.to_string(),
+        },
+    })
+}
+
+/// Two variants that reach Teal as the same word are a declaration that cannot say which
+/// one a value meant — an `enum` listing it twice, or two records with the same `where`
+/// clause — so it is refused, naming both.
+fn reject_duplicate_words(en: &ItemEnum, words: &[String], enum_name: &str) -> Result<(), String> {
+    for (i, w) in words.iter().enumerate() {
+        if let Some(j) = words[..i].iter().position(|p| p == w) {
+            return Err(format!(
+                "TealRecord: {enum_name}::{} and {enum_name}::{} both reach Teal as {w:?}; \
+                 give one a `#[teal(name = \"..\")]` of its own",
+                en.variants[j].ident, en.variants[i].ident
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The kind an enum lowers to: all unit variants -> `enum`, otherwise a union of
 /// `where`-discriminated records.
-fn enum_kind(en: &ItemEnum, name: &str) -> Result<RecordKind, String> {
+fn enum_kind(en: &ItemEnum, name: &str, rule: Option<RenameRule>) -> Result<RecordKind, String> {
     if en.variants.is_empty() {
         return Err(format!(
             "TealRecord: `{name}` has no variants and has nothing to declare"
         ));
     }
+    let words: Vec<String> = en
+        .variants
+        .iter()
+        .map(|v| variant_word(v, rule, name))
+        .collect::<Result<_, _>>()?;
+    reject_duplicate_words(en, &words, name)?;
     if en
         .variants
         .iter()
         .all(|v| matches!(v.fields, syn::Fields::Unit))
     {
-        return Ok(RecordKind::Enum {
-            variants: en.variants.iter().map(|v| v.ident.to_string()).collect(),
-        });
+        return Ok(RecordKind::Enum { variants: words });
     }
     let mut variants = Vec::new();
-    for v in &en.variants {
+    for (v, word) in en.variants.iter().zip(words) {
         let vname = v.ident.to_string();
         let shape = match &v.fields {
             syn::Fields::Unit => VariantShape::Unit,
@@ -394,7 +580,11 @@ fn enum_kind(en: &ItemEnum, name: &str) -> Result<RecordKind, String> {
                 VariantShape::Struct(record_fields(fields, name)?)
             }
         };
-        variants.push(UnionVariant { name: vname, shape });
+        variants.push(UnionVariant {
+            name: vname,
+            word,
+            shape,
+        });
     }
     Ok(RecordKind::Union { variants })
 }
@@ -408,8 +598,18 @@ fn record_parts(item: &Item) -> Result<(String, TealAttrs, RecordKind), String> 
     };
     let name = attrs.name.clone().unwrap_or(ident);
     let kind = match item {
-        Item::Struct(st) => struct_kind(st, &name)?,
-        Item::Enum(en) => enum_kind(en, &name)?,
+        Item::Struct(st) => {
+            // `rename_all` spells variants, and a struct has none. Field renaming is a
+            // separate decision, so this is refused rather than silently ignored.
+            if attrs.rename_all.is_some() {
+                return Err(format!(
+                    "TealRecord: `{name}`: `rename_all` applies to enum variants; \
+                     record fields are declared under their Rust names"
+                ));
+            }
+            struct_kind(st, &name)?
+        }
+        Item::Enum(en) => enum_kind(en, &name, attrs.rename_all)?,
         _ => unreachable!(),
     };
     Ok((name, attrs, kind))
@@ -453,7 +653,7 @@ fn kind_decl(name: &str, kind: &RecordKind, indent: &str) -> String {
         RecordKind::Union { variants } => {
             for v in variants {
                 s.push_str(&format!("{indent}{local}record {name}_{}\n", v.name));
-                s.push_str(&format!("{inner}where self.kind == \"{}\"\n", v.name));
+                s.push_str(&format!("{inner}where self.kind == \"{}\"\n", v.word));
                 for (f, t) in variant_fields(v) {
                     s.push_str(&format!("{inner}{f}: {t}\n"));
                 }
@@ -888,6 +1088,116 @@ mod tests {
         );
     }
 
+    /// `rename_all` spells the entries; the Rust names are untouched, so the enum still
+    /// reads as Rust and the Teal side keeps the words its store already holds.
+    #[test]
+    fn rename_all_spells_the_enum_entries() {
+        let rd = record_decl(&item(
+            "#[derive(TealRecord)] #[teal(rename_all = \"snake_case\")] pub enum State { Open, InReview }",
+        ))
+        .unwrap();
+        assert_eq!(
+            rd.kind,
+            RecordKind::Enum {
+                variants: vec!["open".into(), "in_review".into()]
+            }
+        );
+        assert_eq!(
+            rd.decl,
+            "local enum State\n   \"open\"\n   \"in_review\"\nend\n\nreturn State\n"
+        );
+    }
+
+    /// serde's set, applied to a variant name, so a type that is also `Serialize` can say
+    /// the same thing twice and the two agree.
+    #[test]
+    fn every_rename_rule_spells_a_variant_serde_s_way() {
+        let spellings: Vec<String> = RenameRule::NAMES
+            .iter()
+            .map(|n| RenameRule::parse(n).unwrap().apply("InReview"))
+            .collect();
+        assert_eq!(
+            spellings,
+            vec![
+                "inreview",
+                "INREVIEW",
+                "InReview",
+                "inReview",
+                "in_review",
+                "IN_REVIEW",
+                "in-review",
+                "IN-REVIEW",
+            ]
+        );
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] #[teal(rename_all = \"Title Case\")] pub enum S { A }",
+        ))
+        .unwrap_err();
+        assert!(
+            e.contains("`rename_all` must be one of") && e.contains("\"snake_case\""),
+            "{e}"
+        );
+    }
+
+    /// `#[teal(name = ..)]` on a variant is the override, and nothing else may be
+    /// written there.
+    #[test]
+    fn a_variant_name_wins_over_rename_all() {
+        let rd = record_decl(&item(
+            "#[derive(TealRecord)] #[teal(rename_all = \"snake_case\")] pub enum State { Open, #[teal(name = \"REVIEW\")] InReview }",
+        ))
+        .unwrap();
+        assert_eq!(
+            rd.decl,
+            "local enum State\n   \"open\"\n   \"REVIEW\"\nend\n\nreturn State\n"
+        );
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] pub enum State { #[teal(rename_all = \"lowercase\")] Open }",
+        ))
+        .unwrap_err();
+        assert!(
+            e.contains("State::Open") && e.contains("`rename_all` goes on the enum"),
+            "{e}"
+        );
+    }
+
+    /// Two variants under one word is a declaration that cannot say which one a value
+    /// meant, so it is refused, naming both.
+    #[test]
+    fn two_variants_reaching_the_same_word_are_refused() {
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] #[teal(rename_all = \"lowercase\")] pub enum State { Open, OPEN }",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "TealRecord: State::Open and State::OPEN both reach Teal as \"open\"; \
+             give one a `#[teal(name = \"..\")]` of its own"
+        );
+        // The override collides the same way, and against a plain Rust name too.
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] pub enum State { Open, #[teal(name = \"Open\")] Closed }",
+        ))
+        .unwrap_err();
+        assert!(e.contains("State::Open and State::Closed"), "{e}");
+    }
+
+    /// Fields are declared under their Rust names: `rename_all` on a struct and
+    /// `#[teal(..)]` on a field are refused rather than quietly ignored.
+    #[test]
+    fn renaming_record_fields_is_refused_not_ignored() {
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] #[teal(rename_all = \"snake_case\")] pub struct P { pub x: f64 }",
+        ))
+        .unwrap_err();
+        assert!(e.contains("`rename_all` applies to enum variants"), "{e}");
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] pub struct P { #[teal(name = \"ex\")] pub x: f64 }",
+        ))
+        .unwrap_err();
+        assert!(e.contains("P.x") && e.contains("not supported"), "{e}");
+    }
+
     #[test]
     fn a_data_enum_is_a_union_of_where_records() {
         let rd = record_decl(&item(
@@ -901,6 +1211,23 @@ mod tests {
              local record Shape_Circle\n   where self.kind == \"Circle\"\n   kind: string\n   value: number\nend\n\
              local record Shape_Rect\n   where self.kind == \"Rect\"\n   kind: string\n   w: number\n   h: number\nend\n\
              local type Shape = Shape_Dot | Shape_Circle | Shape_Rect\n\nreturn Shape\n"
+        );
+    }
+
+    /// A data enum renames its tag, not its records: `where self.kind == "in_review"` is
+    /// the word that crosses, while `State_InReview` stays a Teal identifier (which
+    /// `kebab-case` is not) and stays the name a caller narrows with.
+    #[test]
+    fn rename_all_spells_the_kind_tag_and_leaves_the_record_names() {
+        let rd = record_decl(&item(
+            "#[derive(TealRecord)] #[teal(rename_all = \"kebab-case\")] pub enum State { Open, InReview(f64) }",
+        ))
+        .unwrap();
+        assert_eq!(
+            rd.decl,
+            "local record State_Open\n   where self.kind == \"open\"\n   kind: string\nend\n\
+             local record State_InReview\n   where self.kind == \"in-review\"\n   kind: string\n   value: number\nend\n\
+             local type State = State_Open | State_InReview\n\nreturn State\n"
         );
     }
 

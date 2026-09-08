@@ -514,12 +514,16 @@ fn expand_record(item: &Item) -> Result<TokenStream, String> {
         (Item::Struct(st), dts::RecordKind::Alias { inner }) => {
             (&st.ident, alias_into(), alias_from(st, name, inner))
         }
-        (Item::Enum(en), dts::RecordKind::Enum { variants }) => {
-            (&en.ident, enum_into(en), enum_from(en, name, variants))
-        }
-        (Item::Enum(en), dts::RecordKind::Union { variants }) => {
-            (&en.ident, union_into(en), union_from(en, name, variants))
-        }
+        (Item::Enum(en), dts::RecordKind::Enum { variants }) => (
+            &en.ident,
+            enum_into(en, variants),
+            enum_from(en, name, variants),
+        ),
+        (Item::Enum(en), dts::RecordKind::Union { variants }) => (
+            &en.ident,
+            union_into(en, variants),
+            union_from(en, name, variants),
+        ),
         _ => return Err("TealRecord: only structs and enums are supported".into()),
     };
     let decl = &rd.decl;
@@ -648,12 +652,12 @@ fn variant_idents(en: &ItemEnum) -> Vec<&syn::Ident> {
     en.variants.iter().map(|v| &v.ident).collect()
 }
 
-/// Unit enum -> the variant's name as a string.
-fn enum_into(en: &ItemEnum) -> TokenStream2 {
+/// Unit enum -> the variant's word as a string: the one the declaration lists, which
+/// `#[teal(rename_all)]` / `#[teal(name)]` may have spelled differently from Rust.
+fn enum_into(en: &ItemEnum, words: &[String]) -> TokenStream2 {
     let idents = variant_idents(en);
-    let names: Vec<String> = idents.iter().map(|i| i.to_string()).collect();
     quote! {
-        let s = match self { #( Self::#idents => #names, )* };
+        let s = match self { #( Self::#idents => #words, )* };
         Ok(::htl::mlua::Value::String(lua.create_string(s)?))
     }
 }
@@ -681,15 +685,17 @@ fn enum_from(en: &ItemEnum, name: &str, variants: &[String]) -> TokenStream2 {
     }
 }
 
-/// Data enum -> table: `kind` names the variant, a newtype payload goes under `value`,
-/// struct-variant fields under their own names.
-fn union_into(en: &ItemEnum) -> TokenStream2 {
+/// Data enum -> table: `kind` carries the variant's word (the one its `where` clause
+/// tests), a newtype payload goes under `value`, struct-variant fields under their own
+/// names.
+fn union_into(en: &ItemEnum, variants: &[dts::UnionVariant]) -> TokenStream2 {
     let arms: Vec<TokenStream2> = en
         .variants
         .iter()
-        .map(|v| {
+        .zip(variants)
+        .map(|(v, uv)| {
             let id = &v.ident;
-            let vname = id.to_string();
+            let vname = uv.word.as_str();
             match &v.fields {
                 syn::Fields::Unit => quote! {
                     Self::#id => { t.set("kind", #vname)?; }
@@ -725,15 +731,17 @@ fn union_into(en: &ItemEnum) -> TokenStream2 {
 /// are, reported under `Enum.Variant`. No table, no `kind`, or an unknown one names the
 /// enum and lists the variants.
 fn union_from(en: &ItemEnum, name: &str, variants: &[dts::UnionVariant]) -> TokenStream2 {
-    let vnames: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
+    let vnames: Vec<&str> = variants.iter().map(|v| v.word.as_str()).collect();
     let arms: Vec<TokenStream2> = en
         .variants
         .iter()
         .zip(variants)
         .map(|(v, uv)| {
             let id = &v.ident;
-            let vname = uv.name.as_str();
-            let path = format!("{name}.{vname}");
+            let vname = uv.word.as_str();
+            // The path names the variant record the value failed to fill
+            // (`Shape.Rect.h` for `record Shape_Rect`), which stays the Rust name.
+            let path = format!("{name}.{}", uv.name);
             match (&v.fields, &uv.shape) {
                 (syn::Fields::Unit, _) => quote! { #vname => Ok(Self::#id), },
                 (syn::Fields::Unnamed(u), dts::VariantShape::Newtype(teal)) => {

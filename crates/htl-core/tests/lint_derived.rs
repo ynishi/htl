@@ -48,6 +48,74 @@ fn enum_exhaustive_sees_a_derived_enum() {
     );
 }
 
+/// Renaming the variants does not hide them from the lints: the `enum` entries are the
+/// renamed words, and a chain that leaves one out is still reported by its word.
+#[test]
+fn enum_exhaustive_sees_the_renamed_words() {
+    let dir = scratch("enum-renamed");
+    let item: syn::Item = syn::parse_str(
+        "#[derive(TealRecord)] #[teal(rename_all = \"snake_case\")] pub enum State { Open, InReview, Closed }",
+    )
+    .unwrap();
+    let rd = dts::record_decl(&item).unwrap();
+    write(&dir.join("State.d.tl"), &rd.decl);
+    write(
+        &dir.join("flow.tl"),
+        "local type State = require(\"State\")\n\n\
+         local function act(s: State)\n   if s == \"open\" then\n      print(1)\n   elseif s == \"in_review\" then\n      print(2)\n   end\nend\n\nact(\"open\")\n",
+    );
+    let lints = lints_of(&dir, "flow.tl");
+    assert!(
+        lints
+            .iter()
+            .any(|l| l.contains("enum-exhaustive") && l.contains("closed")),
+        "expected enum-exhaustive naming the renamed word, got {lints:?}"
+    );
+}
+
+/// A renamed data enum: the `where` clauses carry the renamed words while the variant
+/// records keep their Rust names, and `union-exhaustive` counts them as it always did.
+#[test]
+fn union_exhaustive_counts_the_variants_of_a_renamed_union() {
+    let dir = scratch("union-renamed");
+    let file: syn::File = syn::parse_str(
+        "#[derive(TealRecord)] #[teal(rename_all = \"snake_case\")] pub enum Step { Idle, InReview(f64), NeedsWork { why: String } }\n\
+         pub struct Host;\n\
+         #[host_module(name = \"host\", records = [Step])]\n\
+         impl Host {\n    pub fn any(&self) -> Step { todo!() }\n}\n",
+    )
+    .unwrap();
+    let imp = file
+        .items
+        .iter()
+        .find_map(|i| match i {
+            syn::Item::Impl(imp) => Some(imp),
+            _ => None,
+        })
+        .unwrap();
+    let attrs = dts::parse_host_module_attr(&imp.attrs).unwrap().unwrap();
+    let hd = dts::host_decl(imp, attrs, Some(&file.items)).unwrap();
+    assert!(
+        hd.decl.contains("where self.kind == \"needs_work\""),
+        "{}",
+        hd.decl
+    );
+    write(&dir.join("host.d.tl"), &hd.decl);
+    write(
+        &dir.join("use.tl"),
+        "local type host = require(\"host\")\n\n\
+         local function n(s: host.Step): number\n\
+         \n   if s is host.Step_Idle then\n      return 0\n   elseif s is host.Step_InReview then\n      return s.value\n   end\nend\n\nreturn n\n",
+    );
+    let lints = lints_of(&dir, "use.tl");
+    assert_eq!(lints.len(), 1, "{lints:?}");
+    assert!(
+        lints[0].contains("[htl union-exhaustive]") && lints[0].contains("Step_NeedsWork"),
+        "{}",
+        lints[0]
+    );
+}
+
 /// A derived data enum nested in a host module: `is host.Shape_<Variant>` chains are
 /// measured against every variant the Rust enum has.
 #[test]
