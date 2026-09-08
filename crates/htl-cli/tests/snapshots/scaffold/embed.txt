@@ -224,5 +224,9 @@ an implementation, and a second declaration of the same module is reported
 
 Files htl writes here are the ones the project *publishes*: the module a
 `---@contract` type is declared in, for the authors of the modules that contract
-holds. Declarations generated from Rust (`#[host_module]`) are written next to the
-scripts, not here. Both are committed.
+holds. Declarations generated from this crate's own Rust (`#[host_module]`) are
+written next to the scripts, not here. Both are committed.
+
+So is `<crate>/`, when there is one: a dependency that names its declarations in
+`[package.metadata.htl] dts` has them copied there by `htl dts` (and by check / run
+/ test). Edit the crate, not the copy — the next run writes it again.

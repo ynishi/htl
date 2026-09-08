@@ -603,6 +603,7 @@ fn print_checkinfo(c: &CheckInfo) {
 /// exits non-zero on it, but `run` / `test` / `build` have neither, and a declaration
 /// that is quietly not written is one an outside author finds missing later.
 fn auto_dts(start: &Path) -> Result<()> {
+    let mut project = None;
     if let Some((root, _, cfg)) = load_config(start)? {
         let (contracts, _) = htl::contract::resolve(&root, &cfg);
         let (results, problems) = htl::contract::publish(&root, &contracts);
@@ -610,13 +611,50 @@ fn auto_dts(start: &Path) -> Result<()> {
         for p in &problems {
             eprintln!("dts: {p}");
         }
+        project = Some(root);
     }
     let Some(root) = htl::dts::find_cargo_package_root(start) else {
         return Ok(());
     };
     let results = htl::dts::generate_crate(&root).map_err(|e| anyhow::anyhow!("htl dts: {e}"))?;
     announce_dts(&results, &root);
+    let types_root = project.unwrap_or_else(|| root.clone());
+    let (results, problems, notes) = dep_dts(&root, &types_root);
+    announce_dts(&results, &types_root);
+    for n in problems.iter().chain(&notes) {
+        eprintln!("dts: {n}");
+    }
     Ok(())
+}
+
+/// Materialise the declarations this project's dependencies ship, under
+/// `<types_root>/types/<crate>/`. Returns what was written, what was asked for and could
+/// not be written, and what there is to say about the rest — a file left behind by a
+/// dependency that is gone, a graph that would not resolve.
+///
+/// The last two are separate because they mean different things to the exit code. A crate
+/// naming a declaration that is not in it is one this command was asked for and did not
+/// write, which is what `htl dts` fails on. A graph that would not resolve is the machine
+/// rather than the project: nothing was asked for because nothing could be read, so it is
+/// reported, the committed declarations stand, and the check that follows names the module
+/// if one is missing. An orphan is a file to decide about, and deciding is not this
+/// command's.
+///
+/// The graph comes from `cargo metadata`, so this costs a subprocess on every command that
+/// generates. Nothing is built, and nothing is downloaded for dependencies already fetched.
+fn dep_dts(
+    cargo_root: &Path,
+    types_root: &Path,
+) -> (Vec<(PathBuf, bool)>, Vec<String>, Vec<String>) {
+    let decls = match htl::dep_dts::resolve(cargo_root) {
+        Ok(d) => d,
+        Err(e) => return (Vec::new(), Vec::new(), vec![e]),
+    };
+    // Orphans before materialising: the note beside a crate's declarations is what says
+    // which crate they came from, and the write below rewrites it.
+    let orphans = htl::dep_dts::orphans(types_root, &decls);
+    let (results, problems) = htl::dep_dts::materialise(types_root, &decls);
+    (results, problems, orphans)
 }
 
 fn announce_dts(results: &[(PathBuf, bool)], root: &Path) {
@@ -639,6 +677,7 @@ fn cmd_dts(dir: Option<&Path>) -> Result<ExitCode> {
     // all, and the `bail!` below would then be wrong about there being nothing to do.
     let mut results = Vec::new();
     let mut failed = false;
+    let mut project = None;
     if let Some((croot, _, cfg)) = load_config(&start)? {
         let (contracts, _) = htl::contract::resolve(&croot, &cfg);
         let (published, problems) = htl::contract::publish(&croot, &contracts);
@@ -649,6 +688,7 @@ fn cmd_dts(dir: Option<&Path>) -> Result<ExitCode> {
         // step that regenerates declarations would pass having written nothing.
         failed = !problems.is_empty();
         results.extend(published);
+        project = Some(croot);
     }
     let code = |failed: bool| {
         if failed {
@@ -669,6 +709,15 @@ fn cmd_dts(dir: Option<&Path>) -> Result<ExitCode> {
         return Ok(code(failed));
     };
     results.extend(htl::dts::generate_crate(&root).map_err(|e| anyhow::anyhow!("{e}"))?);
+    let types_root = project.unwrap_or_else(|| root.clone());
+    let (dep_results, problems, notes) = dep_dts(&root, &types_root);
+    for p in problems.iter().chain(&notes) {
+        eprintln!("  {p}");
+    }
+    // An orphan, and a graph that would not resolve, are reports. A declaration asked for
+    // and not written is a failure, the same as a contract that could not be published.
+    failed = failed || !problems.is_empty();
+    results.extend(dep_results);
     report_dts(&results, &root);
     Ok(code(failed))
 }

@@ -388,8 +388,11 @@ fn t_types_readme() -> String {
      (`duplicate-declaration`) rather than silently losing to one of them.\n\n\
      Files htl writes here are the ones the project *publishes*: the module a\n\
      `---@contract` type is declared in, for the authors of the modules that contract\n\
-     holds. Declarations generated from Rust (`#[host_module]`) are written next to the\n\
-     scripts, not here. Both are committed.\n"
+     holds. Declarations generated from this crate's own Rust (`#[host_module]`) are\n\
+     written next to the scripts, not here. Both are committed.\n\n\
+     So is `<crate>/`, when there is one: a dependency that names its declarations in\n\
+     `[package.metadata.htl] dts` has them copied there by `htl dts` (and by check / run\n\
+     / test). Edit the crate, not the copy — the next run writes it again.\n"
         .to_string()
 }
 

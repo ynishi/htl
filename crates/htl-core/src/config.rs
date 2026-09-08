@@ -261,7 +261,14 @@ impl HtlConfig {
     /// `types/` never shadows an implementation, and the order only decides between two
     /// declarations of one module — which `duplicate-declaration` reports.
     pub fn search_paths(&self, root: &Path) -> Vec<PathBuf> {
-        let mut out = vec![root.to_path_buf(), root.join("src"), root.join("types")];
+        let types = root.join("types");
+        let mut out = vec![root.to_path_buf(), root.join("src"), types.clone()];
+        // `types/<crate>/` holding declarations materialised from that crate: on the path
+        // itself, so the module keeps the name it was declared under whatever the crate
+        // shipping it is called (`crate::materialised_types_dirs`). After `types/`, so a
+        // declaration the project wrote by hand is the one read and the shipped one is
+        // what `duplicate-declaration` reports as shadowed.
+        out.extend(crate::materialised_types_dirs(&types));
         for p in &self.check.paths {
             out.push(resolve_path(root, p));
         }

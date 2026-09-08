@@ -477,6 +477,7 @@ pub fn search_dirs(
     out.push(root.to_path_buf());
     out.push(root.join("src"));
     out.push(root.join("types"));
+    out.extend(crate::materialised_types_dirs(&root.join("types")));
     if let Some((r, c)) = cfg {
         out.extend(c.search_paths(r));
     }

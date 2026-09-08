@@ -51,7 +51,7 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 | `htl pkg patch <dep> [--force]` | take that dependency's source into `patches/<dep>/`, where the project owns it and install resolves it from (see Patched dependencies) |
 | `htl types add <library> [--from dir] [--force]` | the declarations a library never shipped, from [teal-types](https://github.com/teal-language/teal-types), into `types/` with the commit they came from recorded beside each |
 | `htl cache status [path] [--entries]` / `htl cache clear [path]` | report what the store holds, or empty it (see Caching) |
-| `htl dts [dir]` | write the `.d.tl` files this project declares: from Rust source, the ones `#[host_module]` / `#[derive(TealRecord)]` ask for, no build needed; from Teal, the module each `---@contract` type is declared in. `check` / `run` / `test` / `build` do this automatically; exits non-zero when something it was asked to write could not be |
+| `htl dts [dir]` | write the `.d.tl` files this project declares: from Rust source, the ones `#[host_module]` / `#[derive(TealRecord)]` ask for, no build needed; from Teal, the module each `---@contract` type is declared in; from the crate graph, the ones a dependency ships (`[package.metadata.htl] dts`) into `types/<crate>/`. `check` / `run` / `test` / `build` do this automatically; exits non-zero when something it was asked to write could not be |
 
 `mlua-pkg.toml` is detected by walking up from the file: installed deps become
 visible to the checker and to `run` / `test` / `build` automatically. They go under
@@ -307,6 +307,23 @@ in as `UserDataRef<T>` (`UserDataRefMut<T>` to mutate it, `UserDataOwned<T>` to 
 and is declared as `T`, the same name a method returning it declared; nested types come
 from `#[derive(TealRecord)]` structs and enums in the same source file, types from
 other modules via `uses = [Name]` + their own `.d.tl`.
+
+### Shipping the declaration to your users (`[package.metadata.htl] dts`)
+
+A crate that registers a module in someone else's Lua state has to hand them the
+declaration of it too — their `htl check` searches their project, not your package. Name
+the files your macros write, in your manifest:
+
+```toml
+# your-crate/Cargo.toml
+[package.metadata.htl]
+dts = ["dts/mq.d.tl"]      # written by this crate's own #[host_module(dts = "dts/mq.d.tl")]
+```
+
+Every project that depends on the crate then gets them under `types/<crate>/` from `htl
+dts` (and from `check` / `run` / `test`, which generate before they work). Keep the files
+current the way this repository does — the macro rewrites them, CI diffs them — and commit
+them; they are what a consumer's checkout copies from, before anything of yours is built.
 
 ### `async fn` (feature `async`)
 
@@ -571,8 +588,33 @@ checker would not look (an SDK cache, a mods dir): the CLI, `include_tl!` and
 declarations the module's author did not ship), searched without any configuration;
 `htl new` creates it.
 
-Three kinds arrive there. The ones written by hand; the ones a dependency published; and
-the ones for a library that published none of its own.
+Four kinds arrive there. The ones written by hand; the ones a Rust dependency ships; the
+ones a Lua dependency published; and the ones for a library that published none of its
+own. Only the first are anyone's to edit — the rest are copies, and a change to one
+belongs in the crate or package it came from.
+
+A Rust crate that registers a module in its user's Lua state names the declarations it
+ships in its manifest (`[package.metadata.htl] dts = ["dts/mq.d.tl"]`, see "Embedding in
+Rust"). `htl dts` — and `check` / `run` / `test`, which generate before they work —
+resolves the crate graph with `cargo metadata` and writes each of those files to
+`types/<crate>/<file>`, reported like the project's own (`wrote types/htl-mq/mq.d.tl`) and
+committed like them. That directory is on the search path in its own right, so the module
+keeps the name it was declared under whatever the crate is called: `htl-mq`'s `mq.d.tl` is
+`require("mq")`. A note beside them (`.htl-dts`) records which crate and version they came
+from, and is what tells the directory apart from one laid out by hand, where the path below
+`types/` is the module name.
+
+Nothing is built to do it, and a project whose dependencies are already resolved and
+fetched needs no network. A manifest edited since the last resolve is resolved again, which
+writes `Cargo.lock` and may fetch — what the next `cargo build` would do anyway, and what
+having the dependency's files on disk to copy from requires. Where the graph cannot be
+resolved at all, that is reported and the committed copies go on being what the project
+checks against. `include_tl!` never runs cargo at all — it reads `types/`, as it always
+has. A hand-written `types/mq.d.tl` beside a shipped one is a
+`duplicate-declaration` (the hand-written one is read), which is the message wanted when a
+project upgrades a crate that has started shipping its own. Dropping the dependency leaves
+the file where it is and says so: what a committed declaration is still for is the
+project's to decide, not this command's.
 
 A package keeps its own declarations at `types/` in its root, which is outside the entry
 directory `require` resolves through, so `htl pkg` copies them in. `htl types add
@@ -975,8 +1017,8 @@ directory's.
 ├── mlua-pkg.toml          [package] entry = "src/<mod>"  → consumers require("<name>")
 ├── htl.toml               [lint] / [fmt] / [[contract]] shared by the CLI and include_tl!
 ├── src/<mod>/init.tl      the module (require("<mod>") from src/ and tests/)
-├── types/                 .d.tl the project consumes (hand-written) and publishes
-│                          (a ---@contract type), searched by default
+├── types/                 .d.tl the project consumes (hand-written, and <crate>/ copied
+│                          from a dependency) and publishes (a ---@contract type)
 ├── patches/<dep>/         a dependency taken into the tree (htl pkg patch), committed;
 │                          checked, not formatted, its tests not run
 ├── src/main.tl            entry script
