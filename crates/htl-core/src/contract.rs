@@ -253,8 +253,13 @@ fn self_contained_marker(src: &str, c: &Resolved) -> String {
     let mut lines: Vec<String> = src.lines().map(str::to_string).collect();
     // The marker is on the record's line or the one above it, the same two places it was
     // read from.
-    for i in [c.declared_at.saturating_sub(1), c.declared_at.saturating_sub(2)] {
-        let Some(line) = lines.get_mut(i) else { continue };
+    for i in [
+        c.declared_at.saturating_sub(1),
+        c.declared_at.saturating_sub(2),
+    ] {
+        let Some(line) = lines.get_mut(i) else {
+            continue;
+        };
         let Some(at) = line.find("---@contract") else {
             continue;
         };
@@ -318,7 +323,10 @@ pub fn declaration_of(src: &str) -> Result<String, Vec<String>> {
             FnKind::Exported => match signature(&lines, i) {
                 Ok((path, field)) => found.push(Implementation {
                     span: (first, end),
-                    doc: lines[first..i].iter().map(|l| l.trim().to_string()).collect(),
+                    doc: lines[first..i]
+                        .iter()
+                        .map(|l| l.trim().to_string())
+                        .collect(),
                     field: Some((path, field)),
                 }),
                 Err(e) => problems.push(format!("{}:1: {e}:", i + 1)),
@@ -351,11 +359,7 @@ pub fn declaration_of(src: &str) -> Result<String, Vec<String>> {
                 }
                 let indent = " ".repeat(indent_of(lines[at]) + 3);
                 let existing = out[at].take().unwrap_or_default();
-                let doc: String = imp
-                    .doc
-                    .iter()
-                    .map(|l| format!("{indent}{l}\n"))
-                    .collect();
+                let doc: String = imp.doc.iter().map(|l| format!("{indent}{l}\n")).collect();
                 out[at] = Some(format!("{doc}{indent}{field}\n{existing}"));
             }
             None => problems.push(format!(
@@ -415,7 +419,8 @@ fn body_end(lines: &[&str], i: usize) -> Option<usize> {
     let base = indent_of(lines[i]);
     (i + 1..lines.len()).find(|&j| {
         let t = lines[j].trim_start();
-        (t == "end" || t.starts_with("end ") || t.starts_with("end-")) && indent_of(lines[j]) <= base
+        (t == "end" || t.starts_with("end ") || t.starts_with("end-"))
+            && indent_of(lines[j]) <= base
     })
 }
 
@@ -499,9 +504,8 @@ fn record_close(lines: &[&str], path: &[String]) -> Option<usize> {
     for name in path {
         let at = (from..to).find(|&j| record_name(lines[j]).as_deref() == Some(name.as_str()))?;
         let base = indent_of(lines[at]);
-        to = (at + 1..to).find(|&j| {
-            lines[j].trim_start().starts_with("end") && indent_of(lines[j]) <= base
-        })?;
+        to = (at + 1..to)
+            .find(|&j| lines[j].trim_start().starts_with("end") && indent_of(lines[j]) <= base)?;
         from = at + 1;
     }
     Some(to)
@@ -575,7 +579,11 @@ fn read_file(file: &Path, src: &str, cfg: &HtlConfig) -> Result<Vec<Resolved>, V
         let marker = match parse_marker(&marker) {
             Ok(m) => m,
             Err(e) => {
-                problems.push(format!("{}:{}:1: {e} [htl contract]", file.display(), i + 1));
+                problems.push(format!(
+                    "{}:{}:1: {e} [htl contract]",
+                    file.display(),
+                    i + 1
+                ));
                 continue;
             }
         };
@@ -618,7 +626,9 @@ fn read_file(file: &Path, src: &str, cfg: &HtlConfig) -> Result<Vec<Resolved>, V
             dir,
             type_path: path,
             require_fields: required_fields(&lines, i),
-            module: marker.module.or_else(|| inherited.and_then(|c| c.module.clone())),
+            module: marker
+                .module
+                .or_else(|| inherited.and_then(|c| c.module.clone())),
             exclude: marker
                 .exclude
                 .or_else(|| inherited.map(|c| c.exclude.clone()))
@@ -704,12 +714,7 @@ fn parse_marker(rest: &str) -> Result<Marker, String> {
             // Space-separated inside one string: a Lua comment is not a place for a list
             // literal, and the names are module names, which have no spaces in them.
             Some(("exclude", v)) => {
-                m.exclude = Some(
-                    unquote(v)?
-                        .split_whitespace()
-                        .map(str::to_string)
-                        .collect(),
-                )
+                m.exclude = Some(unquote(v)?.split_whitespace().map(str::to_string).collect())
             }
             Some(("dts", v)) => m.dts = Some(unquote(v)?),
             Some((k, _)) => return Err(format!("---@contract has no {k:?} argument")),
@@ -755,7 +760,9 @@ fn type_path(lines: &[&str], i: usize, module: &str, record: &str) -> Option<Str
             continue;
         }
         let d = indent_of(line);
-        if d < depth && let Some(n) = record_name(line) {
+        if d < depth
+            && let Some(n) = record_name(line)
+        {
             names.push(n);
             depth = d;
         }
@@ -784,7 +791,11 @@ fn required_fields(lines: &[&str], i: usize) -> RequireFields {
             .chars()
             .take_while(|c| c.is_alphanumeric() || *c == '_')
             .collect();
-        if name.is_empty() || !line.trim_start()[name.len()..].trim_start().starts_with(':') {
+        if name.is_empty()
+            || !line.trim_start()[name.len()..]
+                .trim_start()
+                .starts_with(':')
+        {
             continue;
         }
         if marker_on(lines, j, "required").is_some() {
