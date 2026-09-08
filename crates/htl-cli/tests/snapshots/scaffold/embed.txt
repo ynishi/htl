@@ -1,0 +1,187 @@
+===== files =====
+.gitignore
+Cargo.toml
+README.md
+htl.toml
+mlua-pkg.toml
+src/main.rs
+src/main.tl
+src/sample/init.tl
+tests/sample_test.tl
+types/README.md
+===== .gitignore =====
+.htl/
+*.hb
+/target
+===== Cargo.toml =====
+[package]
+name = "sample"
+version = "0.1.0"
+edition = "2024"
+# authors / license / repository: fill in yourself
+
+[dependencies]
+htl = "{{htl}}"
+anyhow = "1"
+
+# The Teal checker runs inside htl's proc macros; the dev profile would build it
+# unoptimised and make every `cargo build` that touches a .tl about 3x slower.
+[profile.dev.build-override]
+opt-level = 3
+===== README.md =====
+# sample
+
+Teal project managed with [htl](https://github.com/ynishi/htl).
+
+```sh
+htl check .            # type-check + lints
+htl test               # tests/*_test.tl via htl.test
+htl fmt .              # whitespace formatter
+htl pkg install        # fetch [deps] from mlua-pkg.toml
+cargo run              # Rust host with the scripts embedded (type-checked at build)
+                       # (src/main.tl requires the Rust `host`, so `htl run` cannot run it)
+```
+
+Module: `src/sample/init.tl` (`require("sample")` from `src/` and `tests/`).
+
+`mlua-pkg.toml` `entry = "src/sample"` only matters to *consumers* that depend on this
+package through mlua-pkg: they get it as `require("sample")`. The Rust host in `src/main.rs`
+embeds the scripts directly and does not use it.
+
+`src/host.d.tl` is generated from `#[host_module]` in `src/main.rs`: `cargo build` writes it,
+and so does `htl dts` / `htl check` without building, so the Teal side always sees the
+current Rust signatures.
+===== htl.toml =====
+# htl project settings (htl check / htl test / htl fmt / include_tl! all read this).
+# Command-line flags and HTL_LINTS / HTL_LINT override it.
+
+[lint]
+# enable  = ["class-record", "explicit-number"]   # opt-in rules (htl check --list-lints)
+# disable = ["shadow-local"]
+# strict  = true   # lints fail check/test and include_tl!; false makes the macro advisory
+
+[fmt]
+indent = 3
+
+[check]
+# paths = ["mods", "~/.cache/sdk"]   # extra dirs require() resolves from while checking
+# (src/ and types/ are always searched; hand-written .d.tl go under types/)
+
+# Where this project accepts modules written outside it:
+# [[contract]]
+# dir = "mods"             # relative to this file; "sites/*" = each subdirectory
+# module = "Site"          # optional: only this module name in each dir
+#
+# The shape those modules must have is declared on the record itself, so the two
+# cannot drift apart:
+#
+#   local record defs
+#      record Mod              ---@contract     -- inherits `dir` above;
+#         name: string         ---@required     -- ---@contract("other") overrides it
+#         monsters: {Monster}  ---@required
+#         factions: {Faction}                   -- unmarked: for the mods that want it
+#      end
+#   end
+#
+# The host must enforce it too: htl::pkg::contract_resolvers(root, &config).
+# `htl check` reports `contract-unenforced` when that call is not in the Rust sources.
+# enforced_by = "mods/_validate.lua"   # ...or name where it is enforced instead,
+#                          # for a Lua-side validator, a sibling crate, generated
+#                          # code. The file has to exist; a missing one is reported.
+===== mlua-pkg.toml =====
+[package]
+name = "sample"
+version = "0.1.0"
+# Consumers `require("sample")` -> this directory's init.tl
+entry = "src/sample"
+
+[deps]
+# lshape = { git = "https://github.com/ynishi/lshape", tag = "v0.1" }
+===== src/main.rs =====
+//! Rust host: the Teal sources are type-checked at `cargo build` and embedded.
+
+use htl::{Htl, TealRecord, host_module, include_tl};
+
+/// Crosses the Rust <-> Teal boundary as a plain table (`host.Point` on the Teal side).
+#[derive(TealRecord, Clone)]
+pub struct Point {
+    pub x: f64,
+    pub y: f64,
+}
+
+pub struct Host;
+
+/// Exposed to Teal as `require("host")`. Its declaration is written to `src/host.d.tl`
+/// by this macro at build time, and by `htl dts` / `htl check` without building.
+#[host_module(name = "host", dts = "src/host.d.tl", records = [Point])]
+impl Host {
+    pub fn greet(&self, who: &str) -> String {
+        format!("hello from Rust, {who}")
+    }
+
+    pub fn scale(&self, p: Point, k: f64) -> Point {
+        Point { x: p.x * k, y: p.y * k }
+    }
+}
+
+// Teal sources, checked at build. Keep these after `#[host_module]` (same file, source order)
+// so the declaration exists when they are checked.
+const LIB: &[u8] = htl::include_tl_bytes!("src/sample/init.tl");
+const MAIN: &str = include_tl!("src/main.tl");
+
+fn main() -> anyhow::Result<()> {
+    let h = Htl::new()?;
+    Host.htl_preload(&h)?;
+    h.preload_bytes("sample", LIB)?;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    h.set_arg("main.tl", &args)?; // `arg[1]`.. as under `htl run`; `exec` alone passes `...`
+    h.exec(MAIN, "=main.tl", &args)?;
+    Ok(())
+}
+===== src/main.tl =====
+local sample = require("sample")
+local host = require("host") -- Rust side, see src/main.rs (types: src/host.d.tl)
+
+local g = sample.greet(arg and arg[1] or "teal")
+print(g.text)
+
+print(host:greet(g.who))
+local p: host.Point = host:scale({ x = 1, y = 2 }, 3)
+print("scaled:", p.x, p.y)
+===== src/sample/init.tl =====
+local record sample
+   record Greeting
+      who: string
+      text: string
+   end
+end
+
+function sample.greet(who: string): sample.Greeting
+   return { who = who, text = "hello, " .. who }
+end
+
+return sample
+===== tests/sample_test.tl =====
+local t = require("htl.test")
+local sample = require("sample")
+
+t.describe("sample.greet", function()
+   t.it("greets by name", function()
+      t.expect(sample.greet("teal")):to_equal({ who = "teal", text = "hello, teal" })
+   end)
+end)
+===== types/README.md =====
+# types/
+
+Hand-written `.d.tl` declarations for modules the host provides at run time and
+that ship no declaration of their own (a Rust crate re-exported to Lua, a runtime
+SDK): `xlib.d.tl` here makes `require("xlib")` typed in `htl check`, `htl test` and
+`include_tl!`. Consulted after the project root and `src/`, before `[check] paths`;
+a `.tl` source anywhere on the path beats a declaration, so nothing here can shadow
+an implementation, and a second declaration of the same module is reported
+(`duplicate-declaration`) rather than silently losing to one of them.
+
+Files htl writes here are the ones the project *publishes*: the module a
+`---@contract` type is declared in, for the authors of the modules that contract
+holds. Declarations generated from Rust (`#[host_module]`) are written next to the
+scripts, not here. Both are committed.

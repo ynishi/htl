@@ -1,0 +1,8 @@
+[package]
+name = "{{name}}"
+version = "0.1.0"
+# Consumers `require("{{name}}")` -> this directory's init.tl
+entry = "src/{{mod}}"
+
+[deps]
+# lshape = { git = "https://github.com/ynishi/lshape", tag = "v0.1" }

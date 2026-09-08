@@ -1,0 +1,9 @@
+local {{mod}} = require("{{mod}}")
+local host = require("host") -- Rust side, see src/main.rs (types: src/host.d.tl)
+
+local g = {{mod}}.greet(arg and arg[1] or "teal")
+print(g.text)
+
+print(host:greet(g.who))
+local p: host.Point = host:scale({ x = 1, y = 2 }, 3)
+print("scaled:", p.x, p.y)
