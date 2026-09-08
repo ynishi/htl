@@ -217,6 +217,23 @@ A Teal record literal may leave fields out and `htl check` is right to pass it, 
 message is the whole signal for that direction; `require_fields` in `htl.toml` is the
 check-time counterpart when a module's table is meant to be complete.
 
+The derive takes more than a struct, so a host's closed sets and aliases reach Teal as
+declarations rather than as `any`:
+
+| Rust | Teal declaration | crosses as |
+|---|---|---|
+| `struct Point { x: f64, y: f64 }` | `record Point` | a table |
+| `enum Mode { Fast, Careful }` | `enum Mode "Fast" "Careful" end` | the variant name, a string; any other string is refused: `Mode: expected one of "Fast", "Careful", got "fst"` |
+| `enum Shape { Dot, Circle(f64), Rect { w: f64, h: f64 } }` | `record Shape_Dot`, `record Shape_Circle`, `record Shape_Rect`, each `where self.kind == "…"`, and `type Shape = Shape_Dot \| Shape_Circle \| Shape_Rect` | a table with `kind`; a newtype payload under `value`, struct fields under their names; `union-exhaustive` counts the variants, and a missing field reads `Shape.Rect.h: expected number, got nil` |
+| `struct Label(String)` | `type Label = string` | whatever the inner type crosses as |
+| `mlua::Value` / `serde_json::Value` | `any` | unchanged: the deliberate escape hatch |
+
+A data-carrying enum is declared nested in the host module (`records = [Shape]`), where
+its variant records are reachable as `host.Shape_Circle` for `is`; a `.d.tl` module of
+its own could export only the union, so `#[teal(dts = ..)]` on one is refused. Unit
+enums and newtypes may stand alone, and `uses = [Name]` imports every kind with
+`local type Name = require("Name")`.
+
 `Result<T, E>` returns raise a Lua error on `Err` by default. With
 `#[host_module(name = "store", errors = "return")]` they come back Lua-style instead:
 `Ok(v)` -> `v, nil`, `Ok(())` -> `true, nil`, `Err(e)` -> `nil, tostring(e)`, and the
@@ -227,9 +244,9 @@ check-time counterpart when a module's table is meant to be complete.
 `scripts/host.d.tl` when it expands, so `scripts/main.tl` sees
 `host:scale(p: Point, k: number): Point` and `host.Point`. Change a Rust signature
 and the next `cargo build` fails inside the `.tl` that relied on it. `&str`,
-`&[T]` and `&Record` parameters are accepted (`&mut` is not); nested records come
-from structs in the same source file, records from other modules via
-`uses = [Name]` + their own `.d.tl`.
+`&[T]` and `&Record` parameters are accepted (`&mut` is not); nested types come
+from `#[derive(TealRecord)]` structs and enums in the same source file, types from
+other modules via `uses = [Name]` + their own `.d.tl`.
 
 ### `async fn` (feature `async`)
 

@@ -2,7 +2,7 @@
 //!
 //! - `include_tl!("path.tl")`        -> `&'static str` generated Lua, Teal-checked at build time
 //! - `include_tl_bytes!("path.tl")`  -> `&'static [u8]` stripped Lua 5.4 bytecode, same check
-//! - `#[derive(TealRecord)]`         -> Teal `record` decl + `IntoLua` / `FromLua` (plain table)
+//! - `#[derive(TealRecord)]`         -> Teal `record` / `enum` / `type` decl + `IntoLua` / `FromLua`
 //! - `#[host_module(name = "...")]`  -> `UserData` impl + Teal `.d.tl` from a plain `impl` block
 //!
 //! Paths are relative to `CARGO_MANIFEST_DIR`. Teal type errors (and htl lints, unless
@@ -18,10 +18,13 @@ mod ty;
 use htl_core::dts;
 use proc_macro::TokenStream;
 use proc_macro2::Literal;
+use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use std::path::{Path, PathBuf};
 use syn::punctuated::Punctuated;
-use syn::{ItemImpl, ItemStruct, LitStr, Meta, Token, parse::Parser, parse_macro_input};
+use syn::{
+    Item, ItemEnum, ItemImpl, ItemStruct, LitStr, Meta, Token, parse::Parser, parse_macro_input,
+};
 
 // ------------------------------------------------------------------ include_tl!
 
@@ -388,35 +391,54 @@ fn write_dts(rel: &str, text: &str) -> Result<(), String> {
 
 #[proc_macro_derive(TealRecord, attributes(teal))]
 pub fn derive_teal_record(input: TokenStream) -> TokenStream {
-    let item = parse_macro_input!(input as ItemStruct);
+    let item = parse_macro_input!(input as Item);
     match expand_record(&item) {
         Ok(ts) => ts,
         Err(msg) => quote! { compile_error!(#msg) }.into(),
     }
 }
 
-fn expand_record(item: &ItemStruct) -> Result<TokenStream, String> {
+/// What every kind gets: the `TealRecord` constants, `IntoLua` / `FromLua` around the
+/// per-kind bodies, and `htl_preload`. The declaration text and the kind come from
+/// `htl_core::dts`, the same code `htl dts` runs, so the `.d.tl` a build writes and the
+/// one the CLI writes cannot disagree.
+fn expand_record(item: &Item) -> Result<TokenStream, String> {
     let rd = dts::record_decl(item)?;
     if let Some(d) = &rd.attrs.dts {
         write_dts(d, &rd.decl)?;
     }
-    let ident = &item.ident;
-    let name = &rd.name;
-    let decl = &rd.decl;
-    let field_idents: Vec<_> = rd
-        .fields
-        .iter()
-        .map(|(f, _)| format_ident!("{}", f))
-        .collect();
-    let field_names: Vec<&str> = rd.fields.iter().map(|(f, _)| f.as_str()).collect();
-    // The Teal type each field declares, so a failed conversion can say what the record
-    // asked for rather than the Rust type nobody on the Teal side wrote.
-    let field_teal: Vec<&str> = rd.fields.iter().map(|(_, t)| t.as_str()).collect();
-    let syn::Fields::Named(named) = &item.fields else {
-        return Err("TealRecord: only structs with named fields are supported".into());
+    let name = rd.name.as_str();
+    let (ident, into, from) = match (item, &rd.kind) {
+        (Item::Struct(st), dts::RecordKind::Record { fields }) => {
+            (&st.ident, record_into(st), record_from(st, name, fields))
+        }
+        (Item::Struct(st), dts::RecordKind::Alias { inner }) => {
+            (&st.ident, alias_into(), alias_from(st, name, inner))
+        }
+        (Item::Enum(en), dts::RecordKind::Enum { variants }) => {
+            (&en.ident, enum_into(en), enum_from(en, name, variants))
+        }
+        (Item::Enum(en), dts::RecordKind::Union { variants }) => {
+            (&en.ident, union_into(en), union_from(en, name, variants))
+        }
+        _ => return Err("TealRecord: only structs and enums are supported".into()),
     };
-    let field_types: Vec<&syn::Type> = named.named.iter().map(|f| &f.ty).collect();
-
+    let decl = &rd.decl;
+    // A data-carrying enum is never a `.d.tl` module of its own (see `dts`), so there
+    // is no `require("NAME")` for it to satisfy.
+    let preload = if matches!(rd.kind, dts::RecordKind::Union { .. }) {
+        quote! {}
+    } else {
+        quote! {
+            impl #ident {
+                /// Make `require("NAME")` resolve at runtime (type-only module -> empty table).
+                pub fn htl_preload(h: &::htl::Htl) -> ::htl::mlua::Result<()> {
+                    let t = h.lua().create_table()?;
+                    h.preload_value(#name, t).map_err(::htl::mlua::Error::external)
+                }
+            }
+        }
+    };
     Ok(quote! {
         impl ::htl::teal::TealRecord for #ident {
             const NAME: &'static str = #name;
@@ -424,36 +446,229 @@ fn expand_record(item: &ItemStruct) -> Result<TokenStream, String> {
         }
         impl ::htl::mlua::IntoLua for #ident {
             fn into_lua(self, lua: &::htl::mlua::Lua) -> ::htl::mlua::Result<::htl::mlua::Value> {
-                let t = lua.create_table()?;
-                #( t.set(#field_names, self.#field_idents)?; )*
-                Ok(::htl::mlua::Value::Table(t))
+                #into
             }
         }
         impl ::htl::mlua::FromLua for #ident {
             fn from_lua(value: ::htl::mlua::Value, lua: &::htl::mlua::Lua) -> ::htl::mlua::Result<Self> {
-                let t = <::htl::mlua::Table as ::htl::mlua::FromLua>::from_lua(value, lua)?;
-                Ok(Self { #(
-                    // Take the field as a Value first: what arrived is half the message,
-                    // and the conversion consumes it.
-                    #field_idents: {
-                        let v: ::htl::mlua::Value = t.get(#field_names)?;
-                        let got = v.type_name();
-                        <#field_types as ::htl::mlua::FromLua>::from_lua(v, lua).map_err(|e| {
-                            ::htl::teal::field_error(#name, #field_names, #field_teal, got, e)
-                        })?
-                    },
-                )* })
+                #from
             }
         }
-        impl #ident {
-            /// Make `require("NAME")` resolve at runtime (type-only module -> empty table).
-            pub fn htl_preload(h: &::htl::Htl) -> ::htl::mlua::Result<()> {
-                let t = h.lua().create_table()?;
-                h.preload_value(#name, t).map_err(::htl::mlua::Error::external)
-            }
-        }
+        #preload
     }
     .into())
+}
+
+/// `field: { .. }` initializers reading each named field out of table `t`, in
+/// declaration order, so `teal` (from `dts`, same order) pairs with the Rust types.
+/// A failed field is reported under `path` (`Record` or `Enum.Variant`).
+fn field_reads(
+    path: &str,
+    named: &syn::FieldsNamed,
+    teal: &[(String, String)],
+) -> Vec<TokenStream2> {
+    named
+        .named
+        .iter()
+        .zip(teal)
+        .map(|(f, (fname, fteal))| {
+            let id = f.ident.as_ref().unwrap();
+            let read = field_read(path, fname, &f.ty, fteal);
+            quote! { #id: #read }
+        })
+        .collect()
+}
+
+/// A block reading key `fname` out of table `t` as `ty`, reporting a failure as
+/// `path.fname` with the Teal type `fteal` the declaration promised.
+fn field_read(path: &str, fname: &str, ty: &syn::Type, fteal: &str) -> TokenStream2 {
+    quote! {
+        {
+            // Take the field as a Value first: what arrived is half the message, and
+            // the conversion consumes it.
+            let v: ::htl::mlua::Value = t.get(#fname)?;
+            let got = v.type_name();
+            <#ty as ::htl::mlua::FromLua>::from_lua(v, lua).map_err(|e| {
+                ::htl::teal::field_error(#path, #fname, #fteal, got, e)
+            })?
+        }
+    }
+}
+
+fn named_fields(st: &ItemStruct) -> &syn::FieldsNamed {
+    match &st.fields {
+        syn::Fields::Named(n) => n,
+        _ => unreachable!("dts::record_decl classified this struct as a record"),
+    }
+}
+
+/// Record -> table, one key per field.
+fn record_into(st: &ItemStruct) -> TokenStream2 {
+    let idents: Vec<_> = named_fields(st)
+        .named
+        .iter()
+        .map(|f| f.ident.as_ref().unwrap())
+        .collect();
+    let names: Vec<String> = idents.iter().map(|i| i.to_string()).collect();
+    quote! {
+        let t = lua.create_table()?;
+        #( t.set(#names, self.#idents)?; )*
+        Ok(::htl::mlua::Value::Table(t))
+    }
+}
+
+/// Table -> record, every field checked and named on failure.
+fn record_from(st: &ItemStruct, name: &str, fields: &[(String, String)]) -> TokenStream2 {
+    let reads = field_reads(name, named_fields(st), fields);
+    quote! {
+        let t = <::htl::mlua::Table as ::htl::mlua::FromLua>::from_lua(value, lua)?;
+        Ok(Self { #( #reads, )* })
+    }
+}
+
+/// Newtype -> whatever the inner value converts to.
+fn alias_into() -> TokenStream2 {
+    quote! { ::htl::mlua::IntoLua::into_lua(self.0, lua) }
+}
+
+/// Value -> newtype, through the inner type's own conversion.
+fn alias_from(st: &ItemStruct, name: &str, inner: &str) -> TokenStream2 {
+    let ty = match &st.fields {
+        syn::Fields::Unnamed(u) => &u.unnamed[0].ty,
+        _ => unreachable!("dts::record_decl classified this struct as an alias"),
+    };
+    quote! {
+        let got = value.type_name();
+        let inner = <#ty as ::htl::mlua::FromLua>::from_lua(value, lua)
+            .map_err(|e| ::htl::teal::value_error(#name, #inner, got, e))?;
+        Ok(Self(inner))
+    }
+}
+
+fn variant_idents(en: &ItemEnum) -> Vec<&syn::Ident> {
+    en.variants.iter().map(|v| &v.ident).collect()
+}
+
+/// Unit enum -> the variant's name as a string.
+fn enum_into(en: &ItemEnum) -> TokenStream2 {
+    let idents = variant_idents(en);
+    let names: Vec<String> = idents.iter().map(|i| i.to_string()).collect();
+    quote! {
+        let s = match self { #( Self::#idents => #names, )* };
+        Ok(::htl::mlua::Value::String(lua.create_string(s)?))
+    }
+}
+
+/// String -> unit enum; anything else, or a string that is no variant, names the enum
+/// and lists what it accepts.
+fn enum_from(en: &ItemEnum, name: &str, variants: &[String]) -> TokenStream2 {
+    let idents = variant_idents(en);
+    quote! {
+        const VARIANTS: &[&str] = &[#( #variants ),*];
+        match &value {
+            ::htl::mlua::Value::String(s) => {
+                // A string that is not UTF-8 is no variant either; it is reported by
+                // its type rather than quoted, as there is nothing readable to quote.
+                let Ok(s) = s.to_str() else {
+                    return Err(::htl::teal::enum_error(#name, VARIANTS, "string"));
+                };
+                match &*s {
+                    #( #variants => Ok(Self::#idents), )*
+                    other => Err(::htl::teal::enum_error(#name, VARIANTS, &format!("\"{other}\""))),
+                }
+            }
+            other => Err(::htl::teal::enum_error(#name, VARIANTS, other.type_name())),
+        }
+    }
+}
+
+/// Data enum -> table: `kind` names the variant, a newtype payload goes under `value`,
+/// struct-variant fields under their own names.
+fn union_into(en: &ItemEnum) -> TokenStream2 {
+    let arms: Vec<TokenStream2> = en
+        .variants
+        .iter()
+        .map(|v| {
+            let id = &v.ident;
+            let vname = id.to_string();
+            match &v.fields {
+                syn::Fields::Unit => quote! {
+                    Self::#id => { t.set("kind", #vname)?; }
+                },
+                syn::Fields::Unnamed(_) => quote! {
+                    Self::#id(value) => { t.set("kind", #vname)?; t.set("value", value)?; }
+                },
+                syn::Fields::Named(n) => {
+                    let ids: Vec<_> = n.named.iter().map(|f| f.ident.as_ref().unwrap()).collect();
+                    let names: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+                    // Bound under prefixed names: a field called `t` or `lua` must not
+                    // shadow the table or the state the arm writes through.
+                    let binds: Vec<_> =
+                        ids.iter().map(|i| format_ident!("__htl_f_{}", i)).collect();
+                    quote! {
+                        Self::#id { #( #ids: #binds ),* } => {
+                            t.set("kind", #vname)?;
+                            #( t.set(#names, #binds)?; )*
+                        }
+                    }
+                }
+            }
+        })
+        .collect();
+    quote! {
+        let t = lua.create_table()?;
+        match self { #( #arms )* }
+        Ok(::htl::mlua::Value::Table(t))
+    }
+}
+
+/// Table -> data enum: `kind` picks the variant, then its fields are read as a record's
+/// are, reported under `Enum.Variant`. No table, no `kind`, or an unknown one names the
+/// enum and lists the variants.
+fn union_from(en: &ItemEnum, name: &str, variants: &[dts::UnionVariant]) -> TokenStream2 {
+    let vnames: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
+    let arms: Vec<TokenStream2> = en
+        .variants
+        .iter()
+        .zip(variants)
+        .map(|(v, uv)| {
+            let id = &v.ident;
+            let vname = uv.name.as_str();
+            let path = format!("{name}.{vname}");
+            match (&v.fields, &uv.shape) {
+                (syn::Fields::Unit, _) => quote! { #vname => Ok(Self::#id), },
+                (syn::Fields::Unnamed(u), dts::VariantShape::Newtype(teal)) => {
+                    let read = field_read(&path, "value", &u.unnamed[0].ty, teal);
+                    quote! { #vname => Ok(Self::#id(#read)), }
+                }
+                (syn::Fields::Named(n), dts::VariantShape::Struct(fields)) => {
+                    let reads = field_reads(&path, n, fields);
+                    quote! { #vname => Ok(Self::#id { #( #reads, )* }), }
+                }
+                _ => unreachable!("dts::record_decl and this walk see the same variants"),
+            }
+        })
+        .collect();
+    quote! {
+        const VARIANTS: &[&str] = &[#( #vnames ),*];
+        let t = match value {
+            ::htl::mlua::Value::Table(t) => t,
+            other => return Err(::htl::teal::enum_error(#name, VARIANTS, other.type_name())),
+        };
+        let kind: ::htl::mlua::Value = t.get("kind")?;
+        let kind = match &kind {
+            ::htl::mlua::Value::String(s) => match s.to_str() {
+                Ok(s) => s.to_string(),
+                // Not UTF-8: no variant, reported by type (nothing readable to quote).
+                Err(_) => return Err(::htl::teal::enum_error(#name, VARIANTS, "string")),
+            },
+            other => return Err(::htl::teal::enum_error(#name, VARIANTS, other.type_name())),
+        };
+        match kind.as_str() {
+            #( #arms )*
+            other => Err(::htl::teal::enum_error(#name, VARIANTS, &format!("\"{other}\""))),
+        }
+    }
 }
 
 // ------------------------------------------------------------------ #[host_module]
