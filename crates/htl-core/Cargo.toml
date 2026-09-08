@@ -34,6 +34,11 @@ anyhow = { workspace = true }
 walkdir = { workspace = true }
 syn = { version = "2", features = ["full"], optional = true }
 serde = { version = "1", features = ["derive"] }
+# The run cache (src/cache.rs): entries are JSON, keyed and invalidated by content hash
+# (never mtime). Here rather than in the CLI so the linker and the proc macros can read
+# the same store `htl check` / `htl test` write.
+serde_json = "1"
+blake3 = "1"
 toml = "0.8"
 toml_edit = { version = "0.22", optional = true }
 

@@ -5,7 +5,7 @@
 use anyhow::Result;
 use htl::CheckInfo;
 use htl::testing::FileReport;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
 
@@ -34,42 +34,9 @@ pub struct Diagnostic {
     pub origin: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct FixJson {
-    /// `safe` / `unsafe` / `suggest`. Owned rather than `&'static str` because the run
-    /// cache reads these back (`crate::cache`), and a borrowed field cannot be
-    /// deserialized into. The JSON is unchanged either way.
-    pub applicability: String,
-    pub edits: Vec<EditJson>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct EditJson {
-    pub line: usize,
-    pub col: usize,
-    pub end_line: usize,
-    pub end_col: usize,
-    pub text: String,
-}
-
-impl FixJson {
-    pub fn from_fix(f: &htl::Fix) -> Self {
-        Self {
-            applicability: f.applicability.as_str().to_string(),
-            edits: f
-                .edits
-                .iter()
-                .map(|e| EditJson {
-                    line: e.line,
-                    col: e.col,
-                    end_line: e.end_line,
-                    end_col: e.end_col,
-                    text: e.text.clone(),
-                })
-                .collect(),
-        }
-    }
-}
+// The JSON shapes of a fix and of a dependency diagnostic are the run cache's, since the
+// store reads them back; `--format json` prints the same shapes.
+pub use htl::cache::{DependencyJson, FixJson};
 
 /// `"<file>:<line>:<col>: <message>"` (what the checker formats) into parts. A line
 /// that does not have that shape keeps its whole text as the message.
@@ -104,19 +71,6 @@ pub fn parse_diag(severity: &'static str, text: &str) -> Diagnostic {
         required_by: None,
         origin: None,
     }
-}
-
-/// What a dependency's diagnostic carries besides its text: the file that required it
-/// and where the file lives. Stored with the diagnostic (`crate::cache::Recorded`) so a
-/// replay says exactly what the run said, and decides the same way whether to say it.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct DependencyJson {
-    /// The file the error is in, as the checker found it.
-    pub file: String,
-    pub required_by: String,
-    /// `dependency` / `external`, or none for a file of the project's own.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin: Option<String>,
 }
 
 /// Lint lines end with ` [htl <rule>]`.

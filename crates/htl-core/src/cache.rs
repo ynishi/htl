@@ -42,6 +42,21 @@
 //! would have been anyway. The one invariant worth stating is mypy's: an entry is written
 //! whole or not at all, via a temporary file and a rename, so a reader never sees half of
 //! one. Set `HTL_CACHE_DEBUG=1` to print why a lookup missed.
+//!
+//! # Why this lives in htl-core
+//!
+//! The store began in the CLI, which was the only reader. The linker is a reader too
+//! (#100): `htl build` and `include_bundle!` walk the require closure through
+//! [`crate::link`], and a module whose `gen` entry still holds — the same entry `htl test`
+//! writes and replays — has no reason to be generated again. `htl-cli` depends on `htl`,
+//! which depends on `htl-macros`, so a store the macros can open has to sit below both.
+//! The CLI keeps its flags, its `cache status` command and its report types; what moved is
+//! the store and the JSON shapes it writes, and the conversions between those shapes and
+//! [`crate::CheckInfo`], which every reader was carrying a copy of.
+//!
+//! Only `htl check` sweeps ([`Cache::sweep`]). It is the one reader that sees the whole
+//! project, so its keep-list is the whole project's; a build or a macro expansion sees one
+//! closure, and sweeping from that view would evict every other entry the project has.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -49,11 +64,18 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::{CheckInfo, DependencyError, Fix, RequireSite};
+
 /// Bumped by hand when anything below changes shape. An entry stamped with a different
 /// value is a miss rather than an error: a fresh checkout and an upgrade both take that
 /// path in normal operation, which is why rustc treats its own header mismatch the same
 /// way.
-const FORMAT: u32 = 5;
+///
+/// 6: the stamp carries the checker's identity, and a `module` entry carries nothing
+/// else about the binary (#100), so the proc macros — whose `current_exe` is rustc, which
+/// does not change when htl does — still miss on a checker that no longer exists, and
+/// the CLI and the macros read each other's module entries.
+const FORMAT: u32 = 6;
 
 /// Where the store lives under the project root. Generated, and `htl init` puts it in
 /// `.gitignore`.
@@ -78,15 +100,35 @@ fn default_bound(files: usize) -> usize {
 /// would happily replay results from a checker that no longer exists. Rebuilding always
 /// moves both. This is the same reasoning behind sccache hashing the compiler binary into
 /// its key.
+///
+/// A [`MODULE`] entry — a required module's generated Lua — is stamped without the
+/// binary. Those entries are written by `htl test`, `htl build` and the proc macros, and
+/// inside a proc macro the binary is `rustc`: stamping with it would have the CLI and the
+/// macros overwrite each other's entries for the same module forever. What decides what a
+/// module generates is the Lua the checker is made of (the vendored `tl`, the prelude, the
+/// lints), so those entries carry [`crate::checker_identity`] — a hash of exactly that —
+/// beside the format and the htl version, and nothing that differs between two binaries
+/// built from the same sources.
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
 struct Stamp {
     format: u32,
     htl: String,
+    checker: String,
     exe_len: u64,
     exe_mtime_ns: u128,
 }
 
 impl Stamp {
+    /// What this build stamps an entry of `kind` with: the binary too, except for
+    /// [`MODULE`] entries (see the type doc).
+    fn for_kind(kind: &str) -> Option<Self> {
+        if kind == MODULE {
+            Some(Self::portable())
+        } else {
+            Self::current()
+        }
+    }
+
     fn current() -> Option<Self> {
         let exe = std::env::current_exe().ok()?;
         let m = std::fs::metadata(&exe).ok()?;
@@ -97,11 +139,21 @@ impl Stamp {
             .ok()?
             .as_nanos();
         Some(Self {
-            format: FORMAT,
-            htl: env!("CARGO_PKG_VERSION").to_string(),
             exe_len: m.len(),
             exe_mtime_ns: mtime,
+            ..Self::portable()
         })
+    }
+
+    /// The stamp with nothing about the binary in it.
+    fn portable() -> Self {
+        Self {
+            format: FORMAT,
+            htl: env!("CARGO_PKG_VERSION").to_string(),
+            checker: crate::checker_identity().to_string(),
+            exe_len: 0,
+            exe_mtime_ns: 0,
+        }
     }
 }
 
@@ -138,14 +190,89 @@ struct Probe {
 pub struct Recorded {
     pub severity: String,
     pub text: String,
-    pub fix: Option<crate::report::FixJson>,
+    pub fix: Option<FixJson>,
     /// Set when the text is an error in a module this one required rather than in this
     /// one: the dependency and the file that required it. The entry carries every such
     /// error the check found; the sink decides at replay, as it did at the original run,
     /// which of them to say (once per run). Absent in entries written before this field
     /// existed, which then read as having none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dependency: Option<crate::report::DependencyJson>,
+    pub dependency: Option<DependencyJson>,
+}
+
+/// A [`Fix`] as an entry (and the CLI's `--format json`) stores it.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FixJson {
+    /// `safe` / `unsafe` / `suggest`. Owned rather than `&'static str` because the store
+    /// reads these back, and a borrowed field cannot be deserialized into. The JSON is
+    /// unchanged either way.
+    pub applicability: String,
+    pub edits: Vec<EditJson>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct EditJson {
+    pub line: usize,
+    pub col: usize,
+    pub end_line: usize,
+    pub end_col: usize,
+    pub text: String,
+}
+
+impl FixJson {
+    pub fn from_fix(f: &Fix) -> Self {
+        Self {
+            applicability: f.applicability.as_str().to_string(),
+            edits: f
+                .edits
+                .iter()
+                .map(|e| EditJson {
+                    line: e.line,
+                    col: e.col,
+                    end_line: e.end_line,
+                    end_col: e.end_col,
+                    text: e.text.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    pub fn to_fix(&self) -> Fix {
+        Fix {
+            applicability: match self.applicability.as_str() {
+                "unsafe" => crate::Applicability::Unsafe,
+                "suggest" => crate::Applicability::Suggest,
+                // Anything else is a build that wrote a name this one does not know;
+                // treating it as the most cautious of the three is the only safe reading.
+                "safe" => crate::Applicability::Safe,
+                _ => crate::Applicability::Suggest,
+            },
+            edits: self
+                .edits
+                .iter()
+                .map(|e| crate::Edit {
+                    line: e.line,
+                    col: e.col,
+                    end_line: e.end_line,
+                    end_col: e.end_col,
+                    text: e.text.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// What a dependency's diagnostic carries besides its text: the file that required it
+/// and where the file lives. Stored with the diagnostic ([`Recorded`]) so a replay says
+/// exactly what the run said, and decides the same way whether to say it.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DependencyJson {
+    /// The file the error is in, as the checker found it.
+    pub file: String,
+    pub required_by: String,
+    /// `dependency` / `external`, or none for a file of the project's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 /// One literal `require` and where the checker resolved it. Kept because the project-level
@@ -196,12 +323,75 @@ pub struct CheckInfoJson {
     pub lints: Vec<String>,
     pub deps: Vec<String>,
     pub requires: Vec<RequireJson>,
-    pub error_fixes: Vec<Option<crate::report::FixJson>>,
-    pub lint_fixes: Vec<Option<crate::report::FixJson>>,
+    pub error_fixes: Vec<Option<FixJson>>,
+    pub lint_fixes: Vec<Option<FixJson>>,
     /// `CheckInfo::dependency_errors`, so the runner reads back the whole of what the
     /// check said. Absent in entries written before the field existed.
     #[serde(default)]
     pub dependency_errors: Vec<DependencyErrorJson>,
+}
+
+impl CheckInfoJson {
+    /// What a check reported, in the form an entry stores it.
+    pub fn from_check(c: &CheckInfo) -> Self {
+        Self {
+            errors: c.errors.clone(),
+            warnings: c.warnings.clone(),
+            lints: c.lints.clone(),
+            deps: c.deps.iter().map(|p| normal(p)).collect(),
+            requires: requires_json(c),
+            error_fixes: c
+                .error_fixes
+                .iter()
+                .map(|f| f.as_ref().map(FixJson::from_fix))
+                .collect(),
+            lint_fixes: c
+                .lint_fixes
+                .iter()
+                .map(|f| f.as_ref().map(FixJson::from_fix))
+                .collect(),
+            dependency_errors: c
+                .dependency_errors
+                .iter()
+                .map(|e| DependencyErrorJson {
+                    file: e.file.display().to_string(),
+                    required_by: e.required_by.display().to_string(),
+                    text: e.text.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    /// And back, for a replayed module: the test runner puts it into its report, the
+    /// linker reads its lints, requires and dependency errors.
+    pub fn to_check(&self) -> CheckInfo {
+        CheckInfo {
+            errors: self.errors.clone(),
+            warnings: self.warnings.clone(),
+            lints: self.lints.clone(),
+            deps: self.deps.iter().map(PathBuf::from).collect(),
+            requires: requires_from_json(&self.requires),
+            error_fixes: self
+                .error_fixes
+                .iter()
+                .map(|f| f.as_ref().map(FixJson::to_fix))
+                .collect(),
+            lint_fixes: self
+                .lint_fixes
+                .iter()
+                .map(|f| f.as_ref().map(FixJson::to_fix))
+                .collect(),
+            dependency_errors: self
+                .dependency_errors
+                .iter()
+                .map(|e| DependencyError {
+                    file: PathBuf::from(&e.file),
+                    required_by: PathBuf::from(&e.required_by),
+                    text: e.text.clone(),
+                })
+                .collect(),
+        }
+    }
 }
 
 /// One `htl::DependencyError` as an entry stores it.
@@ -210,6 +400,87 @@ pub struct DependencyErrorJson {
     pub file: String,
     pub required_by: String,
     pub text: String,
+}
+
+/// `CheckInfo`'s requires in the form an entry stores them.
+pub fn requires_json(c: &CheckInfo) -> Vec<RequireJson> {
+    c.requires
+        .iter()
+        .map(|r| RequireJson {
+            module: r.module.clone(),
+            path: r.path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            line: r.line,
+            col: r.col,
+        })
+        .collect()
+}
+
+fn requires_from_json(requires: &[RequireJson]) -> Vec<RequireSite> {
+    requires
+        .iter()
+        .map(|r| RequireSite {
+            module: r.module.clone(),
+            path: r.path.as_ref().map(PathBuf::from),
+            line: r.line,
+            col: r.col,
+        })
+        .collect()
+}
+
+impl Module {
+    /// A `CheckInfo` carrying only what the project-level lints read.
+    ///
+    /// `require_cycles` runs over every file in the walk, replayed ones included — a cycle
+    /// that closes through a module nobody edited is still a cycle — so a replayed module
+    /// has to produce something that lint can read. Its diagnostics are already printed by
+    /// then, and nothing downstream looks at the other fields.
+    pub fn requires_only(&self) -> CheckInfo {
+        CheckInfo {
+            deps: self.deps.iter().map(PathBuf::from).collect(),
+            requires: requires_from_json(&self.requires),
+            ..Default::default()
+        }
+    }
+
+    /// A `gen` entry as the linker and the test runner write it: no printed diagnostics
+    /// (they print from the structured form), the generated Lua, and what the check said.
+    pub fn generated(c: &CheckInfo, code: String) -> Self {
+        Self {
+            diagnostics: Vec::new(),
+            errors: c.errors.len(),
+            warnings: c.warnings.len(),
+            lints: c.lints.len(),
+            deps: c.deps.iter().map(|p| normal(p)).collect(),
+            requires: requires_json(c),
+            code: Some(code),
+            check: Some(CheckInfoJson::from_check(c)),
+        }
+    }
+}
+
+/// Directories a `require` could resolve in, listed whether or not they exist yet.
+///
+/// The ones that do not exist matter most: a `types/` created after an entry was written
+/// changes what a module name resolves to while every file the entry recorded still hashes
+/// the same. Recording only the directories that happened to exist is the hole ccache
+/// documents in its direct mode, and an empty directory hashes differently from one holding
+/// the name, so a probe over a directory that is not there yet is what catches its arrival.
+///
+/// `cfg` is the project's `htl.toml` with the directory it was found in, for the extra
+/// `[check] paths` it names.
+pub fn search_dirs(
+    file: &Path,
+    root: &Path,
+    cfg: Option<(&Path, &crate::config::HtlConfig)>,
+) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = file.parent().map(Path::to_path_buf).into_iter().collect();
+    out.push(root.to_path_buf());
+    out.push(root.join("src"));
+    out.push(root.join("types"));
+    if let Some((r, c)) = cfg {
+        out.extend(c.search_paths(r));
+    }
+    out
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -407,6 +678,102 @@ pub const GEN: &str = "gen";
 /// has no use for.
 pub fn gen_key(spelling: &Path, lint: Option<&str>) -> Key {
     key_with(GEN, spelling, lint)
+}
+
+/// An entry holding a required module's generated Lua, keyed by the file it is.
+pub const MODULE: &str = "module";
+
+/// The key for a module's checked-and-generated form, by the file it is.
+///
+/// A test file is keyed by its spelling ([`gen_key`]) because the runner prints that
+/// spelling. A module reached through `require` is another matter: the test runner meets
+/// it by the path the checker resolved, the linker by the one it resolved, `htl build` and
+/// `include_bundle!` from different working directories — and its generated Lua is the
+/// same file's Lua whichever way it was reached. So the key is the canonical path and the
+/// lint selection, and nothing about the invocation, and the entry is stamped without the
+/// binary ([`Stamp`]): that is what lets `htl test`, `htl build` and the macros replay one
+/// another's entries (#100).
+pub fn module_gen_key(path: &Path, lint: Option<&str>) -> Key {
+    let mut h = blake3::Hasher::new();
+    h.update(MODULE.as_bytes());
+    h.update(b"\0");
+    h.update(normal(path).as_bytes());
+    h.update(b"\0");
+    h.update(lint.unwrap_or("").as_bytes());
+    Key {
+        hash: h.finalize().to_hex().to_string(),
+        kind: MODULE,
+    }
+}
+
+/// Whether a module's source could `require` anything: the token appears in it.
+///
+/// `gen_lua` comes back without requires for a module the checker already holds — it
+/// serves the generated code without walking the file again — and a reader that needs the
+/// requires (the linker's walk, an entry's validation) asks `check` for them. A full check
+/// for every leaf module is the wrong price for that, and a file that never says
+/// `require` has nothing to ask about. Word-bounded, so `required_by` does not count.
+pub fn source_mentions_require(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    text.match_indices("require").any(|(i, _)| {
+        let before = i.checked_sub(1).map(|j| bytes[j]);
+        let after = bytes.get(i + "require".len()).copied();
+        !before.is_some_and(ident) && !after.is_some_and(ident)
+    })
+}
+
+/// The switches every reader of the store honours, from the environment:
+/// `HTL_NO_CACHE` (neither read nor write), `HTL_CACHE_DEBUG` (say why lookups missed),
+/// `HTL_CACHE_MAX_ENTRIES` (the sweep's bound; the test suite's, since nothing else can
+/// reach a few hundred entries by honest means). A command's flags override what this
+/// read; the proc macros have no flags and take this as it is.
+impl Options {
+    pub fn from_env() -> Self {
+        Self {
+            enabled: std::env::var_os("HTL_NO_CACHE").is_none(),
+            mode: Mode::PerModule,
+            explain: std::env::var_os("HTL_CACHE_DEBUG").is_some(),
+            max_entries: std::env::var_os("HTL_CACHE_MAX_ENTRIES")
+                .and_then(|v| v.to_str().and_then(|s| s.parse().ok())),
+        }
+    }
+}
+
+/// Where a project's store lives: beside the `htl.toml` found from `path`, or nowhere.
+///
+/// One project, one store: every reader — `htl check`, `htl test`, `htl build`, the proc
+/// macros — resolves it through here, so they find each other's entries. A directory with
+/// no `htl.toml` has not opted into the layout (`htl init` / `htl new` write the file and
+/// gitignore `.htl/`); the CLI falls back to the working directory for its own commands,
+/// the macros to no store at all.
+pub fn root_for(path: &Path) -> Option<PathBuf> {
+    crate::config::HtlConfig::find(path)
+        .ok()
+        .flatten()
+        .map(|(file, _)| crate::parent_dir(&file))
+}
+
+/// Why a proc macro must not write a store under `root`, if it must not.
+///
+/// A macro expands wherever cargo compiles the crate: in the checkout, but also in the
+/// copy `cargo publish` verifies under `target/package/<crate>/` — where a new file makes
+/// cargo abort with "Source directory was modified" — and in a registry checkout under
+/// `$CARGO_HOME/registry/src`, which nothing should write to. Both are recognisable by
+/// their path, and a store there would be nobody's to keep anyway.
+pub fn scratch_root(root: &Path) -> Option<&'static str> {
+    if root.components().any(|c| c.as_os_str() == "target") {
+        return Some("under a `target` directory");
+    }
+    let cargo_home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")));
+    if let Some(registry) = cargo_home.map(|h| h.join("registry"))
+        && root.starts_with(&registry)
+    {
+        return Some("a registry checkout");
+    }
+    None
 }
 
 fn key_with(kind: &'static str, spelling: &Path, lint: Option<&str>) -> Key {
@@ -663,12 +1030,13 @@ impl Cache {
     /// for the names it asked about.
     fn still_valid(
         &self,
+        kind: &str,
         stamp: &Stamp,
         inputs: &[Input],
         probes: &[Probe],
         names: &[String],
     ) -> bool {
-        let Some(current) = Stamp::current() else {
+        let Some(current) = Stamp::for_kind(kind) else {
             return false;
         };
         if *stamp != current {
@@ -720,7 +1088,13 @@ impl Cache {
         let raw = std::fs::read_to_string(self.entry_path(key)).ok()?;
         let entry: Entry = self.parse(&raw)?;
         let names = Self::required_names(std::slice::from_ref(&entry.module));
-        if !self.still_valid(&entry.stamp, &entry.inputs, &entry.probes, &names) {
+        if !self.still_valid(
+            &entry.kind,
+            &entry.stamp,
+            &entry.inputs,
+            &entry.probes,
+            &names,
+        ) {
             return None;
         }
         self.touch(key);
@@ -752,7 +1126,7 @@ impl Cache {
             return None;
         }
         let names = Self::required_names(&entry.modules);
-        if !self.still_valid(&entry.stamp, &entry.inputs, &entry.probes, &names) {
+        if !self.still_valid(RUN, &entry.stamp, &entry.inputs, &entry.probes, &names) {
             return None;
         }
         self.touch(key);
@@ -798,7 +1172,7 @@ impl Cache {
         dirs: &[PathBuf],
         module: &Module,
     ) {
-        let Some(stamp) = Stamp::current() else {
+        let Some(stamp) = Stamp::for_kind(key.kind) else {
             return;
         };
         let paths = std::iter::once(normal(file))
@@ -979,5 +1353,93 @@ impl Cache {
             return Err(e.into());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("htl-core-cache-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        dir
+    }
+
+    /// A `module` entry is stamped without the binary, so one written by `htl` is served
+    /// inside a proc macro (whose binary is `rustc`) and the other way round. A test-file
+    /// entry keeps the binary in its stamp, as it always did.
+    #[test]
+    fn a_module_entry_is_served_whatever_binary_wrote_it() {
+        let root = scratch("portable");
+        let file = root.join("src/m.tl");
+        std::fs::write(&file, "return {}\n").unwrap();
+        let cache = Cache::open(&root, Options::default()).unwrap();
+        // What another binary writes for a module: the portable stamp. This binary's own
+        // stamp is a different value, which is the point.
+        assert_ne!(Stamp::current().unwrap(), Stamp::portable());
+        let module = Module {
+            diagnostics: Vec::new(),
+            errors: 0,
+            warnings: 0,
+            lints: 0,
+            deps: Vec::new(),
+            requires: Vec::new(),
+            code: Some("return {}".into()),
+            check: Some(CheckInfoJson::default()),
+        };
+        let entry = |kind: &str| Entry {
+            stamp: Stamp::portable(),
+            subject: normal(&file),
+            kind: kind.to_string(),
+            inputs: cache.inputs_for(std::iter::once(normal(&file))).unwrap(),
+            probes: Vec::new(),
+            module: module.clone(),
+        };
+        let mk = module_gen_key(&file, None);
+        cache.write(&mk, &entry(MODULE)).unwrap();
+        assert!(
+            cache.lookup(&mk).is_some(),
+            "a module entry: the binary is not part of its stamp"
+        );
+        let gk = gen_key(&file, None);
+        cache.write(&gk, &entry(GEN)).unwrap();
+        assert!(
+            cache.lookup(&gk).is_none(),
+            "a test-file entry from another binary: written by a different build"
+        );
+        // And what this binary stores under a module key is what any other reads.
+        cache.store_module(&mk, &file, &[], &[], &module);
+        let raw = std::fs::read_to_string(cache.entry_path(&mk)).unwrap();
+        let stored: Entry = serde_json::from_str(&raw).unwrap();
+        assert_eq!(stored.stamp, Stamp::portable());
+    }
+
+    #[test]
+    fn source_mentions_require_is_word_bounded() {
+        assert!(source_mentions_require("local a = require(\"a\")\n"));
+        assert!(source_mentions_require("require 'a'"));
+        assert!(!source_mentions_require("local required_by = 1\n"));
+        assert!(!source_mentions_require("local x = prerequire\n"));
+        assert!(!source_mentions_require("local record c\nend\nreturn c\n"));
+        assert!(!source_mentions_require(""));
+    }
+
+    #[test]
+    fn scratch_roots_are_recognised() {
+        assert_eq!(
+            scratch_root(Path::new("/w/target/package/host-0.1.0")),
+            Some("under a `target` directory")
+        );
+        assert_eq!(scratch_root(Path::new("/w/host")), None);
+        let cargo_home = std::env::var_os("CARGO_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")))
+            .expect("CARGO_HOME or HOME");
+        assert_eq!(
+            scratch_root(&cargo_home.join("registry/src/index/htl-0.3.0")),
+            Some("a registry checkout")
+        );
     }
 }

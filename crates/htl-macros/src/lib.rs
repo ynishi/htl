@@ -135,6 +135,8 @@ fn parse_str_list(input: syn::parse::ParseStream) -> syn::Result<Vec<String>> {
 struct BundleOut {
     bytes: Vec<u8>,
     inputs: Vec<String>,
+    /// Typed modules replayed from the run cache, out of how many.
+    cached: (usize, usize),
 }
 
 /// Link `rel` (relative to `manifest_dir`) with the CLI's search paths and `[build]`
@@ -148,21 +150,25 @@ fn resolve_bundle(
     if !path.is_file() {
         return Err(format!("include_bundle!: no such file: {}", path.display()));
     }
-    let (h, cfg) = checker_for("include_bundle!", manifest_dir, &path)?;
+    let ck = checker_for("include_bundle!", manifest_dir, &path)?;
+    let (h, cfg) = (&ck.h, &ck.cfg);
     let mut opts = opts.clone();
-    if let Some(c) = &cfg {
+    if let Some(c) = cfg {
         opts.extra.extend(c.build.extra.iter().cloned());
         opts.host.extend(c.build.host.iter().cloned());
     }
-    let linked =
-        htl_core::link::link(&h, &path, &opts).map_err(|e| format!("include_bundle!: {e:#}"))?;
+    let store = ck.store();
+    let linked = htl_core::link::link_with(h, &path, &opts, ck.link_store(store.as_ref()))
+        .map_err(|e| format!("include_bundle!: {e:#}"))?;
+    let typed = linked.modules.iter().filter(|m| m.typed).count();
+    let cached = (linked.cached, typed);
     for (_, ci) in &linked.checks {
         for w in &ci.warnings {
             eprintln!("include_bundle! warning: {w}");
         }
     }
     if !linked.lints.is_empty() {
-        if lenient(&cfg) {
+        if lenient(cfg) {
             for l in &linked.lints {
                 eprintln!("include_bundle! lint: {l}");
             }
@@ -192,11 +198,22 @@ fn resolve_bundle(
     Ok(BundleOut {
         bytes: bundle.encode(),
         inputs,
+        cached,
     })
+}
+
+/// `HTL_CACHE_DEBUG`: say what the store did for this expansion, the way the CLI's
+/// `--explain-cache` does at the end of a run. Build output is the only place a macro can
+/// say anything, and only when asked.
+fn explain_cache(tag: &str, cached: usize, of: usize) {
+    if std::env::var_os("HTL_CACHE_DEBUG").is_some() {
+        eprintln!("{tag}: {cached} of {of} module(s) replayed from the run cache");
+    }
 }
 
 fn expand_bundle(args: &BundleArgs) -> Result<TokenStream, String> {
     let out = resolve_bundle(&manifest_dir()?, &args.entry, &args.opts)?;
+    explain_cache("include_bundle!", out.cached.0, out.cached.1);
     let lit = Literal::byte_string(&out.bytes);
     let inputs = out.inputs;
     Ok(quote! {{
@@ -219,6 +236,8 @@ struct Included {
     main_abs: String,
     deps: Vec<String>,
     payload: Payload,
+    /// Whether the check and the Lua came from the run cache.
+    cached: bool,
 }
 
 #[derive(Debug)]
@@ -233,15 +252,79 @@ enum Payload {
 /// A checker set up the way the CLI would be for `path`: `htl.toml` lints, the file's
 /// own dir, the crate's `src/`, the mlua-pkg project, `[check] paths`, the test lib.
 /// Never the process cwd (cargo's), which has nothing to do with the script.
-fn checker_for(
-    tag: &str,
-    manifest_dir: &Path,
-    path: &Path,
-) -> Result<(htl_core::Htl, Option<htl_core::config::HtlConfig>), String> {
+/// A checker set up for one macro expansion, with what the run cache needs to key and
+/// validate what the checker produces.
+struct Checker {
+    h: htl_core::Htl,
+    cfg: Option<htl_core::config::HtlConfig>,
+    /// Where `htl.toml` was found, if it was.
+    cfg_path: Option<PathBuf>,
+    /// The project root: beside `htl.toml`, else the crate's manifest directory. Where the
+    /// store lives (`.htl/cache`), the same place the CLI keeps it.
+    root: PathBuf,
+    /// The lint selection in force: `[lint]` from `htl.toml`, then `HTL_LINTS`.
+    spec: String,
+}
+
+impl Checker {
+    /// The lint selection as a cache key takes it.
+    fn lint(&self) -> Option<&str> {
+        (!self.spec.is_empty()).then_some(self.spec.as_str())
+    }
+
+    /// The run cache, when there is a project to keep one in: an `htl.toml` was found
+    /// (that is the opt-in; `htl init` / `htl new` write it and gitignore `.htl/`), and
+    /// its directory is not build scratch — the copy `cargo publish` verifies under
+    /// `target/package/`, where a new file aborts the publish, or a registry checkout
+    /// (`htl_core::cache::scratch_root`). Otherwise `None`, silently: everything is
+    /// generated, which is what happened before there was a store. `HTL_CACHE_DEBUG`
+    /// says which of the two it was.
+    ///
+    /// Per-module always, like `htl test`: an expansion is one closure, and an edit
+    /// anywhere in it should cost that module and its dependents rather than the closure.
+    /// Nothing is swept from here — an expansion sees one closure, and only `htl check`,
+    /// which sees the project, bounds the store.
+    fn store(&self) -> Option<htl_core::cache::Cache> {
+        let opts = htl_core::cache::Options::from_env();
+        let refused = if self.cfg_path.is_none() {
+            Some("no htl.toml".to_string())
+        } else {
+            htl_core::cache::scratch_root(&self.root).map(str::to_string)
+        };
+        if let Some(why) = refused {
+            if opts.explain {
+                eprintln!(
+                    "htl cache: not used by the macro expansion ({why}: {})",
+                    self.root.display()
+                );
+            }
+            return None;
+        }
+        htl_core::cache::Cache::open(&self.root, opts)
+    }
+
+    fn link_store<'a>(
+        &'a self,
+        cache: Option<&'a htl_core::cache::Cache>,
+    ) -> Option<htl_core::link::LinkStore<'a>> {
+        cache.map(|c| htl_core::link::LinkStore {
+            cache: c,
+            lint: self.lint(),
+            root: &self.root,
+            config: match (&self.cfg_path, &self.cfg) {
+                (Some(p), Some(c)) => Some((p.as_path(), c)),
+                _ => None,
+            },
+        })
+    }
+}
+
+fn checker_for(tag: &str, manifest_dir: &Path, path: &Path) -> Result<Checker, String> {
     let h = htl_core::Htl::new().map_err(|e| format!("{tag}: {e:#}"))?;
     // htl.toml `[lint]` first, then HTL_LINTS, so the env var wins.
     let cfg = htl_core::config::HtlConfig::find(path).map_err(|e| format!("{tag}: {e:#}"))?;
     let cfg_root = cfg.as_ref().map(|(p, _)| htl_core::parent_dir(p));
+    let cfg_path = cfg.as_ref().map(|(p, _)| p.clone());
     let cfg = cfg.map(|(_, c)| c);
     let file_spec = cfg.as_ref().map(|c| c.lint_spec()).unwrap_or_default();
     let env_spec = std::env::var("HTL_LINTS").unwrap_or_default();
@@ -266,7 +349,14 @@ fn checker_for(
             .map_err(|e| format!("{tag}: {e:#}"))?;
     }
     h.install_test_lib().map_err(|e| format!("{tag}: {e:#}"))?;
-    Ok((h, cfg))
+    let root = cfg_root.unwrap_or_else(|| manifest_dir.to_path_buf());
+    Ok(Checker {
+        h,
+        cfg,
+        cfg_path,
+        root,
+        spec,
+    })
 }
 
 /// Lints fail the build unless `HTL_LINT=warn`, else `htl.toml` `strict = false`.
@@ -282,9 +372,16 @@ fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Includ
     if !path.is_file() {
         return Err(format!("include_tl!: no such file: {}", path.display()));
     }
-    let (h, cfg) = checker_for("include_tl!", manifest_dir, &path)?;
-    let (code, ci) = h
-        .gen_lua(&path)
+    let ck = checker_for("include_tl!", manifest_dir, &path)?;
+    let (h, cfg) = (&ck.h, &ck.cfg);
+    // One module, through the same store the linker uses: its `gen` entry, if it still
+    // holds, is the check and the Lua.
+    let store = ck.store();
+    let htl_core::link::Generated {
+        code,
+        check: ci,
+        cached,
+    } = htl_core::link::generate(h, &path, ck.link_store(store.as_ref()))
         .map_err(|e| format!("include_tl!: {e:#}"))?;
 
     for w in &ci.warnings {
@@ -308,7 +405,7 @@ fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Includ
         ));
     }
     if !ci.lints.is_empty() {
-        if lenient(&cfg) {
+        if lenient(cfg) {
             for l in &ci.lints {
                 eprintln!("include_tl! lint: {l}");
             }
@@ -355,11 +452,13 @@ fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Includ
         main_abs,
         deps,
         payload,
+        cached,
     })
 }
 
 fn expand_include(rel: &str, bytes: bool) -> Result<TokenStream, String> {
     let inc = resolve_include(&manifest_dir()?, rel, bytes)?;
+    explain_cache("include_tl!", usize::from(inc.cached), 1);
     let main_abs = inc.main_abs;
     let deps = inc.deps;
     let payload = match inc.payload {
@@ -957,6 +1056,95 @@ mod tests {
             "[lint]\nenable = [\"no-any\"]\nstrict = false\n",
         );
         resolve_include(&root, "src/main.tl", false).expect("strict = false downgrades lints");
+    }
+
+    /// Both macros read the run cache under the project root: the second expansion
+    /// replays what the first generated, an edit is a miss for the module and its
+    /// dependents, and what comes out is the same either way.
+    #[test]
+    fn macros_replay_from_the_run_cache_on_the_second_expansion() {
+        let root = scratch("cache");
+        write(&root.join("htl.toml"), "[check]\n");
+        write(
+            &root.join("src/main.tl"),
+            "local util = require(\"util\")\nprint(util.twice(21))\n",
+        );
+        write(
+            &root.join("src/util.tl"),
+            "local record util\nend\nfunction util.twice(n: integer): integer\n   return n * 2\nend\nreturn util\n",
+        );
+        let opts = htl_core::link::LinkOptions::default();
+        let first = resolve_bundle(&root, "src/main.tl", &opts).expect("links");
+        assert_eq!(first.cached, (0, 2), "cold");
+        let second = resolve_bundle(&root, "src/main.tl", &opts).expect("links");
+        assert_eq!(second.cached, (2, 2), "warm");
+        assert_eq!(first.bytes, second.bytes, "same bundle either way");
+        assert!(
+            root.join(".htl/cache").is_dir(),
+            "the store is beside htl.toml"
+        );
+
+        write(
+            &root.join("src/main.tl"),
+            "local util = require(\"util\")\nprint(util.twice(42))\n",
+        );
+        let edited = resolve_bundle(&root, "src/main.tl", &opts).expect("links");
+        assert_eq!(edited.cached, (1, 2), "util replays, main does not");
+
+        // `include_tl!` on the entry alone: generated on the first expansion (the bundle
+        // above keyed it by the same path and the same lints, so it is warm already), and
+        // replayed once it is stored.
+        let inc = resolve_include(&root, "src/main.tl", false).expect("checks");
+        assert!(
+            inc.cached,
+            "the bundle's entry for main serves include_tl! too"
+        );
+        write(
+            &root.join("src/main.tl"),
+            "local util = require(\"util\")\nprint(util.twice(7))\n",
+        );
+        let inc = resolve_include(&root, "src/main.tl", false).expect("checks");
+        assert!(!inc.cached, "edited: generated");
+        let inc = resolve_include(&root, "src/main.tl", false).expect("checks");
+        assert!(inc.cached, "and stored");
+    }
+
+    /// No `htl.toml`: the crate has not opted into the layout, and the macro leaves no
+    /// `.htl/` behind. Under `target/`: the copy `cargo publish` verifies, where a new
+    /// file would abort the publish. Both generate everything and write nothing.
+    #[test]
+    fn macros_leave_no_store_without_a_project_or_under_target() {
+        let opts = htl_core::link::LinkOptions::default();
+        let sources = |root: &Path| {
+            write(
+                &root.join("src/main.tl"),
+                "local util = require(\"util\")\nprint(util.twice(21))\n",
+            );
+            write(
+                &root.join("src/util.tl"),
+                "local record util\nend\nfunction util.twice(n: integer): integer\n   return n * 2\nend\nreturn util\n",
+            );
+        };
+
+        let bare = scratch("nocfg");
+        sources(&bare);
+        for _ in 0..2 {
+            let out = resolve_bundle(&bare, "src/main.tl", &opts).expect("links");
+            assert_eq!(out.cached, (0, 2), "nothing replays without a project");
+        }
+        assert!(!bare.join(".htl").exists(), "no htl.toml, no store");
+
+        let published = scratch("publish").join("target/package/host-0.1.0");
+        sources(&published);
+        write(&published.join("htl.toml"), "[check]\n");
+        for _ in 0..2 {
+            let out = resolve_bundle(&published, "src/main.tl", &opts).expect("links");
+            assert_eq!(out.cached, (0, 2), "nothing replays under target/");
+        }
+        assert!(
+            !published.join(".htl").exists(),
+            "cargo publish's verify copy is left exactly as it was"
+        );
     }
 
     /// `include_bundle!`: the closure is linked, host modules are recorded, every input

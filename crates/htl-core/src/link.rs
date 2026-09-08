@@ -7,8 +7,25 @@
 //! `.d.tl` declaration is recorded as host-provided, as is anything listed in `host`.
 //! Any other unresolved `require` is an error: the point of a bundle is that "module
 //! not found" happens here, not on the first `require` at the customer's machine.
+//!
+//! # The store
+//!
+//! Generating a module is the expensive part of linking — the Teal check behind it costs
+//! about a second per few thousand lines, against milliseconds for Lua's own compiler to
+//! turn the result into bytecode — and it is the part the run cache already answers for.
+//! [`link_with`] takes a [`LinkStore`]: for every typed module it asks the store for the
+//! module's `gen` entry (the one `htl test` writes and replays), and an entry whose inputs
+//! and probes still hold stands in for the check, its generated Lua for `gen_lua`. A miss
+//! generates as before and writes the entry, so `htl build`, `htl test` and the
+//! `include_bundle!` / `include_tl!` macros feed one another (#100).
+//!
+//! Bytecode is never stored: compiling it is cheap, and an entry that carried it would
+//! have to be keyed on the strip and debug flags and on the Lua the bytecode is for, for
+//! no saving. What a bundle contains — module order, fingerprint, host modules — is the
+//! same whether a module was generated or replayed.
 
 use crate::bundle::{Bundle, Kind, Module};
+use crate::cache::{self, Cache};
 use crate::{CheckInfo, Htl, RequireSite};
 use anyhow::{Context, Result};
 use std::collections::{BTreeSet, HashSet, VecDeque};
@@ -24,6 +41,44 @@ pub struct LinkOptions {
     pub extra: Vec<String>,
     /// Modules the host provides at run time (besides those declared only by a `.d.tl`).
     pub host: Vec<String>,
+}
+
+/// The run cache as the linker uses it: the store, plus what the store needs to key and
+/// to validate an entry and that only the caller knows.
+///
+/// A borrowed view rather than part of [`LinkOptions`], which is owned and `Default` and
+/// crosses the proc-macro boundary as a value; the store lives for one command or one
+/// macro expansion, the options may not.
+#[derive(Clone, Copy)]
+pub struct LinkStore<'a> {
+    pub cache: &'a Cache,
+    /// The lint selection in force, as [`cache::gen_key`] takes it: an entry generated
+    /// under different lints reports different lints, and must not be reused.
+    pub lint: Option<&'a str>,
+    /// The project root, for the directories a `require` could resolve in.
+    pub root: &'a Path,
+    /// The project's `htl.toml` (its path) and what it says: its `[check] paths` are
+    /// probed, and the file itself is an input of every entry, since its lint selection is.
+    pub config: Option<(&'a Path, &'a crate::config::HtlConfig)>,
+}
+
+impl LinkStore<'_> {
+    /// Files an entry depends on besides the module and what it required.
+    fn extra_inputs(&self) -> Vec<PathBuf> {
+        self.config
+            .map(|(file, _)| vec![file.to_path_buf()])
+            .unwrap_or_default()
+    }
+
+    /// Directories a `require` from `file` could resolve in, for the entry's probes.
+    fn probe_dirs(&self, file: &Path) -> Vec<PathBuf> {
+        let cfg = self.config.map(|(file, c)| (crate::parent_dir(file), c));
+        cache::search_dirs(
+            file,
+            self.root,
+            cfg.as_ref().map(|(dir, c)| (dir.as_path(), *c)),
+        )
+    }
 }
 
 /// One linked module: where it came from and how it was stored.
@@ -45,6 +100,9 @@ pub struct Linked {
     pub errors: Vec<String>,
     pub lints: Vec<String>,
     pub checks: Vec<(PathBuf, CheckInfo)>,
+    /// How many typed modules came from the store rather than the checker. Zero without
+    /// a store. The total to say it against is the typed count of [`modules`](Self::modules).
+    pub cached: usize,
 }
 
 impl Linked {
@@ -94,6 +152,22 @@ impl Linked {
 /// Link `entry` (a `.tl` file) and everything it requires. The checker's search path
 /// must already cover the project (`add_path` / `apply_project` / `apply_config`).
 pub fn link(h: &Htl, entry: &Path, opts: &LinkOptions) -> Result<Linked> {
+    link_with(h, entry, opts, None)
+}
+
+/// [`link`], replaying from the run cache what it can (see the module doc).
+///
+/// With `store` = `None` this is `link`. With a store, a typed module whose `gen` entry
+/// still holds is taken from it — its generated Lua, and what checking it reported — and
+/// counted in [`Linked::cached`]; every other typed module is generated and its entry
+/// written. Nothing about the store can fail the link: an unreadable or stale entry is a
+/// generate, an unwritable store is a generate next time too.
+pub fn link_with(
+    h: &Htl,
+    entry: &Path,
+    opts: &LinkOptions,
+    store: Option<LinkStore<'_>>,
+) -> Result<Linked> {
     let mut out = Linked::default();
     let entry_name = entry
         .file_stem()
@@ -125,7 +199,14 @@ pub fn link(h: &Htl, entry: &Path, opts: &LinkOptions) -> Result<Linked> {
     while let Some((name, path)) = queue.pop_front() {
         let typed = path.extension().is_none_or(|e| e != "lua");
         let (code, requires) = if typed {
-            let (code, ci) = h.gen_lua(&path)?;
+            let Generated {
+                code,
+                check: ci,
+                cached,
+            } = generate(h, &path, store)?;
+            if cached {
+                out.cached += 1;
+            }
             out.errors.extend(ci.errors.iter().cloned());
             out.lints.extend(ci.lints.iter().cloned());
             let reqs = ci.requires.clone();
@@ -182,6 +263,74 @@ pub fn link(h: &Htl, entry: &Path, opts: &LinkOptions) -> Result<Linked> {
         out.bundle.fingerprint = h.fingerprint()?;
     }
     Ok(out)
+}
+
+/// One typed module, generated or replayed: see [`generate`].
+#[derive(Debug)]
+pub struct Generated {
+    /// The Lua; `None` when checking produced errors (see [`CheckInfo`]).
+    pub code: Option<String>,
+    pub check: CheckInfo,
+    /// Whether it came from the store rather than the checker.
+    pub cached: bool,
+}
+
+/// One typed module's generated Lua and what checking it said: from the store when its
+/// `gen` entry still holds, else from the checker, and then into the store. What
+/// [`link_with`] does per module, and what `include_tl!` does for its one file.
+///
+/// A hit needs both halves of the entry — the Lua, and the structured check it came with —
+/// since the reader wants the lints, the requires and the dependencies out of the second.
+/// `htl test` writes both; an entry missing either is a miss rather than a partial replay.
+pub fn generate(h: &Htl, path: &Path, store: Option<LinkStore<'_>>) -> Result<Generated> {
+    let key = store.map(|s| cache::module_gen_key(path, s.lint));
+    if let (Some(s), Some(k)) = (store, &key)
+        && let Some(m) = s.cache.lookup(k)
+        && let (Some(code), Some(check)) = (&m.code, &m.check)
+    {
+        return Ok(Generated {
+            code: Some(code.clone()),
+            check: check.to_check(),
+            cached: true,
+        });
+    }
+    let (code, ci) = h.gen_lua(path)?;
+    // Only when there is code: a module that failed to check has nothing to bundle, and
+    // storing that would replay the failure as if it were a result.
+    if let (Some(s), Some(k), Some(code)) = (store, &key, &code) {
+        // `gen_lua` can come back without requires for a module the checker already holds
+        // — it serves the generated code without walking the file again — and the requires
+        // are what the next run's validation and the linker's own walk are built from. Ask
+        // the checker separately, but only when the file could have any: a leaf that never
+        // says `require` is most of a project, and a check per leaf is the wrong price.
+        let stored = if ci.requires.is_empty() && mentions_require(path) {
+            match h.check(path) {
+                Ok(c) if !c.requires.is_empty() => CheckInfo {
+                    requires: c.requires,
+                    ..ci.clone()
+                },
+                _ => ci.clone(),
+            }
+        } else {
+            ci.clone()
+        };
+        let m = cache::Module::generated(&stored, code.clone());
+        s.cache
+            .store_module(k, path, &s.extra_inputs(), &s.probe_dirs(path), &m);
+    }
+    Ok(Generated {
+        code,
+        check: ci,
+        cached: false,
+    })
+}
+
+/// Whether `path`'s source says `require` anywhere ([`cache::source_mentions_require`]);
+/// an unreadable file is taken to, which costs a check rather than a wrong entry.
+pub fn mentions_require(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .map(|s| cache::source_mentions_require(&s))
+        .unwrap_or(true)
 }
 
 fn is_decl(p: &Path) -> bool {
