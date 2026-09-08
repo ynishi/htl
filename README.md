@@ -820,7 +820,10 @@ htl test: seed 8014255196 (repeat with --seed 8014255196)
 ```
 
 `t.rng()` is that stream, shaped like `math.random` (`rng()`, `rng(m)`, `rng(m, n)`);
-`math.random` is the same stream, so a test already using it repeats too. Each file's
+`math.random` is the same stream, so a test already using it repeats too. It *is*
+`math.random`, so the argumentless form returns a float in [0, 1) and the other two an
+integer; the declaration types all three `integer`, since this Teal resolves an overload
+by declaration order rather than by arity and cannot type the forms apart. Each file's
 seed is derived from the run's seed and the file's own path rather than drawn from one
 shared stream, so what a file draws does not depend on which other files ran or in what
 order — running it alone, or with `--filter`, reproduces what it did in the full run. A

@@ -217,7 +217,9 @@ function M.configure(cfg)
 end
 
 --- The run's random stream, as a function with `math.random`'s own shape:
---- `rng()`, `rng(m)`, `rng(m, n)`.
+--- `rng()`, `rng(m)`, `rng(m, n)`. It is `math.random`, so `rng()` returns a float in
+--- [0, 1) and the other two an integer, even though test.d.tl types all three
+--- `integer` (it says there why).
 ---
 --- The runner seeds the state before the file runs, so this and `math.random` are one
 --- stream and both repeat under `htl test --seed <n>`. Drawing through this rather than
