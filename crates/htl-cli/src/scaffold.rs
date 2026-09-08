@@ -233,20 +233,6 @@ fn t_cargo(name: &str) -> String {
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::htl_dep_version_of;
-
-    #[test]
-    fn dep_version_is_the_shortest_compatible_requirement() {
-        assert_eq!(htl_dep_version_of("0.2.0"), "0.2");
-        assert_eq!(htl_dep_version_of("0.2.7"), "0.2");
-        assert_eq!(htl_dep_version_of("0.10.1"), "0.10");
-        assert_eq!(htl_dep_version_of("1.0.0"), "1");
-        assert_eq!(htl_dep_version_of("2.3.4"), "2");
-    }
-}
-
 fn t_main_rs(m: &str, lib: bool) -> String {
     let main_const = if lib {
         String::new()
@@ -285,4 +271,18 @@ fn t_main_rs(m: &str, lib: bool) -> String {
          const LIB: &[u8] = htl::include_tl_bytes!(\"src/{m}/init.tl\");\n{main_const}\n\
          fn main() -> anyhow::Result<()> {{\n    let h = Htl::new()?;\n    Host.htl_preload(&h)?;\n    h.preload_bytes(\"{m}\", LIB)?;\n{run}    Ok(())\n}}\n"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::htl_dep_version_of;
+
+    #[test]
+    fn dep_version_is_the_shortest_compatible_requirement() {
+        assert_eq!(htl_dep_version_of("0.2.0"), "0.2");
+        assert_eq!(htl_dep_version_of("0.2.7"), "0.2");
+        assert_eq!(htl_dep_version_of("0.10.1"), "0.10");
+        assert_eq!(htl_dep_version_of("1.0.0"), "1");
+        assert_eq!(htl_dep_version_of("2.3.4"), "2");
+    }
 }
