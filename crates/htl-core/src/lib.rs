@@ -1143,14 +1143,22 @@ impl Htl {
     pub fn install_bundle(&self, b: &bundle::Bundle) -> Result<()> {
         // Bytecode from a Lua that disagrees with ours would fail with "bad binary
         // format" somewhere inside the first require; say what differs instead.
+        // The header cannot tell one 5.4.x from another, so the htl versions go in the
+        // message too: they are the only record of which Lua produced each side.
         if b.modules.iter().any(|m| m.kind == bundle::Kind::Bytecode) && !b.fingerprint.is_empty() {
             let mine = self.fingerprint()?;
             if mine != b.fingerprint {
+                let built_by = if b.htl_version.is_empty() {
+                    "an htl that did not record its version".to_string()
+                } else {
+                    format!("htl {}", b.htl_version)
+                };
                 bail!(
-                    "bundle bytecode was compiled for {} but this host runs {}; rebuild the bundle here, \
-                     or build it with --source",
+                    "bundle bytecode was compiled for {} by {built_by}, but this host runs {} on htl {}; \
+                     rebuild the bundle here, or build it with --source",
                     bundle::describe_fingerprint(&b.fingerprint),
-                    bundle::describe_fingerprint(&mine)
+                    bundle::describe_fingerprint(&mine),
+                    env!("CARGO_PKG_VERSION")
                 );
             }
         }

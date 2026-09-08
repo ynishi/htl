@@ -9,17 +9,54 @@
 //! u32 count, count x ( u8 kind, u32 len, module name, u32 len, payload )
 //!   kind 0 = Lua 5.4 bytecode (from this build's mlua), kind 1 = Lua source
 //! ```
-//! All integers little-endian. Bytecode is only portable between hosts whose Lua
-//! agrees with the fingerprint (version, instruction / integer / number sizes,
-//! endianness); [`Htl::install_bundle`](crate::Htl::install_bundle) checks it and
-//! says so, instead of Lua's bare "bad binary format". Source modules load anywhere.
+//! All integers little-endian.
 //!
-//! Version 1 bundles (`HTLB\x01`: entry + bytecode modules, no metadata) still decode.
+//! # Portability
+//!
+//! Nothing about the CPU or the operating system is in a Lua chunk. What decides
+//! whether bytecode loads is Lua's own chunk header, and that is what the fingerprint
+//! is: the first 31 bytes of a dumped chunk — signature, version byte, format, the
+//! `LUAC_DATA` probe, the sizes of `Instruction` / `lua_Integer` / `lua_Number`, and the
+//! `LUAC_INT` / `LUAC_NUM` probes that detect integer endianness and float format.
+//! [`Htl::install_bundle`](crate::Htl::install_bundle) compares it to the host's and
+//! refuses on mismatch, naming both sides ([`LuaHeader`] is the readable form), instead
+//! of Lua's bare "bad binary format".
+//!
+//! The Lua htl vendors has a 4-byte instruction, an 8-byte integer and an 8-byte double
+//! on every 64-bit little-endian platform, so a bytecode bundle built on one of them
+//! runs on all of them: an arm64 Mac's bundle loads on x86_64 Linux. What the check
+//! refuses is a big-endian host, and a Lua built with a non-default `LUA_INT_TYPE` /
+//! `LUA_FLOAT_TYPE`. Source modules (`--source`) load anywhere and are the answer for
+//! those cases, and for a bundle that has to outlive a Lua upgrade.
+//!
+//! The header cannot tell one 5.4.x from another, and htl pins the vendored Lua through
+//! mlua, so `htl version` is the only record of which Lua produced the bytes. It is
+//! advisory: a bundle from an older htl whose header agrees still loads, and when the
+//! header disagrees the mismatch message says which htl built the bundle and which is
+//! running, since the header alone cannot say why two 5.4 builds differ.
+//!
+//! Version 1 bundles (`HTLB\x01`: entry + bytecode modules, no metadata) still decode;
+//! [`format_version`] tells the two apart from the bytes.
 
 use anyhow::{Result, bail};
+use serde::Serialize;
+use std::fmt;
 
 pub const MAGIC: &[u8] = b"HTLB\x02";
 const MAGIC_V1: &[u8] = b"HTLB\x01";
+
+/// The format version a byte string carries (`1` for `HTLB\x01`, `2` for `HTLB\x02`),
+/// or `None` when it is not a bundle at all. [`Bundle::decode`] folds the two into one
+/// struct, so this is how a reader says which one it was given.
+pub fn format_version(bytes: &[u8]) -> Option<u8> {
+    if bytes.starts_with(MAGIC) {
+        Some(2)
+    } else if bytes.starts_with(MAGIC_V1) {
+        Some(1)
+    } else {
+        None
+    }
+}
 
 /// How a module's payload is stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,25 +211,65 @@ fn take_bytes<'a>(cur: &mut &'a [u8]) -> Result<&'a [u8]> {
     Ok(head)
 }
 
-/// Human-readable form of a bytecode header (for mismatch messages).
-pub fn describe_fingerprint(fp: &[u8]) -> String {
-    // \x1bLua | version | format | LUAC_DATA(6) | sizeof(Instruction) | sizeof(lua_Integer) | sizeof(lua_Number) | LUAC_INT(8) | LUAC_NUM(8)
-    if fp.len() < 15 {
-        return format!("{} byte(s)", fp.len());
+/// What a fingerprint says, field by field: the Lua a bundle's bytecode was compiled
+/// for. `Display` is the one-line form the mismatch message and `htl bundle info` use,
+/// `Lua 5.4, format 0, 4/8/8, little-endian` (the three numbers are the sizes of
+/// `Instruction`, `lua_Integer` and `lua_Number` in bytes).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LuaHeader {
+    /// `"5.4"`: the version byte, split.
+    pub version: String,
+    /// The bytecode format number (`0` for stock Lua).
+    pub format: u8,
+    pub instruction_bytes: u8,
+    pub integer_bytes: u8,
+    pub number_bytes: u8,
+    /// `"little"` or `"big"`: how `LUAC_INT` came out.
+    pub endian: &'static str,
+}
+
+impl LuaHeader {
+    /// Read a fingerprint as [`crate::Htl::fingerprint`] produces it. `None` when it is
+    /// too short to be one (a truncated or foreign byte string), which is reported as
+    /// such rather than guessed at.
+    pub fn parse(fp: &[u8]) -> Option<Self> {
+        // \x1bLua | version | format | LUAC_DATA(6) | sizeof(Instruction) | sizeof(lua_Integer) | sizeof(lua_Number) | LUAC_INT(8) | LUAC_NUM(8)
+        if fp.len() < 23 {
+            return None;
+        }
+        let ver = fp[4];
+        Some(Self {
+            version: format!("{}.{}", ver >> 4, ver & 0xf),
+            format: fp[5],
+            instruction_bytes: fp[12],
+            integer_bytes: fp[13],
+            number_bytes: fp[14],
+            // LUAC_INT is 0x5678: its low byte comes first on a little-endian host.
+            endian: if fp[15] == 0x78 { "little" } else { "big" },
+        })
     }
-    let ver = fp[4];
-    let endian = if fp.len() >= 23 && fp[15] == 0x78 {
-        "little-endian"
-    } else {
-        "big-endian"
-    };
-    format!(
-        "Lua {}.{}, format {}, sizeof(Instruction)={} sizeof(Integer)={} sizeof(Number)={}, {endian}",
-        ver >> 4,
-        ver & 0xf,
-        fp[5],
-        fp[12],
-        fp[13],
-        fp[14]
-    )
+}
+
+impl fmt::Display for LuaHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Lua {}, format {}, {}/{}/{}, {}-endian",
+            self.version,
+            self.format,
+            self.instruction_bytes,
+            self.integer_bytes,
+            self.number_bytes,
+            self.endian
+        )
+    }
+}
+
+/// Human-readable form of a bytecode header (for mismatch messages): the
+/// [`LuaHeader`] line, or the byte count when the bytes are not a header.
+pub fn describe_fingerprint(fp: &[u8]) -> String {
+    match LuaHeader::parse(fp) {
+        Some(h) => h.to_string(),
+        None => format!("{} byte(s)", fp.len()),
+    }
 }

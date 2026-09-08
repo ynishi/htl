@@ -351,17 +351,94 @@ fn foreign_bytecode_is_refused_with_a_readable_message() {
     let mut b = linked.into_bundle().unwrap();
     // Pretend the bundle came from a 32-bit Lua: sizeof(lua_Integer) byte differs.
     b.fingerprint[13] = 4;
+    b.htl_version = "0.1.19".into();
     let r = Htl::new().unwrap();
     let err = r.install_bundle(&b).unwrap_err().to_string();
     assert!(
-        err.contains("compiled for Lua 5.4") && err.contains("sizeof(Integer)=4"),
+        err.contains("compiled for Lua 5.4, format 0, 4/4/8, little-endian by htl 0.1.19"),
         "{err}"
     );
     assert!(
-        err.contains("this host runs Lua 5.4") && err.contains("sizeof(Integer)=8"),
+        err.contains(&format!(
+            "this host runs Lua 5.4, format 0, 4/8/8, little-endian on htl {}",
+            env!("CARGO_PKG_VERSION")
+        )),
         "{err}"
     );
     assert!(err.contains("--source"), "{err}");
+}
+
+#[test]
+fn big_endian_bytecode_is_refused_by_the_endianness_probe() {
+    let root = project("endian");
+    let h = checker(&root);
+    let linked = link(&h, &root.join("src/main.tl"), &LinkOptions::default()).unwrap();
+    let mut b = linked.into_bundle().unwrap();
+    // Same sizes, other byte order: LUAC_INT (0x5678) dumped big-endian, as a Lua on a
+    // big-endian CPU writes it. The version, format and sizes all still agree.
+    b.fingerprint[15..23].copy_from_slice(&0x5678u64.to_be_bytes());
+    let r = Htl::new().unwrap();
+    let err = r.install_bundle(&b).unwrap_err().to_string();
+    assert!(
+        err.contains("compiled for Lua 5.4, format 0, 4/8/8, big-endian"),
+        "{err}"
+    );
+    assert!(
+        err.contains("this host runs Lua 5.4, format 0, 4/8/8, little-endian"),
+        "{err}"
+    );
+}
+
+#[test]
+fn version_1_bundle_mismatch_says_the_version_was_not_recorded() {
+    let root = project("noversion");
+    let h = checker(&root);
+    let linked = link(&h, &root.join("src/main.tl"), &LinkOptions::default()).unwrap();
+    let mut b = linked.into_bundle().unwrap();
+    b.fingerprint[13] = 4;
+    b.htl_version.clear();
+    let err = Htl::new()
+        .unwrap()
+        .install_bundle(&b)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("by an htl that did not record its version"),
+        "{err}"
+    );
+}
+
+#[test]
+fn the_fingerprint_reads_as_a_lua_header() {
+    use htl_core::bundle::{LuaHeader, describe_fingerprint, format_version};
+    let fp = Htl::new().unwrap().fingerprint().unwrap();
+    assert_eq!(fp.len(), 31);
+    let h = LuaHeader::parse(&fp).unwrap();
+    assert_eq!(h.version, "5.4");
+    assert_eq!(h.format, 0);
+    assert_eq!(
+        (h.instruction_bytes, h.integer_bytes, h.number_bytes),
+        (4, 8, 8),
+        "the vendored Lua's sizes on every 64-bit little-endian host"
+    );
+    assert_eq!(
+        h.endian,
+        if cfg!(target_endian = "little") {
+            "little"
+        } else {
+            "big"
+        }
+    );
+    assert_eq!(
+        h.to_string(),
+        format!("Lua 5.4, format 0, 4/8/8, {}-endian", h.endian)
+    );
+    assert_eq!(describe_fingerprint(&fp), h.to_string());
+    assert_eq!(LuaHeader::parse(&fp[..10]), None);
+    assert_eq!(describe_fingerprint(&fp[..10]), "10 byte(s)");
+    assert_eq!(format_version(b"HTLB\x02rest"), Some(2));
+    assert_eq!(format_version(b"HTLB\x01rest"), Some(1));
+    assert_eq!(format_version(b"\x1bLua"), None);
 }
 
 #[test]
