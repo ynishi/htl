@@ -167,6 +167,116 @@ local function struct_resolver(result, filename)
    end
 end
 
+-- `---@sealed`: which records are built only where they are declared, and which functions
+-- (`---@sealed(gate.judge, gate.open)`) may build them. Read from the declaring file, like
+-- the `---@struct` markers above and for the same reason: the checker discards comments,
+-- and the file being checked is rarely the one that declares the record.
+--
+-- Read more strictly than `has_marker`, which also accepts the line above the declaration.
+-- A record nested directly under `record Judged   ---@sealed` sits on that line, and a
+-- marker read that loosely would seal the nested one too; on its own line the marker has
+-- to be on a line that is only a marker comment.
+local function marker_args(line, marker)
+   if not line then return false, nil end
+   local at = line:find("%-%-%-@" .. marker .. "%f[%W]")
+   if not at then return false, nil end
+   local args = line:sub(at):match("^%-%-%-@" .. marker .. "%s*(%b())")
+   return true, args and args:sub(2, -2) or nil
+end
+
+local function sealed_marker(lines, y)
+   if not lines or not y then return false, nil end
+   local found, args = marker_args(lines[y], "sealed")
+   if found then return true, args end
+   local above = lines[y - 1]
+   if above and above:match("^%s*%-%-%-@") then return marker_args(above, "sealed") end
+   return false, nil
+end
+
+-- What `sealed_at` returns for a position whose type is a `---@sealed` record:
+-- { name = "gate.Judged", file = "gate.tl", here = false, fns = { "gate.judge" } }.
+-- `file` is the declaring file by its own name: the message says where the record may be
+-- built, and where that file sits on this machine is not part of the answer.
+local function clean_path(p)
+   local s = tostring(p or ""):gsub("\\", "/")
+   s = s:gsub("^%./", "")
+   return s:lower()
+end
+
+local function same_file(a, b)
+   if not a or not b then return false end
+   local x, y = clean_path(a), clean_path(b)
+   if x == y then return true end
+   -- One side may be absolute and the other relative to the same root.
+   return x:sub(-#y - 1) == "/" .. y or y:sub(-#x - 1) == "/" .. x
+end
+
+-- The record as its declaration names it: `Judged` nested in `record gate` is
+-- `gate.Judged`, which is how a site that requires the module spells it. The checker's own
+-- name for it is the bare `Judged` (the same gap `enum-cast` closes by reading the site).
+-- Read from the lines above: the enclosing record is the first line indented less than the
+-- declaration, and a line that is not a record declaration ends the nesting.
+local function qualified_name(lines, y, name)
+   local base = indent_of(lines[y] or "")
+   if base == 0 then return name end
+   local parts = { name }
+   for i = y - 1, 1, -1 do
+      local l = lines[i]
+      if l and l:match("%S") and indent_of(l) < base then
+         local outer = l:match("^%s*local%s+record%s+([%w_]+)") or l:match("^%s*record%s+([%w_]+)")
+         if not outer then break end
+         table.insert(parts, 1, outer)
+         base = indent_of(l)
+         if base == 0 then break end
+      end
+   end
+   return table.concat(parts, ".")
+end
+
+local function sealed_spec(cache, t, filename)
+   local lines = source_lines(cache, t.file)
+   if not lines then return nil end
+   local found, args = sealed_marker(lines, t.y)
+   if not found then return nil end
+   local fns
+   if args then
+      fns = {}
+      for name in args:gmatch("[^,%s]+") do fns[#fns + 1] = name end
+      if #fns == 0 then fns = nil end
+   end
+   return {
+      name = qualified_name(lines, t.y, t.str or "record"),
+      file = tostring(t.file):match("([^/\\]+)$") or tostring(t.file),
+      here = same_file(t.file, filename),
+      fns = fns,
+   }
+end
+
+-- Resolver for the `sealed-record` lint: the `---@sealed` record whose type is at (y, x)
+-- -- the type a table constructor is built as, or the one an `as` cast lands on -- or nil.
+-- Which of the two a position holds is the rule's business; both are the same question
+-- here, and it is the same position report `struct_at` and `cast_at` answer from.
+local function sealed_resolver(result, filename)
+   local ok, report = pcall(tl.get_types, result)
+   if not ok or type(report) ~= "table" then return nil end
+   local by_pos = report.by_pos and report.by_pos[filename]
+   if not by_pos then return nil end
+   local specs, sources = {}, {}
+   local function deref(id, depth)
+      local t = report.types[id]
+      if t and t.ref and depth < 8 then return deref(t.ref, depth + 1) end
+      return t
+   end
+   return function(y, x)
+      local id = by_pos[y] and by_pos[y][x]
+      if not id then return nil end
+      local t = deref(id, 0)
+      if not t or not t.fields or not t.file or not t.y then return nil end
+      if specs[id] == nil then specs[id] = sealed_spec(sources, t, filename) or false end
+      return specs[id] or nil
+   end
+end
+
 -- Resolver for the `union-exhaustive` lint: the members of the union type at (y, x), as
 -- a set of names, or `false` for a value that is typed and not a union. Nothing here
 -- reconstructs the union from the `is` tests; the checker already knows it, and knows the
@@ -747,6 +857,7 @@ function H.check(filename, env, opts)
             enums = enums,
             subject_enum = subject,
             struct_at = struct_resolver(result, filename),
+            sealed_at = sealed_resolver(result, filename),
             union_at = union_resolver(result, filename),
             cast_at = cast_at,
             enum_table_at = enum_table_at,

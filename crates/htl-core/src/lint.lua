@@ -3,6 +3,9 @@
 --
 --   nil-index        `t[k].x` / `t[k]:m()` / `t[k]()` / `t[k][j]` -- indexing a map/array
 --                    yields V, not V|nil in Teal, so chaining on it can raise at runtime.
+--   sealed-record    a table constructor for a record marked `---@sealed`, or an `as` cast
+--                    to one, outside the file that declares it (outside the functions the
+--                    marker names, when it names any).
 --   enum-exhaustive  `if e == "a" then ... elseif e == "b" then ... end` where the string
 --                    literals belong to a declared enum: every value must be covered or an
 --                    `else` branch must exist.
@@ -30,6 +33,8 @@ L.DEFAULT = {
    -- On by default and still silent by default: nothing is reported until a record is
    -- marked `---@struct`, which is a thing someone had to write.
    ["struct-fields"] = true,
+   -- Same: nothing is reported until a record is marked `---@sealed`.
+   ["sealed-record"] = true,
    ["enum-exhaustive"] = true,
    ["enum-cast"] = true,
    ["enum-table"] = true,
@@ -927,9 +932,98 @@ local function lint_struct_fields(ast, report, extra)
    end)
 end
 
+---------------------------------------------------------------- sealed-record
+
+-- A record marked `---@sealed` is built where it is declared and nowhere else. Some
+-- records mean "this went through the check" -- a `Judged` only `gate.judge` is supposed
+-- to produce, a state only a transition may mint -- and Teal has no private field and no
+-- sealed constructor to say it with: `{ ... }` with the right keys builds one anywhere,
+-- and `as` gets past even a mismatch because it is erased. The marker says it and this
+-- rule holds the boundary.
+--
+-- Which record a `{ ... }` is built as, and which one an `as` lands on, is type
+-- information; `extra.sealed_at(y, x)` answers both from the checker's position report
+-- (see prelude.lua). What this rule adds is the site: the file it is in, and the function.
+--
+-- `---@sealed(gate.judge)` narrows the boundary from the file to those functions, inside
+-- the declaring file. A function matches on the name as written (`gate.judge`) or on its
+-- last segment (`judge`), because the local the site spells the module with need not be
+-- the name the marker uses. A function that is assigned rather than declared
+-- (`gate.judge = function() ... end`) has no name of its own here, and the site counts as
+-- being in the enclosing function -- as a callback written inside `gate.judge` does.
+local FUNCTION_KINDS = {
+   ["function"] = true, ["local_function"] = true, ["global_function"] = true,
+   ["record_function"] = true, ["macroexp"] = true, ["local_macroexp"] = true,
+}
+
+-- `function gate.judge()` -> "gate.judge", `function Gate:judge()` -> "Gate:judge",
+-- `local function judge()` -> "judge", an anonymous function -> nil.
+local function fn_written_name(n)
+   if not is_node(n.name) or not n.name.tk then return nil end
+   local owners = {}
+   local owner = n.fn_owner
+   while is_node(owner) do
+      if owner.kind == "op" and owner.op and owner.op.op == "." and is_node(owner.e2) then
+         table.insert(owners, 1, owner.e2.tk or "?")
+         owner = owner.e1
+      else
+         table.insert(owners, 1, owner.tk or "?")
+         break
+      end
+   end
+   if #owners == 0 then return n.name.tk end
+   return table.concat(owners, ".") .. (n.is_method and ":" or ".") .. n.name.tk
+end
+
+local function fn_allowed(fns, name)
+   if not name then return false end
+   local last = name:match("([^.:]+)$") or name
+   for _, want in ipairs(fns) do
+      if want == name or (want:match("([^.:]+)$") or want) == last then return true end
+   end
+   return false
+end
+
+local function lint_sealed_record(ast, report, extra)
+   local sealed_at = extra and extra.sealed_at
+   if not sealed_at then return end
+   local function allowed(spec, fn)
+      if spec.fns then return spec.here and fn_allowed(spec.fns, fn) end
+      return spec.here
+   end
+   -- The record is named as its declaration names it, at both kinds of site: a cast writes
+   -- the type out and a constructor does not, and one name for the rule reads better than
+   -- one name per site.
+   local function complain(spec, n)
+      local msg = "`" .. spec.name .. "` is sealed: built only in " .. spec.file
+      if spec.fns then msg = msg .. " by " .. table.concat(spec.fns, " or ") end
+      report("sealed-record", n.y, n.x, msg)
+   end
+   local seen = {}
+   local function visit(n, fn)
+      if type(n) ~= "table" or seen[n] then return end
+      seen[n] = true
+      if is_node(n) then
+         if FUNCTION_KINDS[n.kind] then fn = fn_written_name(n) or fn end
+         if n.kind == "literal_table" and n.y and n.x then
+            local spec = sealed_at(n.y, n.x)
+            if spec and not allowed(spec, fn) then complain(spec, n) end
+         elseif n.kind == "op" and n.op and n.op.op == "as" and n.y and n.x then
+            local spec = sealed_at(n.y, n.x)
+            if spec and not allowed(spec, fn) then complain(spec, n) end
+         end
+      end
+      for k, v in pairs(n) do
+         if not SKIP_KEYS[k] and type(v) == "table" then visit(v, fn) end
+      end
+   end
+   visit(ast, nil)
+end
+
 local RULES = {
    { "nil-index", lint_nil_index },
    { "struct-fields", lint_struct_fields },
+   { "sealed-record", lint_sealed_record },
    { "enum-exhaustive", lint_enum_exhaustive },
    { "enum-cast", lint_enum_cast },
    { "enum-table", lint_enum_table },

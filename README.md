@@ -383,6 +383,7 @@ every declared field, for types that are settled.
 |---|---|---|
 | `nil-index` | on | `t[k].x`, `t[k]:m()`, `t[k]()`, `t[k][j]` — Teal types a map/array lookup as `V`, not `V \| nil` |
 | `struct-fields` | on | a table built for a record marked `---@struct` that leaves out a field the record declares and `---@optional` does not exempt. Silent until a record carries the marker (see below) |
+| `sealed-record` | on | a table built for a record marked `---@sealed`, or an `as` cast to one, outside the file that declares it — outside the functions the marker names, when it names any (`---@sealed(gate.judge)`). Silent until a record carries the marker (see below) |
 | `enum-exhaustive` | on | `if e == "a" ... elseif e == "b" ... end` over an enum with a value left unhandled and no `else`; enums nested in records and enums from required modules count |
 | `enum-cast` | on | `e as E` where `E` is an enum and the checker types `e` as `string`: `as` is erased, so the word enters the enum with nothing checking it. A string literal (`"open" as E`) and a value already typed as the enum are not reported (see below) |
 | `enum-table` | on | a table constructor whose declared type maps an enum (`{string: E}`, `{E: T}`) and that leaves a value of the enum out, or lists a word that is not one. An array of the enum (`{E}`) is a selection, not a mapping, and is not reported. `htl fix enum-table` fills a `{string: E}` one in |
@@ -443,6 +444,49 @@ comment; use sites still see a nilable field. What it removes is the reason to g
 the doubt about whether a field was ever set. Data arriving from outside the program — a
 mod's return value, a save file, a host — is a different question, and `[[contract]]` with
 `require_fields` is what checks that.
+
+### Records built where they are declared (`---@sealed`)
+
+Some records mean "this went through the check": a `Judged` that only `gate.judge()` is
+supposed to produce, a state a transition may mint and nobody else. In Rust that is a
+private field and a constructor; in Teal a record is built by writing `{ ... }` with the
+right keys anywhere, and `{ ok = true } as Judged` gets past even a mismatch, so the
+invariant the record stands for is a comment. `---@sealed` is that comment made a rule:
+
+```tl
+local record gate
+   record Judged        ---@sealed
+      verdict: Verdict
+      at: integer
+   end
+
+   ---@sealed(gate.open, gate.reopen)
+   record Draft
+      who: string
+   end
+end
+```
+
+A table built as a `Judged`, or an `as` cast to one, outside `gate.tl` is reported:
+
+```text
+`gate.Judged` is sealed: built only in gate.tl
+```
+
+Inside the declaring file everything is allowed — the marker is about the boundary, not
+the owner. Naming functions narrows it to those, inside that file: a `Draft` built in
+`gate.open` passes and one built in `gate.other` is reported (`built only in gate.tl by
+gate.open or gate.reopen`). The function is matched on the name as written or on its last
+segment, and a function assigned rather than declared (`gate.judge = function() ... end`)
+counts as the function it is written inside. `-- htl: allow(sealed-record)` keeps one site
+the project stands behind.
+
+A record nested inside a sealed one is not sealed by that; mark it too if it should be.
+Like `---@struct`, this is a lint and not a type: the file stays valid Teal, other tooling
+ignores the comment, and what it adds is the one thing a run-time check cannot — that no
+other code minted the value. It pairs with `---@struct` on the same record, which says
+every field is set where this says who may set them; both report at the same site with
+their own message.
 
 ### The string boundary of an enum (`enum-cast`, `enum-table`)
 

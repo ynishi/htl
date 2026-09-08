@@ -55,6 +55,14 @@ fn list_lints_names_the_enum_boundary_rules() {
 }
 
 #[test]
+fn list_lints_names_the_sealed_record_rule() {
+    let dir = scratch("list-sealed");
+    let (stdout, _) = htl(&["check", "--list-lints"], &dir);
+    let rules: Vec<&str> = stdout.lines().map(str::trim).collect();
+    assert!(rules.contains(&"sealed-record"), "{stdout}");
+}
+
+#[test]
 fn a_rule_can_be_turned_off_for_a_run() {
     let dir = project("off");
     let (_, on) = htl(&["check", ".", "--no-cache"], &dir);
