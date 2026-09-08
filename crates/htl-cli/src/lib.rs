@@ -283,17 +283,25 @@ enum Cmd {
         /// Library only (no src/main.tl)
         #[arg(long)]
         lib: bool,
-        /// Also emit a Rust host (Cargo.toml + src/main.rs with include_tl!)
+        /// Also emit a Rust host: shorthand for --host rust
         #[arg(long)]
         embed: bool,
+        /// Which Rust host to write: Cargo.toml + src/lib.rs (the #[host_module], the
+        /// embedded module, preload) and, when there is an entry script, a thin src/main.rs
+        #[arg(long, value_name = "NAME", value_parser = clap::builder::PossibleValuesParser::new(scaffold::host_names()))]
+        host: Option<String>,
     },
     /// Fill in the scaffold files that are missing in an existing directory
     Init {
         dir: Option<PathBuf>,
         #[arg(long)]
         lib: bool,
+        /// Shorthand for --host rust
         #[arg(long)]
         embed: bool,
+        /// Fill in this host's files, and report the ones that were already there
+        #[arg(long, value_name = "NAME", value_parser = clap::builder::PossibleValuesParser::new(scaffold::host_names()))]
+        host: Option<String>,
     },
     /// Package management at the nearest `mlua-pkg.toml` project root: install / add /
     /// update / clean / patch, through mlua-pkg's library rather than its binary
@@ -504,8 +512,18 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
             } => cmd_cache_status(path.as_deref(), format == Format::Json, entries),
         },
         Cmd::Dts { dir } => cmd_dts(dir.as_deref()),
-        Cmd::New { name, lib, embed } => cmd_new(&name, lib, embed),
-        Cmd::Init { dir, lib, embed } => cmd_init(dir.as_deref(), lib, embed),
+        Cmd::New {
+            name,
+            lib,
+            embed,
+            host,
+        } => cmd_new(&name, lib, embed, host.as_deref()),
+        Cmd::Init {
+            dir,
+            lib,
+            embed,
+            host,
+        } => cmd_init(dir.as_deref(), lib, embed, host.as_deref()),
         Cmd::Gen { file, out } => cmd_gen(&file, out.as_deref()),
         Cmd::Run { file, args } => cmd_run(&file, &args),
         Cmd::Fix {
@@ -680,32 +698,50 @@ fn apply_project(h: &Htl, start: &Path) -> Result<Option<htl::pkg::Project>> {
     Ok(Some(p))
 }
 
-fn report_scaffold(dir: &Path, written: &[PathBuf]) {
+/// What the run wrote, and — when a host was asked for by name — what it left alone. The
+/// kept list is what makes `htl init --host rust` on an older project say which of that
+/// host's files were already there instead of skipping them in silence.
+fn report_scaffold(dir: &Path, written: &[PathBuf], kept: &[PathBuf]) {
+    let rel = |p: &PathBuf| p.strip_prefix(dir).unwrap_or(p).display().to_string();
     for p in written {
-        let rel = p.strip_prefix(dir).unwrap_or(p);
-        eprintln!("  created {}", rel.display());
+        eprintln!("  created {}", rel(p));
     }
-    eprintln!(
-        "htl: {} file(s) written under {}",
-        written.len(),
-        dir.display()
-    );
+    for p in kept {
+        eprintln!("  kept    {} (already there)", rel(p));
+    }
+    if kept.is_empty() {
+        eprintln!(
+            "htl: {} file(s) written under {}",
+            written.len(),
+            dir.display()
+        );
+    } else {
+        eprintln!(
+            "htl: {} file(s) written, {} kept under {}",
+            written.len(),
+            kept.len(),
+            dir.display()
+        );
+    }
 }
 
-fn cmd_new(name: &str, lib: bool, embed: bool) -> Result<ExitCode> {
+fn cmd_new(name: &str, lib: bool, embed: bool, host: Option<&str>) -> Result<ExitCode> {
     let dir = PathBuf::from(name);
     let pkg_name = dir
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| anyhow::anyhow!("invalid project name: {name}"))?
         .to_string();
-    let written = scaffold::scaffold(&dir, &pkg_name, &scaffold::Options { lib, embed }, true)?;
-    report_scaffold(&dir, &written);
+    // Before the directory is touched: an unknown host, or one that disagrees with --lib,
+    // fails here and leaves nothing behind.
+    let host = scaffold::resolve_host(host, embed, lib)?;
+    let done = scaffold::scaffold(&dir, &pkg_name, &scaffold::Options { lib, host }, true)?;
+    report_scaffold(&dir, &done.written, &[]);
     eprintln!("next: cd {} && htl test", dir.display());
     Ok(ExitCode::SUCCESS)
 }
 
-fn cmd_init(dir: Option<&Path>, lib: bool, embed: bool) -> Result<ExitCode> {
+fn cmd_init(dir: Option<&Path>, lib: bool, embed: bool, host: Option<&str>) -> Result<ExitCode> {
     let dir = match dir {
         Some(d) => d.to_path_buf(),
         None => std::env::current_dir()?,
@@ -716,11 +752,16 @@ fn cmd_init(dir: Option<&Path>, lib: bool, embed: bool) -> Result<ExitCode> {
         .and_then(|s| s.to_str())
         .ok_or_else(|| anyhow::anyhow!("cannot derive a project name from {}", abs.display()))?
         .to_string();
-    let written = scaffold::scaffold(&dir, &name, &scaffold::Options { lib, embed }, false)?;
-    if written.is_empty() {
+    let asked_for_a_host = host.is_some() || embed;
+    let host = scaffold::resolve_host(host, embed, lib)?;
+    let done = scaffold::scaffold(&dir, &name, &scaffold::Options { lib, host }, false)?;
+    // A host was named: say what it would have written and found already there. Without
+    // one the old one-liner stands, so a plain re-run does not list the whole tree.
+    let kept: &[PathBuf] = if asked_for_a_host { &done.kept } else { &[] };
+    if done.written.is_empty() && kept.is_empty() {
         eprintln!("htl init: nothing to do, all scaffold files already exist");
     } else {
-        report_scaffold(&dir, &written);
+        report_scaffold(&dir, &done.written, kept);
     }
     Ok(ExitCode::SUCCESS)
 }

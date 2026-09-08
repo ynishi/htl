@@ -23,7 +23,7 @@ fmt-check:
     cargo fmt --all -- --check
 
 # Everything CI runs on a push, in the same order, so a failure there reproduces here.
-ci: build check e2e
+ci: build check e2e e2e-scaffold
 
 # Compile everything, including tests and benches, without running any of it.
 build:
@@ -35,6 +35,48 @@ e2e:
     cargo run -q -p htl-cli --bin htl -- test examples/tl/util_test.tl
     cargo run -q -p embed
     cargo run -q -p embed -- --bundle
+
+# The Rust host `htl new --host rust` writes, end to end: scaffolded into a temporary
+# directory outside this repository, pointed back at this checkout so it is *this* htl
+# that is embedded, then built, tested and run. The snapshot tests pin what the scaffold
+# writes byte for byte; only this says the bytes compile and work.
+e2e-scaffold:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="$(pwd)"
+    # Scaffolding inside the repository would leave a Cargo package in the checkout and
+    # run the CLI against the repository's own htl.toml, so the project goes elsewhere
+    # entirely and only its build artefacts come back.
+    dir="$(mktemp -d)"
+    trap 'rm -rf "$dir"' EXIT
+    # A scaffolded project depends on the released htl, which is what a user gets; for the
+    # change under test to be the one that runs, point the three crates at this checkout.
+    # Its artefacts land beside the workspace's under a directory of their own, because
+    # the scaffold sets `[profile.dev.build-override]` and sharing one target directory
+    # would rebuild the proc macro dependencies on every switch.
+    sample=(--config "patch.crates-io.htl.path='$root/crates/htl'"
+            --config "patch.crates-io.htl-core.path='$root/crates/htl-core'"
+            --config "patch.crates-io.htl-macros.path='$root/crates/htl-macros'"
+            --target-dir "${CARGO_TARGET_DIR:-$root/target}/e2e-scaffold")
+    # Each project is built in a subshell: `cargo run -p htl-cli` below has to be back in
+    # this workspace, not in the one that was just scaffolded.
+    cargo run -q -p htl-cli --bin htl -- new "$dir/hostsample" --host rust
+    (
+      cd "$dir/hostsample"
+      cargo test "${sample[@]}"
+      out="$(cargo run -q "${sample[@]}" -- Ada)"
+      printf '%s\n' "$out"
+      printf '%s\n' "$out" | grep -qx 'hello from Rust, Ada'
+    )
+    # --lib is the same host without a binary: the library still builds and its test still
+    # goes through preload, and there is no entry point for cargo run to find.
+    cargo run -q -p htl-cli --bin htl -- new "$dir/libsample" --host rust --lib
+    (
+      cd "$dir/libsample"
+      test ! -e src/main.rs
+      test ! -e src/main.tl
+      cargo test "${sample[@]}"
+    )
 
 # Every benchmark: the figures in the README come from these. Ten samples each; a few minutes.
 bench:

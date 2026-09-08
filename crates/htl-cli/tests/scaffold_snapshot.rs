@@ -149,14 +149,23 @@ fn new_lib_writes_no_entry_script() {
 }
 
 #[test]
-fn new_embed_writes_the_bin_host() {
+fn new_embed_writes_the_rust_host() {
     let root = common::scratch("htl-cli-snapshot", "embed");
     htl(&["new", "sample", "--embed"], &root);
     assert_tree("embed", &root.join("sample"));
 }
 
+/// `--embed` is the shorthand for `--host rust`, and sharing the snapshot is what says
+/// the two write the same tree rather than two trees that happen to look alike.
 #[test]
-fn new_lib_embed_writes_the_bin_host_without_a_script() {
+fn new_host_rust_writes_what_embed_writes() {
+    let root = common::scratch("htl-cli-snapshot", "host-rust");
+    htl(&["new", "sample", "--host", "rust"], &root);
+    assert_tree("embed", &root.join("sample"));
+}
+
+#[test]
+fn new_lib_embed_writes_the_rust_host_without_a_binary() {
     let root = common::scratch("htl-cli-snapshot", "lib-embed");
     htl(&["new", "sample", "--lib", "--embed"], &root);
     assert_tree("lib-embed", &root.join("sample"));
@@ -180,4 +189,18 @@ fn init_embed_in_an_empty_directory_writes_what_new_would() {
     std::fs::create_dir_all(&dir).unwrap();
     htl(&["init", "--embed"], &dir);
     assert_tree("embed", &dir);
+}
+
+/// Adding a host to a project that already exists. It is deliberately *not* the `embed`
+/// tree: `README.md` and `src/main.tl` were written without a host and are kept, so the
+/// project ends up with the Rust side filled in and its own prose untouched. That
+/// difference is the reason this has a snapshot of its own — it is what a reader of
+/// `htl init --host` on a real project actually gets.
+#[test]
+fn init_host_fills_in_the_rust_side_of_a_plain_project() {
+    let root = common::scratch("htl-cli-snapshot", "init-host");
+    let dir = root.join("sample");
+    htl(&["new", "sample"], &root);
+    htl(&["init", "--host", "rust"], &dir);
+    assert_tree("init-host", &dir);
 }

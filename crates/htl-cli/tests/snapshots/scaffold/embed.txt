@@ -4,6 +4,7 @@ Cargo.toml
 README.md
 htl.toml
 mlua-pkg.toml
+src/lib.rs
 src/main.rs
 src/main.tl
 src/sample/init.tl
@@ -38,17 +39,20 @@ htl check .            # type-check + lints
 htl test               # tests/*_test.tl via htl.test
 htl fmt .              # whitespace formatter
 htl pkg install        # fetch [deps] from mlua-pkg.toml
-cargo run              # Rust host with the scripts embedded (type-checked at build)
+cargo run              # the binary: preload, then src/main.tl (type-checked at build)
                        # (src/main.tl requires the Rust `host`, so `htl run` cannot run it)
+cargo test             # the library's Rust test: the module loaded through preload
 ```
 
 Module: `src/sample/init.tl` (`require("sample")` from `src/` and `tests/`).
 
 `mlua-pkg.toml` `entry = "src/sample"` only matters to *consumers* that depend on this
-package through mlua-pkg: they get it as `require("sample")`. The Rust host in `src/main.rs`
-embeds the scripts directly and does not use it.
+package through mlua-pkg: they get it as `require("sample")`. The Rust host is a library:
+`src/lib.rs` holds the `#[host_module]`, embeds this module, and registers both in
+`preload(&Htl)`. `src/main.rs` is a few lines on top of it — `preload`, then the entry
+script. Grow the library, not the binary.
 
-`src/host.d.tl` is generated from `#[host_module]` in `src/main.rs`: `cargo build` writes it,
+`src/host.d.tl` is generated from `#[host_module]` in `src/lib.rs`: `cargo build` writes it,
 and so does `htl dts` / `htl check` without building, so the Teal side always sees the
 current Rust signatures.
 ===== htl.toml =====
@@ -97,10 +101,13 @@ entry = "src/sample"
 
 [deps]
 # lshape = { git = "https://github.com/ynishi/lshape", tag = "v0.1" }
-===== src/main.rs =====
-//! Rust host: the Teal sources are type-checked at `cargo build` and embedded.
+===== src/lib.rs =====
+//! The project as a library: the Rust host, the Teal module embedded beside it, and
+//! `preload`, which hands both to an `Htl`. Everything that grows lives here — a second
+//! `#[host_module]`, a Rust test, an `extern "C"` layer, a window loop — and every entry
+//! point (the binary, a test, another crate embedding this one) goes through `preload`.
 
-use htl::{Htl, TealRecord, host_module, include_tl};
+use htl::{Htl, TealRecord, host_module};
 
 /// Crosses the Rust <-> Teal boundary as a plain table (`host.Point` on the Teal side).
 #[derive(TealRecord, Clone)]
@@ -124,15 +131,49 @@ impl Host {
     }
 }
 
-// Teal sources, checked at build. Keep these after `#[host_module]` (same file, source order)
-// so the declaration exists when they are checked.
-const LIB: &[u8] = htl::include_tl_bytes!("src/sample/init.tl");
-const MAIN: &str = include_tl!("src/main.tl");
+// The Teal module, type-checked at `cargo build` and embedded as stripped bytecode. Keep
+// this after `#[host_module]` (same file, source order) so the declaration exists when the
+// module is checked.
+const MODULE: &[u8] = htl::include_tl_bytes!("src/sample/init.tl");
+
+/// Register what this crate provides on a fresh `Htl`: the Rust `host` module, then the
+/// Teal module as `require("sample")`.
+pub fn preload(h: &Htl) -> anyhow::Result<()> {
+    Host.htl_preload(h)?;
+    h.preload_bytes("sample", MODULE)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preload;
+    use htl::Htl;
+
+    /// The Teal side, exercised the way a host does it: through `preload`, so the test
+    /// fails if the module stops loading or `greet` changes shape.
+    #[test]
+    fn greet_comes_back_through_preload() -> anyhow::Result<()> {
+        let h = Htl::new()?;
+        preload(&h)?;
+        let g: htl::mlua::Table = h
+            .lua()
+            .load("return require('sample').greet('rust')")
+            .eval()?;
+        assert_eq!(g.get::<String>("text")?, "hello, rust");
+        Ok(())
+    }
+}
+===== src/main.rs =====
+//! The binary: the library holds the host and the module, so this is only the entry
+//! script and the arguments it runs with.
+
+use htl::{Htl, include_tl};
+
+const MAIN: &str = include_tl!("src/main.tl"); // checked at cargo build
 
 fn main() -> anyhow::Result<()> {
     let h = Htl::new()?;
-    Host.htl_preload(&h)?;
-    h.preload_bytes("sample", LIB)?;
+    sample::preload(&h)?;
     let args: Vec<String> = std::env::args().skip(1).collect();
     h.set_arg("main.tl", &args)?; // `arg[1]`.. as under `htl run`; `exec` alone passes `...`
     h.exec(MAIN, "=main.tl", &args)?;
@@ -140,7 +181,7 @@ fn main() -> anyhow::Result<()> {
 }
 ===== src/main.tl =====
 local sample = require("sample")
-local host = require("host") -- Rust side, see src/main.rs (types: src/host.d.tl)
+local host = require("host") -- Rust side, see src/lib.rs (types: src/host.d.tl)
 
 local g = sample.greet(arg and arg[1] or "teal")
 print(g.text)
