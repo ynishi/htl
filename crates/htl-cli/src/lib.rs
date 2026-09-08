@@ -4,6 +4,7 @@
 //! - `htl gen <file.tl>`      emit readable Lua (escape hatch)
 //! - `htl run <file.tl|.hb>`  type-check then execute (strict: type errors abort)
 //! - `htl build <dir>`        compile a tree of `.tl` into one stripped-bytecode bundle
+//! - `htl bundle info <.hb>`  print what a bundle records, without running it
 
 mod cache;
 mod report;
@@ -117,6 +118,19 @@ enum CacheCmd {
         /// List every entry rather than counting them by kind
         #[arg(long)]
         entries: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum BundleCmd {
+    /// Print what a bundle records: format, the htl that built it, payload kind, the Lua
+    /// its bytecode was compiled for, entry, modules, host-provided names
+    Info {
+        /// The `.hb` file
+        file: PathBuf,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
     },
 }
 
@@ -329,7 +343,8 @@ enum Cmd {
         /// Keep debug info (line numbers, local names) in the bytecode
         #[arg(long)]
         debug: bool,
-        /// Store generated Lua source instead of bytecode (loads on any Lua build)
+        /// Store generated Lua source instead of bytecode: for a big-endian target, a Lua
+        /// with non-default number types, or a bundle that must outlive a Lua upgrade
         #[arg(long)]
         source: bool,
         /// Modules to bundle that only a dynamic require reaches (also `[build] extra`)
@@ -338,6 +353,11 @@ enum Cmd {
         /// Modules the host provides (also `[build] host`; `.d.tl`-only modules are implied)
         #[arg(long, value_delimiter = ',')]
         host: Vec<String>,
+    },
+    /// Read a `.hb` bundle without running it (see README, "Bundles")
+    Bundle {
+        #[command(subcommand)]
+        cmd: BundleCmd,
     },
 }
 
@@ -519,6 +539,9 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
                 host,
             },
         ),
+        Cmd::Bundle { cmd } => match cmd {
+            BundleCmd::Info { file, format } => cmd_bundle_info(&file, format == Format::Json),
+        },
     }
 }
 
@@ -2732,6 +2755,128 @@ fn cmd_build_dir(
         b.modules.len(),
         out.display(),
         buf.len()
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// What `htl bundle info` reports: everything the file records and nothing it does not
+/// (no Lua state is created, nothing is loaded). `lua` is the header the bytecode was
+/// compiled for, in the fields the mismatch message names; `None` when the bundle
+/// carries no fingerprint, which `payload` explains (`source`) or `format` does (`1`).
+#[derive(serde::Serialize)]
+struct BundleInfo {
+    file: String,
+    format: u8,
+    htl_version: Option<String>,
+    /// `bytecode`, `source`, or `mixed` when modules disagree.
+    payload: &'static str,
+    lua: Option<htl::bundle::LuaHeader>,
+    entry: String,
+    modules: Vec<BundleModuleInfo>,
+    host_modules: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct BundleModuleInfo {
+    name: String,
+    kind: &'static str,
+    bytes: usize,
+}
+
+fn cmd_bundle_info(file: &Path, json: bool) -> Result<ExitCode> {
+    let bytes = fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+    let Some(format) = htl::bundle::format_version(&bytes) else {
+        bail!("{} is not an htl bundle (bad magic)", file.display());
+    };
+    let b = Bundle::decode(&bytes)?;
+    let kind_name = |k: htl::bundle::Kind| match k {
+        htl::bundle::Kind::Bytecode => "bytecode",
+        htl::bundle::Kind::Source => "source",
+    };
+    let payload = match (
+        b.modules
+            .iter()
+            .any(|m| m.kind == htl::bundle::Kind::Bytecode),
+        b.modules
+            .iter()
+            .any(|m| m.kind == htl::bundle::Kind::Source),
+    ) {
+        (true, true) => "mixed",
+        (false, true) => "source",
+        // Bytecode, or no modules at all: what the loader would treat it as.
+        _ => "bytecode",
+    };
+    let info = BundleInfo {
+        file: file.display().to_string(),
+        format,
+        htl_version: (!b.htl_version.is_empty()).then(|| b.htl_version.clone()),
+        payload,
+        lua: htl::bundle::LuaHeader::parse(&b.fingerprint),
+        entry: b.entry.clone(),
+        modules: b
+            .modules
+            .iter()
+            .map(|m| BundleModuleInfo {
+                name: m.name.clone(),
+                kind: kind_name(m.kind),
+                bytes: m.payload.len(),
+            })
+            .collect(),
+        host_modules: b.host_modules.clone(),
+    };
+    if json {
+        report::emit(&info)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    println!(
+        "{}: htl bundle, format {}, built by {}",
+        info.file,
+        info.format,
+        match &info.htl_version {
+            Some(v) => format!("htl {v}"),
+            None => "htl (version not recorded)".to_string(),
+        }
+    );
+    println!("  payload:  {}", info.payload);
+    let lua = match &info.lua {
+        Some(h) => h.to_string(),
+        None if !b.fingerprint.is_empty() => {
+            format!("unreadable fingerprint ({} bytes)", b.fingerprint.len())
+        }
+        None if info.format == 1 => {
+            "not recorded (a format 1 bundle carries no fingerprint)".into()
+        }
+        None => "any (source payload, no bytecode to bind)".into(),
+    };
+    println!("  lua:      {lua}");
+    println!("  entry:    {}", info.entry);
+    let modules: Vec<String> = info
+        .modules
+        .iter()
+        .map(|m| {
+            if info.payload == "mixed" {
+                format!("{} ({})", m.name, m.kind)
+            } else {
+                m.name.clone()
+            }
+        })
+        .collect();
+    println!(
+        "  modules:  {}",
+        if modules.is_empty() {
+            "(none)".to_string()
+        } else {
+            modules.join(", ")
+        }
+    );
+    println!(
+        "  host:     {}",
+        if info.host_modules.is_empty() {
+            "(none)".to_string()
+        } else {
+            info.host_modules.join(", ")
+        }
     );
     Ok(ExitCode::SUCCESS)
 }

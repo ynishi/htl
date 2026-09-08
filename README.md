@@ -43,6 +43,7 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 | `htl fmt [paths] [--check] [--indent N]` | whitespace formatter (indentation from the syntax tree, blank lines, trailing space) |
 | `htl gen <file.tl> [-o out.lua]` | readable Lua, the escape hatch out of htl |
 | `htl build <entry.tl> -o app.hb [--debug] [--source] [--extra a,b] [--host x,y]` | link the entry's `require` closure into one bundle (see Bundles) |
+| `htl bundle info <app.hb> [--format json]` | what a bundle records, without running it: format, the htl that built it, payload kind, the Lua its bytecode is for, entry, modules, host-provided names |
 | `htl pkg install` | fetch every dependency `mlua-pkg.toml` declares into `.htl/modules/` and write `mlua-pkg.lock`; the deps' own `types/` are then copied into the project's (see `types/`) |
 | `htl pkg add <name> <git> [--tag t \| --rev r \| --branch b] [--entry dir] [--target-dir dir]` | write the dependency into the manifest (`install` fetches it); a `patch_dir` the entry already declared is kept |
 | `htl pkg update [name] [--dry-run] [--force]` | refresh dependencies and bump the pins that follow releases, then install |
@@ -728,11 +729,28 @@ and is refused up front, naming them, if one is missing.
 
 - Payload is stripped Lua 5.4 bytecode by default. `--debug` keeps line numbers and
   local names (tracebacks with lines; module names survive stripping since the loader
-  supplies them). `--source` stores generated Lua instead: larger and readable, but
-  loads on any Lua build.
-- The bundle carries the compiling Lua's bytecode header (version, instruction /
-  integer / number sizes, endianness). Lua's own version byte is `0x54` for every
-  5.4.x, so this is what `install_bundle` checks, with a readable message on mismatch.
+  supplies them). `--source` stores generated Lua instead: larger and readable, and
+  bound to no Lua build.
+- **Portability.** A bytecode bundle runs on any host whose Lua chunk header matches
+  the one it was compiled by: version, bytecode format, the sizes of instruction /
+  integer / number, and endianness. Nothing about the CPU or the OS is in a Lua chunk,
+  and the Lua htl vendors has a 4-byte instruction, 8-byte integer and 8-byte double on
+  every 64-bit little-endian platform, so a bundle built on an arm64 Mac loads on
+  x86_64 Linux and cross-building between mainstream desktop and server targets needs
+  nothing. `--source` is for the cases the header refuses: a big-endian target, a host
+  whose Lua was built with a non-default `LUA_INT_TYPE` / `LUA_FLOAT_TYPE`, and a bundle
+  that has to outlive a Lua upgrade (mlua pins the Lua htl vendors, and a new one may
+  change the format). `install_bundle` checks the header before the first `require`
+  and refuses on mismatch, naming both sides: `compiled for Lua 5.4, format 0, 4/8/8,
+  little-endian by htl 0.1.19, but this host runs ... on htl 0.2.0`. The htl version
+  is advisory (a bundle from an older htl whose header agrees still loads); it is in
+  the message because the header alone cannot say why two 5.4 builds disagree.
+- `htl bundle info app.hb` prints what the file records — format version, the htl that
+  built it, payload kind, the Lua the bytecode is for in the same words as the mismatch
+  message, entry, modules, host-provided names — without creating a Lua state. That is
+  what a build step checks in and a bug report pastes; `--format json` for the same. A
+  `--source` bundle says its Lua is `any`; a format 1 bundle (`HTLB\x01`, before the
+  fingerprint) says it was not recorded.
 - A dynamic `require(expr)` cannot be followed: list its targets under `[build] extra`
   in `htl.toml` (or `--extra`). Modules the host provides without a `.d.tl` go under
   `[build] host` (or `--host`).
@@ -749,8 +767,9 @@ so an edit rebuilds, and a Teal type error anywhere in the closure fails the bui
 
 ```rust
 const BUNDLE: &[u8] = htl::include_bundle!("src/main.tl", host = ["host"], extra = ["modkit"]);
-// payload = "source" for cross-compiling (bytecode is produced by the build machine's
-// Lua); debug = true keeps line numbers. [build] extra / host in htl.toml are merged in.
+// payload = "source" for a target whose Lua header differs (big-endian, non-default
+// number types; see Portability above); debug = true keeps line numbers.
+// [build] extra / host in htl.toml are merged in.
 Host { .. }.htl_preload(&h)?;
 h.run_bundle(&htl::bundle::Bundle::decode(BUNDLE)?, &args)?;
 ```
@@ -888,8 +907,10 @@ was not used).
 
 - No Teal fork: `tl.lua` is vendored verbatim (0.24.8, MIT) and swapped as a file.
 - No token-level formatting: `htl fmt` recomputes indentation and whitespace only.
-- No Luau: PUC Lua 5.4 / LuaJIT via mlua features; bundles are bound to the Lua
-  generation of the `htl` that built them.
+- No Luau: PUC Lua 5.4 / LuaJIT via mlua features. Bytecode bundles are bound to the
+  Lua chunk header of the `htl` that built them, which every 64-bit little-endian host
+  shares (see Bundles, Portability); there is no dual bytecode-plus-source payload,
+  since shipping the source is what the bytecode form exists to avoid.
 - `.d.tl` files are written syntactically, from Rust source (`htl dts`, and the
   macros at expansion time write the same text) and from Teal (the module a
   `---@contract` type is declared in). There is no reflection on types either way: a

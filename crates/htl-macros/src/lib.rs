@@ -53,8 +53,9 @@ pub fn include_tl_bytes(input: TokenStream) -> TokenStream {
 /// Every linked file and every declaration the checker read is `include_bytes!`-tracked,
 /// so an edit rebuilds and a Teal type error is a compile error, like `include_tl!`.
 /// `payload` is `"bytecode"` (default, stripped; `debug = true` keeps line info) or
-/// `"source"` (generated Lua: what to use when cross-compiling, since bytecode is
-/// produced by the build machine's Lua).
+/// `"source"` (generated Lua: for a big-endian target, a Lua with non-default number
+/// types, or a bundle that must outlive a Lua upgrade; bytecode already loads on every
+/// 64-bit little-endian host, see `htl::bundle`).
 #[proc_macro]
 pub fn include_bundle(input: TokenStream) -> TokenStream {
     let args = parse_macro_input!(input as BundleArgs);
