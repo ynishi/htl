@@ -395,6 +395,14 @@ pub struct Project {
     /// the manifest, e.g. `target_dir = "lua/lshape"` -> `<root>/lua`), so
     /// `require("lshape")` resolves to `<root>/lua/lshape/init.*` like a vendored dep.
     pub target_dirs: Vec<PathBuf>,
+    /// The `target_dir` copies themselves (`<root>/lua/lshape`), as against the parents
+    /// above.
+    ///
+    /// A copy is a dependency's source that happens to sit in the repo, and `mlua-pkg
+    /// install` rewrites it every time it runs — so it is not the project's to check,
+    /// format or take tests from, and editing one there does not survive the next install.
+    /// What that means for the walkers is in [`crate::project_skip_dirs`].
+    pub vendored_copies: Vec<PathBuf>,
     /// The `patch_dir` deps: a dependency's source taken into the tree, and what the
     /// manifest calls it. Unlike a `target_dir` copy, which install rewrites, this one is
     /// the project's own code — [`Project::patch`] wrote it once and the project edits it
@@ -492,10 +500,11 @@ impl Project {
     pub fn at(root: &Path) -> Self {
         let inner = mlua_pkg::Project::in_dir(root, pkgs_dir(root));
         let manifest = inner.manifest_path().to_path_buf();
-        // `target_dir` deps: collect the parent of each declared copy target. `patch_dir`
+        // `target_dir` deps: the copy itself, and the parent `require` searches. `patch_dir`
         // deps: the directory itself, which is what a walker is asked about. A manifest
         // that fails to parse contributes nothing here (mlua-pkg itself reports it).
         let mut target_dirs: Vec<PathBuf> = Vec::new();
+        let mut vendored_copies: Vec<PathBuf> = Vec::new();
         let mut patches: Vec<Patched> = Vec::new();
         if let Ok(m) = mlua_pkg::manifest::Manifest::from_path(&manifest) {
             for (name, dep) in &m.deps {
@@ -507,6 +516,9 @@ impl Project {
                         .unwrap_or_else(|| root.to_path_buf());
                     if !target_dirs.contains(&parent) {
                         target_dirs.push(parent);
+                    }
+                    if !vendored_copies.contains(&abs) {
+                        vendored_copies.push(abs);
                     }
                 }
                 if let Some(pd) = &dep.patch_dir {
@@ -524,6 +536,7 @@ impl Project {
             vendored: inner.pkg_dir().vendored(),
             pkgs_dir: inner.pkg_dir().base().to_path_buf(),
             target_dirs,
+            vendored_copies,
             patches,
         }
     }
