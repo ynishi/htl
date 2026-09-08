@@ -10,10 +10,13 @@ mod cache;
 mod report;
 mod scaffold;
 
-/// Output format of `check` / `test`.
+/// Output format of every command that has `--format`. One enum, so its help must be
+/// true of all of them: `check` / `test` / `fix` put their text form on stderr (README,
+/// "Machine-readable output" says why), `cache status` / `bundle info` are reports and
+/// put it on stdout. Which stream is the README's to say, not this help's.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
 enum Format {
-    /// Human-readable lines on stderr
+    /// Human-readable lines
     Text,
     /// One JSON document on stdout (see README, "Machine-readable output")
     Json,

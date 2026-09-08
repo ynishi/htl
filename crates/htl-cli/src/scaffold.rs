@@ -207,11 +207,44 @@ fn t_readme(name: &str, m: &str, opts: &Options) -> String {
     s
 }
 
+/// The `htl` requirement a scaffolded host declares: this CLI's own release, in the
+/// shortest form cargo's caret rule reads as "this line and its compatible updates" —
+/// `"0.2"` for 0.2.x (`>=0.2.0, <0.3.0`), `"1"` once there is a 1.x (`>=1.0.0, <2.0.0`).
+/// Derived, not written into the template, so the scaffold follows the release that
+/// produced it and nobody has to remember the template at bump time.
+pub fn htl_dep_version() -> String {
+    htl_dep_version_of(env!("CARGO_PKG_VERSION"))
+}
+
+fn htl_dep_version_of(version: &str) -> String {
+    let mut parts = version.split('.');
+    let major = parts.next().unwrap_or("0");
+    if major != "0" {
+        return major.to_string();
+    }
+    format!("0.{}", parts.next().unwrap_or("0"))
+}
+
 fn t_cargo(name: &str) -> String {
+    let htl = htl_dep_version();
     format!(
         "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n# authors / license / repository: fill in yourself\n\n\
-         [dependencies]\nhtl = \"0.1\"\nanyhow = \"1\"\n"
+         [dependencies]\nhtl = \"{htl}\"\nanyhow = \"1\"\n"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::htl_dep_version_of;
+
+    #[test]
+    fn dep_version_is_the_shortest_compatible_requirement() {
+        assert_eq!(htl_dep_version_of("0.2.0"), "0.2");
+        assert_eq!(htl_dep_version_of("0.2.7"), "0.2");
+        assert_eq!(htl_dep_version_of("0.10.1"), "0.10");
+        assert_eq!(htl_dep_version_of("1.0.0"), "1");
+        assert_eq!(htl_dep_version_of("2.3.4"), "2");
+    }
 }
 
 fn t_main_rs(m: &str, lib: bool) -> String {
@@ -230,7 +263,9 @@ fn t_main_rs(m: &str, lib: bool) -> String {
             "    let g: htl::mlua::Table = h.lua().load(\"return require('{m}').greet('rust')\").eval()?;\n    println!(\"{{}}\", g.get::<String>(\"text\")?);\n"
         )
     } else {
-        "    let args: Vec<String> = std::env::args().skip(1).collect();\n    h.exec(MAIN, \"=main.tl\", &args)?;\n".to_string()
+        // `exec` hands the arguments over as `...`; `set_arg` is what fills the `arg`
+        // table main.tl reads, the way `htl run` does, so the same script runs both ways.
+        "    let args: Vec<String> = std::env::args().skip(1).collect();\n    h.set_arg(\"main.tl\", &args)?; // `arg[1]`.. as under `htl run`; `exec` alone passes `...`\n    h.exec(MAIN, \"=main.tl\", &args)?;\n".to_string()
     };
     format!(
         "//! Rust host: the Teal sources are type-checked at `cargo build` and embedded.\n\n\
