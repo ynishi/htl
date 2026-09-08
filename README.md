@@ -261,7 +261,9 @@ enums and newtypes may stand alone, and `uses = [Name]` imports every kind with
 `scripts/host.d.tl` when it expands, so `scripts/main.tl` sees
 `host:scale(p: Point, k: number): Point` and `host.Point`. Change a Rust signature
 and the next `cargo build` fails inside the `.tl` that relied on it. `&str`,
-`&[T]` and `&Record` parameters are accepted (`&mut` is not); nested types come
+`&[T]` and `&Record` parameters are accepted (`&mut` is not). Another host type comes
+in as `UserDataRef<T>` (`UserDataRefMut<T>` to mutate it, `UserDataOwned<T>` to keep it)
+and is declared as `T`, the same name a method returning it declared; nested types come
 from `#[derive(TealRecord)]` structs and enums in the same source file, types from
 other modules via `uses = [Name]` + their own `.d.tl`.
 
