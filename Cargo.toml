@@ -30,3 +30,11 @@ mlua-pkg = "0.11.0"
 anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive"] }
 walkdir = "2.5.0"
+
+# The Teal checker runs inside htl's proc macros (`include_tl!` / `include_bundle!`), and
+# the dev profile compiles a proc macro and its dependencies — htl-core, mlua, the vendored
+# Lua — under `build-override`, whose default is `opt-level = 0`. Left there, every
+# `cargo build -p embed` that touches a `.tl` runs the checker about 3x slower than the
+# release CLI does (README "Embedding in Rust"). `htl new --embed` writes the same section.
+[profile.dev.build-override]
+opt-level = 3

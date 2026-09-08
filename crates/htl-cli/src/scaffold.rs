@@ -229,7 +229,10 @@ fn t_cargo(name: &str) -> String {
     let htl = htl_dep_version();
     format!(
         "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n# authors / license / repository: fill in yourself\n\n\
-         [dependencies]\nhtl = \"{htl}\"\nanyhow = \"1\"\n"
+         [dependencies]\nhtl = \"{htl}\"\nanyhow = \"1\"\n\n\
+         # The Teal checker runs inside htl's proc macros; the dev profile would build it\n\
+         # unoptimised and make every `cargo build` that touches a .tl about 3x slower.\n\
+         [profile.dev.build-override]\nopt-level = 3\n"
     )
 }
 

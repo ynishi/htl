@@ -47,6 +47,24 @@ fn embed_scaffold_depends_on_the_htl_that_wrote_it() {
     assert!(cargo.contains(&want), "want {want} in:\n{cargo}");
 }
 
+/// The checker runs inside the proc macros, which the dev profile would otherwise build
+/// at `opt-level = 0`: the scaffold says so and sets the override.
+#[test]
+fn embed_scaffold_optimises_the_proc_macro_build() {
+    let root = scratch("opt");
+    let (ok, _, stderr) = htl(&["new", "sample", "--embed"], &root);
+    assert!(ok, "{stderr}");
+    let cargo = std::fs::read_to_string(root.join("sample/Cargo.toml")).unwrap();
+    assert!(
+        cargo.contains("[profile.dev.build-override]\nopt-level = 3\n"),
+        "want the build-override section in:\n{cargo}"
+    );
+    assert!(
+        cargo.contains("# The Teal checker runs inside htl's proc macros"),
+        "the section says why:\n{cargo}"
+    );
+}
+
 #[test]
 fn embed_scaffold_fills_arg_before_running_main() {
     let root = scratch("arg");

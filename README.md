@@ -202,6 +202,23 @@ fn main() -> anyhow::Result<()> {
 fills the `arg` table the way the `lua` CLI and `htl run` do, so the same `main.tl` runs
 unchanged both ways (`htl new --embed` writes both calls).
 
+The macros run the checker — htl-core and the vendored Lua that hosts `tl` — inside the
+proc macro, and the `dev` profile compiles a proc macro and its dependencies under
+`[profile.dev.build-override]`, whose default is `opt-level = 0`. Left there, a
+`cargo build` that touches a `.tl` runs the checker about three times slower than the
+release-built CLI: on a 30-module, 16,000-line project, 3.8 s against 1.3 s for
+`htl build` of the same closure, and 1.6 s once the host's `Cargo.toml` says
+
+```toml
+[profile.dev.build-override]
+opt-level = 3
+```
+
+`htl new --embed` writes that section; add it by hand to a host that predates it (one
+rebuild of the macro's dependencies, then every build after). The `.tl` edit loop belongs
+to `htl check` / `htl test` in any case — an edit to a leaf module costs a few
+milliseconds from the cache — and `cargo build` to the Rust host and the binary.
+
 `#[derive(TealRecord)]` is checked in one direction at build time and one at runtime:
 the `.d.tl` it writes is what the Teal side is compiled against, while a table coming
 back the other way is compared field by field as it converts. A table that does not fit
