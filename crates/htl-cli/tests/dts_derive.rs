@@ -105,6 +105,56 @@ fn dts_writes_an_enum_an_alias_and_a_nested_union() {
     assert!(err.contains(", 0 written"), "{err}");
 }
 
+/// `#[teal(rename_all)]` reaches the `.d.tl` the CLI writes from the source alone — the
+/// same text the macro writes at build — and the checker holds the renamed words: a
+/// script passing the Rust spelling is a type error before anything runs.
+#[test]
+fn dts_writes_the_renamed_words_and_check_holds_them() {
+    let root = scratch("renamed");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    );
+    write(&root.join("htl.toml"), "");
+    write(
+        &root.join("src/main.rs"),
+        "use htl::{TealRecord, host_module};\n\n\
+         #[derive(TealRecord)]\n#[teal(dts = \"types/State.d.tl\", rename_all = \"snake_case\")]\n\
+         pub enum State { Open, InReview, #[teal(name = \"done\")] Closed }\n\n\
+         pub struct Host;\n\n\
+         #[host_module(name = \"host\", dts = \"types/host.d.tl\", uses = [State])]\n\
+         impl Host {\n    pub fn advance(&self, s: State) -> State { s }\n}\n\nfn main() {}\n",
+    );
+    let out = htl(&root, &["dts"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("types/State.d.tl")).unwrap(),
+        "local enum State\n   \"open\"\n   \"in_review\"\n   \"done\"\nend\n\nreturn State\n"
+    );
+
+    write(
+        &root.join("src/main.tl"),
+        "local type host = require(\"host\")\n\nlocal h: host = nil\nprint(h:advance(\"open\"))\n",
+    );
+    let out = htl(&root, &["check", "src/main.tl", "--no-cache"]);
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("0 error(s)"), "{err}");
+
+    // The Rust spelling is not one of the words, and the checker says so.
+    write(
+        &root.join("src/bad.tl"),
+        "local type host = require(\"host\")\n\nlocal h: host = nil\nprint(h:advance(\"Open\"))\n",
+    );
+    let out = htl(&root, &["check", "src/bad.tl", "--no-cache"]);
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("State"), "{err}");
+}
+
 #[test]
 fn a_data_enum_asking_for_its_own_dts_is_refused_with_advice() {
     let root = scratch("refused");

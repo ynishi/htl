@@ -262,6 +262,7 @@ declarations rather than as `any`:
 | `struct Point { x: f64, y: f64 }` | `record Point` | a table |
 | `enum Mode { Fast, Careful }` | `enum Mode "Fast" "Careful" end` | the variant name, a string; any other string is refused: `Mode: expected one of "Fast", "Careful", got "fst"` |
 | `enum Shape { Dot, Circle(f64), Rect { w: f64, h: f64 } }` | `record Shape_Dot`, `record Shape_Circle`, `record Shape_Rect`, each `where self.kind == "…"`, and `type Shape = Shape_Dot \| Shape_Circle \| Shape_Rect` | a table with `kind`; a newtype payload under `value`, struct fields under their names; `union-exhaustive` counts the variants, and a missing field reads `Shape.Rect.h: expected number, got nil` |
+| `#[teal(rename_all = "snake_case")] enum State { Open, InReview }` | `enum State "open" "in_review" end` | the renamed word: `"open"` is accepted, `"Open"` is refused (`State: expected one of "open", "in_review", got "Open"`) |
 | `struct Label(String)` | `type Label = string` | whatever the inner type crosses as |
 | `mlua::Value` / `serde_json::Value` | `any` | unchanged: the deliberate escape hatch |
 
@@ -270,6 +271,19 @@ its variant records are reachable as `host.Shape_Circle` for `is`; a `.d.tl` mod
 its own could export only the union, so `#[teal(dts = ..)]` on one is refused. Unit
 enums and newtypes may stand alone, and `uses = [Name]` imports every kind with
 `local type Name = require("Name")`.
+
+A variant reaches Teal under its Rust name unless the enum says otherwise:
+`#[teal(rename_all = "..")]` on the enum takes serde's set — `lowercase`, `UPPERCASE`,
+`PascalCase`, `camelCase`, `snake_case`, `SCREAMING_SNAKE_CASE`, `kebab-case`,
+`SCREAMING-KEBAB-CASE`, spelled as serde spells them, so a type that is also `Serialize`
+can say the same thing twice and the two agree — and `#[teal(name = "..")]` on one
+variant overrides it. The word is what the declaration lists, what a value must say to
+cross, what the message lists when it does not, and, for a data-carrying enum, what
+`where self.kind == "in_review"` tests; the variant *records* keep their Rust names
+(`Shape_InReview`), since a Teal identifier cannot be `kebab-case`. Two variants that end
+up with the same word are refused at expansion, naming both. Record fields have no
+equivalent — they are declared under their Rust names, and `#[teal(..)]` on a field is
+refused rather than ignored.
 
 `Result<T, E>` returns raise a Lua error on `Err` by default. With
 `#[host_module(name = "store", errors = "return")]` they come back Lua-style instead:
