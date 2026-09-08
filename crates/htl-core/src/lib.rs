@@ -16,6 +16,7 @@ use mlua::{Function, Lua, Table, Value, Variadic};
 use std::path::{Path, PathBuf};
 
 pub mod bundle;
+pub mod cache;
 pub mod config;
 pub mod contract;
 #[cfg(feature = "dts")]
@@ -35,6 +36,26 @@ const TL_SRC: &str = include_str!("../vendor/tl.lua");
 const LINT_SRC: &str = include_str!("lint.lua");
 const FMT_SRC: &str = include_str!("fmt.lua");
 const PRELUDE: &str = include_str!("prelude.lua");
+
+/// A hash of the Lua the checker is made of: the vendored `tl`, the lints, the formatter
+/// and the prelude. Two builds with the same value generate the same Lua for the same
+/// input, whatever else differs about them.
+///
+/// The run cache stamps its entries with this ([`cache`]). The CLI also stamps them with
+/// its own binary, which moves on every rebuild; inside a proc macro the binary is
+/// `rustc`, which does not move when htl does, and this is what tells those entries apart
+/// from a checker that no longer exists.
+pub fn checker_identity() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        let mut h = blake3::Hasher::new();
+        for src in [TL_SRC, LINT_SRC, FMT_SRC, PRELUDE] {
+            h.update(src.as_bytes());
+            h.update(b"\0");
+        }
+        h.finalize().to_hex().to_string()
+    })
+}
 
 /// Teal version vendored into this crate.
 pub const TEAL_VERSION: &str = "0.24.8";

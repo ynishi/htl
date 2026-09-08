@@ -451,7 +451,6 @@ name = "htl-cli"
 version = "0.3.0"
 dependencies = [
  "anyhow",
- "blake3",
  "clap",
  "criterion",
  "htl",
@@ -464,10 +463,12 @@ name = "htl-core"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "criterion",
  "mlua",
  "mlua-pkg",
  "serde",
+ "serde_json",
  "syn 2.0.119",
  "toml",
  "toml_edit",

@@ -42,7 +42,7 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 | `htl test [paths] [--filter s] [--lib mod] [--coverage] [--lcov file] [--no-cache]` | `*_test.tl` and `tests/**/*.tl`, one isolated state per file; checking is replayed from `.htl/`, the run never is (see Caching) |
 | `htl fmt [paths] [--check] [--indent N]` | whitespace formatter (indentation from the syntax tree, blank lines, trailing space) |
 | `htl gen <file.tl> [-o out.lua]` | readable Lua, the escape hatch out of htl |
-| `htl build <entry.tl> -o app.hb [--debug] [--source] [--extra a,b] [--host x,y]` | link the entry's `require` closure into one bundle (see Bundles) |
+| `htl build <entry.tl> -o app.hb [--debug] [--source] [--extra a,b] [--host x,y] [--no-cache] [--explain-cache]` | link the entry's `require` closure into one bundle (see Bundles), replaying from the run cache what still holds (see Caching; the directory form is not cached) |
 | `htl bundle info <app.hb> [--format json]` | what a bundle records, without running it: format, the htl that built it, payload kind, the Lua its bytecode is for, entry, modules, host-provided names |
 | `htl pkg install` | fetch every dependency `mlua-pkg.toml` declares into `.htl/modules/` and write `mlua-pkg.lock`; the deps' own `types/` are then copied into the project's (see `types/`) |
 | `htl pkg add <name> <git> [--tag t \| --rev r \| --branch b] [--entry dir] [--target-dir dir]` | write the dependency into the manifest (`install` fetches it); a `patch_dir` the entry already declared is kept |
@@ -98,6 +98,26 @@ store and no checker was built at all, `[36/48 cached]` when some of it did, and
 when none did. `--format json` carries the same as `summary.cached` and `summary.replayed`.
 `htl init` puts `.htl/` in `.gitignore` — one line for the cache and the installed deps
 beside it; add it by hand in an existing project.
+
+`htl build` and the macros (`include_bundle!`, `include_tl!`, `include_tl_bytes!`) read
+the same store. A typed module in the closure whose entry still holds is taken from it —
+the Lua it generated, and what checking it reported — instead of being generated again,
+and `htl build` says so with the same `[cached]` / `[31/32 cached]` suffix (the directory
+form of `build`, the older snapshot, is not cached). The entries are the ones `htl test`
+writes for the modules its test files reach (`module`, holding the generated Lua beside
+what checking said), keyed by the file and the lint selection and stamped without the
+binary, so a test run feeds the next build, a build feeds the next test run, and a
+`cargo build` replays what `htl build` generated. Bytecode is never stored: compiling the
+stored Lua is milliseconds, and the bundle a replayed build writes is byte-for-byte the
+one a cold build writes. `build` takes `--no-cache` and `--explain-cache` and is always
+per-module; the macros keep a store only in a project with an `htl.toml`, and never under
+`target/` (the copy `cargo publish` verifies) or a registry checkout — `HTL_NO_CACHE=1`
+turns it off, `HTL_CACHE_DEBUG=1` has them say how much they replayed or why they did
+not. Only `htl check` bounds the store: a build or an expansion sees one closure and
+would evict the rest of the project. On a 30-module, 16,000-line project (release CLI): a
+cold build 1.3 s; nothing edited 0.03 s; one leaf edited 0.7 s, `[30/32 cached]` — the
+leaf and the entry that requires it are generated, the rest replay; the module every
+other one requires edited, 1.3 s again, since every entry read it.
 
 There are two separate controls. **Whether to cache** is `--no-cache`, which neither reads
 nor writes. **How the cache is grained** is `--cache-mode`, or `[cache] mode` in `htl.toml`

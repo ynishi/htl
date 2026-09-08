@@ -1,0 +1,4 @@
+# The example is a project of its own: this is what lets `include_tl!` / `include_bundle!`
+# keep a run cache under `examples/embed/.htl/` (gitignored), the same store `htl build`
+# and `htl check` use when run here.
+[check]

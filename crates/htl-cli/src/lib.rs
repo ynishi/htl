@@ -6,7 +6,7 @@
 //! - `htl build <dir>`        compile a tree of `.tl` into one stripped-bytecode bundle
 //! - `htl bundle info <.hb>`  print what a bundle records, without running it
 
-mod cache;
+use htl::cache;
 mod report;
 mod scaffold;
 
@@ -335,8 +335,9 @@ enum Cmd {
     },
     /// Compile a directory of .tl into a stripped-bytecode bundle
     Build {
-        /// Entry `.tl` file: it and everything it requires are bundled (a directory
-        /// bundles every `.tl` under it, the older snapshot form)
+        /// Entry `.tl` file: it and everything it requires are bundled, replaying from
+        /// the run cache what still holds (a directory bundles every `.tl` under it, the
+        /// older snapshot form, which is not cached)
         entry: PathBuf,
         #[arg(short, long, default_value = "app.hb")]
         out: PathBuf,
@@ -356,6 +357,13 @@ enum Cmd {
         /// Modules the host provides (also `[build] host`; `.d.tl`-only modules are implied)
         #[arg(long, value_delimiter = ',')]
         host: Vec<String>,
+        /// Generate every module even if its cached form still holds, and do not store
+        /// (the directory form is never cached)
+        #[arg(long)]
+        no_cache: bool,
+        /// Say why the cache was not used, and what this run did with it
+        #[arg(long)]
+        explain_cache: bool,
     },
     /// Read a `.hb` bundle without running it (see README, "Bundles")
     Bundle {
@@ -531,6 +539,8 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
             source,
             extra,
             host,
+            no_cache,
+            explain_cache,
         } => cmd_build(
             &entry,
             &out,
@@ -540,6 +550,10 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
                 source,
                 extra,
                 host,
+            },
+            BuildCache {
+                use_cache: !no_cache,
+                explain: explain_cache,
             },
         ),
         Cmd::Bundle { cmd } => match cmd {
@@ -1233,16 +1247,7 @@ fn cmd_test(
                 // Only when there is code: a file that failed to check has nothing to run,
                 // and storing that would replay an empty run as if it were a result.
                 if let (Some(c), Some(code)) = (&store, code) {
-                    let m = cache::Module {
-                        diagnostics: Vec::new(),
-                        errors: rep.check.errors.len(),
-                        warnings: rep.check.warnings.len(),
-                        lints: rep.check.lints.len(),
-                        deps: rep.check.deps.iter().map(|p| cache::normal(p)).collect(),
-                        requires: requires_json(&rep.check),
-                        code: Some(code),
-                        check: Some(check_json(&rep.check)),
-                    };
+                    let m = cache::Module::generated(&rep.check, code);
                     c.store_module(key, f, &cfg_inputs, &search_dirs(f, &root, &cfg), &m);
                     // And the modules it reached, so the next run can preload them. The
                     // checker's store is warm here, so this generates rather than re-checks.
@@ -1994,12 +1999,14 @@ fn cache_options(
                 })
         })
         .unwrap_or_default();
+    // The environment's switches are the store's own (`cache::Options::from_env`, shared
+    // with the proc macros); the flag and the config decide over them.
+    let env = cache::Options::from_env();
     cache::Options {
-        enabled,
+        enabled: enabled && env.enabled,
         mode,
-        explain: explain || std::env::var_os("HTL_CACHE_DEBUG").is_some(),
-        max_entries: std::env::var_os("HTL_CACHE_MAX_ENTRIES")
-            .and_then(|v| v.to_str().and_then(|s| s.parse().ok())),
+        explain: explain || env.explain,
+        max_entries: env.max_entries,
     }
 }
 
@@ -2017,8 +2024,7 @@ fn explain_cache(store: Option<&cache::Cache>, opts: cache::Options) {
 /// The project root a cache command works on: beside `htl.toml`, or the working directory.
 fn cache_root(path: Option<&Path>) -> Result<PathBuf> {
     let start = path.unwrap_or(Path::new("."));
-    Ok(load_config(start)?
-        .map(|(r, _, _)| r)
+    Ok(cache::root_for(start)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))))
 }
 
@@ -2053,7 +2059,8 @@ fn cmd_cache_status(path: Option<&Path>, json: bool, list_entries: bool) -> Resu
     for (kind, (n, bytes)) in &by_kind {
         let what = match *kind {
             cache::CHECK => "checked modules",
-            cache::GEN => "checked and generated (htl test)",
+            cache::GEN => "checked and generated test files (htl test)",
+            cache::MODULE => "generated modules (htl test / build, include_bundle!)",
             cache::RUN => "whole runs",
             _ => "entries this build cannot read",
         };
@@ -2307,7 +2314,7 @@ fn harvest_modules(h: &Harvest<'_>, check: &CheckInfo, test_file: &Path) {
         }
         // Nor is there anything to do for one another run already stored and that still
         // holds. Checking that costs a few hashes against a generate.
-        if let Some(m) = store.lookup(&cache::gen_key(&path, lint))
+        if let Some(m) = store.lookup(&cache::module_gen_key(&path, lint))
             && m.code.is_some()
         {
             queue.extend(resolved_requires(&m.requires));
@@ -2321,25 +2328,18 @@ fn harvest_modules(h: &Harvest<'_>, check: &CheckInfo, test_file: &Path) {
         // store — it serves the generated code and does not walk the AST again. The requires
         // are what the next run's closure is built from, so ask for them separately; the
         // check is served from the same store and costs almost nothing.
-        let c = if c.requires.is_empty() {
+        // Only when the file could have any (`htl::link::mentions_require`): a check
+        // per leaf module is the wrong price for an empty list that is right already.
+        let c = if c.requires.is_empty() && htl::link::mentions_require(&path) {
             session.checker().check(&path).unwrap_or(c)
         } else {
             c
         };
         stored += 1;
-        let m = cache::Module {
-            diagnostics: Vec::new(),
-            errors: c.errors.len(),
-            warnings: c.warnings.len(),
-            lints: c.lints.len(),
-            deps: c.deps.iter().map(|p| cache::normal(p)).collect(),
-            requires: requires_json(&c),
-            code: Some(code),
-            check: Some(check_json(&c)),
-        };
+        let m = cache::Module::generated(&c, code);
         queue.extend(resolved_requires(&m.requires));
         store.store_module(
-            &cache::gen_key(&path, lint),
+            &cache::module_gen_key(&path, lint),
             &path,
             cfg_inputs,
             &search_dirs(&path, root, cfg),
@@ -2374,7 +2374,7 @@ fn preloads_for(
         if !seen.insert(path.clone()) {
             continue;
         }
-        let Some(m) = store.lookup(&cache::gen_key(&path, lint)) else {
+        let Some(m) = store.lookup(&cache::module_gen_key(&path, lint)) else {
             absent += 1;
             continue;
         };
@@ -2394,132 +2394,20 @@ fn preloads_for(
 }
 
 /// What a test file's check reported, in the form an entry stores it.
-fn check_json(c: &CheckInfo) -> cache::CheckInfoJson {
-    cache::CheckInfoJson {
-        errors: c.errors.clone(),
-        warnings: c.warnings.clone(),
-        lints: c.lints.clone(),
-        deps: c.deps.iter().map(|p| cache::normal(p)).collect(),
-        requires: requires_json(c),
-        error_fixes: c
-            .error_fixes
-            .iter()
-            .map(|f| f.as_ref().map(report::FixJson::from_fix))
-            .collect(),
-        lint_fixes: c
-            .lint_fixes
-            .iter()
-            .map(|f| f.as_ref().map(report::FixJson::from_fix))
-            .collect(),
-        dependency_errors: c
-            .dependency_errors
-            .iter()
-            .map(|e| cache::DependencyErrorJson {
-                file: e.file.display().to_string(),
-                required_by: e.required_by.display().to_string(),
-                text: e.text.clone(),
-            })
-            .collect(),
-    }
-}
-
-/// And back, for a replayed test file.
+/// A `CheckInfo` back from the form an entry stores, for a replayed test file.
 fn check_from_json(j: &cache::CheckInfoJson) -> CheckInfo {
-    CheckInfo {
-        errors: j.errors.clone(),
-        warnings: j.warnings.clone(),
-        lints: j.lints.clone(),
-        deps: j.deps.iter().map(PathBuf::from).collect(),
-        requires: j
-            .requires
-            .iter()
-            .map(|r| htl::RequireSite {
-                module: r.module.clone(),
-                path: r.path.as_ref().map(PathBuf::from),
-                line: r.line,
-                col: r.col,
-            })
-            .collect(),
-        error_fixes: j
-            .error_fixes
-            .iter()
-            .map(|f| f.as_ref().map(fix_from_json))
-            .collect(),
-        lint_fixes: j
-            .lint_fixes
-            .iter()
-            .map(|f| f.as_ref().map(fix_from_json))
-            .collect(),
-        dependency_errors: j
-            .dependency_errors
-            .iter()
-            .map(|e| htl::DependencyError {
-                file: PathBuf::from(&e.file),
-                required_by: PathBuf::from(&e.required_by),
-                text: e.text.clone(),
-            })
-            .collect(),
-    }
-}
-
-fn fix_from_json(f: &report::FixJson) -> htl::Fix {
-    htl::Fix {
-        applicability: match f.applicability.as_str() {
-            "unsafe" => htl::Applicability::Unsafe,
-            "suggest" => htl::Applicability::Suggest,
-            // Anything else is a build that wrote a name this one does not know; treating it
-            // as the most cautious of the three is the only safe reading.
-            "safe" => htl::Applicability::Safe,
-            _ => htl::Applicability::Suggest,
-        },
-        edits: f
-            .edits
-            .iter()
-            .map(|e| htl::Edit {
-                line: e.line,
-                col: e.col,
-                end_line: e.end_line,
-                end_col: e.end_col,
-                text: e.text.clone(),
-            })
-            .collect(),
-    }
+    j.to_check()
 }
 
 /// `CheckInfo`'s requires in the form an entry stores them.
 fn requires_json(c: &CheckInfo) -> Vec<cache::RequireJson> {
-    c.requires
-        .iter()
-        .map(|r| cache::RequireJson {
-            module: r.module.clone(),
-            path: r.path.as_ref().map(|p| p.to_string_lossy().into_owned()),
-            line: r.line,
-            col: r.col,
-        })
-        .collect()
+    cache::requires_json(c)
 }
 
-/// A `CheckInfo` carrying only what the project-level lints read.
-///
-/// `require_cycles` runs over every file in the walk, replayed ones included — a cycle that
-/// closes through a module nobody edited is still a cycle — so a replayed module has to
-/// produce something that lint can read. Its diagnostics are already printed by then, and
-/// nothing downstream looks at the other fields.
+/// A `CheckInfo` carrying only what the project-level lints read (see
+/// `cache::Module::requires_only`).
 fn requires_only(m: &cache::Module) -> CheckInfo {
-    CheckInfo {
-        deps: m.deps.iter().map(PathBuf::from).collect(),
-        requires: m
-            .requires
-            .iter()
-            .map(|r| htl::RequireSite {
-                module: r.module.clone(),
-                path: r.path.as_ref().map(PathBuf::from),
-                line: r.line,
-                col: r.col,
-            })
-            .collect(),
-        ..Default::default()
-    }
+    m.requires_only()
 }
 
 /// Directories a `require` could resolve in, listed whether or not they exist yet.
@@ -2534,14 +2422,7 @@ fn search_dirs(
     root: &Path,
     cfg: &Option<(PathBuf, PathBuf, htl::config::HtlConfig)>,
 ) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = file.parent().map(Path::to_path_buf).into_iter().collect();
-    out.push(root.to_path_buf());
-    out.push(root.join("src"));
-    out.push(root.join("types"));
-    if let Some((r, _, c)) = cfg {
-        out.extend(c.search_paths(r));
-    }
-    out
+    cache::search_dirs(file, root, cfg.as_ref().map(|(r, _, c)| (r.as_path(), c)))
 }
 
 /// The one place a check reports its totals, so a replayed module and a checked one cannot
@@ -2643,25 +2524,65 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
     }
 }
 
+/// The run cache as `htl build` was asked to use it: `--no-cache` and `--explain-cache`,
+/// the two switches that mean something for one closure. There is no `--cache-mode`: a
+/// build's entries are per module, as `htl test`'s are, since a build is many modules and
+/// an edit to one should cost that one and its dependents rather than the closure.
+struct BuildCache {
+    use_cache: bool,
+    explain: bool,
+}
+
 fn cmd_build(
     entry: &Path,
     out: &Path,
     main: &str,
     mut opts: htl::link::LinkOptions,
+    cache_flags: BuildCache,
 ) -> Result<ExitCode> {
     let h = Htl::new()?;
     auto_dts(entry)?;
     apply_project(&h, entry)?;
-    if let Some((root, _, cfg)) = load_config(entry)? {
-        h.apply_config(&root, &cfg)?;
+    let cfg = load_config(entry)?;
+    if let Some((root, _, cfg)) = &cfg {
+        h.apply_config(root, cfg)?;
         opts.extra.extend(cfg.build.extra.iter().cloned());
         opts.host.extend(cfg.build.host.iter().cloned());
     }
     if entry.is_dir() {
+        if cache_flags.explain {
+            eprintln!("htl cache: the directory form of `htl build` is not cached");
+        }
         return cmd_build_dir(&h, entry, out, main, &opts);
     }
     h.add_layout_paths(entry)?;
-    let linked = htl::link::link(&h, entry, &opts)?;
+    // The store: `module` entries keyed the way `htl test` and the macros key them — the
+    // file the module is and the lint selection `htl.toml` puts in force — so a module any
+    // of them generated is one the build replays, and the reverse. Nothing is swept here:
+    // a build sees one closure, and only `htl check`, which sees the project, bounds the
+    // store (`cache.rs`).
+    let root = cache::root_for(entry)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let spec = cfg
+        .as_ref()
+        .map(|(_, _, c)| c.lint_spec())
+        .unwrap_or_default();
+    let lint = (!spec.is_empty()).then_some(spec.as_str());
+    let cache_opts = cache_options(
+        cache_flags.use_cache,
+        Some(cache::Mode::PerModule),
+        &cfg,
+        cache_flags.explain,
+    );
+    let store = cache::Cache::open(&root, cache_opts);
+    let link_store = store.as_ref().map(|c| htl::link::LinkStore {
+        cache: c,
+        lint,
+        root: &root,
+        config: cfg.as_ref().map(|(_, p, c)| (p.as_path(), c)),
+    });
+    let linked = htl::link::link_with(&h, entry, &opts, link_store)?;
+    explain_cache(store.as_ref(), cache_opts);
     for (_, c) in &linked.checks {
         print_checkinfo(c);
     }
@@ -2680,8 +2601,17 @@ fn cmd_build(
     let buf = linked.bundle()?.encode();
     fs::write(out, &buf).with_context(|| format!("writing {}", out.display()))?;
     let typed = linked.modules.iter().filter(|m| m.typed).count();
+    // The same suffix `htl check` prints: everything from the store, some of it, or
+    // nothing said when none was.
+    let cached = if typed > 0 && linked.cached == typed {
+        " [cached]".to_string()
+    } else if linked.cached > 0 {
+        format!(" [{}/{typed} cached]", linked.cached)
+    } else {
+        String::new()
+    };
     eprintln!(
-        "htl build: {} module(s) ({typed} typed, {} lua) -> {} ({} bytes{}{})",
+        "htl build: {} module(s) ({typed} typed, {} lua) -> {} ({} bytes{}{}){cached}",
         linked.modules.len(),
         linked.modules.len() - typed,
         out.display(),
