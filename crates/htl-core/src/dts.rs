@@ -7,6 +7,8 @@
 //! Type mapping is syntactic: `f64 -> number`, integers -> `integer`, `String`/`&str`
 //! -> `string`, `bool -> boolean`, `Vec<T> -> {T}`, `HashMap<K, V> -> {K:V}`,
 //! `Option<T> -> T`, `Result<T, _> -> T`, other identifiers pass through as record names.
+//! An `Option<T>` *parameter* is declared `name?: T` where Teal accepts the mark (a
+//! trailing run of them); a field and a return value stay `T`.
 //!
 //! # Why `#[derive(TealRecord)]` lowers the way it does
 //!
@@ -104,6 +106,22 @@ pub fn teal_type(ty: &Type, self_name: &str) -> Result<String, String> {
             "unsupported type for Teal mapping (use a path, reference, tuple, slice or array type)"
                 .into(),
         ),
+    }
+}
+
+/// `true` if the outermost type is `Option<..>`. A parameter of that shape is declared
+/// `name?: T`, the Teal spelling for an argument the caller may leave out.
+pub fn is_option(ty: &Type) -> bool {
+    match ty {
+        Type::Reference(r) => is_option(&r.elem),
+        Type::Paren(p) => is_option(&p.elem),
+        Type::Path(p) => p
+            .path
+            .segments
+            .last()
+            .map(|s| s.ident == "Option")
+            .unwrap_or(false),
+        _ => false,
     }
 }
 
@@ -763,6 +781,9 @@ pub struct HostParam {
     /// The Rust fn takes a reference; the wrapper passes `&value`.
     pub by_ref: bool,
     pub teal: String,
+    /// Declared `name?: T` — an `Option<T>` the Lua caller may leave out. Only a
+    /// *trailing* run of them can be marked (see `host_decl`).
+    pub optional: bool,
 }
 
 #[derive(Clone)]
@@ -864,15 +885,34 @@ pub fn host_decl(
                         _ => format!("a{}", params.len()),
                     };
                     let teal = teal_type(&owned_ty, &module)?;
-                    teal_params.push(format!("{pname}: {teal}"));
+                    let optional = is_option(&owned_ty);
                     params.push(HostParam {
                         name: pname,
                         owned_ty,
                         by_ref,
                         teal,
+                        optional,
                     });
                 }
             }
+        }
+        // `Option<T>` is declared `name?: T` — the Rust side already takes nil for it, and
+        // the declaration is what lets a Teal caller leave the argument out. Teal parses
+        // `?` only on a trailing run ("non-optional arguments cannot follow optional
+        // arguments"), so an `Option` with a required parameter after it stays required:
+        // marking it would make the whole `.d.tl` unparseable, and refusing the signature
+        // would reject a shape both Rust and the wrapper handle.
+        let mut required_seen = false;
+        for p in params.iter_mut().rev() {
+            if !p.optional {
+                required_seen = true;
+            } else if required_seen {
+                p.optional = false;
+            }
+        }
+        for p in &params {
+            let mark = if p.optional { "?" } else { "" };
+            teal_params.push(format!("{}{mark}: {}", p.name, p.teal));
         }
         if receiver.is_some() {
             teal_params.insert(0, format!("self: {module}"));
@@ -1324,6 +1364,104 @@ mod tests {
         assert_eq!(
             e,
             "TealRecord: Op::Set: a field named `kind` collides with the variant tag"
+        );
+    }
+
+    fn host_impl(src: &str) -> HostDecl {
+        let file: syn::File = syn::parse_str(src).unwrap();
+        let imp = file
+            .items
+            .iter()
+            .find_map(|i| match i {
+                Item::Impl(imp) => Some(imp),
+                _ => None,
+            })
+            .unwrap();
+        let attrs = parse_host_module_attr(&imp.attrs).unwrap().unwrap();
+        host_decl(imp, attrs, Some(&file.items)).unwrap()
+    }
+
+    /// An `Option<T>` parameter is what the caller may leave out, and `name?: T` is how
+    /// Teal says so; the field and the return keep the plain type.
+    #[test]
+    fn an_option_parameter_is_declared_optional() {
+        let hd = host_impl(
+            "pub struct Api;\n\
+             #[host_module(name = \"api\")]\n\
+             impl Api {\n\
+             \x20   pub fn find(&self, name: &str, scope: Option<String>) -> Option<String> { todo!() }\n\
+             }\n",
+        );
+        assert!(
+            hd.decl
+                .contains("find: function(self: api, name: string, scope?: string): string"),
+            "{}",
+            hd.decl
+        );
+    }
+
+    /// Several trailing `Option`s are all marked, and so is a lone one.
+    #[test]
+    fn every_trailing_option_is_marked() {
+        let hd = host_impl(
+            "pub struct Api;\n\
+             #[host_module(name = \"api\")]\n\
+             impl Api {\n\
+             \x20   pub fn page(&self, n: i64, size: Option<i64>, cursor: Option<String>) {}\n\
+             }\n",
+        );
+        assert!(
+            hd.decl
+                .contains("page: function(self: api, n: integer, size?: integer, cursor?: string)"),
+            "{}",
+            hd.decl
+        );
+    }
+
+    /// Teal parses `?` only on a trailing run ("non-optional arguments cannot follow
+    /// optional arguments"), so an `Option` with a required parameter after it is declared
+    /// as the plain type — the declaration stays parseable and says what the caller must
+    /// pass.
+    #[test]
+    fn an_option_followed_by_a_required_parameter_stays_required() {
+        let hd = host_impl(
+            "pub struct Api;\n\
+             #[host_module(name = \"api\")]\n\
+             impl Api {\n\
+             \x20   pub fn at(&self, scope: Option<String>, n: i64, tail: Option<i64>) {}\n\
+             }\n",
+        );
+        assert!(
+            hd.decl
+                .contains("at: function(self: api, scope: string, n: integer, tail?: integer)"),
+            "{}",
+            hd.decl
+        );
+    }
+
+    /// The mark is a parameter's; a record field and a return value keep the plain type
+    /// (a Teal record field is nilable by definition, and a return position has no `?`).
+    #[test]
+    fn a_field_and_a_return_are_not_marked() {
+        let rd = record_decl(&item(
+            "#[derive(TealRecord)] pub struct Outcome { pub did: String, pub blocked: Option<String> }",
+        ))
+        .unwrap();
+        assert_eq!(
+            rd.decl,
+            "local record Outcome\n   did: string\n   blocked: string\nend\n\nreturn Outcome\n"
+        );
+        let hd = host_impl(
+            "pub struct Api;\n\
+             #[host_module(name = \"api\")]\n\
+             impl Api {\n\
+             \x20   pub fn last(&self) -> Option<String> { todo!() }\n\
+             }\n",
+        );
+        assert!(
+            hd.decl.contains("last: function(self: api): string"),
+            "{}",
+            hd.decl
         );
     }
 

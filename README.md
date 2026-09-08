@@ -264,6 +264,9 @@ declarations rather than as `any`:
 | `enum Shape { Dot, Circle(f64), Rect { w: f64, h: f64 } }` | `record Shape_Dot`, `record Shape_Circle`, `record Shape_Rect`, each `where self.kind == "…"`, and `type Shape = Shape_Dot \| Shape_Circle \| Shape_Rect` | a table with `kind`; a newtype payload under `value`, struct fields under their names; `union-exhaustive` counts the variants, and a missing field reads `Shape.Rect.h: expected number, got nil` |
 | `#[teal(rename_all = "snake_case")] enum State { Open, InReview }` | `enum State "open" "in_review" end` | the renamed word: `"open"` is accepted, `"Open"` is refused (`State: expected one of "open", "in_review", got "Open"`) |
 | `struct Label(String)` | `type Label = string` | whatever the inner type crosses as |
+| `Option<T>` | `T` as a field and as a return, `name?: T` as a method parameter | nil where the Rust side has `None`: a Teal record field is nilable already and a return position has no `?`, while the mark on a parameter is what lets a caller write `api:find("x")` |
+| `Vec<T>` / `&[T]` / `[T; N]` / `VecDeque<T>` / `HashSet<T>` | `{T}` | a table used as a sequence |
+| `HashMap<K, V>` / `BTreeMap<K, V>` | `{K:V}` | a table keyed by `K` |
 | `mlua::Value` / `serde_json::Value` | `any` | unchanged: the deliberate escape hatch |
 
 A data-carrying enum is declared nested in the host module (`records = [Shape]`), where
@@ -295,7 +298,11 @@ refused rather than ignored.
 `scripts/host.d.tl` when it expands, so `scripts/main.tl` sees
 `host:scale(p: Point, k: number): Point` and `host.Point`. Change a Rust signature
 and the next `cargo build` fails inside the `.tl` that relied on it. `&str`,
-`&[T]` and `&Record` parameters are accepted (`&mut` is not). Another host type comes
+`&[T]` and `&Record` parameters are accepted (`&mut` is not). An `Option<T>` parameter is
+declared `name?: T`, so a caller may leave that argument out (or pass nil) and the method
+sees `None`; Teal parses the mark only on a trailing run of parameters, so an `Option`
+with a required parameter after it is declared as the plain `T` and has to be passed.
+Another host type comes
 in as `UserDataRef<T>` (`UserDataRefMut<T>` to mutate it, `UserDataOwned<T>` to keep it)
 and is declared as `T`, the same name a method returning it declared; nested types come
 from `#[derive(TealRecord)]` structs and enums in the same source file, types from
