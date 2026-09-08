@@ -19,6 +19,31 @@ print("host.parse_int('42'):", host.parse_int(" 42 "))
 local ok, err = pcall(host.parse_int, "nope")
 print("host.parse_int('nope') ->", ok, err)
 
+-- enum in, newtype out: a string each way, checked against host.Mode
+local label: host.Label = host:pace("Careful")
+print("host:pace('Careful'):", label)
+
+-- data enum in: a table tagged with `kind`
+print("host:area(circle 2):", host:area({ kind = "Circle", value = 2 } as host.Shape_Circle))
+print("host:area(rect 3x4):", host:area({ kind = "Rect", w = 3, h = 4 } as host.Shape_Rect))
+
+-- data enum out: narrowed with `is`, and union-exhaustive wants every variant seen
+local function describe(s: host.Shape): string
+   if s is host.Shape_Dot then
+      return "a dot"
+   elseif s is host.Shape_Circle then
+      return "a circle of radius " .. tostring(s.value)
+   elseif s is host.Shape_Rect then
+      return "a " .. tostring(s.w) .. "x" .. tostring(s.h) .. " rect"
+   end
+end
+print("host:bounding(2, 2):", describe(host:bounding(2, 2)))
+print("host:bounding(3, 4):", describe(host:bounding(3, 4)))
+
+-- a value the enum does not have is refused by name at run time
+local okm, errm = pcall(host.pace, host, "fst" as host.Mode)
+print("host:pace('fst') ->", okm, tostring(errm):match("^[^\n]*"))
+
 -- errors = "return": `value, err` instead of raising
 local store = require("store")
 local wrote, werr = store:write("htl-embed-demo.txt", "hello")

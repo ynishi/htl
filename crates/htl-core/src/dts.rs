@@ -7,12 +7,34 @@
 //! Type mapping is syntactic: `f64 -> number`, integers -> `integer`, `String`/`&str`
 //! -> `string`, `bool -> boolean`, `Vec<T> -> {T}`, `HashMap<K, V> -> {K:V}`,
 //! `Option<T> -> T`, `Result<T, _> -> T`, other identifiers pass through as record names.
+//!
+//! # Why `#[derive(TealRecord)]` lowers the way it does
+//!
+//! What each Rust shape becomes on the Teal side is tabled in README "Embedding in
+//! Rust"; this is the reasoning behind the choices there.
+//!
+//! - **A data-carrying enum is a union of `where`-discriminated records**, not one
+//!   record with every variant's fields optional. Teal refuses a plain union of two
+//!   table types (it cannot tell them apart at run time), and a `where` clause on each
+//!   record is its own answer to that; with it, `is N_A` narrows and `union-exhaustive`
+//!   counts the variants, which is the whole point of declaring a closed set.
+//! - **It can only be declared nested** (`records = [N]` in the host module). A caller
+//!   narrows with `is module.N_A`, so it needs the variant records by name, and a
+//!   `.d.tl` module exports one name — the union. `#[teal(dts = ..)]` on one is refused
+//!   with that advice rather than writing a declaration nobody can narrow against.
+//! - **`uses` imports with `local type X = require("X")`**. A module whose value is only
+//!   a type (an alias, an enum) is "abstract" to Teal when required as a value, and the
+//!   `type` form imports a record just the same, so one form serves every kind.
+//! - **The tag is `kind`, the newtype payload is `value`**, and neither is configurable:
+//!   a name that differs per host is a name the reader has to look up, and these are
+//!   what Teal's own `where` examples use. Variant names are written as in Rust, the way
+//!   record fields are; a struct variant may not carry a field named `kind`.
 
 use std::path::{Path, PathBuf};
 use syn::punctuated::Punctuated;
 use syn::{
-    Attribute, Expr, FnArg, GenericArgument, ImplItem, Item, ItemImpl, ItemStruct, Lit, Meta, Pat,
-    PathArguments, ReturnType, Token, Type,
+    Attribute, Expr, FnArg, GenericArgument, ImplItem, Item, ItemEnum, ItemImpl, ItemStruct, Lit,
+    Meta, Pat, PathArguments, ReturnType, Token, Type,
 };
 
 // ---------------------------------------------------------------- type mapping
@@ -94,9 +116,10 @@ pub struct TealAttrs {
     pub name: Option<String>,
     /// `.d.tl` output path, relative to the crate's `CARGO_MANIFEST_DIR`.
     pub dts: Option<String>,
-    /// Record types declared in their own `.d.tl` module: emits `local X = require("X")`.
+    /// Types declared in their own `.d.tl` module: emits `local type X = require("X")`.
     pub uses: Vec<String>,
-    /// Record types (structs in the same source file) nested inside the module record.
+    /// `#[derive(TealRecord)]` types (structs and enums in the same source file) nested
+    /// inside the module record.
     pub records: Vec<String>,
     /// How `Result<T, E>` returns reach Lua: `"raise"` (default; `Err` becomes a Lua
     /// error) or `"return"` (`T, string` / `boolean, string` in the `io.open` style).
@@ -189,7 +212,7 @@ fn parse_named_attr(attrs: &[Attribute], name: &str) -> Result<Option<TealAttrs>
     parse_attr_metas(metas).map(Some)
 }
 
-/// `#[teal(...)]` on a struct (absent -> defaults).
+/// `#[teal(...)]` on a struct or enum (absent -> defaults).
 pub fn parse_teal_attrs(attrs: &[Attribute]) -> Result<TealAttrs, String> {
     Ok(parse_named_attr(attrs, "teal")?.unwrap_or_default())
 }
@@ -218,10 +241,14 @@ pub fn derives_teal_record(attrs: &[Attribute]) -> bool {
     })
 }
 
+/// `local type X = require("X")` per `uses` entry. The `type` form is the one that
+/// imports an alias or an enum — a module whose value is only a type is "abstract" to
+/// Teal when required as a value — and it imports a record just the same, so one form
+/// serves every kind a `.d.tl` can return.
 fn uses_header(uses: &[String]) -> String {
     let mut s = String::new();
     for u in uses {
-        s.push_str(&format!("local {u} = require(\"{u}\")\n"));
+        s.push_str(&format!("local type {u} = require(\"{u}\")\n"));
     }
     if !uses.is_empty() {
         s.push('\n');
@@ -231,14 +258,60 @@ fn uses_header(uses: &[String]) -> String {
 
 // ---------------------------------------------------------------- records
 
+/// The Teal shape a `#[derive(TealRecord)]` item lowers to (see the module docs).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordKind {
+    /// A struct with named fields: `record N` with `(field, teal type)` in declaration
+    /// order, crossing as a plain table.
+    Record { fields: Vec<(String, String)> },
+    /// `struct N(T)`: `type N = T`, crossing as `T` does.
+    Alias { inner: String },
+    /// An enum of unit variants: `enum N "A" "B" end`, crossing as the variant name.
+    Enum { variants: Vec<String> },
+    /// An enum with a data variant: one `where`-discriminated record per variant and
+    /// `type N = N_A | N_B`, crossing as a table whose `kind` names the variant.
+    Union { variants: Vec<UnionVariant> },
+}
+
+/// One variant of a data-carrying enum.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnionVariant {
+    pub name: String,
+    pub shape: VariantShape,
+}
+
+/// What a variant carries, and so which fields its record has beyond `kind`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VariantShape {
+    /// `A`: only `kind`.
+    Unit,
+    /// `B(T)`: `value: T`.
+    Newtype(String),
+    /// `C { x: U, .. }`: the fields as declared.
+    Struct(Vec<(String, String)>),
+}
+
 #[derive(Debug, Clone)]
 pub struct RecordDecl {
     pub name: String,
-    /// `(field, teal type)` in declaration order.
-    pub fields: Vec<(String, String)>,
-    /// Full module text: `local record NAME ... end  return NAME`.
+    pub kind: RecordKind,
+    /// Full module text: `local record NAME ... end  return NAME` (or the `enum` /
+    /// `type` form; a union's is the top-level form, which only `DECL` ever holds).
     pub decl: String,
     pub attrs: TealAttrs,
+}
+
+impl RecordDecl {
+    /// `record N` / `enum N` / `type N`: how the declaration is named in reports, by the
+    /// Teal keyword that declares `N` (a data-carrying enum is a `type`, the union).
+    pub fn what(&self) -> String {
+        let kw = match self.kind {
+            RecordKind::Record { .. } => "record",
+            RecordKind::Alias { .. } | RecordKind::Union { .. } => "type",
+            RecordKind::Enum { .. } => "enum",
+        };
+        format!("{kw} {}", self.name)
+    }
 }
 
 fn record_fields(
@@ -254,36 +327,182 @@ fn record_fields(
     Ok(out)
 }
 
-/// Declaration for a `#[derive(TealRecord)]` struct.
-pub fn record_decl(item: &ItemStruct) -> Result<RecordDecl, String> {
-    let attrs = parse_teal_attrs(&item.attrs)?;
-    let name = attrs.name.clone().unwrap_or_else(|| item.ident.to_string());
-    let syn::Fields::Named(fields) = &item.fields else {
-        return Err("TealRecord: only structs with named fields are supported".into());
-    };
-    let fields = record_fields(fields, &name)?;
-    let mut decl = uses_header(&attrs.uses);
-    decl.push_str(&format!("local record {name}\n"));
-    for (f, t) in &fields {
-        decl.push_str(&format!("   {f}: {t}\n"));
+/// The kind a struct lowers to: named fields -> record, one unnamed field -> alias.
+fn struct_kind(st: &ItemStruct, name: &str) -> Result<RecordKind, String> {
+    match &st.fields {
+        syn::Fields::Named(fields) => Ok(RecordKind::Record {
+            fields: record_fields(fields, name)?,
+        }),
+        syn::Fields::Unnamed(u) if u.unnamed.len() == 1 => Ok(RecordKind::Alias {
+            inner: teal_type(&u.unnamed[0].ty, name)?,
+        }),
+        syn::Fields::Unnamed(_) => Err(format!(
+            "TealRecord: `{name}` is a tuple struct with more than one field; only a newtype (`struct {name}(T)`) lowers to a Teal type"
+        )),
+        syn::Fields::Unit => Err(format!(
+            "TealRecord: `{name}` is a unit struct and has nothing to declare"
+        )),
     }
-    decl.push_str(&format!("end\n\nreturn {name}\n"));
+}
+
+/// The kind an enum lowers to: all unit variants -> `enum`, otherwise a union of
+/// `where`-discriminated records.
+fn enum_kind(en: &ItemEnum, name: &str) -> Result<RecordKind, String> {
+    if en.variants.is_empty() {
+        return Err(format!(
+            "TealRecord: `{name}` has no variants and has nothing to declare"
+        ));
+    }
+    if en
+        .variants
+        .iter()
+        .all(|v| matches!(v.fields, syn::Fields::Unit))
+    {
+        return Ok(RecordKind::Enum {
+            variants: en.variants.iter().map(|v| v.ident.to_string()).collect(),
+        });
+    }
+    let mut variants = Vec::new();
+    for v in &en.variants {
+        let vname = v.ident.to_string();
+        let shape = match &v.fields {
+            syn::Fields::Unit => VariantShape::Unit,
+            syn::Fields::Unnamed(u) if u.unnamed.len() == 1 => {
+                VariantShape::Newtype(teal_type(&u.unnamed[0].ty, name)?)
+            }
+            syn::Fields::Unnamed(_) => {
+                return Err(
+                    "TealRecord: tuple variants with more than one field are not supported"
+                        .to_string(),
+                );
+            }
+            syn::Fields::Named(fields) => {
+                // The tag is `kind`, on every variant record; a payload field of that
+                // name would be declared twice and could not survive a round trip.
+                if fields
+                    .named
+                    .iter()
+                    .any(|f| f.ident.as_ref().is_some_and(|i| i == "kind"))
+                {
+                    return Err(format!(
+                        "TealRecord: {name}::{vname}: a field named `kind` collides with the variant tag"
+                    ));
+                }
+                VariantShape::Struct(record_fields(fields, name)?)
+            }
+        };
+        variants.push(UnionVariant { name: vname, shape });
+    }
+    Ok(RecordKind::Union { variants })
+}
+
+/// Name, attributes and kind of a `#[derive(TealRecord)]` item.
+fn record_parts(item: &Item) -> Result<(String, TealAttrs, RecordKind), String> {
+    let (attrs, ident) = match item {
+        Item::Struct(st) => (parse_teal_attrs(&st.attrs)?, st.ident.to_string()),
+        Item::Enum(en) => (parse_teal_attrs(&en.attrs)?, en.ident.to_string()),
+        _ => return Err("TealRecord: only structs and enums are supported".into()),
+    };
+    let name = attrs.name.clone().unwrap_or(ident);
+    let kind = match item {
+        Item::Struct(st) => struct_kind(st, &name)?,
+        Item::Enum(en) => enum_kind(en, &name)?,
+        _ => unreachable!(),
+    };
+    Ok((name, attrs, kind))
+}
+
+/// Field lines of a variant record: `kind` first, then what the variant carries.
+fn variant_fields(v: &UnionVariant) -> Vec<(String, String)> {
+    let mut fields = vec![("kind".to_string(), "string".to_string())];
+    match &v.shape {
+        VariantShape::Unit => {}
+        VariantShape::Newtype(t) => fields.push(("value".to_string(), t.clone())),
+        VariantShape::Struct(fs) => fields.extend(fs.iter().cloned()),
+    }
+    fields
+}
+
+/// The declaration at `indent` (`""` for a module of its own, `"   "` nested in a host
+/// module record). `local` prefixes top-level declarations only.
+fn kind_decl(name: &str, kind: &RecordKind, indent: &str) -> String {
+    let local = if indent.is_empty() { "local " } else { "" };
+    let inner = format!("{indent}   ");
+    let mut s = String::new();
+    match kind {
+        RecordKind::Record { fields } => {
+            s.push_str(&format!("{indent}{local}record {name}\n"));
+            for (f, t) in fields {
+                s.push_str(&format!("{inner}{f}: {t}\n"));
+            }
+            s.push_str(&format!("{indent}end\n"));
+        }
+        RecordKind::Alias { inner: t } => {
+            s.push_str(&format!("{indent}{local}type {name} = {t}\n"));
+        }
+        RecordKind::Enum { variants } => {
+            s.push_str(&format!("{indent}{local}enum {name}\n"));
+            for v in variants {
+                s.push_str(&format!("{inner}\"{v}\"\n"));
+            }
+            s.push_str(&format!("{indent}end\n"));
+        }
+        RecordKind::Union { variants } => {
+            for v in variants {
+                s.push_str(&format!("{indent}{local}record {name}_{}\n", v.name));
+                s.push_str(&format!("{inner}where self.kind == \"{}\"\n", v.name));
+                for (f, t) in variant_fields(v) {
+                    s.push_str(&format!("{inner}{f}: {t}\n"));
+                }
+                s.push_str(&format!("{indent}end\n"));
+            }
+            let members: Vec<String> = variants
+                .iter()
+                .map(|v| format!("{name}_{}", v.name))
+                .collect();
+            s.push_str(&format!(
+                "{indent}{local}type {name} = {}\n",
+                members.join(" | ")
+            ));
+        }
+    }
+    s
+}
+
+/// Declaration for a `#[derive(TealRecord)]` struct or enum.
+///
+/// The text is the module form (`local ... return NAME`). A data-carrying enum gets it
+/// too — it is what its `DECL` constant holds — but asking for it as a file
+/// (`#[teal(dts = ..)]`) is refused: see the module docs for why it has to be nested.
+pub fn record_decl(item: &Item) -> Result<RecordDecl, String> {
+    let (name, attrs, kind) = record_parts(item)?;
+    if attrs.dts.is_some() && matches!(kind, RecordKind::Union { .. }) {
+        return Err(format!(
+            "TealRecord: `{name}` has data-carrying variants and cannot be a `.d.tl` module of its own \
+             (a caller narrows it with `is {name}_<Variant>`, and a module exports one name); \
+             drop `dts` and declare it nested in the host module with `records = [{name}]`"
+        ));
+    }
+    let mut decl = uses_header(&attrs.uses);
+    decl.push_str(&kind_decl(&name, &kind, ""));
+    decl.push_str(&format!("\nreturn {name}\n"));
     Ok(RecordDecl {
         name,
-        fields,
+        kind,
         decl,
         attrs,
     })
 }
 
-/// Find a struct by name in a file's items (recursing into inline modules).
-pub fn find_struct<'a>(items: &'a [Item], name: &str) -> Option<&'a ItemStruct> {
+/// Find a struct or enum by name in a file's items (recursing into inline modules).
+pub fn find_item<'a>(items: &'a [Item], name: &str) -> Option<&'a Item> {
     for it in items {
         match it {
-            Item::Struct(s) if s.ident == name => return Some(s),
+            Item::Struct(s) if s.ident == name => return Some(it),
+            Item::Enum(e) if e.ident == name => return Some(it),
             Item::Mod(m) => {
                 if let Some((_, inner)) = &m.content
-                    && let Some(s) = find_struct(inner, name)
+                    && let Some(s) = find_item(inner, name)
                 {
                     return Some(s);
                 }
@@ -308,23 +527,25 @@ fn nested_record_decls(
     })?;
     let mut out = Vec::new();
     for name in names {
-        let st = find_struct(items, name).ok_or_else(|| {
+        let it = find_item(items, name).ok_or_else(|| {
             format!(
-                "host_module: struct `{name}` not found in this file (records must live in the same file; \
+                "host_module: `{name}` not found in this file (records must live in the same file; \
                  use `uses` for records from other modules)"
             )
         })?;
-        let syn::Fields::Named(fields) = &st.fields else {
+        // The nested name is the Rust one: `records = [X]` names the item, and the
+        // host's signatures say `X` too. A `#[teal(name = ..)]` rename could satisfy
+        // neither — and `Self` inside the item would already have been mapped to the
+        // rename — so it is refused rather than half-applied.
+        let (renamed, attrs, kind) = record_parts(it)?;
+        if attrs.name.is_some() {
             return Err(format!(
-                "host_module: `{name}` must be a struct with named fields"
+                "host_module: `{name}` is nested through `records` and cannot be renamed \
+                 (`#[teal(name = \"{renamed}\")]`); to declare it as `{renamed}`, give it a \
+                 `.d.tl` of its own (`#[teal(dts = ..)]`) and import it with `uses = [{renamed}]`"
             ));
-        };
-        let mut s = format!("   record {name}\n");
-        for (f, t) in record_fields(fields, name)? {
-            s.push_str(&format!("      {f}: {t}\n"));
         }
-        s.push_str("   end\n");
-        out.push(s);
+        out.push(kind_decl(name, &kind, "   "));
     }
     Ok(out)
 }
@@ -509,7 +730,8 @@ pub struct Generated {
     pub target: PathBuf,
     pub text: String,
     pub source: PathBuf,
-    /// `host_module <module>` / `record <Name>` for reporting.
+    /// `host_module <module>`, or `RecordDecl::what` (`record <Name>` / `enum <Name>` /
+    /// `type <Name>`), for reporting.
     pub what: String,
 }
 
@@ -547,14 +769,16 @@ pub fn scan_rust_file(path: &Path, manifest_dir: &Path) -> Result<Vec<Generated>
                     }
                 }
             }
-            Item::Struct(st) if derives_teal_record(&st.attrs) => {
-                let rd = record_decl(st)?;
+            Item::Struct(ItemStruct { attrs, .. }) | Item::Enum(ItemEnum { attrs, .. })
+                if derives_teal_record(attrs) =>
+            {
+                let rd = record_decl(it)?;
                 if let Some(dts) = &rd.attrs.dts {
                     out.push(Generated {
                         target: manifest_dir.join(dts),
                         text: rd.decl.clone(),
                         source: path.to_path_buf(),
-                        what: format!("record {}", rd.name),
+                        what: rd.what(),
                     });
                 }
             }
@@ -612,4 +836,196 @@ pub fn generate_crate(manifest_dir: &Path) -> Result<Vec<(PathBuf, bool)>, Strin
         }
     }
     Ok(results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(src: &str) -> Item {
+        syn::parse_str(src).unwrap()
+    }
+
+    #[test]
+    fn a_struct_with_named_fields_is_a_record_as_before() {
+        let rd = record_decl(&item(
+            "#[derive(TealRecord)] pub struct Point { pub x: f64, pub y: f64 }",
+        ))
+        .unwrap();
+        assert_eq!(rd.what(), "record Point");
+        assert_eq!(
+            rd.decl,
+            "local record Point\n   x: number\n   y: number\nend\n\nreturn Point\n"
+        );
+    }
+
+    #[test]
+    fn a_newtype_is_a_type_alias_of_its_inner_type() {
+        let rd = record_decl(&item("#[derive(TealRecord)] pub struct Sql(pub String);")).unwrap();
+        assert_eq!(
+            rd.kind,
+            RecordKind::Alias {
+                inner: "string".into()
+            }
+        );
+        assert_eq!(rd.what(), "type Sql");
+        assert_eq!(rd.decl, "local type Sql = string\n\nreturn Sql\n");
+    }
+
+    #[test]
+    fn a_unit_enum_is_a_teal_enum_of_its_variant_names() {
+        let rd = record_decl(&item(
+            "#[derive(TealRecord)] pub enum Mode { Fast, Careful }",
+        ))
+        .unwrap();
+        assert_eq!(rd.what(), "enum Mode");
+        assert_eq!(
+            rd.decl,
+            "local enum Mode\n   \"Fast\"\n   \"Careful\"\nend\n\nreturn Mode\n"
+        );
+    }
+
+    #[test]
+    fn a_data_enum_is_a_union_of_where_records() {
+        let rd = record_decl(&item(
+            "#[derive(TealRecord)] pub enum Shape { Dot, Circle(f64), Rect { w: f64, h: f64 } }",
+        ))
+        .unwrap();
+        assert_eq!(rd.what(), "type Shape");
+        assert_eq!(
+            rd.decl,
+            "local record Shape_Dot\n   where self.kind == \"Dot\"\n   kind: string\nend\n\
+             local record Shape_Circle\n   where self.kind == \"Circle\"\n   kind: string\n   value: number\nend\n\
+             local record Shape_Rect\n   where self.kind == \"Rect\"\n   kind: string\n   w: number\n   h: number\nend\n\
+             local type Shape = Shape_Dot | Shape_Circle | Shape_Rect\n\nreturn Shape\n"
+        );
+    }
+
+    #[test]
+    fn a_data_enum_refuses_to_be_a_module_of_its_own() {
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] #[teal(dts = \"types/Shape.d.tl\")] pub enum Shape { Dot, Circle(f64) }",
+        ))
+        .unwrap_err();
+        assert!(e.contains("records = [Shape]"), "{e}");
+        assert!(e.contains("is Shape_<Variant>"), "{e}");
+    }
+
+    #[test]
+    fn a_tuple_variant_with_two_fields_is_refused() {
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] pub enum Pair { Two(f64, f64) }",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "TealRecord: tuple variants with more than one field are not supported"
+        );
+    }
+
+    #[test]
+    fn a_tuple_struct_with_two_fields_and_a_unit_struct_are_refused() {
+        let e = record_decl(&item("#[derive(TealRecord)] pub struct P(f64, f64);")).unwrap_err();
+        assert!(e.contains("newtype"), "{e}");
+        let e = record_decl(&item("#[derive(TealRecord)] pub struct U;")).unwrap_err();
+        assert!(e.contains("unit struct"), "{e}");
+    }
+
+    #[test]
+    fn uses_imports_with_local_type() {
+        let rd = record_decl(&item(
+            "#[derive(TealRecord)] #[teal(uses = [Mode])] pub struct Run { pub mode: Mode }",
+        ))
+        .unwrap();
+        assert!(
+            rd.decl
+                .starts_with("local type Mode = require(\"Mode\")\n\nlocal record Run\n"),
+            "{}",
+            rd.decl
+        );
+    }
+
+    /// Every kind nested in a host module: what `records = [..]` writes, indented, with
+    /// the variant records reachable as `host.Shape_Circle`.
+    #[test]
+    fn every_kind_nests_in_a_host_module() {
+        let file: syn::File = syn::parse_str(
+            "#[derive(TealRecord)] pub enum Mode { Fast, Careful }\n\
+             #[derive(TealRecord)] pub struct Label(pub String);\n\
+             #[derive(TealRecord)] pub enum Shape { Dot, Circle(f64) }\n\
+             #[derive(TealRecord)] pub struct Point { pub x: f64 }\n\
+             pub struct Host;\n\
+             #[host_module(name = \"host\", records = [Mode, Label, Shape, Point])]\n\
+             impl Host {\n    pub fn area(&self, s: Shape, m: Mode) -> Label { todo!() }\n}\n",
+        )
+        .unwrap();
+        let imp = file
+            .items
+            .iter()
+            .find_map(|i| match i {
+                Item::Impl(imp) => Some(imp),
+                _ => None,
+            })
+            .unwrap();
+        let attrs = parse_host_module_attr(&imp.attrs).unwrap().unwrap();
+        let hd = host_decl(imp, attrs, Some(&file.items)).unwrap();
+        assert_eq!(
+            hd.decl,
+            "local record host\n\
+             \x20  enum Mode\n      \"Fast\"\n      \"Careful\"\n   end\n\
+             \x20  type Label = string\n\
+             \x20  record Shape_Dot\n      where self.kind == \"Dot\"\n      kind: string\n   end\n\
+             \x20  record Shape_Circle\n      where self.kind == \"Circle\"\n      kind: string\n      value: number\n   end\n\
+             \x20  type Shape = Shape_Dot | Shape_Circle\n\
+             \x20  record Point\n      x: number\n   end\n\
+             \x20  area: function(self: host, s: Shape, m: Mode): Label\n\
+             end\n\nreturn host\n"
+        );
+    }
+
+    /// `kind` is the tag on every variant record; a payload field of that name would be
+    /// declared twice and could not come back as the value that went in.
+    #[test]
+    fn a_struct_variant_with_a_field_named_kind_is_refused() {
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] pub enum Op { Get, Set { kind: String, n: i64 } }",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "TealRecord: Op::Set: a field named `kind` collides with the variant tag"
+        );
+    }
+
+    /// A nested item is declared under its Rust name (the host's signatures say that
+    /// name), so a `#[teal(name = ..)]` on it can only be refused, with the standalone
+    /// route named.
+    #[test]
+    fn a_renamed_item_cannot_be_nested() {
+        let file: syn::File = syn::parse_str(
+            "#[derive(TealRecord)] #[teal(name = \"Pt\")] pub struct Point { pub x: f64, pub next: Option<Box<Self>> }\n\
+             pub struct Host;\n\
+             #[host_module(name = \"host\", records = [Point])]\n\
+             impl Host {\n    pub fn origin(&self) -> Point { todo!() }\n}\n",
+        )
+        .unwrap();
+        let imp = file
+            .items
+            .iter()
+            .find_map(|i| match i {
+                Item::Impl(imp) => Some(imp),
+                _ => None,
+            })
+            .unwrap();
+        let attrs = parse_host_module_attr(&imp.attrs).unwrap().unwrap();
+        let e = match host_decl(imp, attrs, Some(&file.items)) {
+            Ok(hd) => panic!("rename accepted: {}", hd.decl),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("`Point` is nested through `records` and cannot be renamed")
+                && e.contains("uses = [Pt]"),
+            "{e}"
+        );
+    }
 }

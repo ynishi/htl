@@ -2,10 +2,14 @@
 //!
 //! - `include_tl!` / `include_tl_bytes!` type-check each `.tl` at `cargo build` time and
 //!   embed generated Lua (source or stripped bytecode). No `.tl` is read at runtime.
-//! - `#[derive(TealRecord)]` mirrors `Point` as a Teal record (plain table both ways).
-//! - `#[host_module(records = [Point])]` turns the plain `impl Host` into a `UserData` impl
-//!   and writes `scripts/host.d.tl` with `Point` nested inside the module record, so Teal
-//!   sees the Rust API with its real signatures as `host.Point`.
+//! - `#[derive(TealRecord)]` mirrors `Point` as a Teal record (plain table both ways),
+//!   `Mode` as a Teal `enum` (a string both ways), `Label` as a `type` alias of `string`,
+//!   and `Shape` — an enum carrying data — as a union of `where`-discriminated records
+//!   (a table with a `kind` field).
+//! - `#[host_module(records = [Point, Mode, Label, Shape])]` turns the plain `impl Host`
+//!   into a `UserData` impl and writes `scripts/host.d.tl` with those nested inside the
+//!   module record, so Teal sees the Rust API with its real signatures as `host.Point`,
+//!   `host.Mode`, `host.Label`, `host.Shape` and narrows with `is host.Shape_Circle`.
 
 use anyhow::Result;
 use htl::{Htl, TealRecord, host_module, include_tl, include_tl_bytes};
@@ -17,11 +21,32 @@ pub struct Point {
     pub y: f64,
 }
 
+/// A closed set: `host.Mode` is a Teal `enum`, so `host:pace("fst")` is a check error
+/// and a `"fst"` that reaches the host at run time is refused by name.
+#[derive(TealRecord, Debug, Clone, Copy, PartialEq)]
+pub enum Mode {
+    Fast,
+    Careful,
+}
+
+/// A newtype: `host.Label` is `type Label = string`, and crosses as the string.
+#[derive(TealRecord, Debug, Clone)]
+pub struct Label(pub String);
+
+/// An enum with data: one record per variant (`host.Shape_Dot`, `host.Shape_Circle`,
+/// `host.Shape_Rect`) discriminated on `kind`, and `host.Shape` their union.
+#[derive(TealRecord, Debug, Clone, PartialEq)]
+pub enum Shape {
+    Dot,
+    Circle(f64),
+    Rect { w: f64, h: f64 },
+}
+
 pub struct Host {
     started: Instant,
 }
 
-#[host_module(name = "host", dts = "scripts/host.d.tl", records = [Point])]
+#[host_module(name = "host", dts = "scripts/host.d.tl", records = [Point, Mode, Label, Shape])]
 impl Host {
     /// Seconds since the Unix epoch.
     pub fn now(&self) -> f64 {
@@ -62,6 +87,34 @@ impl Host {
     /// `Result` return: `Err` becomes a Lua error.
     pub fn parse_int(s: &str) -> Result<i64, std::num::ParseIntError> {
         s.trim().parse()
+    }
+
+    /// Enum in, newtype out: Teal passes `"Fast"` / `"Careful"` and gets a string back.
+    pub fn pace(&self, m: Mode) -> Label {
+        Label(match m {
+            Mode::Fast => "hurry".to_string(),
+            Mode::Careful => "take your time".to_string(),
+        })
+    }
+
+    /// Data enum in: Teal builds `{ kind = "Circle", value = 2 }` and the host matches.
+    pub fn area(&self, s: Shape) -> f64 {
+        match s {
+            Shape::Dot => 0.0,
+            Shape::Circle(r) => std::f64::consts::PI * r * r,
+            Shape::Rect { w, h } => w * h,
+        }
+    }
+
+    /// Data enum out: Teal narrows the result with `is host.Shape_Rect`.
+    pub fn bounding(&self, w: f64, h: f64) -> Shape {
+        if w == h && w == 0.0 {
+            Shape::Dot
+        } else if w == h {
+            Shape::Circle(w / 2.0)
+        } else {
+            Shape::Rect { w, h }
+        }
     }
 }
 
