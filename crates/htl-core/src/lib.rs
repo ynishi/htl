@@ -20,6 +20,8 @@ pub mod cache;
 pub mod config;
 pub mod contract;
 #[cfg(feature = "dts")]
+pub mod dep_dts;
+#[cfg(feature = "dts")]
 pub mod dts;
 pub mod fix;
 pub mod link;
@@ -1417,6 +1419,31 @@ fn read_requires(list: &Table) -> Result<Vec<RequireSite>> {
 pub fn is_tl_source(p: &Path) -> bool {
     let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
     p.is_file() && name.ends_with(".tl") && !name.ends_with(".d.tl")
+}
+
+/// The note `htl dts` writes beside the declarations it materialises from a dependency
+/// crate, in `types/<crate>/`. See [`dep_dts`].
+pub const DEP_TYPES_NOTE: &str = ".htl-dts";
+
+/// The immediate subdirectories of `types/` holding declarations materialised from a
+/// dependency, in name order.
+///
+/// They go on the search path in their own right, so that a declaration keeps the module
+/// name it was written under whatever the crate shipping it is called: `htl-mq`'s
+/// `mq.d.tl` is `require("mq")`, not `require("htl-mq.mq")`. A directory a person laid out
+/// under `types/` carries no note and goes on meaning what it has always meant — the path
+/// below `types/` is the module name, as `socket/http.d.tl` is `require("socket.http")`.
+pub fn materialised_types_dirs(types: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(types) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && p.join(DEP_TYPES_NOTE).is_file())
+        .collect();
+    out.sort();
+    out
 }
 
 /// `true` for `foo.d.tl`: a declaration, with the implementation somewhere else.

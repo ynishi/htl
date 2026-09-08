@@ -1,0 +1,10 @@
+# A crate that registers a module in its user's Lua state, and so ships the declaration
+# of that module: the file its own `#[host_module]` writes, named here so that every
+# project depending on this crate can materialise it under `types/`.
+[package]
+name = "dep"
+version = "0.1.0"
+edition = "2024"
+
+[package.metadata.htl]
+dts = ["dts/dep.d.tl"]
