@@ -440,3 +440,76 @@ fn a_library_without_tests_field_still_reports() {
     assert_eq!((rep.passed, rep.failed), (2, 0), "{:?}", rep.failures);
     assert!(rep.tests.is_empty());
 }
+
+#[test]
+fn every_form_the_readme_documents_type_checks_and_runs() {
+    // test.d.tl is the promise and test.lua is the runtime, and nothing was holding the
+    // two to the README: `rng` was declared `function(integer, integer)` for a whole
+    // release while all three of the documented spellings ran, so `rng()` and `rng(m)`
+    // were refused by the checker (#113). One file that calls every documented form
+    // turns that kind of drift into a red test, because a type error fails the file.
+    //
+    // `run` and `configure` are the runner's side of the contract, not a test's, and are
+    // exercised by every other test here; everything a test file is documented to call
+    // is below.
+    let dir = scratch("documented-surface");
+    write(
+        &dir.join("s_test.tl"),
+        "local t = require(\"htl.test\")\n\
+         local function valid(n: integer): boolean, string\n\
+            if n > 0 then return true, \"\" end\n\
+            return false, \"no door\"\n\
+         end\n\
+         t.describe(\"the documented surface\", function()\n\
+            t.it(\"rng has math.random's three forms\", function()\n\
+               local rng = t.rng()\n\
+               local zero = rng()\n\
+               local one = rng(10)\n\
+               local two = rng(1, 10)\n\
+               t.expect(zero >= 0 and zero < 1):to_be_truthy()\n\
+               t.expect(one >= 1 and one <= 10):to_be_truthy()\n\
+               t.expect(two >= 1 and two <= 10):to_be_truthy()\n\
+            end)\n\
+            t.it(\"every matcher the README lists\", function()\n\
+               t.expect(2):to_equal(2)\n\
+               t.expect(2):to_not_equal(3)\n\
+               t.expect(\"a value\"):to_be_truthy()\n\
+               t.expect(false):to_be_falsy()\n\
+               t.expect(nil):to_be_nil()\n\
+               t.expect(0):to_not_be_nil()\n\
+               t.expect(0.5):to_be_close(0.5)\n\
+               t.expect(0.5):to_be_close(0.6, 0.2)\n\
+               t.expect(3):to_be_greater_than(2)\n\
+               t.expect(3):to_be_less_than(4)\n\
+               t.expect(3):to_be_at_least(3)\n\
+               t.expect(3):to_be_at_most(3)\n\
+               t.expect(\"costs 12 gold\"):to_contain(\"gold\")\n\
+               t.expect({ \"a\", \"b\" }):to_contain(\"b\")\n\
+               t.expect(\"costs 12 gold\"):to_not_contain(\"mana\")\n\
+               t.expect(\"costs 12 gold\"):to_match(\"%d+ gold\")\n\
+               t.expect(\"costs 12 gold\"):to_not_match(\"%d+ mana\")\n\
+               t.expect({ 1, 2, 3 }):to_have_length(3)\n\
+               t.expect(function() error(\"boom\") end):to_error()\n\
+               t.expect(function() error(\"boom\") end):to_error(\"boom\")\n\
+               t.expect(\"a rendered line\"):to_match_snapshot(\"one line\")\n\
+               t.expect_all(valid(0)):to_equal(false, \"no door\")\n\
+            end)\n\
+            t.it(\"count sees the tests registered so far\", function()\n\
+               t.expect(t.count()):to_be_greater_than(0)\n\
+            end)\n\
+         end)\n",
+    );
+    let rep = run_test_file(
+        &dir.join("s_test.tl"),
+        None,
+        "htl.test",
+        None,
+        &RunOptions {
+            seed: Some(7),
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(rep.check.ok(), "{:?}", rep.check.errors);
+    assert_eq!((rep.passed, rep.failed), (3, 0), "{:?}", rep.failures);
+}

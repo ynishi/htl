@@ -62,9 +62,17 @@ local record test
    run: function(filter?: string, opts?: RunOptions): Report
    count: function(): integer
    configure: function(SnapshotConfig)
-   --- The run's random stream, shaped like `math.random`. Repeats under
-   --- `htl test --seed <n>`; see the Tests section of the README.
-   rng: function(): function(integer, integer): integer
+   --- The run's random stream, shaped like `math.random` — `rng()`, `rng(m)`,
+   --- `rng(m, n)`. Repeats under `htl test --seed <n>`; see the Tests section of
+   --- the README.
+   ---
+   --- The argumentless form returns a float in [0, 1), as `math.random()` does,
+   --- and the other two an integer; all three are typed `integer` here because
+   --- this Teal picks the first declaration of an overload rather than the one
+   --- matching the arity, so the forms cannot be typed apart, and `number` would
+   --- make `rng(1, n)` unusable where an integer is wanted. It is the type the
+   --- Teal standard library gives `math.random()` itself.
+   rng: function(): function(m?: integer, n?: integer): integer
 end
 
 return test
