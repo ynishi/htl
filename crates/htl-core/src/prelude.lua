@@ -199,6 +199,60 @@ local function union_resolver(result, filename)
    end
 end
 
+-- Resolvers for the enum boundary lints, built from one type report:
+--
+--   `cast_at(y, x, from_y, from_x)` — for the `as` expression at (y, x): the enum it casts
+--   to (`{ name, values }`) and the checker's name for the type of the value being cast
+--   (`"string"`, `"defs.State | nil"`, ...). nil when the cast does not land on an enum.
+--
+--   `enum_table_at(y, x)` — for the table constructor at (y, x): the enum its declared
+--   type maps, in key or in value position, with the type as the checker writes it
+--   (`{string : defs.State}`). nil when the declared type maps no enum, and when there is
+--   no declared type at all — which is what exempts a table nobody annotated. An array of
+--   an enum answers nil as well: it is a selection, not a mapping (see lint.lua).
+--
+-- Both answer from positions rather than from the tree, for the reason `struct_at` does:
+-- lint.lua parses afresh and never touches the checker's annotated tree, so the type side
+-- is answered here and handed over as a lookup.
+local function enum_boundary_resolvers(result, filename)
+   local ok, report = pcall(tl.get_types, result)
+   if not ok or type(report) ~= "table" then return nil, nil end
+   local by_pos = report.by_pos and report.by_pos[filename]
+   if not by_pos then return nil, nil end
+   local function deref(id, depth)
+      if not id then return nil end
+      local t = report.types[id]
+      if t and t.ref and depth < 8 then return deref(t.ref, depth + 1) end
+      return t
+   end
+   local function at(y, x)
+      return deref(by_pos[y] and by_pos[y][x], 0)
+   end
+   -- Values sorted: a report has to be the same from one run to the next, and the fix
+   -- inserts them in the order they are named.
+   local function enum_of(t)
+      if not t or type(t.enums) ~= "table" then return nil end
+      local values = {}
+      for _, v in ipairs(t.enums) do values[#values + 1] = v end
+      table.sort(values)
+      return { name = t.str or "enum", values = values }
+   end
+   local cast_at = function(y, x, from_y, from_x)
+      local target = enum_of(at(y, x))
+      if not target then return nil end
+      local from = at(from_y, from_x)
+      return target, from and from.str or nil
+   end
+   local enum_table_at = function(y, x)
+      local t = at(y, x)
+      if not t then return nil end
+      local key, value = enum_of(deref(t.keys, 0)), enum_of(deref(t.values, 0))
+      if not (key or value) then return nil end
+      return { name = t.str or "table", key = key, value = value }
+   end
+   return cast_at, enum_table_at
+end
+
 -- Resolver for lints: type of a dotted subject (`c` / `w.state`) at (y, x).
 -- Returns (enumset, type name) for an enum, `false` for a known non-enum type,
 -- nil when unknown.
@@ -688,11 +742,14 @@ function H.check(filename, env, opts)
          local subject = subject_enum_resolver(result, filename)
          prof("get_types", filename, t1)
          t1 = os.clock()
+         local cast_at, enum_table_at = enum_boundary_resolvers(result, filename)
          local found = lint.run(src, filename, H.lint_cfg, {
             enums = enums,
             subject_enum = subject,
             struct_at = struct_resolver(result, filename),
             union_at = union_resolver(result, filename),
+            cast_at = cast_at,
+            enum_table_at = enum_table_at,
          })
          prof("lint.run", filename, t1)
          for _, l in ipairs(found or {}) do

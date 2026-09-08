@@ -6,6 +6,11 @@
 --   enum-exhaustive  `if e == "a" then ... elseif e == "b" then ... end` where the string
 --                    literals belong to a declared enum: every value must be covered or an
 --                    `else` branch must exist.
+--   enum-cast        `e as E` where E is an enum and `e` is a string: the cast is erased,
+--                    so the word enters the enum unchecked.
+--   enum-table       a table constructor whose declared type maps an enum (`{string: E}`,
+--                    `{E: T}`) and that leaves a variant out (or lists a word that is not
+--                    one).
 --   shadow-local     a local (or loop / parameter name) reuses the name of a local in an
 --                    enclosing scope.
 --   no-global        `global` declarations (prefer locals + module return).
@@ -26,6 +31,8 @@ L.DEFAULT = {
    -- marked `---@struct`, which is a thing someone had to write.
    ["struct-fields"] = true,
    ["enum-exhaustive"] = true,
+   ["enum-cast"] = true,
+   ["enum-table"] = true,
    ["union-exhaustive"] = true,
    ["shadow-local"] = true,
    ["no-global"] = true,
@@ -255,6 +262,233 @@ local function lint_enum_exhaustive(ast, report, extra)
             "if-chain on '" .. subject .. "' does not cover enum " .. best_name .. " value(s): "
             .. table.concat(missing, ", ") .. "; add a branch or an else")
       end
+   end)
+end
+
+---------------------------------------------------------------- enum-cast
+
+-- A Teal enum is a string at run time and `as` is erased with the types, so `e as E` is
+-- the one place a word enters the enum with nothing looking at it. The two sites where
+-- that happens are the two that matter: a row read back from a store, and a word a person
+-- typed. With `"opne"` in the store every `== "open"` is false, the value falls out of
+-- every branch, and nothing raises -- `enum-exhaustive` guards the `if` chain, it cannot
+-- see that the value never entered the set.
+--
+-- Only a cast the checker types as `string` is reported. A value it already types as the
+-- enum (or a union holding it) is a cast that restates what is known, and a string
+-- *literal* is checked by the literal itself: `"open" as E` fails the check if "open" is
+-- not a value of E.
+local function unparen(n)
+   while is_node(n) and n.kind == "paren" do n = n.e1 end
+   return n
+end
+
+-- The cast's type as it is written at the site (`defs.State`), for the message: the
+-- checker's own name for it is the bare `State`, which is not what the line says.
+local function cast_written(n)
+   local ct = is_node(n.e2) and n.e2.casttype
+   if type(ct) ~= "table" or type(ct.names) ~= "table" or #ct.names == 0 then return nil end
+   return table.concat(ct.names, ".")
+end
+
+local function lint_enum_cast(ast, report, extra)
+   local cast_at = extra and extra.cast_at
+   if not cast_at then return end
+   walk(ast, function(n)
+      if n.kind ~= "op" or not n.op or n.op.op ~= "as" then return end
+      local from = unparen(n.e1)
+      if not is_node(from) or from.kind == "string" then return end
+      local target, from_type = cast_at(n.y, n.x, from.y, from.x)
+      if not target or from_type ~= "string" then return end
+      local written = cast_written(n) or target.name
+      report("enum-cast", n.y, n.x,
+         "`as " .. written .. "` is not checked at run time; look the word up in a table typed {string: "
+         .. written .. "}, or declare the enum on the host")
+   end)
+end
+
+---------------------------------------------------------------- enum-table
+
+-- The hand-written answer to `enum-cast` is a lookup table: `{ open = "open", ... }` typed
+-- `{string: E}`, read as `states[s] or <default>`, which is total where the cast was not.
+-- The table is then on its own -- add a value to the enum and it is one entry short, and
+-- `enum-exhaustive` checks `if` chains, not constructors. This rule is that check, and
+-- `htl fix enum-table` fills the entry in, which is the `enum-exhaustive` story for tables.
+--
+-- The words a constructor lists are its keys, in both shapes the enum can be mapped by:
+-- `{string: E}` (the lookup above) and `{E: T}` (a table of one thing per value). An array
+-- of the enum is not looked at: `{E}` is a selection, not a mapping — a list of the styles
+-- one branch uses, the behaviours one test walks — and asking it for every value is noise
+-- [measured on a 22k-line dogfood project: 13 array literals, 13 of them a selection].
+--
+-- Two constructors are left alone as well: an empty one (which says nothing about the
+-- words, and is how a table that is filled later is written), and one whose keys are not
+-- all literals (a computed key leaves the word set unknown). A table built by a call has
+-- no constructor here at all, which is the exemption `enum-exhaustive` makes too.
+local LUA_KEYWORDS = {
+   ["and"] = true, ["break"] = true, ["do"] = true, ["else"] = true, ["elseif"] = true,
+   ["end"] = true, ["false"] = true, ["for"] = true, ["function"] = true, ["goto"] = true,
+   ["if"] = true, ["in"] = true, ["local"] = true, ["nil"] = true, ["not"] = true,
+   ["or"] = true, ["repeat"] = true, ["return"] = true, ["then"] = true, ["true"] = true,
+   ["until"] = true, ["while"] = true,
+}
+
+-- `open = "open"`, or `["end"] = "end"` for a value that is not a bare key.
+local function entry_text(name)
+   local quoted = string.format("%q", name)
+   if name:match("^[%a_][%w_]*$") and not LUA_KEYWORDS[name] then
+      return name .. " = " .. quoted
+   end
+   return "[" .. quoted .. "] = " .. quoted
+end
+
+-- The line with its trailing comment removed. Quotes are tracked so that a `--` inside a
+-- string is not mistaken for the start of one, which is what decides where a comma goes.
+local function strip_comment(s)
+   local i, q = 1, nil
+   while i <= #s do
+      local c = s:sub(i, i)
+      if q then
+         if c == "\\" then i = i + 1
+         elseif c == q then q = nil end
+      elseif c == '"' or c == "'" then
+         q = c
+      elseif c == "-" and s:sub(i + 1, i + 1) == "-" then
+         return s:sub(1, i - 1)
+      end
+      i = i + 1
+   end
+   return s
+end
+
+-- Edits that add `name = "name"` for each missing value to the constructor `n`. The
+-- layout comes from the source, not the tree: where the last entry ends, whether it ends
+-- in a comma, and how far it is indented are all things only the lines know.
+local function table_entry_fix(lines, n, names)
+   if not lines or not n.yend or not n.xend then return nil end
+   local last_y, last_x
+   for y = n.yend, n.y, -1 do
+      local line = lines[y]
+      if not line then return nil end
+      local from = (y == n.y) and (n.x + 1) or 1
+      local to = (y == n.yend) and (n.xend - 1) or #line
+      if to >= from then
+         local seg = strip_comment(line:sub(from, to))
+         local col = seg:match("^.*()%S")
+         if col then
+            last_y, last_x = y, from + col - 1
+            break
+         end
+      end
+   end
+   if not last_y then return nil end
+   local comma = lines[last_y]:sub(last_x, last_x) == "," and "" or ","
+   -- The closing brace on the last entry's own line: everything stays on that line.
+   if last_y == n.yend then
+      local parts = {}
+      for _, name in ipairs(names) do parts[#parts + 1] = entry_text(name) end
+      return {
+         applicability = "safe",
+         edits = { {
+            line = last_y, col = last_x + 1, end_line = last_y, end_col = last_x + 1,
+            text = comma .. " " .. table.concat(parts, ", "),
+         } },
+      }
+   end
+   local indent = lines[last_y]:match("^(%s*)") or ""
+   local text = {}
+   for _, name in ipairs(names) do text[#text + 1] = indent .. entry_text(name) .. ",\n" end
+   -- Insert before the brace, or before its indentation when it sits on its own line, so
+   -- that the brace keeps the column it had.
+   local before = lines[n.yend]:sub(1, n.xend - 1)
+   local col = before:match("^%s*$") and 1 or n.xend
+   local edits = {}
+   if comma ~= "" then
+      edits[#edits + 1] = {
+         line = last_y, col = last_x + 1, end_line = last_y, end_col = last_x + 1, text = comma,
+      }
+   end
+   edits[#edits + 1] = {
+      line = n.yend, col = col, end_line = n.yend, end_col = col, text = table.concat(text),
+   }
+   return { applicability = "safe", edits = edits }
+end
+
+-- The keys the constructor lists, in source order, or nil when one of them is not a
+-- literal. For `{E: T}` these are the enum's own spellings; for `{string: E}` they are the
+-- words the program will look up, which is the same set when the table is that lookup.
+local function listed_words(n)
+   local words, order = {}, {}
+   for _, item in ipairs(n) do
+      if type(item) ~= "table" then return nil end
+      local w
+      if is_node(item.key) then
+         if item.key.kind == "string" then
+            w = unquote(item.key.tk or "")
+         elseif item.key.kind == "identifier" then
+            w = item.key.tk
+         end
+      end
+      if not w then return nil end
+      if not words[w] then
+         words[w] = true
+         order[#order + 1] = w
+      end
+   end
+   return words, order
+end
+
+local function lint_enum_table(ast, report, extra)
+   local enum_table_at = extra and extra.enum_table_at
+   if not enum_table_at then return end
+   walk(ast, function(n)
+      if n.kind ~= "literal_table" or not n.y or not n.x then return end
+      if #n == 0 then return end
+      local spec = enum_table_at(n.y, n.x)
+      if not spec then return end
+      -- `{E: T}` first: when both ends are enums the keys are still the words listed.
+      local target, position = spec.key, "key"
+      if not target then target, position = spec.value, "value" end
+      if not target then return end
+      local words, order = listed_words(n)
+      if not words then return end
+
+      local declared = {}
+      for _, v in ipairs(target.values) do declared[v] = true end
+      local unknown, covered = {}, 0
+      for _, w in ipairs(order) do
+         if declared[w] then covered = covered + 1 else unknown[#unknown + 1] = w end
+      end
+      local missing = {}
+      for _, v in ipairs(target.values) do
+         if not words[v] then missing[#missing + 1] = v end
+      end
+      -- `{string: E}`: the enum is what the table maps *to*, so the keys are the enum's
+      -- own spellings only when the table is that lookup. One key that is a value says it
+      -- is; none says this is some other map, and none of this rule's business.
+      if position == "value" and covered == 0 then return end
+      if #missing == 0 and #unknown == 0 then return end
+      table.sort(unknown)
+
+      local parts = {}
+      if #missing > 0 then
+         parts[#parts + 1] = "does not list " .. target.name .. " value(s): " .. table.concat(missing, ", ")
+      end
+      if #unknown > 0 then
+         parts[#parts + 1] = "lists word(s) that are not " .. target.name .. " value(s): "
+            .. table.concat(unknown, ", ")
+      end
+      local msg = "table typed " .. spec.name .. " " .. table.concat(parts, ", and ")
+      local fix
+      if #missing > 0 then
+         if position == "value" then
+            msg = msg .. "; a word it does not list looks up as nil"
+            fix = table_entry_fix(extra.lines, n, missing)
+         else
+            msg = msg .. "; add the entry (what it maps to is not something a fix can invent)"
+         end
+      end
+      report("enum-table", n.y, n.x, msg, fix)
    end)
 end
 
@@ -697,6 +931,8 @@ local RULES = {
    { "nil-index", lint_nil_index },
    { "struct-fields", lint_struct_fields },
    { "enum-exhaustive", lint_enum_exhaustive },
+   { "enum-cast", lint_enum_cast },
+   { "enum-table", lint_enum_table },
    { "union-exhaustive", lint_union_exhaustive },
    { "shadow-local", lint_shadow },
    { "no-global", lint_no_global },
