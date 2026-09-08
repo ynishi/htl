@@ -155,6 +155,62 @@ fn dts_writes_the_renamed_words_and_check_holds_them() {
     assert!(err.contains("State"), "{err}");
 }
 
+/// An `Option<T>` parameter is declared `name?: T` from the source alone, and the checker
+/// then accepts the call that leaves the argument out as well as the one that passes it.
+/// A record field of the same shape stays `T` — every Teal record field is nilable.
+#[test]
+fn dts_marks_an_option_parameter_optional_and_check_takes_both_calls() {
+    let root = scratch("optional");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    );
+    write(&root.join("htl.toml"), "");
+    write(
+        &root.join("src/main.rs"),
+        "use htl::{TealRecord, host_module};\n\n\
+         #[derive(TealRecord)]\npub struct Outcome { pub did: String, pub blocked: Option<String> }\n\n\
+         pub struct Api;\n\n\
+         #[host_module(name = \"api\", dts = \"types/api.d.tl\", records = [Outcome])]\n\
+         impl Api {\n    pub fn find(&self, name: &str, scope: Option<String>) -> Option<Outcome> { todo!() }\n}\n\nfn main() {}\n",
+    );
+    let out = htl(&root, &["dts"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    let api = std::fs::read_to_string(root.join("types/api.d.tl")).unwrap();
+    assert!(
+        api.contains("   find: function(self: api, name: string, scope?: string): Outcome\n"),
+        "{api}"
+    );
+    assert!(
+        api.contains("   record Outcome\n      did: string\n      blocked: string\n   end\n"),
+        "{api}"
+    );
+
+    write(
+        &root.join("src/main.tl"),
+        "local type api = require(\"api\")\n\n\
+         local a: api = nil\nlocal one = a:find(\"x\")\nlocal two = a:find(\"x\", \"y\")\n\
+         print(one.did, two.did)\n",
+    );
+    let out = htl(&root, &["check", "src/main.tl", "--no-cache"]);
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("0 error(s)"), "{err}");
+
+    // The mark says "may be left out", not "any number of arguments".
+    write(
+        &root.join("src/bad.tl"),
+        "local type api = require(\"api\")\n\nlocal a: api = nil\nprint(a:find(\"x\", \"y\", \"z\"))\n",
+    );
+    let out = htl(&root, &["check", "src/bad.tl", "--no-cache"]);
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("wrong number of arguments"), "{err}");
+}
+
 #[test]
 fn a_data_enum_asking_for_its_own_dts_is_refused_with_advice() {
     let root = scratch("refused");
