@@ -332,7 +332,10 @@ fn enforced_by_exempts_the_contract_that_carries_it() {
         "carried onto the resolved contract"
     );
     let out = contract_enforcement_lints(&cfg_path, &found, Some(&root));
-    assert!(out.is_empty(), "no call in the Rust sources, and none needed: {out:?}");
+    assert!(
+        out.is_empty(),
+        "no call in the Rust sources, and none needed: {out:?}"
+    );
 }
 
 /// The path is what makes the key a claim rather than an off switch: it has to exist, and
@@ -787,8 +790,10 @@ fn contract_resolvers_enforce_the_same_contract_at_run_time() {
 fn a_contract_type_under_types_resolves_at_run_time() {
     let (root, cfg) = project_declaring_at("types-decl", "types/defs.d.tl", CONTRACT_TOML);
     let h = Htl::new().unwrap();
-    let [good, partial] =
-        verdicts(&h, Resolver::for_contract(&root, &cfg, &contracts(&root, &cfg)[0]).unwrap());
+    let [good, partial] = verdicts(
+        &h,
+        Resolver::for_contract(&root, &cfg, &contracts(&root, &cfg)[0]).unwrap(),
+    );
     assert!(good.is_ok(), "conforming mod: {good:?}");
     assert!(
         partial.as_ref().is_err_and(|e| e.contains("hp")),
@@ -806,8 +811,10 @@ fn a_contract_type_under_a_check_path_resolves_at_run_time() {
         "[check]\npaths = [\"sdk\"]\n[[contract]]\ndir = \"mods\"\n",
     );
     let h = Htl::new().unwrap();
-    let [good, partial] =
-        verdicts(&h, Resolver::for_contract(&root, &cfg, &contracts(&root, &cfg)[0]).unwrap());
+    let [good, partial] = verdicts(
+        &h,
+        Resolver::for_contract(&root, &cfg, &contracts(&root, &cfg)[0]).unwrap(),
+    );
     assert!(good.is_ok(), "conforming mod: {good:?}");
     assert!(
         partial.as_ref().is_err_and(|e| e.contains("hp")),
@@ -869,7 +876,10 @@ fn the_publish_target_can_be_named() {
     let (written, problems) = htl_core::contract::publish(&root, &found);
     assert!(problems.is_empty(), "{problems:?}");
     assert_eq!(written, vec![(root.join("sdk/defs.d.tl"), true)]);
-    assert!(!root.join("types/defs.d.tl").exists(), "not the default too");
+    assert!(
+        !root.join("types/defs.d.tl").exists(),
+        "not the default too"
+    );
 }
 
 /// A module with bodies in it is published as a declaration: the bodies go, and each

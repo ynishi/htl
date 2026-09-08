@@ -37,7 +37,7 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 | command | what it does |
 |---|---|
 | `htl new <name>` / `htl init [dir]` | scaffold: `mlua-pkg.toml`, `src/<mod>/init.tl`, `src/main.tl`, `tests/`, README (`--lib`, `--embed` for a Rust host) |
-| `htl check [paths] [--strict] [--lint +rule,-rule] [--no-cache] [--cache-mode per-module\|whole-run] [--explain-cache]` | type-check; htl lints as `lint:` (advisory, `--strict` fails on them); what has not changed is replayed from `.htl/` (see Caching) |
+| `htl check [paths] [--strict] [--lint +rule,-rule] [--no-cache] [--cache-mode per-module\|whole-run] [--explain-cache]` | type-check; htl lints as `lint:` (advisory, `--strict` fails on them); a module reached through `require` (an installed dep, a `[check] paths` dir) is checked with the file and its type errors are errors too, once per run, with the file that required it; what has not changed is replayed from `.htl/` (see Caching) |
 | `htl run <file.tl \| app.hb> [args]` | check then execute; `require` of a `.tl` with type errors fails |
 | `htl test [paths] [--filter s] [--lib mod] [--coverage] [--lcov file] [--no-cache]` | `*_test.tl` and `tests/**/*.tl`, one isolated state per file; checking is replayed from `.htl/`, the run never is (see Caching) |
 | `htl fmt [paths] [--check] [--indent N]` | whitespace formatter (indentation from the syntax tree, blank lines, trailing space) |
@@ -65,7 +65,19 @@ directory is given, `check` / `fmt` / `build` / `test` walk the project's own fi
 `target/`, `node_modules/`, `.mlua-pkgs/` and any
 dot-directory are not entered, so dependencies' sources and tests stay theirs. A
 directory passed explicitly is always walked. A `patch_dir` dependency is the one thing in
-between: `check` reads it, `fmt` and `test` do not (see Patched dependencies). Files under `tests/` are checked with the
+between: `check` reads it, `fmt` and `test` do not (see Patched dependencies). What is
+not walked is still checked: a dependency is checked through the `require` that reaches
+it, and a type error in it is reported as an error with the dependency's own path and
+the file that required it —
+
+```text
+error: .htl/modules/vendored/mathx/init.tl:12:8: in local declaration: got string, expected number
+  (required by src/geometry.tl)
+```
+
+— once per run however many files require it, and replayed from the cache like the
+requirer's own diagnostics. `htl run` would refuse the module at that `require`; the
+check says so first. Files under `tests/` are checked with the
 project root and `src/` on the search path, the same as `htl test`, so `htl check tests`
 and `htl test` agree.
 
@@ -538,9 +550,11 @@ errors are the project's to fix, so `htl check` walks it and names the dependenc
 directory stands in for. `htl fmt` and `htl test` do not touch it: formatting it would
 turn every file into a diff against its base and hide the change inside it, and its
 `*_test.tl` are the dependency's suite rather than the project's. `.htl/modules` is not
-descended into at all, patched or otherwise. The criterion is who writes the directory —
-one that install regenerates (`target_dir`) is skipped, one that the project edits is
-checked.
+descended into at all, patched or otherwise; its modules are checked through the
+`require` that reaches them and their errors reported against the requirer, never offered
+to `htl fix` (a fix there would go at the next install — patching is how a dependency is
+edited). The criterion for walking is who writes the directory — one that install
+regenerates (`target_dir`) is skipped, one that the project edits is checked.
 
 **Upgrading.** A patch is bound to the revision it was taken from. When the pin moves —
 the dependency was upgraded — install fetches the new revision and resolves from it, the
@@ -681,8 +695,12 @@ The exit code is the same as in text mode. Field names are stable; fields may be
 added, not renamed.
 
 - `check`: `{ files, diagnostics: [{ severity: "error"|"warning"|"lint", file, line,
-  col, rule?, message }], summary: { errors, warnings, lints, strict, ok } }`. `rule`
-  is the lint rule (`nil-index`, `contract`, ...), split out of the message.
+  col, rule?, message, required_by?, origin? }], summary: { errors, warnings, lints,
+  strict, ok } }`. `rule` is the lint rule (`nil-index`, `contract`, ...), split out of
+  the message. An error in a module the check reached through `require` has `file` set
+  to that module and `required_by` to the file that required it; `origin` is
+  `"dependency"` (installed under `.htl/modules`, or a vendored copy) or `"external"`
+  (a `[check] paths` or contract directory), and absent for a file of the project's own.
 - `test`: `{ files: [{ path, ok, diagnostics, error?, file_level, passed, failed,
   failures, tests: [{ name, ok, ms }], duration_ms, snapshots_written,
   snapshots_updated }], summary: { files, files_run, passed, failed, files_with_errors,

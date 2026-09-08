@@ -48,7 +48,9 @@ fn spelling_defs(dir: &Path) {
 fn spelled(dir: &Path, literal: &str) -> Vec<String> {
     write(
         &dir.join("mod.tl"),
-        &format!("local defs = require(\"defs\")\nlocal m: defs.MonsterDef = {literal}\nreturn m\n"),
+        &format!(
+            "local defs = require(\"defs\")\nlocal m: defs.MonsterDef = {literal}\nreturn m\n"
+        ),
     );
     let h = Htl::new().unwrap();
     h.add_path(dir).unwrap();
@@ -156,7 +158,11 @@ fn a_field_left_out_is_reported_where_the_record_is_built() {
     );
     let lints = lints_of(&dir, "mod.tl");
     assert_eq!(lints.len(), 1, "{lints:?}");
-    assert!(lints[0].contains("mod.tl:2:28"), "at the literal: {}", lints[0]);
+    assert!(
+        lints[0].contains("mod.tl:2:28"),
+        "at the literal: {}",
+        lints[0]
+    );
     assert!(
         lints[0].contains("MonsterDef is built without hp"),
         "{}",

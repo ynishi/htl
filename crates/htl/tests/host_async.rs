@@ -70,7 +70,10 @@ fn the_declaration_says_nothing_about_async() {
         decl.contains("record: function(self: api): integer"),
         "{decl}"
     );
-    assert!(decl.contains("parse: function(s: string): integer"), "{decl}");
+    assert!(
+        decl.contains("parse: function(s: string): integer"),
+        "{decl}"
+    );
     assert!(!decl.contains("async"), "nothing leaks into Teal: {decl}");
 }
 

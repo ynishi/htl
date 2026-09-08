@@ -139,6 +139,13 @@ pub struct Recorded {
     pub severity: String,
     pub text: String,
     pub fix: Option<crate::report::FixJson>,
+    /// Set when the text is an error in a module this one required rather than in this
+    /// one: the dependency and the file that required it. The entry carries every such
+    /// error the check found; the sink decides at replay, as it did at the original run,
+    /// which of them to say (once per run). Absent in entries written before this field
+    /// existed, which then read as having none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency: Option<crate::report::DependencyJson>,
 }
 
 /// One literal `require` and where the checker resolved it. Kept because the project-level
@@ -191,6 +198,18 @@ pub struct CheckInfoJson {
     pub requires: Vec<RequireJson>,
     pub error_fixes: Vec<Option<crate::report::FixJson>>,
     pub lint_fixes: Vec<Option<crate::report::FixJson>>,
+    /// `CheckInfo::dependency_errors`, so the runner reads back the whole of what the
+    /// check said. Absent in entries written before the field existed.
+    #[serde(default)]
+    pub dependency_errors: Vec<DependencyErrorJson>,
+}
+
+/// One `htl::DependencyError` as an entry stores it.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DependencyErrorJson {
+    pub file: String,
+    pub required_by: String,
+    pub text: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
