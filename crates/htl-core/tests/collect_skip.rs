@@ -169,3 +169,54 @@ fn project_pkgs_dir_is_skipped_by_path() {
     assert!(is_skipped_dir(&custom, &extra));
     assert!(!is_skipped_dir(&root.join("src"), &extra));
 }
+
+/// A project holding a `target_dir` dep: the copy is committed to the repo under a name the
+/// project chose, and `lua/mine.tl` — the project's own — sits beside it under the same
+/// parent. Only the manifest says which is which.
+fn target_dir_project() -> PathBuf {
+    let root = scratch("targetdir");
+    write(
+        &root.join("mlua-pkg.toml"),
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[deps.mathx]\n\
+         git = \"https://example.invalid/mathx\"\ntag = \"v1\"\ntarget_dir = \"lua/mathx\"\n",
+    );
+    write(&root.join("src/main.tl"), "print(1)\n");
+    write(&root.join("tests/main_test.tl"), "print(2)\n");
+    // the dependency's own source and tests, put there by `mlua-pkg install`
+    write(&root.join("lua/mathx/init.tl"), "return {}\n");
+    write(&root.join("lua/mathx/mathx_test.tl"), "print(3)\n");
+    // and the project's own module, under the same parent
+    write(&root.join("lua/mine.tl"), "return {}\n");
+    root
+}
+
+/// Install rewrites the copy every time it runs, so its errors are not the project's to fix
+/// and an edit made there does not survive — `htl check` and `htl fmt` stay out of it.
+#[test]
+fn a_target_dir_copy_is_not_the_projects_to_check() {
+    let root = target_dir_project();
+    let files = collect_tl(std::slice::from_ref(&root)).unwrap();
+    assert_eq!(
+        rel(&root, &files),
+        vec!["lua/mine.tl", "src/main.tl", "tests/main_test.tl"],
+        "the copy is a dependency's source; what sits beside it is not"
+    );
+}
+
+/// And the `*_test.tl` in there are the dependency's suite rather than the project's.
+#[test]
+fn a_target_dir_copys_tests_are_not_the_projects() {
+    let root = target_dir_project();
+    let files = discover_tests(std::slice::from_ref(&root)).unwrap();
+    assert_eq!(rel(&root, &files), vec!["tests/main_test.tl"]);
+}
+
+/// A dependency with no `target_dir` contributes nothing: the walkers are unchanged for a
+/// project that vendors nothing.
+#[test]
+fn a_project_with_no_target_dir_copies_skips_nothing_extra() {
+    let root = project();
+    let skip = htl_core::project_skip_dirs(&root);
+    assert_eq!(skip.len(), 1, "just the pkgs dir: {skip:?}");
+    assert!(skip[0].ends_with(".htl/modules"), "{skip:?}");
+}

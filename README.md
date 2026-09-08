@@ -65,7 +65,13 @@ manifest declares and nothing does by default. When a
 directory is given, `check` / `fmt` / `build` / `test` walk the project's own files only:
 `target/`, `node_modules/`, `.mlua-pkgs/` and any
 dot-directory are not entered, so dependencies' sources and tests stay theirs. A
-directory passed explicitly is always walked. A `patch_dir` dependency is the one thing in
+directory passed explicitly is always walked. A `target_dir` copy is not entered either,
+and there the manifest is what says so: the copy sits in the repo under a name the project
+chose, so nothing about the path tells it apart from the project's own code beside it.
+`mlua-pkg install` rewrites it every time it runs — checking it would report a dependency's
+errors as the project's, `htl fmt` would write a diff against upstream that the next
+install undoes, and its `*_test.tl` are a dependency's suite (Go's `./...` has excluded
+`vendor/` since 1.9 for the same reason). A `patch_dir` dependency is the one thing in
 between: `check` reads it, `fmt` and `test` do not (see Patched dependencies). What is
 not walked is still checked: a dependency is checked through the `require` that reaches
 it, and a type error in it is reported as an error with the dependency's own path and

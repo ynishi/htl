@@ -1432,13 +1432,27 @@ pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Extra directories to skip below `root`: where a project installed its deps, when
-/// `root` is inside an `mlua-pkg.toml` project. What is under there was fetched rather
-/// than written here — the dependencies' own sources and tests, not the project's.
+/// Extra directories to skip below `root`, when `root` is inside an `mlua-pkg.toml`
+/// project: where it installed its deps, and each copy a `target_dir` dep put in the tree.
+///
+/// Both hold a dependency's own sources and tests rather than the project's. The copies
+/// need saying because they are *in* the repo and committed — nothing about the path tells
+/// one apart from the project's own code beside it, and only the manifest knows. `mlua-pkg
+/// install` rewrites them every time it runs, so checking one reports someone else's
+/// errors, formatting it writes a diff against upstream that the next install undoes, and
+/// running its tests runs a dependency's suite. Go settled the same question the same way:
+/// `./...` has excluded `vendor/` since 1.9.
+///
+/// A `patch_dir` dep is the other case and is not here: the project owns that copy, so
+/// whether to walk it depends on what the walk is for ([`patched_dirs`]).
 #[cfg(feature = "pkg")]
 pub fn project_skip_dirs(root: &Path) -> Vec<PathBuf> {
     match pkg::Project::find(root) {
-        Some(p) => vec![p.pkgs_dir],
+        Some(p) => {
+            let mut out = vec![p.pkgs_dir];
+            out.extend(p.vendored_copies);
+            out
+        }
         None => Vec::new(),
     }
 }
