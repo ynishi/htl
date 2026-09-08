@@ -58,6 +58,31 @@ pub struct CheckInfo {
     pub error_fixes: Vec<Option<Fix>>,
     /// `lint_fixes[i]` is the fix for `lints[i]`, when the lint has one.
     pub lint_fixes: Vec<Option<Fix>>,
+    /// Type errors in the modules this check pulled in through `require`, transitively,
+    /// each dependency once. Not in `errors`, and not what [`ok`](Self::ok) answers: the
+    /// file itself checked, and generates; it is the `require` of that module that will
+    /// raise at run time ([`Htl::install_searcher`]), which is why a caller reporting on a
+    /// project treats these as errors too (`htl check`, `include_tl!`).
+    pub dependency_errors: Vec<DependencyError>,
+}
+
+/// A type error in a module a check reached through `require` (see
+/// [`CheckInfo::dependency_errors`]).
+///
+/// The checker checks a required module into the same environment and hands the
+/// requirer its *type*; the module's own errors stay with the module's result. This is
+/// that result's error, said against the file that required it, so a report can name
+/// both — a dependency is only ever checked through a `require`, since its sources are
+/// not the project's to walk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependencyError {
+    /// The file the error is in, as the checker found it on the search path.
+    pub file: PathBuf,
+    /// The file whose `require` (direct or through another dependency) pulled it in:
+    /// the first one on this check's walk.
+    pub required_by: PathBuf,
+    /// `file:line:col: message`, formatted as the file's own errors are.
+    pub text: String,
 }
 
 /// How safely a [`Fix`] can be applied without a human looking at it.
@@ -1280,6 +1305,10 @@ fn read_checkinfo(t: &Table) -> Result<CheckInfo> {
     let lints = seq("lints")?;
     let error_fixes = read_fixes(t, "error_fixes", errors.len())?;
     let lint_fixes = read_fixes(t, "lint_fixes", lints.len())?;
+    let dependency_errors = match t.get::<Table>("dependency_errors") {
+        Ok(list) => read_dependency_errors(&list)?,
+        Err(_) => Vec::new(),
+    };
     Ok(CheckInfo {
         errors,
         warnings: seq("warnings")?,
@@ -1288,7 +1317,21 @@ fn read_checkinfo(t: &Table) -> Result<CheckInfo> {
         requires,
         error_fixes,
         lint_fixes,
+        dependency_errors,
     })
+}
+
+fn read_dependency_errors(list: &Table) -> Result<Vec<DependencyError>> {
+    let mut out = Vec::new();
+    for e in list.sequence_values::<Table>() {
+        let e = e?;
+        out.push(DependencyError {
+            file: PathBuf::from(e.get::<String>("file")?),
+            required_by: PathBuf::from(e.get::<String>("required_by")?),
+            text: e.get::<String>("text")?,
+        });
+    }
+    Ok(out)
 }
 
 /// `fixes[i]` is a fix table or `false`; missing entries are `None`.

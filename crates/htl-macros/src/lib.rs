@@ -289,6 +289,20 @@ fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Includ
     let Some(code) = code else {
         return Err(format!("Teal type check failed:\n{}", ci.errors.join("\n")));
     };
+    // The file checked, but something it required did not. The generated code would
+    // build, and the module's first `require` would raise at run time; the build is where
+    // that belongs, the same as for the file's own errors.
+    if !ci.dependency_errors.is_empty() {
+        let lines: Vec<String> = ci
+            .dependency_errors
+            .iter()
+            .map(|e| format!("{}\n  (required by {})", e.text, e.required_by.display()))
+            .collect();
+        return Err(format!(
+            "Teal type check failed in a required module:\n{}",
+            lines.join("\n")
+        ));
+    }
     if !ci.lints.is_empty() {
         if lenient(&cfg) {
             for l in &ci.lints {
@@ -798,6 +812,32 @@ mod tests {
             err.contains("util.tl") && err.contains("expected integer"),
             "{err}"
         );
+    }
+
+    /// `include_tl!`: the script checks, but a module it requires does not. The macro and
+    /// the CLI share the checker, and the build is where the error belongs — the generated
+    /// Lua would have raised at the module's first `require`.
+    #[test]
+    fn include_fails_on_a_dependency_type_error() {
+        let root = scratch("deperr");
+        write(
+            &root.join("mlua-pkg.toml"),
+            "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[deps]\n",
+        );
+        write(
+            &root.join(".htl/modules/vendored/mathx/init.tl"),
+            "local record mathx\nend\nfunction mathx.twice(n: number): number\n   local s: number = \"no\"\n   return n * 2 + s\nend\nreturn mathx\n",
+        );
+        write(
+            &root.join("scripts/main.tl"),
+            "local mathx = require(\"mathx\")\nprint(mathx.twice(21))\n",
+        );
+        let err = resolve_include(&root, "scripts/main.tl", false).unwrap_err();
+        assert!(
+            err.contains("required module") && err.contains("mathx/init.tl:4:"),
+            "{err}"
+        );
+        assert!(err.contains("required by"), "{err}");
     }
 
     /// Without a project the same script fails: the dep is genuinely not on the path.

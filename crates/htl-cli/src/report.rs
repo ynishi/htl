@@ -21,6 +21,15 @@ pub struct Diagnostic {
     /// A mechanical rewrite `htl fix` may apply, when the diagnostic has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fix: Option<FixJson>,
+    /// For an error in a module the check reached through `require`: the file whose
+    /// require pulled it in. Absent on the project's own diagnostics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_by: Option<String>,
+    /// Where such a file lives: `dependency` (installed under `.htl/modules`, or a
+    /// vendored copy) or `external` (a `[check] paths` or contract directory). Absent for
+    /// a file of the project's own, and on the project's own diagnostics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -77,6 +86,8 @@ pub fn parse_diag(severity: &'static str, text: &str) -> Diagnostic {
             rule,
             message,
             fix: None,
+            required_by: None,
+            origin: None,
         };
     }
     let (message, rule) = split_rule(text);
@@ -88,7 +99,22 @@ pub fn parse_diag(severity: &'static str, text: &str) -> Diagnostic {
         rule,
         message,
         fix: None,
+        required_by: None,
+        origin: None,
     }
+}
+
+/// What a dependency's diagnostic carries besides its text: the file that required it
+/// and where the file lives. Stored with the diagnostic (`crate::cache::Recorded`) so a
+/// replay says exactly what the run said, and decides the same way whether to say it.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DependencyJson {
+    /// The file the error is in, as the checker found it.
+    pub file: String,
+    pub required_by: String,
+    /// `dependency` / `external`, or none for a file of the project's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 /// Lint lines end with ` [htl <rule>]`.
@@ -115,6 +141,16 @@ pub struct Sink {
     pub json: bool,
     pub diagnostics: Vec<Diagnostic>,
     recorded: Vec<crate::cache::Recorded>,
+    /// The files this run checks in their own right, canonical. A dependency error in one
+    /// of them is that file's to report, and is not said a second time on behalf of a file
+    /// that required it.
+    walked: std::collections::HashSet<std::path::PathBuf>,
+    /// Dependencies whose errors this run has already said, canonical. A module thirty
+    /// files require is reported once, against the first of them.
+    reported: std::collections::HashSet<std::path::PathBuf>,
+    /// How many dependency errors reached the output — what the totals and the exit code
+    /// count, as opposed to how many were handed over (the entries store every one).
+    dependency_errors: usize,
 }
 
 impl Sink {
@@ -123,7 +159,16 @@ impl Sink {
             json,
             diagnostics: Vec::new(),
             recorded: Vec::new(),
+            walked: Default::default(),
+            reported: Default::default(),
+            dependency_errors: 0,
         }
+    }
+
+    /// The files the run checks itself. Their errors are reported as their own, so a
+    /// dependency error pointing at one of them is dropped here rather than said twice.
+    pub fn walking(&mut self, files: &[std::path::PathBuf]) {
+        self.walked = files.iter().map(|f| canonical(f)).collect();
     }
 
     pub fn diag(&mut self, severity: &'static str, text: &str) {
@@ -143,23 +188,85 @@ impl Sink {
         }
     }
 
+    /// The errors in what a file required, as errors, each against the file that required
+    /// it. `origin_of` says where the dependency lives (`dependency` / `external` / the
+    /// project's own).
+    ///
+    /// Every one is recorded, so the file's cache entry carries them all and a later run
+    /// that replays only this file still hears about its dependency. Which of them are
+    /// printed is decided at output time, once per run — see [`emit`](Self::emit).
+    ///
+    /// No fix rides along even when the checker found one: a fix under `.htl/` is
+    /// overwritten at the next install, and one under a `[check] paths` directory is
+    /// outside the project. `htl fix` never writes there, so the output does not say it can.
+    pub fn dependency_errors(
+        &mut self,
+        c: &CheckInfo,
+        origin_of: &dyn Fn(&std::path::Path) -> Option<&'static str>,
+    ) {
+        for e in &c.dependency_errors {
+            let dep = DependencyJson {
+                file: e.file.display().to_string(),
+                required_by: e.required_by.display().to_string(),
+                origin: origin_of(&e.file).map(str::to_string),
+            };
+            self.recorded.push(crate::cache::Recorded {
+                severity: "error".to_string(),
+                text: e.text.clone(),
+                fix: None,
+                dependency: Some(dep.clone()),
+            });
+            self.emit("error", &e.text, None, Some(&dep));
+        }
+    }
+
+    /// Dependency errors this run reported (after the once-per-run rule), for the totals.
+    pub fn dependency_error_count(&self) -> usize {
+        self.dependency_errors
+    }
+
     fn diag_with_fix(&mut self, severity: &'static str, text: &str, fix: Option<&htl::Fix>) {
         let fix = fix.map(FixJson::from_fix);
         self.recorded.push(crate::cache::Recorded {
             severity: severity.to_string(),
             text: text.to_string(),
             fix: fix.clone(),
+            dependency: None,
         });
-        self.emit(severity, text, fix.as_ref());
+        self.emit(severity, text, fix.as_ref(), None);
     }
 
     /// The single place a diagnostic becomes output, whether it was just produced or
     /// recovered from the cache.
-    fn emit(&mut self, severity: &'static str, text: &str, fix: Option<&FixJson>) {
+    ///
+    /// A dependency's error is said once per run: not at all when the dependency is one
+    /// of the files being checked (it reports its own), and not again after the first
+    /// file that required it. Deciding here, rather than where the diagnostic was made,
+    /// is what makes a replayed entry and a fresh check agree — both come through this.
+    fn emit(
+        &mut self,
+        severity: &'static str,
+        text: &str,
+        fix: Option<&FixJson>,
+        dependency: Option<&DependencyJson>,
+    ) {
+        if let Some(d) = dependency {
+            let file = canonical(std::path::Path::new(&d.file));
+            if self.walked.contains(&file) || !self.reported.insert(file) {
+                return;
+            }
+            self.dependency_errors += 1;
+        }
         if self.json {
             let mut d = parse_diag(severity, text);
             d.fix = fix.cloned();
+            if let Some(dep) = dependency {
+                d.required_by = Some(dep.required_by.clone());
+                d.origin = dep.origin.clone();
+            }
             self.diagnostics.push(d);
+        } else if let Some(dep) = dependency {
+            eprintln!("{severity}: {text}\n  (required by {})", dep.required_by);
         } else {
             // Text mode: say a fix exists, so `htl fix` is discoverable from the output.
             match fix.map(|f| f.applicability.as_str()) {
@@ -190,7 +297,7 @@ impl Sink {
             })
             .collect::<Result<Vec<&'static str>>>()?;
         for (severity, r) in severities.into_iter().zip(recorded) {
-            self.emit(severity, &r.text, r.fix.as_ref());
+            self.emit(severity, &r.text, r.fix.as_ref(), r.dependency.as_ref());
         }
         Ok(())
     }
@@ -203,6 +310,12 @@ impl Sink {
     pub fn take_recorded(&mut self) -> Vec<crate::cache::Recorded> {
         std::mem::take(&mut self.recorded)
     }
+}
+
+/// One spelling of a file for the once-per-run rule: the checker names a dependency by
+/// the search-path template that found it, the walk names a file as it was given.
+fn canonical(p: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
 #[derive(Serialize, Debug)]

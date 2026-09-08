@@ -1562,6 +1562,19 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
     }
 
     let mut sink = report::Sink::new(flags.json);
+    // Dependencies are reported as `htl check` reports them and never rewritten: a fix
+    // under `.htl/` goes at the next install, one under `[check] paths` is not this
+    // project's. `fix_file` only ever writes the file it was given.
+    let fix_root = cfg
+        .as_ref()
+        .map(|(r, _, _)| r.clone())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let contracts = match &cfg {
+        Some((r, _, c)) => htl::contract::resolve(r, c).0,
+        None => Vec::new(),
+    };
+    let origins = Origins::new(&paths[0], &fix_root, &cfg, &contracts);
+    sink.walking(&files);
     let (mut applied, mut skipped, mut json_files) = (Vec::new(), Vec::new(), Vec::new());
     let (mut changed, mut deferred, mut reverted, mut errors_remaining) =
         (0usize, 0usize, 0usize, 0usize);
@@ -1621,6 +1634,7 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
             }
         }
         sink.checkinfo(&out.check);
+        sink.dependency_errors(&out.check, &|p| origins.of(p));
         if flags.json {
             applied.extend(out.applied.iter().map(|a| report::FixApplied {
                 file: f.display().to_string(),
@@ -1645,6 +1659,9 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
             });
         }
     }
+    // A broken dependency is an error `htl fix` cannot remove; it remains, as `htl check`
+    // would count it, so the two exit the same way on the same tree.
+    errors_remaining += sink.dependency_error_count();
     let n_applied = if flags.json { applied.len() } else { 0 };
     let fail = errors_remaining > 0 || (flags.exit_non_zero_on_fix && changed > 0);
     if flags.json {
@@ -1763,6 +1780,10 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let opts = cache_options(use_cache, cache_mode, &cfg, explain);
     let store = cache::Cache::open(&root, opts);
+    let origins = Origins::new(&paths[0], &root, &cfg, &contracts);
+    // A dependency error is said once per run, and not on behalf of a file the walk
+    // checks itself. The rule applies to replayed entries as much as to fresh checks.
+    sink.walking(&files);
 
     // The lint selection is part of what a module reports, so it is part of every key.
     let file_spec = cfg
@@ -1802,7 +1823,7 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
             }
             None => {
                 let h = h.as_ref().expect("a module missed, so a checker was built");
-                let m = check_one(h, &mut sink, f, &cfg, &contracts)?;
+                let m = check_one(h, &mut sink, f, &cfg, &contracts, &origins)?;
                 // Per-module entries are written as each one is checked; a whole-run entry
                 // cannot be written until the walk is done, so it happens below.
                 if let Some(c) = &store
@@ -1865,6 +1886,9 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
     }
     explain_cache(store.as_ref(), opts);
 
+    // Errors in dependencies, counted as the sink printed them: a module's own count says
+    // nothing about them, and one required from thirty files was printed once.
+    n_err += sink.dependency_error_count();
     let replayed = files.len() - to_check;
     let fail = report_check(
         &mut sink,
@@ -2077,13 +2101,71 @@ fn build_checker(
     Ok(h)
 }
 
-/// Check one file and collect everything it reported, its contract lints included.
+/// Where a file a check pulled in lives, for the `origin` a dependency diagnostic carries.
+///
+/// Decided by the directory and reported, never enforced: every file with errors is
+/// reported whatever this says. `dependency` is the installed-deps directory
+/// (`.htl/modules`) and the vendored copies the manifest declares; `external` is a
+/// `[check] paths` or contract directory, supplied from outside the project; anything else
+/// is the project's own and carries no origin. A consumer that counts a dependency's
+/// errors apart from the project's reads this field rather than parsing paths.
+struct Origins {
+    dependency: Vec<PathBuf>,
+    external: Vec<PathBuf>,
+}
+
+impl Origins {
+    fn new(
+        start: &Path,
+        root: &Path,
+        cfg: &Option<(PathBuf, PathBuf, htl::config::HtlConfig)>,
+        contracts: &[htl::contract::Resolved],
+    ) -> Self {
+        let canon = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
+        let mut dependency = Vec::new();
+        if let Some(p) = htl::pkg::Project::find(start) {
+            dependency.push(canon(p.pkgs_dir.clone()));
+            dependency.extend(p.target_dirs.iter().cloned().map(canon));
+        }
+        let mut external = Vec::new();
+        if let Some((r, _, c)) = cfg {
+            external.extend(
+                c.check
+                    .paths
+                    .iter()
+                    .map(|p| canon(htl::config::resolve_path(r, p))),
+            );
+            for c in contracts {
+                external.extend(c.dirs(root).into_iter().map(canon));
+            }
+        }
+        Self {
+            dependency,
+            external,
+        }
+    }
+
+    fn of(&self, file: &Path) -> Option<&'static str> {
+        let file = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+        if self.dependency.iter().any(|d| file.starts_with(d)) {
+            Some("dependency")
+        } else if self.external.iter().any(|d| file.starts_with(d)) {
+            Some("external")
+        } else {
+            None
+        }
+    }
+}
+
+/// Check one file and collect everything it reported, its contract lints included, and
+/// the errors of what it required after them.
 fn check_one(
     h: &Htl,
     sink: &mut report::Sink,
     f: &Path,
     cfg: &Option<(PathBuf, PathBuf, htl::config::HtlConfig)>,
     contracts: &[htl::contract::Resolved],
+    origins: &Origins,
 ) -> Result<cache::Module> {
     // Both `add_layout_paths` and the contract lints prepend to the search path, and
     // without putting it back the Nth file would be checked against the directories of the
@@ -2111,6 +2193,11 @@ fn check_one(
             lints += 1;
         }
     }
+    // What this file required and found broken: `htl run` would refuse the module at its
+    // first `require`, so the check says so first. Recorded into this file's entry like
+    // its own diagnostics, so a replay carries them and an edit to the dependency — which
+    // is among `deps` — invalidates the entry.
+    sink.dependency_errors(&c, &|p| origins.of(p));
     h.set_search_path(&saved)?;
     Ok(cache::Module {
         // Everything this file put into the sink, and nothing from the files before it:
@@ -2298,6 +2385,15 @@ fn check_json(c: &CheckInfo) -> cache::CheckInfoJson {
             .iter()
             .map(|f| f.as_ref().map(report::FixJson::from_fix))
             .collect(),
+        dependency_errors: c
+            .dependency_errors
+            .iter()
+            .map(|e| cache::DependencyErrorJson {
+                file: e.file.display().to_string(),
+                required_by: e.required_by.display().to_string(),
+                text: e.text.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -2327,6 +2423,15 @@ fn check_from_json(j: &cache::CheckInfoJson) -> CheckInfo {
             .lint_fixes
             .iter()
             .map(|f| f.as_ref().map(fix_from_json))
+            .collect(),
+        dependency_errors: j
+            .dependency_errors
+            .iter()
+            .map(|e| htl::DependencyError {
+                file: PathBuf::from(&e.file),
+                required_by: PathBuf::from(&e.required_by),
+                text: e.text.clone(),
+            })
             .collect(),
     }
 }

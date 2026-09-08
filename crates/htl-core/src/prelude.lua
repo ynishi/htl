@@ -600,6 +600,49 @@ function H.reset_store()
    store = {}
 end
 
+-- The type errors of every module a check pulled in through `require`, transitively.
+--
+-- tl checks a required module into the same env (`env.loaded[file]` holds its full
+-- result, errors included) and hands the requirer only its *type*, so a broken
+-- dependency leaves no trace in the requirer's own error list — `htl check` used to
+-- pass a project whose first `require` at run time would raise. Each dependency is
+-- listed once per walk, against the file that first required it; the caller decides
+-- what to do about a dependency it has already seen from another file.
+--
+-- `result.dependencies` is name -> file for the direct requires; a dependency that
+-- was seeded from the store into this env may not have had its own requires loaded
+-- here, so the store is asked for those. Names are visited sorted: the map has no
+-- order of its own, and a report has to be the same from one run to the next.
+local function dependency_errors(filename, result, env)
+   local out = {}
+   local seen = { [filename] = true }
+   local function walk(res, requirer)
+      local names = {}
+      for name in pairs(res.dependencies or {}) do names[#names + 1] = name end
+      table.sort(names)
+      for _, name in ipairs(names) do
+         local fname = res.dependencies[name]
+         if not seen[fname] then
+            seen[fname] = true
+            local dep = env.loaded and env.loaded[fname]
+            if not dep then
+               local e = store[name]
+               if e and e.filename == fname then dep = e.result end
+            end
+            if dep then
+               local errs = collect_errors(fname, dep)
+               for _, text in ipairs(errs) do
+                  out[#out + 1] = { file = fname, required_by = requirer, text = text }
+               end
+               walk(dep, fname)
+            end
+         end
+      end
+   end
+   walk(result, filename)
+   return out
+end
+
 -- opts.lints = false skips the lint pass (runtime `require` of an already type-checked
 -- module: nobody reads lints there, and the pass costs more than the check itself).
 -- opts.seed = false checks with a cold env (no store): what is on disk right now, rather
@@ -662,8 +705,11 @@ function H.check(filename, env, opts)
    -- require sites feed the project-level require-cycle lint: same gate as the lints.
    if opts.lints ~= false and result.ast then requires = require_sites(result.ast) end
    prof("lint+req", filename, t0)
+   -- Errors in what this file required. `ok` stays the file's own answer: `H.gen` still
+   -- generates it, and the searcher refuses the dependency itself on its first `require`.
+   local dep_errors = dependency_errors(filename, result, env)
    return { ok = #errors == 0, errors = errors, error_fixes = error_fixes, warnings = warnings, deps = deps,
-      lints = lints, lint_fixes = lint_fixes, requires = requires, result = result }
+      lints = lints, lint_fixes = lint_fixes, requires = requires, dependency_errors = dep_errors, result = result }
 end
 
 -- Type-check + generate Lua source. Returns code, checkinfo (code is nil on failure).
