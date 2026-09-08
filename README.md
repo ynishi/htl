@@ -83,7 +83,9 @@ error: .htl/modules/vendored/mathx/init.tl:12:8: in local declaration: got strin
 ```
 
 — once per run however many files require it, and replayed from the cache like the
-requirer's own diagnostics. `htl run` would refuse the module at that `require`; the
+requirer's own diagnostics. Paths read against the directory the command ran in, whether
+the walk or a `require` found the file, and one that lies outside it is written in full
+rather than as a stack of `..`. `htl run` would refuse the module at that `require`; the
 check says so first. Files under `tests/` are checked with the
 project root and `src/` on the search path, the same as `htl test`, so `htl check tests`
 and `htl test` agree.

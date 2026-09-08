@@ -6,6 +6,8 @@ use anyhow::Result;
 use htl::CheckInfo;
 use htl::testing::FileReport;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+use std::path::{Component, Path, PathBuf};
 
 /// One `error:` / `warning:` / `lint:` line, split into its parts.
 #[derive(Serialize, Debug, Clone)]
@@ -257,6 +259,15 @@ impl Sink {
             }
             self.dependency_errors += 1;
         }
+        // A dependency's path is the one that does not read like the rest of the report:
+        // it came from the resolver rather than from the command line. The cache keeps what
+        // the checker said and this writes it for the reader, so an entry replayed from
+        // another directory still reads against that one.
+        let text = match dependency {
+            Some(_) => shown(text),
+            None => Cow::Borrowed(text),
+        };
+        let text = text.as_ref();
         if self.json {
             let mut d = parse_diag(severity, text);
             d.fix = fix.cloned();
@@ -316,6 +327,71 @@ impl Sink {
 /// the search-path template that found it, the walk names a file as it was given.
 fn canonical(p: &std::path::Path) -> std::path::PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// A dependency's diagnostic with its file written against the directory the command ran
+/// in, the way the rest of the report already reads. Everything else is left alone.
+///
+/// A dependency's path comes from the resolver, which searches in absolute paths, and a
+/// `[check] paths` entry keeps the `..` it was joined through — so a report would otherwise
+/// carry `src/area.tl` and `/home/me/proj/../ext/extmod.tl` side by side, and
+/// `--format json` would give two `file` spellings for what may be one directory. The walk
+/// and `required_by` carry what the command line said, which is theirs to keep.
+fn shown(text: &str) -> Cow<'_, str> {
+    let Some((file, rest)) = split_file(text) else {
+        return Cow::Borrowed(text);
+    };
+    let shown = display_path(Path::new(file));
+    if shown == file {
+        return Cow::Borrowed(text);
+    }
+    Cow::Owned(format!("{shown}{rest}"))
+}
+
+/// The leading `<file>` of `"<file>:<line>:<col>: <message>"`, and everything after it.
+/// `None` when the text is not in that shape — the same test [`parse_diag`] makes.
+fn split_file(text: &str) -> Option<(&str, &str)> {
+    let mut parts = text.splitn(4, ':');
+    let file = parts.next()?;
+    let line = parts.next()?;
+    let col = parts.next()?;
+    parts.next()?;
+    line.trim().parse::<usize>().ok()?;
+    col.trim().parse::<usize>().ok()?;
+    Some((file, &text[file.len()..]))
+}
+
+/// Relative to the directory the command ran in when it is under it, normalised absolute
+/// when it is not — a dependency outside the project reads better that way than as a stack
+/// of `..`.
+fn display_path(p: &Path) -> String {
+    let norm = lexical(p);
+    match std::env::current_dir()
+        .ok()
+        .and_then(|cwd| norm.strip_prefix(cwd).ok().map(Path::to_path_buf))
+    {
+        Some(rel) => rel.display().to_string(),
+        None => norm.display().to_string(),
+    }
+}
+
+/// Fold `.` and `..` without touching the filesystem.
+///
+/// [`std::fs::canonicalize`] would resolve symlinks too, and `.htl/modules/vendored/<dep>`
+/// is one: following it names mlua-pkg's cache directory rather than the dependency, which
+/// is the opposite of what a report wants to say.
+fn lexical(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            c => out.push(c.as_os_str()),
+        }
+    }
+    out
 }
 
 #[derive(Serialize, Debug)]

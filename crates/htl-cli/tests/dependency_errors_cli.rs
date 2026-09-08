@@ -245,3 +245,71 @@ fn htl_fix_reports_the_dependency_and_leaves_it_alone() {
         "htl fix never writes under .htl/"
     );
 }
+
+/// One report, one kind of path. A dependency's file comes from the resolver, which
+/// searches in absolute paths, so without folding it a run would print the machine's
+/// directory layout beside `src/area.tl`.
+#[test]
+fn a_dependencys_path_reads_against_the_directory_the_command_ran_in() {
+    let root = project("relative");
+    let (ok, _, stderr) = htl(&["check", "src"], &root);
+    assert!(!ok, "{stderr}");
+    assert!(
+        stderr.contains("error: .htl/modules/vendored/mathx/init.tl:4:"),
+        "the dependency reads from the project, as the README writes it: {stderr}"
+    );
+    assert!(
+        !stderr.contains("error: /"),
+        "and no diagnostic carries an absolute path: {stderr}"
+    );
+
+    let v = check_json(&root, &["src"]);
+    let d = v["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d.get("required_by").is_some())
+        .expect("the dependency's error");
+    assert_eq!(
+        d["file"], ".htl/modules/vendored/mathx/init.tl",
+        "json says the same as the text: {d}"
+    );
+    assert!(
+        d["required_by"].as_str().unwrap().starts_with("src/"),
+        "{d}"
+    );
+
+    // Started from the project root instead: the dependency reads the same way either
+    // time, because it is written against the directory rather than against the argument.
+    let (_, _, stderr) = htl(&["check", "."], &root);
+    assert!(
+        stderr.contains("error: .htl/modules/vendored/mathx/init.tl:4:"),
+        "{stderr}"
+    );
+}
+
+/// A `[check] paths` entry is joined onto the config's directory and keeps the `..` it was
+/// written with. The report folds it rather than printing a path that walks back out of
+/// the directory it starts from.
+#[test]
+fn an_external_dependencys_path_is_folded_rather_than_kept_with_dot_dot() {
+    let root = scratch("external");
+    let proj = root.join("proj");
+    write(&proj.join("htl.toml"), "[check]\npaths = [\"../shared\"]\n");
+    write(&root.join("shared/mathx.tl"), BROKEN_MATHX);
+    write(
+        &proj.join("src/area.tl"),
+        "local mathx = require(\"mathx\")\nlocal record area\nend\n\
+         function area.of(n: number): number\n   return mathx.twice(n)\nend\nreturn area\n",
+    );
+    let (ok, _, stderr) = htl(&["check", "src"], &proj);
+    assert!(!ok, "{stderr}");
+    assert!(
+        stderr.contains("shared/mathx.tl:4:"),
+        "the external dependency is reported: {stderr}"
+    );
+    assert!(
+        !stderr.contains(".."),
+        "and not through the `..` it was resolved by: {stderr}"
+    );
+}
