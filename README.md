@@ -189,6 +189,11 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
+`exec` passes its arguments to the script as `...` and nothing else. A script that reads
+`arg[1]`, as `htl run` lets it, needs `h.set_arg("main.tl", &args)?` before `exec`: that
+fills the `arg` table the way the `lua` CLI and `htl run` do, so the same `main.tl` runs
+unchanged both ways (`htl new --embed` writes both calls).
+
 `#[derive(TealRecord)]` is checked in one direction at build time and one at runtime:
 the `.d.tl` it writes is what the Teal side is compiled against, while a table coming
 back the other way is compared field by field as it converts. A table that does not fit
