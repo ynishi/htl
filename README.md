@@ -12,6 +12,7 @@ scripts/foo.tl ──include_tl!──▶ cargo build   (Teal type error = rustc
                ──htl run ─────▶ check → gen → load, in one mlua state
                ──htl build────▶ stripped Lua 5.4 bytecode bundle (.hb), no source shipped
 Rust impl Host ──#[host_module]▶ UserData impl + host.d.tl   (Rust signature change breaks .tl at build)
+               ──#[c_export]──▶ extern "C" wrappers + host.h   (feature `ffi`: a caller that is not Rust)
 ```
 
 ## Install
@@ -29,7 +30,7 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 |---|---|
 | `htl` | umbrella: re-exports `htl-core` and (feature `macros`, default on) the proc macros. Depend on this one. |
 | `htl-core` | engine: `Htl`, lints, fmt, bundle, test runner, mlua-pkg resolver |
-| `htl-macros` | `include_tl!` / `include_tl_bytes!` / `TealRecord` / `host_module`; generated code targets `::htl::` |
+| `htl-macros` | `include_tl!` / `include_tl_bytes!` / `TealRecord` / `host_module` / `c_export`; generated code targets `::htl::` |
 | `htl-cli` | the `htl` / `cargo-htl` binaries |
 
 ## CLI
@@ -400,6 +401,81 @@ present: the module is rejected at `require` naming the nil ones, and a field ad
 the record later stays optional until it is added to the list, so the type can grow
 without breaking the modules already written against it. `.require_all_fields()` takes
 every declared field, for types that are settled.
+
+### A C ABI for a host that is not Rust (feature `ffi`)
+
+`#[host_module]` hands the Rust host to Lua. `#[c_export]` hands the same `impl` block to
+a caller that is not written in Rust — a Unity script, a Swift app, a Python REPL — as a
+C ABI, with the header written from the same breakdown so a rename moves both.
+
+```rust
+use htl::{Htl, c_export, ffi};
+
+pub struct Game { h: Htl, depth: i32 }
+
+#[c_export(prefix = "game", header = "include/game.h")]
+impl Game {
+    // The opener: options as one JSON object, plus the flag `game_interrupt` sets.
+    pub fn open(options: &str, interrupt: ffi::Interrupt) -> Result<Self, String> {
+        let h = Htl::new().map_err(|e| e.to_string())?;
+        interrupt.install(&h).map_err(|e| e.to_string())?;   // hook: stops a runaway mod
+        Ok(Game { h, depth: 0 })
+    }
+    pub fn frame(&self) -> String { /* … */ }                // char *: the text
+    pub fn state(&self) -> Frame { /* … */ }                 // char *: JSON, via serde
+    pub fn key(&mut self, k: &str) -> Result<(), String> { } // int: a status
+    pub fn depth(&self) -> i32 { self.depth }                // int status, value in `out`
+}
+```
+
+Add `htl = { version = "…", features = ["ffi"] }` and `crate-type = ["rlib", "cdylib"]`
+(plus `"staticlib"` for Unity on iOS). `cargo build` writes `include/game.h` and the
+library exports `game_*` and nothing else.
+
+**What the ABI promises.** Everything a caller holds is an opaque handle pointer, a
+`char *` this library allocated, or an `int`. There are no structs by value, no `bool`,
+no bare enums and no variadics — the list every host language breaks on, one way or
+another (C# marshals a returned `string` and then frees it with `CoTaskMemFree`; Python's
+`restype = c_char_p` copies and leaks the original).
+
+| C | Rust | |
+|---|---|---|
+| `const char *` | `&str` / `String`, or any serde type as JSON | borrowed for the call; free it when you like afterwards |
+| `char *` | a `String` or a serde type returned | **ours**: hand it back to `game_free`, always |
+| `int` | a status, never a value | `GAME_OK` and friends |
+| `int *` | the out-parameter an `i32` result is written through | so no function returns three meanings in one `int` |
+| `game_handle *` | the opaque handle | from `game_open`, to `game_close` |
+
+Any other signature is a compile error naming the type and this set: a `bool` parameter,
+a struct by value, a float, an integer of another width, a generic or an `async fn` does
+not build, rather than building and going wrong on the far side.
+
+**The status enum**, as `int`: `OK` 0, `ERR` 1, `BAD_HANDLE` 2, `NOT_FOUND` 3, `LUA` 4,
+`PANIC` 5, `WRONG_THREAD` 6, `INTERRUPTED` 7. A `char *` function answers `NULL` when it
+fails and `game_last_status()` says which of these it was. `game_last_error()` is the
+message — a pointer owned by the library, valid until the next call *on that thread* —
+and `game_last_error_into(buf, len)` copies it into a buffer of the caller's own.
+
+**Panics do not cross.** Since Rust 1.81 a panic reaching an `extern "C"` frame aborts
+the process, which for a plugin host means taking the editor down with it. Every wrapper
+catches it, records it as `PANIC` with the panic's message, and **poisons the handle**:
+every later call on it answers `PANIC` without running anything.
+
+**One handle, one thread.** The handle records the thread that opened it and every entry
+checks it, so using it elsewhere is `WRONG_THREAD` rather than a data race
+(`game_threadsafe()` answers `0`, the `sqlite3_threadsafe()` convention). The exception is
+`game_interrupt(h)`, callable from any thread: it sets an atomic that a Lua debug hook
+turns into an error at the next tick, which is how a runaway mod is stopped from a host
+that cannot preempt it. One interrupt stops one run; the handle stays usable.
+
+**Conventions the generated code fixes**, so a project does not decide them again:
+`game_open` takes one JSON object — pass absolute paths, a seed and names in it rather
+than expecting the library to read the environment or the working directory; records
+cross as JSON text and an object payload carries `"v"`, a schema version separate from
+`GAME_ABI_VERSION` (which is the shape of the functions, and what a host that never
+unloads a library compares before calling anything else).
+
+`htl dts` writes the header too, so it can be regenerated and diffed without a build.
 
 ## Lints (`htl check`, `include_tl!`)
 

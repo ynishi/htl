@@ -21,8 +21,13 @@ default = ["pkg"]
 # and the rest of that file — its comments, its order, its spacing — has to survive it.
 pkg = ["dep:mlua-pkg", "dep:toml_edit"]
 # `htl_core::dts`: `.d.tl` generation from Rust source (`#[host_module]` / `#[derive(TealRecord)]`),
-# shared by the proc macros and `htl dts`.
+# shared by the proc macros and `htl dts`. `htl_core::cexport` (the C header `#[c_export]`
+# writes) rides with it: it is the same file scan, pointed at C instead of Teal.
 dts = ["dep:syn"]
+# `htl_core::ffi`: the C ABI runtime `#[c_export]` generates against — the handle, the
+# error slot, the panic guard. Off by default so that a host with no C caller keeps the
+# public surface, and the `extern "C"` symbols, it had before.
+ffi = []
 # mlua's async support, for `async fn` in a `#[host_module]` impl. Off by default: it
 # changes how mlua is built, and a host with no async method needs none of it.
 async = ["mlua/async"]
