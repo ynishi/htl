@@ -775,8 +775,11 @@ three are on by default, so a project green under the release before them is red
 the release after, on unchanged sources. Written down, that arrives as a version the
 project moved to rather than as a difference between two machines. A command outside
 the requirement is refused before anything is read, naming both versions and this file;
-htl installs nothing, so the answer is `cargo install htl-cli`. `htl new` writes the
-key; leave it out and any command runs the project, as before.
+htl installs nothing, so the answer is `cargo install htl-cli`. Leave the key out and any
+command runs the project, as before — which is what `htl new` currently writes, because a
+scaffolded Rust host builds against the released `htl` crate and that crate rejects a key
+newer than itself (`docs/releasing.md` § What the scaffold may write). Add it by hand to
+pin a project whose htl already knows it.
 
 `[check] paths` is for modules the host supplies at run time from somewhere the
 checker would not look (an SDK cache, a mods dir): the CLI, `include_tl!` and

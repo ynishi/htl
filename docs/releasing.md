@@ -37,6 +37,41 @@ and that second answer is what the chain below should not run without.
 The bump itself rides with the last change of the release rather than a commit of its own
 (CONTRIBUTING § Commits).
 
+## What the scaffold may write
+
+The same arithmetic, one release out of phase: **a project `htl new` writes may only name
+configuration the htl it pins can read, so anything added to `htl.toml` reaches the scaffold
+one release after it reaches the library.**
+
+A host project depends on the *released* crate — `htl_dep_version()` derives `htl = "0.3"`
+from the CLI's own version, deliberately, so a project follows the htl that produced it.
+`HtlConfig` is `#[serde(deny_unknown_fields)]`, so a key that exists only in this workspace
+is not ignored out there; it is fatal, inside `include_tl!`, at the project's first
+`cargo build`:
+
+```
+error: include_tl!: .../htl.toml: parsing htl.toml: TOML parse error at line 8, column 2
+       unknown field `toolchain`, expected one of `lint`, `fmt`, `check`, ...
+```
+
+So each key crosses in two steps: it lands in `htl-core` and is published, and only the
+release *after* that may write it into a scaffold. `[toolchain]` is the key this was learned
+on (#153); it was written a release early and every project `htl new` wrote in between
+failed to build.
+
+`just e2e-scaffold-published` is what says so without a release: it scaffolds and builds
+with no `[patch.crates-io]`, against the crate the project actually pins, and the CI
+scaffold job runs it. `just e2e-scaffold` cannot — it points the three crates at this
+checkout, where every key this branch added exists.
+
+### At each release
+
+- [ ] Did this release publish an `htl.toml` key the scaffold does not write yet? If so, the
+      *next* release is where the scaffold starts writing it, and that is the release to
+      open with the change. **Owed now: `[toolchain]`, once a published htl parses it.**
+- [ ] Did anything added to the scaffold's templates this cycle need an unpublished htl?
+      Same answer, same list.
+
 ## The chain
 
 Four crates, published in dependency order. Each waits for the previous one to be
