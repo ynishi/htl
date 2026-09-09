@@ -11,4 +11,6 @@
 - Green is `cargo test --workspace` and `cargo clippy --workspace --all-targets`;
   changes to the checker, lints, runner or bundles are also run on a dogfood
   `.tl` project before they ship, and the report says what was run.
-- Internal paths and identifiers stay out of public issues, PRs and commits.
+- What may go into anything public, and what a public artifact owes its reader:
+  [PUBLIC_DEVELOPMENT.md](PUBLIC_DEVELOPMENT.md). It outranks CONTRIBUTING, and
+  its check runs before you write an issue, a PR body or a commit message.
