@@ -19,7 +19,8 @@ mod scaffold;
 enum Format {
     /// Human-readable lines
     Text,
-    /// One JSON document on stdout (see README, "Machine-readable output")
+    /// One JSON document on stdout (README, "Machine-readable output":
+    /// https://github.com/ynishi/htl#machine-readable-output)
     Json,
 }
 
@@ -162,7 +163,21 @@ use std::process::ExitCode;
 #[command(
     name = "htl",
     version,
-    about = "Teal, hidden: run / check / build .tl on mlua"
+    about = "Teal, hidden: run / check / build .tl on mlua",
+    long_about = "\
+Teal, hidden: run / check / build .tl on mlua.
+
+htl is a toolchain for Teal, and a way to embed one. It type-checks `.tl` sources with \
+Teal's own checker, runs and tests them on an embedded mlua state, formats them, links \
+them into a single stripped-bytecode bundle, and reports the public surface a consumer \
+of the project can name. A Rust host embeds the same engine, so the scripts it ships \
+are checked when the host is built rather than when its user first runs one.
+
+The guide, with every command and what a project looks like:
+  https://github.com/ynishi/htl
+
+The API a Rust host holds — `include_tl!`, `#[host_module]`, the run cache:
+  https://docs.rs/htl"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -172,6 +187,20 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Type-check .tl files or directories (htl lints are reported as `lint:`)
+    ///
+    /// A module reached through `require` is checked with the file that required it, and
+    /// what has not changed is replayed from `.htl/`. README, "Lints":
+    /// https://github.com/ynishi/htl#lints-htl-check-include_tl
+    #[command(after_long_help = "\
+Examples:
+  htl check src                  every .tl under src/
+  htl check src --strict         lints and warnings fail the run too
+  htl check src --lint +no-any,-shadow-local
+                                 one rule on, one of the defaults off
+  htl check --list-lints         the rules and what each is for, then exit
+
+Caching: https://github.com/ynishi/htl#caching
+")]
     Check {
         paths: Vec<PathBuf>,
         /// Treat warnings and lints as errors
@@ -197,6 +226,16 @@ enum Cmd {
         explain_cache: bool,
     },
     /// Run tests: `*_test.tl` and `tests/**/*.tl`, one isolated state per file
+    ///
+    /// README, "Tests": https://github.com/ynishi/htl#tests
+    #[command(after_long_help = "\
+Examples:
+  htl test                       every *_test.tl and tests/**/*.tl
+  htl test tests --filter parser only tests whose \"suite > name\" contains it
+  htl test --coverage --coverage-lines
+                                 which lines of each module the suite never reached
+  htl test --junit report.xml    also write the run as a JUnit report, for a CI
+")]
     Test {
         paths: Vec<PathBuf>,
         /// Only run tests whose "suite > name" contains this substring
@@ -248,7 +287,16 @@ enum Cmd {
         #[arg(long)]
         explain_cache: bool,
     },
-    /// Apply the fixes diagnostics carry (safe ones by default; see README, "Fixing")
+    /// Apply the fixes diagnostics carry (safe ones by default)
+    ///
+    /// README, "Fixing": https://github.com/ynishi/htl#fixing-htl-fix
+    #[command(after_long_help = "\
+Examples:
+  htl fix src                    apply the safe fixes to every .tl under src/
+  htl fix src --diff --dry-run   what would change, as a unified diff per file
+  htl fix src --rule forward-ref only that rule's fixes
+  htl fix src --unsafe           also the fixes that may change what the program does
+")]
     Fix {
         paths: Vec<PathBuf>,
         /// Only fixes of these rules (e.g. `forward-ref,explicit-number`)
@@ -285,6 +333,14 @@ enum Cmd {
     },
     /// Report the project's public Teal surface — the package entry, the `#[host_module]`
     /// declarations, the `---@contract` types — as one sorted file to commit and diff
+    ///
+    /// README, "The public surface": https://github.com/ynishi/htl#the-public-surface-htl-api
+    #[command(after_long_help = "\
+Examples:
+  htl api                        the surface on standard output
+  htl api --out htl-api.txt      write it where a diff of the file is a change to it
+  htl api --format json          the same surface as one JSON document
+")]
     Api {
         /// Project root or any path inside it (default: current directory)
         dir: Option<PathBuf>,
@@ -296,6 +352,18 @@ enum Cmd {
         format: Format,
     },
     /// Create a new Teal project directory
+    ///
+    /// README, "Layout of a project": https://github.com/ynishi/htl#layout-of-a-project-htl-new
+    #[command(after_long_help = "\
+Examples:
+  htl new hello                  src/main.tl, a module, tests/, mlua-pkg.toml
+  htl new hello --lib            a library: no entry script
+  htl new hello --embed          the same, plus a Rust host (--host rust)
+  htl new hello --host ffi --lib a library behind a C ABI, for a caller that is not Rust
+
+The Rust host: https://github.com/ynishi/htl#the-rust-host---host-name
+The C ABI host: https://github.com/ynishi/htl#the-c-abi-host---host-ffi
+")]
     New {
         name: String,
         /// Library only (no src/main.tl)
@@ -332,7 +400,9 @@ enum Cmd {
         #[command(subcommand)]
         cmd: TypesCmd,
     },
-    /// Manage the check cache (see README, "Caching")
+    /// Manage the check cache
+    ///
+    /// README, "Caching": https://github.com/ynishi/htl#caching
     Cache {
         #[command(subcommand)]
         cmd: CacheCmd,
@@ -360,6 +430,20 @@ enum Cmd {
         args: Vec<String>,
     },
     /// Compile a directory of .tl into a stripped-bytecode bundle
+    ///
+    /// README, "Bundles": https://github.com/ynishi/htl#bundles-htl-build
+    #[command(after_long_help = "\
+Examples:
+  htl build src/main.tl -o app.hb
+                                 the entry's require closure, as one bundle
+  htl build src/main.tl -o app.hb --debug
+                                 keep line numbers and local names in the bytecode
+  htl build src/main.tl -o app.hb --host mymod
+                                 leave a module the host provides out of the bundle
+  htl run app.hb                 run what was built
+
+Caching: https://github.com/ynishi/htl#caching
+")]
     Build {
         /// Entry `.tl` file: it and everything it requires are bundled, replaying from
         /// the run cache what still holds (a directory bundles every `.tl` under it, the
@@ -392,7 +476,16 @@ enum Cmd {
         explain_cache: bool,
     },
     /// Report what no entry's `require` closure reaches: modules, and `mlua-pkg.toml`
-    /// dependencies (see README, "Unused")
+    /// dependencies
+    ///
+    /// README, "Unused": https://github.com/ynishi/htl#unused-htl-unused
+    #[command(after_long_help = "\
+Examples:
+  htl unused                     modules and dependencies no entry reaches
+  htl unused --exit-non-zero-on-unused
+                                 the same report, and a non-zero exit for a CI
+  htl unused --format json       the same report as one JSON document
+")]
     Unused {
         /// What to report on (default: the working directory). The walk is the project's
         /// either way: a module reached only from `tests/` is reached
@@ -411,11 +504,22 @@ enum Cmd {
         #[arg(long)]
         explain_cache: bool,
     },
-    /// Read a `.hb` bundle without running it (see README, "Bundles")
+    /// Read a `.hb` bundle without running it
+    ///
+    /// README, "Bundles": https://github.com/ynishi/htl#bundles-htl-build
     Bundle {
         #[command(subcommand)]
         cmd: BundleCmd,
     },
+}
+
+/// The command line as clap holds it, before any argument is parsed.
+///
+/// The help is documentation, and the tests that keep it from rotting read it from here
+/// rather than from a copy kept beside them: they walk this tree and ask each command,
+/// argument and value for the strings it would print.
+pub fn command() -> clap::Command {
+    <Cli as clap::CommandFactory>::command()
 }
 
 pub fn run() -> ExitCode {
