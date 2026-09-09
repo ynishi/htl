@@ -46,14 +46,15 @@ jobs:
       - run: cargo run -q -p embed -- --bundle
 
   scaffold:
-    name: scaffolded Rust host end to end
+    name: scaffolded hosts end to end
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: extractions/setup-just@v2
-      # `htl new --host rust` into a temporary directory, patched back at this checkout,
-      # then built, tested and run. The snapshot tests pin the bytes the scaffold writes;
-      # this is what says they compile against the htl in the same commit.
+      # `htl new --host rust` and `--host ffi` into a temporary directory, patched back at
+      # this checkout, then built, tested and run — the C ABI project's library loaded by
+      # the reference callers it ships, with cc, make and python3 all present on this
+      # runner (the recipe says so and skips either caller where they are not).
       - run: just e2e-scaffold

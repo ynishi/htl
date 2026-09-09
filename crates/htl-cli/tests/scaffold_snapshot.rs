@@ -171,6 +171,17 @@ fn new_lib_embed_writes_the_rust_host_without_a_binary() {
     assert_tree("lib-embed", &root.join("sample"));
 }
 
+/// The C ABI host: the library, the `#[c_export]` block, and the two reference callers
+/// under `examples/`. Every byte of them is pinned here — a caller in another language
+/// is the one part of a scaffold nobody compiles by accident, so a change to the Python
+/// host's `restype` or the C host's `free` shows up in this diff or nowhere.
+#[test]
+fn new_lib_host_ffi_writes_the_c_abi_library_and_its_callers() {
+    let root = common::scratch("htl-cli-snapshot", "ffi");
+    htl(&["new", "sample", "--lib", "--host", "ffi"], &root);
+    assert_tree("ffi", &root.join("sample"));
+}
+
 /// `htl init` in an empty directory is `htl new` — the same plan, only the name comes
 /// from the directory. Sharing the snapshot is the assertion.
 #[test]
