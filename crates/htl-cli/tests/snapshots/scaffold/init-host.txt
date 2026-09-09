@@ -130,6 +130,9 @@ const MODULE: &[u8] = htl::include_tl_bytes!("src/sample/init.tl");
 /// Teal module as `require("sample")`.
 pub fn preload(h: &Htl) -> anyhow::Result<()> {
     Host.htl_preload(h)?;
+    // Stripped bytecode: small, and with neither line numbers nor a chunk name, so a
+    // failure inside this module reads `?: in function 'sample.greet'`. `htl run
+    // src/sample/init.tl` and `htl test` run the Teal itself and name file and line.
     h.preload_bytes("sample", MODULE)?;
     Ok(())
 }
@@ -166,7 +169,9 @@ fn main() -> anyhow::Result<()> {
     sample::preload(&h)?;
     let args: Vec<String> = std::env::args().skip(1).collect();
     h.set_arg("main.tl", &args)?; // `arg[1]`.. as under `htl run`; `exec` alone passes `...`
-    h.exec(MAIN, "=main.tl", &args)?;
+    // `@<path>` names the Teal source the chunk came from: a run-time failure inside it,
+    // and every frame below it, reads `src/main.tl:<line>` and can be opened.
+    h.exec(MAIN, "@src/main.tl", &args)?;
     Ok(())
 }
 ===== src/main.tl =====

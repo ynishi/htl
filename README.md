@@ -91,6 +91,60 @@ check says so first. Files under `tests/` are checked with the
 project root and `src/` on the search path, the same as `htl test`, so `htl check tests`
 and `htl test` agree.
 
+A failure at run time names Teal, not the Lua htl generated — the file and the line that
+raised, and the same for every frame that reached it. `htl run boom.tl`, where `boom.tl`
+calls into `depth.tl`:
+
+```text
+runtime error: ./depth.tl:8: attempt to index a nil value (local 'c')
+stack traceback:
+	[C]: in metamethod 'index'
+	./depth.tl:8: in function 'depth.field'
+	./depth.tl:12: in function 'depth.describe'
+	boom.tl:3: in main chunk
+```
+
+Nothing had to be mapped back. Teal keeps the input's line breaks when it generates Lua,
+and htl loads every chunk under its source's own name, so a Lua frame is already a Teal
+frame. The innermost line says a value was nil; the frames say which caller passed it,
+which is the part a reader who did not write the program cannot guess. `htl test` reports
+the same for a failing test and for a file that raises while loading, and `--format json`
+carries the text unchanged in each file's `error` and `failures`.
+
+The exception is stripped bytecode, which is what a bundle holds by default and what
+`include_tl_bytes!` embeds. Stripping drops the line numbers and the chunk's own name
+together, so those frames say what raised and not where. A scaffolded Rust host
+(`htl new --host rust`), failing inside its embedded module:
+
+```text
+runtime error: ?:-1: attempt to index a nil value
+stack traceback:
+	[C]: in metamethod 'index'
+	?: in upvalue '?'
+	?: in function 'sample.greet'
+	src/main.tl:4: in main chunk
+```
+
+The last frame is the entry script, embedded with `include_tl!` as source, and it still
+names its file and line; the two `?` frames are the stripped module, left with the
+function names Lua recovered from the calls and nothing to open. A bundle is stripped
+throughout unless it was built with `htl build --debug` (see Bundles). Whichever a host
+ships, the `.tl` is still there, and running it is what gives the frames back —
+`htl run src/main.tl`, the same failure:
+
+```text
+runtime error: src/sample/init.tl:9: attempt to index a nil value (local 'g')
+stack traceback:
+	[C]: in metamethod 'index'
+	src/sample/init.tl:9: in upvalue 'title'
+	src/sample/init.tl:14: in function 'sample.greet'
+	src/main.tl:4: in main chunk
+```
+
+Frames are for whoever wrote the Teal. A host embedding htl in a program whose users did
+not write it shows them `htl::user_message(&err)` instead — the innermost cause alone (see
+Embedding in Rust).
+
 ## Caching
 
 `htl check` stores what it worked out under `.htl/cache/` at the project root and replays
@@ -213,7 +267,7 @@ fn main() -> anyhow::Result<()> {
     let h = Htl::new()?;
     Host { started: std::time::Instant::now() }.htl_preload(&h)?;
     h.preload_bytes("util", UTIL)?;
-    h.exec(MAIN, "=main.tl", &[])?;
+    h.exec(MAIN, "@scripts/main.tl", &[])?;         // frames read scripts/main.tl:<line>
     Ok(())
 }
 ```
@@ -222,6 +276,20 @@ fn main() -> anyhow::Result<()> {
 `arg[1]`, as `htl run` lets it, needs `h.set_arg("main.tl", &args)?` before `exec`: that
 fills the `arg` table the way the `lua` CLI and `htl run` do, so the same `main.tl` runs
 unchanged both ways (`htl new --embed` writes both calls).
+
+The second argument to `exec` is the chunk name: the name every frame of a run-time
+failure inside that chunk is reported under. `@<path>` is a source location and prints as
+the path, so `@scripts/main.tl` gives a reader something to open; `=<label>` is a bare
+label, the honest answer for a module no file backs, which is how htl registers its own
+test library as `=htl.test`. `preload` takes no chunk name and uses the `.tl` a `require`
+of that module name would have found (`foo.bar` → `@foo/bar.tl`); `preload_at` takes one
+when the source is somewhere else, or when there is no source.
+
+`preload_bytes` is the exception, and it is worth knowing before reading a failure from
+an embedded module. A compiled chunk carries the name it was compiled under, and stripping
+drops that name along with the line numbers — so a frame from `include_tl_bytes!` reads
+`?: in function 'util.greet'`, whatever name the load was given. The Teal is still there
+to run: `htl run scripts/util.tl` and `htl test` name the file and the line.
 
 The macros run the checker — htl-core and the vendored Lua that hosts `tl` — inside the
 proc macro, and the `dev` profile compiles a proc macro and its dependencies under
@@ -389,8 +457,12 @@ GDScript's `load()` or a shorthand `declare module "x"`; use it only when the mo
 itself is unknown until run time.
 
 Errors that come out of running Lua (a host function's `Err`, a Lua `error(...)`) carry
-mlua's `stack traceback:`; `htl::user_message(&err)` returns the innermost cause alone,
-which is what `htl run` / `htl test` print.
+mlua's `stack traceback:`, and there are two things to do with it. A host chooses by
+audience: `htl::developer_message(&err)` returns the cause with the frames below it, which
+is what `htl run` and `htl test` print because whoever runs them wrote the Teal;
+`htl::user_message(&err)` returns the innermost cause alone, which is what a program puts
+in front of people who did not and cannot act on a stack. The C ABI takes the second
+(see below).
 
 For mod / plugin directories, `TealResolver::new("mods")?.expect_type("defs.Mod")` holds
 every served module to a record type: a mod that returns the wrong shape is rejected at
@@ -1107,10 +1179,12 @@ and not on the first `require` at the user's machine. `htl run app.hb` runs it; 
 does `Htl::run_bundle(&Bundle::decode(bytes)?, &args)` after registering its modules,
 and is refused up front, naming them, if one is missing.
 
-- Payload is stripped Lua 5.4 bytecode by default. `--debug` keeps line numbers and
-  local names (tracebacks with lines; module names survive stripping since the loader
-  supplies them). `--source` stores generated Lua instead: larger and readable, and
-  bound to no Lua build.
+- Payload is stripped Lua 5.4 bytecode by default, and stripping takes the traceback
+  with it: every frame of a run-time failure reads `?`, with no line. `--debug` keeps
+  the line numbers and the local names, and its frames read `depth:8` — the module the
+  bundle knows, since a bundle holds modules rather than files. `--source` stores
+  generated Lua instead: larger and readable, bound to no Lua build, and named the same
+  way as `--debug`.
 - **Portability.** A bytecode bundle runs on any host whose Lua chunk header matches
   the one it was compiled by: version, bytecode format, the sizes of instruction /
   integer / number, and endianness. Nothing about the CPU or the OS is in a Lua chunk,

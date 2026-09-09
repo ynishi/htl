@@ -1098,11 +1098,24 @@ impl Htl {
     }
 
     /// Register generated Lua source under a module name (`package.preload`).
+    ///
+    /// The chunk is named after the `.tl` a `require` of this name would have found —
+    /// `foo.bar` becomes `@foo/bar.tl` — because that name is what a run-time failure
+    /// shows, and a reader who has only the output needs something to open. Use
+    /// [`Htl::preload_at`] when the source sits somewhere else (`@scripts/util.tl`), or
+    /// when there is no file at all and a bare label is the honest answer (`=htl.test`).
     pub fn preload(&self, name: &str, lua_src: &str) -> Result<()> {
+        self.preload_at(name, &module_chunk_name(name), lua_src)
+    }
+
+    /// [`Htl::preload`] with the chunk name spelled out, the way [`Htl::exec`] takes one.
+    /// `@<path>` is a source location and is what a host with a file should pass;
+    /// `=<label>` is a literal label, for a module no file backs.
+    pub fn preload_at(&self, name: &str, chunk_name: &str, lua_src: &str) -> Result<()> {
         let loader = self
             .lua
             .load(lua_src)
-            .set_name(format!("={name}"))
+            .set_name(chunk_name)
             .into_function()
             .with_context(|| format!("compiling preloaded module {name}"))?;
         self.preload_table()?.set(name, loader)?;
@@ -1110,11 +1123,19 @@ impl Htl {
     }
 
     /// Register stripped bytecode (e.g. from `include_tl_bytes!`) under a module name.
+    ///
+    /// A chunk name is worth less here than it is to [`Htl::preload`], and the reason is
+    /// worth knowing before reading a failure from an embedded module: a compiled chunk
+    /// carries its own name, given when it was compiled, and `lua_load`'s name is used
+    /// only for the messages loading itself produces. Stripping drops the carried name
+    /// along with the line numbers, so every frame from a stripped payload reads `?` —
+    /// `?: in function 'sample.greet'`. Running the `.tl` under `htl run` or `htl test`
+    /// is where those frames are; a bundle keeps them with `htl build --debug`.
     pub fn preload_bytes(&self, name: &str, bytecode: &[u8]) -> Result<()> {
         let loader = self
             .lua
             .load(bytecode)
-            .set_name(format!("={name}"))
+            .set_name(module_chunk_name(name))
             .set_mode(ChunkMode::Binary)
             .into_function()
             .with_context(|| format!("loading bytecode for module {name}"))?;
@@ -1331,14 +1352,26 @@ fn path_str(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
-/// A user-facing message for an error that came out of running Lua: the innermost
-/// cause without Lua's `stack traceback:` block. A host function's `Err(e)` surfaces
-/// as `e`'s own text; a Lua `error("msg")` surfaces as `file:line: msg`.
+/// The chunk name for a module registered without one: the `.tl` `require` would have
+/// looked for, as a `@` source location. `htl.test` becomes `@htl/test.tl`, which is why
+/// the test library asks for `=htl.test` instead — it ships inside the binary.
+fn module_chunk_name(name: &str) -> String {
+    format!("@{}.tl", name.replace('.', "/"))
+}
+
+/// A message for the people an embedding host serves: the innermost cause without Lua's
+/// `stack traceback:` block. A host function's `Err(e)` surfaces as `e`'s own text; a Lua
+/// `error("msg")` surfaces as `file:line: msg`.
 ///
 /// ```text
 /// sgen: content/no-date.md: front matter: 'date' is required
 /// ```
 /// instead of that line followed by `stack traceback: [C]: in method 'pages' ...`.
+///
+/// This is the answer for a program whose users did not write the Teal and cannot act on
+/// its frames — a static site generator telling an author which file is missing a date.
+/// It is not the answer for whoever is developing the program: see
+/// [`developer_message`], which is what `htl run` and `htl test` print.
 pub fn user_message(err: &anyhow::Error) -> String {
     if let Some(e) = err.downcast_ref::<mlua::Error>() {
         return user_message_lua(e);
@@ -1355,6 +1388,40 @@ pub fn user_message_lua(e: &mlua::Error) -> String {
         mlua::Error::WithContext { cause, .. } => user_message_lua(cause),
         other => strip_traceback(&other.to_string()),
     }
+}
+
+/// A message for whoever is developing the program: [`user_message`]'s innermost cause,
+/// followed by Lua's `stack traceback:` block when the error carries one.
+///
+/// ```text
+/// depth.tl:8: attempt to index a nil value (local 'c')
+/// stack traceback:
+///     depth.tl:8: in function 'depth.field'
+///     depth.tl:12: in function 'depth.describe'
+///     boom.tl:3: in main chunk
+/// ```
+///
+/// The innermost line says a value was nil; the frames say which caller passed it, and
+/// they name Teal files and Teal lines because a generated chunk is loaded under its
+/// source's own name. This is what `htl run` and `htl test` print. The frames are absent
+/// only where the debug information is: stripped bytecode, which is what a bundle without
+/// `--debug` and `include_tl_bytes!` both hold.
+pub fn developer_message(err: &anyhow::Error) -> String {
+    let head = user_message(err);
+    let full = match err.downcast_ref::<mlua::Error>() {
+        Some(e) => e.to_string(),
+        None => format!("{err:#}"),
+    };
+    match traceback_block(&full) {
+        Some(tb) => format!("{head}\n{tb}"),
+        None => head,
+    }
+}
+
+/// The `stack traceback:` block of an error text, trimmed, without the newline before it.
+fn traceback_block(text: &str) -> Option<&str> {
+    let at = text.find("\nstack traceback:")?;
+    Some(text[at + 1..].trim_end())
 }
 
 /// Remove a trailing Lua `stack traceback:` section from an error text.
