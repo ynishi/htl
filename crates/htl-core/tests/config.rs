@@ -1,7 +1,7 @@
 //! `htl.toml`: parsing / discovery, the static `contract` lint, the `contract-unenforced`
 //! host scan, and `contract_resolvers` giving the host the same contract at run time.
 
-use htl_core::config::{HtlConfig, join_specs};
+use htl_core::config::{HtlConfig, check_toolchain, join_specs};
 use htl_core::pkg::TealResolver as Resolver;
 use htl_core::{Htl, contract_enforcement_lints, contract_lints};
 use std::path::{Path, PathBuf};
@@ -115,6 +115,64 @@ fn parse_sections_and_lint_spec() {
     assert!(
         HtlConfig::parse("[lint]\nstrictness = true\n").is_err(),
         "unknown keys are errors"
+    );
+}
+
+/// `[toolchain] htl`: the comparison, and the two answers that are not a comparison at
+/// all — an absent key, and a requirement that is not one.
+#[test]
+fn toolchain_requirement_is_matched_by_cargos_rules() {
+    let pinned = |req: &str| HtlConfig::parse(&format!("[toolchain]\nhtl = \"{req}\"\n")).unwrap();
+    let path = Path::new("/p/htl.toml");
+
+    // Satisfied: `"0.4"` is 0.4.x, and a patch release inside it still satisfies it —
+    // which is why the scaffold writes a requirement rather than an exact version.
+    for (req, running) in [("0.4", "0.4.0"), ("0.4", "0.4.7"), ("1", "1.2.3")] {
+        assert!(
+            check_toolchain(&pinned(req), path, running).is_ok(),
+            "htl {running} should satisfy {req:?}"
+        );
+    }
+
+    // Violated, in both directions: a project ahead of the command and one behind it.
+    for (req, running) in [("0.4", "0.3.0"), ("0.4", "0.5.0"), ("0.4", "1.0.0")] {
+        let e = check_toolchain(&pinned(req), path, running)
+            .expect_err(&format!("htl {running} should not satisfy {req:?}"))
+            .to_string();
+        assert!(e.contains(running), "running version missing: {e}");
+        assert!(
+            e.contains(&format!("[toolchain] htl = \"{req}\"")),
+            "requirement missing: {e}"
+        );
+        assert!(e.contains("/p/htl.toml"), "config file missing: {e}");
+        assert!(
+            e.contains("cargo install htl-cli"),
+            "no way out offered: {e}"
+        );
+    }
+
+    // Absent: nothing to compare, so nothing is refused whatever the command is.
+    let bare = HtlConfig::parse("[fmt]\nindent = 3\n").unwrap();
+    assert!(bare.toolchain.htl.is_none());
+    assert!(bare.toolchain.req().unwrap().is_none());
+    assert!(check_toolchain(&bare, path, "0.1.0").is_ok());
+
+    // Malformed: a config error, raised by parsing rather than by the comparison, so it
+    // reaches a reader of the file that never compares anything.
+    // `{:#}` is how the CLI prints an error: the whole chain, "parsing htl.toml" included.
+    let e = format!(
+        "{:#}",
+        HtlConfig::parse("[toolchain]\nhtl = \"not a requirement\"\n")
+            .expect_err("a requirement that is not one should not parse")
+    );
+    assert!(
+        e.contains("[toolchain] htl = \"not a requirement\"")
+            && e.contains("is not a version requirement"),
+        "unhelpful message: {e}"
+    );
+    assert!(
+        HtlConfig::parse("[toolchain]\nhtl = \"0.4\"\nrustc = \"1.88\"\n").is_err(),
+        "unknown keys under [toolchain] are errors, as they are everywhere else"
     );
 }
 

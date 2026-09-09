@@ -1346,8 +1346,21 @@ fn report_patched(paths: &[PathBuf]) {
 }
 
 /// Nearest `htl.toml` above the first path: `(dir holding it, path, config)`.
+///
+/// Where `[toolchain] htl` is answered, and the only place: every command that reads the
+/// config comes through here, and the pin has to be settled before the command reads a
+/// source file — which is a property of this function, not something each command could
+/// be trusted to repeat. `htl new` / `htl init` do not call it, so a mismatch never stops
+/// anyone from creating a project.
+///
+/// The version compared is this binary's, which is the one the pin is about. The `htl`
+/// crate a Rust host builds against is Cargo's business and is pinned in `Cargo.toml`.
 fn load_config(first: &Path) -> Result<project::Config> {
-    project::config_of(first)
+    let cfg = project::config_of(first)?;
+    if let Some((_, path, c)) = &cfg {
+        htl::config::check_toolchain(c, path, env!("CARGO_PKG_VERSION"))?;
+    }
+    Ok(cfg)
 }
 
 fn cmd_fmt(paths: &[PathBuf], check: bool, indent: Option<usize>) -> Result<ExitCode> {

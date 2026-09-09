@@ -37,6 +37,8 @@ mlua = { workspace = true }
 mlua-pkg = { workspace = true, optional = true }
 anyhow = { workspace = true }
 walkdir = { workspace = true }
+# `[toolchain] htl` in htl.toml — a requirement read and matched by cargo's own rules.
+semver = { workspace = true }
 syn = { version = "2", features = ["full"], optional = true }
 serde = { version = "1", features = ["derive"] }
 # The run cache (src/cache.rs): entries are JSON, keyed and invalidated by content hash

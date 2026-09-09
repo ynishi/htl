@@ -544,9 +544,17 @@ fn t_types_readme() -> String {
 }
 
 fn t_htl_toml() -> String {
-    "# htl project settings (htl check / htl test / htl fmt / include_tl! all read this).\n\
+    format!(
+        "# htl project settings (htl check / htl test / htl fmt / include_tl! all read this).\n\
      # Command-line flags and HTL_LINTS / HTL_LINT override it.\n\n\
-     [lint]\n\
+     # The htl command this project expects, as a cargo requirement. A command outside it\n\
+     # is refused rather than checking with a different set of default lints; the fix is\n\
+     # `cargo install htl-cli`, and moving to a release is this one line plus whatever the\n\
+     # release's new lints found.\n\
+     [toolchain]\n\
+     htl = \"{}\"\n\n",
+        htl_dep_version()
+    ) + "[lint]\n\
      # enable  = [\"class-record\", \"explicit-number\"]   # opt-in rules (htl check --list-lints)\n\
      # disable = [\"shadow-local\"]\n\
      # strict  = true   # lints fail check/test and include_tl!; false makes the macro advisory\n\n\
@@ -576,7 +584,6 @@ fn t_htl_toml() -> String {
      # enforced_by = \"mods/_validate.lua\"   # ...or name where it is enforced instead,\n\
      #                          # for a Lua-side validator, a sibling crate, generated\n\
      #                          # code. The file has to exist; a missing one is reported.\n"
-        .to_string()
 }
 
 fn t_gitignore(host: Option<&'static HostProfile>, ctx: &Ctx<'_>) -> String {

@@ -747,6 +747,9 @@ above the file, so the CLI and the build agree. Flags and `HTL_LINTS` / `HTL_LIN
 override it (`htl new` writes a commented one).
 
 ```toml
+[toolchain]
+htl = "0.3"               # the htl command this project expects; a mismatch is refused
+
 [lint]
 enable  = ["class-record", "explicit-number"]
 disable = ["shadow-local"]
@@ -762,6 +765,16 @@ paths = ["mods", "~/.cache/tsk/sdk"]   # extra dirs require() resolves from whil
 dir = "mods"              # relative to htl.toml; "sites/*" = every subdirectory of sites/
 # module = "Site"         # optional: only this module name (in each dir) is held to it
 ```
+
+`[toolchain] htl` is a cargo requirement (`"0.3"` = 0.3.x) on the *command*, which
+`Cargo.toml` does not pin — it pins the crate a Rust host builds against. The command
+is what decides whether the project checks: three lints were added on one day and all
+three are on by default, so a project green under the release before them is red under
+the release after, on unchanged sources. Written down, that arrives as a version the
+project moved to rather than as a difference between two machines. A command outside
+the requirement is refused before anything is read, naming both versions and this file;
+htl installs nothing, so the answer is `cargo install htl-cli`. `htl new` writes the
+key; leave it out and any command runs the project, as before.
 
 `[check] paths` is for modules the host supplies at run time from somewhere the
 checker would not look (an SDK cache, a mods dir): the CLI, `include_tl!` and
@@ -1241,7 +1254,7 @@ directory's.
 ```text
 <name>/
 ├── mlua-pkg.toml          [package] entry = "src/<mod>"  → consumers require("<name>")
-├── htl.toml               [lint] / [fmt] / [[contract]] shared by the CLI and include_tl!
+├── htl.toml               [toolchain] / [lint] / [fmt] / [[contract]], read by CLI and macro
 ├── src/<mod>/init.tl      the module (require("<mod>") from src/ and tests/)
 ├── types/                 .d.tl the project consumes (hand-written, and <crate>/ copied
 │                          from a dependency) and publishes (a ---@contract type)

@@ -1,6 +1,9 @@
 //! `htl.toml`: project-level settings shared by the CLI and `include_tl!`.
 //!
 //! ```toml
+//! [toolchain]
+//! htl = "0.4"               # the htl command this project expects; a mismatch is refused
+//!
 //! [lint]
 //! enable  = ["class-record", "explicit-number"]
 //! disable = ["shadow-local"]
@@ -24,6 +27,7 @@
 //! flags and the `HTL_LINTS` / `HTL_LINT` environment variables take precedence over it.
 
 use anyhow::{Context, Result};
+use semver::{Version, VersionReq};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -32,6 +36,10 @@ pub const CONFIG_NAME: &str = "htl.toml";
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HtlConfig {
+    /// Which `htl` command the project expects. Checked once where the config is loaded,
+    /// before the command reads anything else.
+    #[serde(default)]
+    pub toolchain: ToolchainConfig,
     #[serde(default)]
     pub lint: LintConfig,
     #[serde(default)]
@@ -48,6 +56,72 @@ pub struct HtlConfig {
     /// directly under `dir` must return `type`; checked by the `contract` lint.
     #[serde(default)]
     pub contract: Vec<Contract>,
+}
+
+/// `[toolchain]` — the `htl` command a project expects to be checked by.
+///
+/// `Cargo.toml` already pins the `htl` *crate* a Rust host builds against, and nothing
+/// pinned the command. The command is what decides whether the project checks: a default
+/// lint added in a release turns a green project red on unchanged sources, and without
+/// this key the first place that shows up is a teammate's terminal rather than the line
+/// in this file that says which release the project moved to.
+///
+/// htl does not install anything — it is one binary, not a toolchain manager — so a
+/// mismatch is reported and the message names `cargo install htl-cli`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolchainConfig {
+    /// A Cargo-style requirement the running command must satisfy: `"0.4"` for 0.4.x,
+    /// `"1"` for 1.x, `">=0.4.2, <0.6"` when a project needs to say more. Absent, any
+    /// command runs the project, which is what every project did before the key existed.
+    pub htl: Option<String>,
+}
+
+impl ToolchainConfig {
+    /// The requirement, parsed. `Ok(None)` when the key is absent; `Err` when it is there
+    /// and is not a requirement — which [`HtlConfig::parse`] raises with the rest of the
+    /// config errors, so a typo here is found where a typo in `[lint]` is.
+    pub fn req(&self) -> Result<Option<VersionReq>> {
+        let Some(text) = &self.htl else {
+            return Ok(None);
+        };
+        match VersionReq::parse(text) {
+            Ok(req) => Ok(Some(req)),
+            Err(e) => Err(anyhow::anyhow!(
+                "[toolchain] htl = \"{text}\" is not a version requirement: {e}"
+            )),
+        }
+    }
+}
+
+/// Refuse the run when the config names a toolchain this command is not.
+///
+/// `running` is the command's own `CARGO_PKG_VERSION`, passed in rather than read here so
+/// that the version answered for is the binary the person invoked, not whichever crate
+/// this code was compiled into.
+///
+/// Refusing rather than warning is the point of a pin: a warning is ignorable, and a pin
+/// that can be ignored stops being one. The cost is bounded — the fix is the one line
+/// this message quotes.
+///
+/// Matching is cargo's, pre-release rule included: `0.4.0-rc.1` does not satisfy `"0.4"`,
+/// the same way it does not satisfy the `htl = "0.4"` beside it in `Cargo.toml`.
+pub fn check_toolchain(cfg: &HtlConfig, path: &Path, running: &str) -> Result<()> {
+    let Some(req) = cfg.toolchain.req()? else {
+        return Ok(());
+    };
+    let version = Version::parse(running)
+        .with_context(|| format!("this htl reports its version as {running}, which is not one"))?;
+    if req.matches(&version) {
+        return Ok(());
+    }
+    let text = cfg.toolchain.htl.as_deref().unwrap_or_default();
+    anyhow::bail!(
+        "htl {running} does not satisfy the toolchain this project asks for\n  \
+         {}: [toolchain] htl = \"{text}\"\n  \
+         htl installs nothing: cargo install htl-cli --version \"{text}\"",
+        path.display()
+    )
 }
 
 /// `[cache]` — how `htl check` reuses what it already worked out.
@@ -195,7 +269,7 @@ pub struct FixConfig {
 impl HtlConfig {
     /// Parse `htl.toml` text.
     pub fn parse(text: &str) -> Result<Self> {
-        toml::from_str(text)
+        let cfg: Self = toml::from_str(text)
             .map_err(|e| match moved_contract_key(text) {
                 // `type` / `require_fields` / `exclude` moved onto the record itself, and
                 // the serde message for an unknown key does not say where they went.
@@ -206,7 +280,12 @@ impl HtlConfig {
                 ),
                 None => anyhow::Error::from(e),
             })
-            .context("parsing htl.toml")
+            .context("parsing htl.toml")?;
+        // Here rather than at the comparison: a requirement that is not one is a fact
+        // about the file, so it is reported when the file is read and by every reader of
+        // it, including the one that never compares versions.
+        cfg.toolchain.req().context("parsing htl.toml")?;
+        Ok(cfg)
     }
 
     /// Nearest `htl.toml` at or above `start` (a file or directory). `Ok(None)` when
