@@ -12,9 +12,11 @@
 //! `HTL_UPDATE_SNAPSHOTS=1 cargo test -p htl-cli --test scaffold_snapshot` rewrites them;
 //! the rewritten files are the thing under review, so read the diff before committing it.
 //!
-//! The `htl` requirement in `Cargo.toml` is derived from this crate's version, so it is
-//! normalised to `htl = "{{htl}}"` here and the derivation keeps its own test in
-//! `scaffold_cli.rs`. Otherwise every release would rewrite these files.
+//! Two lines are derived from this crate's version — the `htl` dependency in `Cargo.toml`
+//! and `[toolchain] htl` in `htl.toml`, which are the same derivation — so both are
+//! normalised to `htl = "{{htl}}"` here and the derivation keeps its own tests in
+//! `scaffold_cli.rs` and `toolchain_pin.rs`. Otherwise every release would rewrite these
+//! files.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
