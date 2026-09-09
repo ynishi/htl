@@ -552,6 +552,7 @@ pub fn check_one<O: Output>(
     cfg: &Config,
     contracts: &[crate::contract::Resolved],
     origins: &Origins,
+    host_modules: &[String],
 ) -> Result<cache::Module> {
     // Both `add_layout_paths` and the contract lints prepend to the search path, and
     // without putting it back the Nth file would be checked against the directories of the
@@ -565,8 +566,9 @@ pub fn check_one<O: Output>(
     sink.checkinfo(&c);
     let mut lints = c.lints.len();
     // Two declarations of one module on the path: one was read, the other silently was
-    // not. Asked here, while the path this file was checked under is still in place.
-    for l in crate::declaration_conflict_lints(h, f, &c)? {
+    // not. And a require of a name the host registers that landed on a file instead.
+    // Asked here, while the path this file was checked under is still in place.
+    for l in crate::declaration_conflict_lints(h, f, &c, host_modules)? {
         sink.diag(Severity::Lint, &l);
         lints += 1;
     }
@@ -865,13 +867,29 @@ pub fn check<O: Output>(
         .unwrap_or_default();
     let spec = crate::config::join_specs([file_spec.as_str(), lint.unwrap_or("")]);
 
+    // The module names the host registers in `package.preload`, read from the crate's
+    // Rust sources once for the run: `host-module-shadowed` asks the same question of
+    // every require. No crate around the project means no host and no scan.
+    let cargo_root = crate::dts::find_cargo_package_root(start);
+    let host_modules = cargo_root
+        .as_deref()
+        .map(crate::dts::host_module_names)
+        .unwrap_or_default();
+
     // Look every module up before checking any of them, so that a run where nothing moved
-    // never builds a checker at all.
+    // never builds a checker at all. The host module names go into the key for the same
+    // reason the lint selection does: they are part of what a module reports, so adding a
+    // `#[host_module]` beside a Teal file of that name has to make the entry a miss.
+    let key_spec = if host_modules.is_empty() {
+        spec.clone()
+    } else {
+        format!("{spec}\u{1}host={}", host_modules.join(","))
+    };
     let keys: Vec<cache::Key> = files
         .iter()
-        .map(|f| cache::module_key(f, Some(&spec)))
+        .map(|f| cache::module_key(f, Some(&key_spec)))
         .collect();
-    let run_key = cache::run_key(&files, Some(&spec));
+    let run_key = cache::run_key(&files, Some(&key_spec));
     let hits: Vec<Option<cache::Module>> = match &store {
         Some(c) => c.lookup_all(&keys, &run_key, files.len()),
         None => vec![None; files.len()],
@@ -897,7 +915,7 @@ pub fn check<O: Output>(
             }
             None => {
                 let h = h.as_ref().expect("a module missed, so a checker was built");
-                let m = check_one(h, sink, f, cfg, &contracts, &origins)?;
+                let m = check_one(h, sink, f, cfg, &contracts, &origins, &host_modules)?;
                 // Per-module entries are written as each one is checked; a whole-run entry
                 // cannot be written until the walk is done, so it happens below.
                 if let Some(c) = &store
@@ -945,7 +963,6 @@ pub fn check<O: Output>(
     }
     // A contract the host never enforces is documentation, not a guarantee.
     if let Some((_, cfg_path, _)) = cfg {
-        let cargo_root = crate::dts::find_cargo_package_root(start);
         for l in crate::contract_enforcement_lints(cfg_path, &contracts, cargo_root.as_deref()) {
             sink.diag(Severity::Lint, &l);
             n_lint += 1;

@@ -379,6 +379,14 @@ and is declared as `T`, the same name a method returning it declared; nested typ
 from `#[derive(TealRecord)]` structs and enums in the same source file, types from
 other modules via `uses = [Name]` + their own `.d.tl`.
 
+The name a host module registers is a name the Teal sources no longer own. The host puts
+it in `package.preload`, which Lua consults before any path searcher, so a `scripts/host.tl`
+sitting beside `#[host_module(name = "host")]` is the file the check reads and never the
+module the program runs — green check, successful build, `attempt to call a nil value` at
+the first function the two do not share. `host-module-shadowed` reports that at the
+`require`, naming both. It is a lint rather than a fix: which of the two should give up the
+name is the project's decision, and htl moves neither resolution order.
+
 ### Shipping the declaration to your users (`[package.metadata.htl] dts`)
 
 A crate that registers a module in someone else's Lua state has to hand them the
@@ -572,6 +580,7 @@ what they are handed.
 | `no-any` | off | explicit `any` annotations and `as any` casts |
 | `explicit-number` | off | `local n = 0` (inferred `integer`) that is later assigned a number expression (`n = n * 1.5`, `n = a / b`): names the declaration and the assignment; write `local n: number = 0`. Plain integer counters are not reported |
 | `class-record` | off | a record declaring metamethods (`metamethod __index: Actor` = a class): its metatable is attached by `setmetatable` at run time and is not part of the value, so serialization and the Rust boundary drop it; keep such records out of saved data and host signatures |
+| `host-module-shadowed` | on (always) | a `require` of a name a `#[host_module]` in the surrounding crate registers that resolved to a Teal file of that name: `package.preload` beats the path searcher at run time, so the file is what is checked and the host is what runs. Reported at the require, naming both (see "Rust host") |
 | `require-cycle` | on (project-level) | a loop in the require graph of the files `htl check <dir>` just checked, e.g. `a.tl -> b.tl -> a.tl`. Teal types the back edge as an opaque circular require, so without this the symptom is "cannot index" somewhere else |
 
 Silence one occurrence with a trailing `-- htl: allow(nil-index)`. `include_tl!`

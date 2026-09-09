@@ -1049,6 +1049,68 @@ pub fn scan_rust_file(path: &Path, manifest_dir: &Path) -> Result<Vec<Generated>
     Ok(out)
 }
 
+/// Every module name a `#[host_module]` under this crate root registers, whether or not
+/// it also asks for a `.d.tl`. The name is the attribute's `name = ".."`, or the impl
+/// target lowercased — the same rule [`host_decl`] applies, which is what makes this
+/// answer the run-time set of `package.preload` keys without a build.
+///
+/// The walk of [`generate_crate`] minus the writing, and with a substring test before the
+/// parse: a crate with no `#[host_module]` anywhere pays one read per `.rs` file and no
+/// `syn`, and a project with no crate at all is never asked (the caller has no root to
+/// pass). A file that will not parse, or an impl whose target is not a plain type,
+/// contributes nothing — `htl dts` is where either of those is an error worth reporting.
+pub fn host_module_names(manifest_dir: &Path) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for sub in ["src", "examples", "tests", "benches"] {
+        let dir = manifest_dir.join(sub);
+        if !dir.is_dir() {
+            continue;
+        }
+        for e in walkdir::WalkDir::new(&dir)
+            .sort_by_file_name()
+            .into_iter()
+            .flatten()
+        {
+            let p = e.path();
+            if !p.is_file() || p.extension().and_then(|s| s.to_str()) != Some("rs") {
+                continue;
+            }
+            let Ok(src) = std::fs::read_to_string(p) else {
+                continue;
+            };
+            if !src.contains("host_module") {
+                continue;
+            }
+            let Ok(file) = syn::parse_file(&src) else {
+                continue;
+            };
+            let mut flat = Vec::new();
+            walk_items(&file.items, &mut flat);
+            for it in flat {
+                let Item::Impl(imp) = it else { continue };
+                let Ok(Some(attrs)) = parse_host_module_attr(&imp.attrs) else {
+                    continue;
+                };
+                let name = match (attrs.name, &*imp.self_ty) {
+                    (Some(n), _) => Some(n),
+                    (None, Type::Path(p)) => p
+                        .path
+                        .segments
+                        .last()
+                        .map(|s| s.ident.to_string().to_lowercase()),
+                    (None, _) => None,
+                };
+                if let Some(n) = name
+                    && !out.contains(&n)
+                {
+                    out.push(n);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Nearest ancestor of `start` holding a `Cargo.toml` with a `[package]` section
 /// (a workspace root without a package does not count).
 pub fn find_cargo_package_root(start: &Path) -> Option<PathBuf> {
