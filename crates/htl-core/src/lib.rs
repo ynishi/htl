@@ -15,11 +15,6 @@ use mlua::chunk::ChunkMode;
 use mlua::{Function, Lua, Table, Value, Variadic};
 use std::path::{Path, PathBuf};
 
-// The public surface report (`htl api`): the declarations the modules below generate,
-// gathered into one file. It reads a Rust crate's declarations and an mlua-pkg package
-// entry, so it asks for the two features that provide them.
-#[cfg(all(feature = "pkg", feature = "dts"))]
-pub mod api;
 pub mod bundle;
 pub mod cache;
 #[cfg(feature = "dts")]

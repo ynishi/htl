@@ -197,62 +197,19 @@ pub fn dts_target(root: &Path, c: &Resolved) -> Option<PathBuf> {
 /// what a hand-written `.d.tl` says. A module of declarations is copied unchanged,
 /// because there is nothing to remove.
 pub fn publish(root: &Path, contracts: &[Resolved]) -> (Vec<(PathBuf, bool)>, Vec<String>) {
-    let (declarations, mut problems) = declarations(root, contracts);
     let mut written = Vec::new();
-    for d in declarations {
-        // A contract already declared in a `.d.tl` is its own publication.
-        if d.in_place {
-            continue;
-        }
-        match crate::write_if_changed(&d.target, &d.text) {
-            Ok(w) => written.push((d.target, w)),
-            Err(e) => problems.push(format!(
-                "{}:1:1: writing {}: {e} [htl contract]",
-                d.declared_in.display(),
-                d.target.display()
-            )),
-        }
-    }
-    (written, problems)
-}
-
-/// A contract's declaration: where it is published, and what it says.
-#[derive(Debug, Clone)]
-pub struct Publication {
-    /// Where the declaration goes — [`dts_target`].
-    pub target: PathBuf,
-    pub text: String,
-    /// `"<module>.<Type>"`, the contract this publishes.
-    pub type_path: String,
-    /// The file the `---@contract` marker is in.
-    pub declared_in: PathBuf,
-    /// The contract is declared in the file it publishes to, so publishing is a no-op:
-    /// the text is the file's own. A report still names it — it is published either way.
-    pub in_place: bool,
-}
-
-/// The declaration each contract publishes, computed and not written: what [`publish`]
-/// writes out, and what `htl api` reports as part of this project's surface.
-pub fn declarations(root: &Path, contracts: &[Resolved]) -> (Vec<Publication>, Vec<String>) {
-    let mut out = Vec::new();
     let mut problems = Vec::new();
     for c in contracts {
         let Some(target) = dts_target(root, c) else {
             continue;
         };
+        // A contract already declared in a `.d.tl` is its own publication.
+        if crate::same_file(&target, &c.declared_in) {
+            continue;
+        }
         let Ok(src) = std::fs::read_to_string(&c.declared_in) else {
             continue;
         };
-        if crate::same_file(&target, &c.declared_in) {
-            out.push(Publication {
-                target,
-                text: src,
-                type_path: c.type_path.clone(),
-                declared_in: c.declared_in.clone(),
-                in_place: true,
-            });
-            continue;
-        }
         let src = self_contained_marker(&src, c);
         let text = match declaration_of(&src) {
             Ok(t) => t,
@@ -268,15 +225,16 @@ pub fn declarations(root: &Path, contracts: &[Resolved]) -> (Vec<Publication>, V
                 continue;
             }
         };
-        out.push(Publication {
-            target,
-            text,
-            type_path: c.type_path.clone(),
-            declared_in: c.declared_in.clone(),
-            in_place: false,
-        });
+        match crate::write_if_changed(&target, &text) {
+            Ok(w) => written.push((target, w)),
+            Err(e) => problems.push(format!(
+                "{}:1:1: writing {}: {e} [htl contract]",
+                c.declared_in.display(),
+                target.display()
+            )),
+        }
     }
-    (out, problems)
+    (written, problems)
 }
 
 /// The source with its `---@contract` rewritten so the published copy stands on its own:
