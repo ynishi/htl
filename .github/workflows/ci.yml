@@ -58,3 +58,9 @@ jobs:
       # the reference callers it ships, with cc, make and python3 all present on this
       # runner (the recipe says so and skips either caller where they are not).
       - run: just e2e-scaffold
+      # The same scaffold without the patch, so the generated project is compiled against
+      # the htl on crates.io — the crate it pins, a release behind this checkout. The step
+      # above cannot see a disagreement between the two because it patches it away. Same
+      # runner and same target directory as the step above on purpose: the marginal cost is
+      # rebuilding the three htl crates, not the graph under them.
+      - run: just e2e-scaffold-published

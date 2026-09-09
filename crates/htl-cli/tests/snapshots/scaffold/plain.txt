@@ -31,13 +31,6 @@ package through mlua-pkg: they get it as `require("sample")`. Ignore it if nobod
 # htl project settings (htl check / htl test / htl fmt / include_tl! all read this).
 # Command-line flags and HTL_LINTS / HTL_LINT override it.
 
-# The htl command this project expects, as a cargo requirement. A command outside it
-# is refused rather than checking with a different set of default lints; the fix is
-# `cargo install htl-cli`, and moving to a release is this one line plus whatever the
-# release's new lints found.
-[toolchain]
-htl = "{{htl}}"
-
 [lint]
 # enable  = ["class-record", "explicit-number"]   # opt-in rules (htl check --list-lints)
 # disable = ["shadow-local"]

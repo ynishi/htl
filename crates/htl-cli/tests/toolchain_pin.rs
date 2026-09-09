@@ -176,9 +176,17 @@ fn a_malformed_requirement_is_a_config_error() {
     );
 }
 
-/// The scaffold's answer, end to end: `htl new` writes the key, and the project it wrote
-/// checks with the command that wrote it. This is the assertion that the derived
-/// requirement and the running version cannot disagree at a release.
+/// The scaffold's answer, end to end: the project `htl new` wrote checks with the command
+/// that wrote it.
+///
+/// It does so *without* `[toolchain]`, and that absence is the assertion. A host project
+/// pins the released `htl` crate, whose `HtlConfig` is `deny_unknown_fields`; a key this
+/// workspace has and no release carries yet is not ignored there but fatal, inside
+/// `include_tl!`, at the project's first `cargo build`. So the scaffold may only write
+/// configuration the version it pins can read, and a new key waits a release
+/// (`docs/releasing.md` § What the scaffold may write). `[toolchain]` itself keeps working
+/// for a project that writes it by hand against an htl that knows it — the tests above are
+/// that half.
 #[test]
 fn a_scaffolded_project_checks_with_the_cli_that_wrote_it() {
     let root = scratch("scaffold-roundtrip");
@@ -188,8 +196,8 @@ fn a_scaffolded_project_checks_with_the_cli_that_wrote_it() {
 
     let written = std::fs::read_to_string(dir.join("htl.toml")).unwrap();
     assert!(
-        written.contains(&format!("[toolchain]\nhtl = \"{}\"\n", satisfied_req())),
-        "htl new did not write the pin:\n{written}"
+        !written.contains("[toolchain]"),
+        "htl new wrote a key the htl it pins cannot read:\n{written}"
     );
 
     let (ok, err) = htl(&["check", ".", "--no-cache"], &dir);

@@ -23,7 +23,7 @@ fmt-check:
     cargo fmt --all -- --check
 
 # Everything CI runs on a push, in the same order, so a failure there reproduces here.
-ci: build check e2e e2e-scaffold
+ci: build check e2e e2e-scaffold e2e-scaffold-published
 
 # Compile everything, including tests and benches, without running any of it.
 build:
@@ -112,6 +112,33 @@ e2e-scaffold:
       else
         echo 'no C compiler: skipping examples/c'
       fi
+    )
+
+# The same scaffold, built against the htl on crates.io rather than this checkout: no
+# `[patch.crates-io]`, so the project compiles against the crate it actually pins — a
+# release behind the workspace, which is what a user has. That gap is the point. A key
+# written into htl.toml before a release carries it, a template that only the workspace's
+# checker accepts, a dependency requirement that does not resolve: none of it is visible to
+# `e2e-scaffold` above, which patches the disagreement away by construction.
+#
+# It runs in the same CI job as `e2e-scaffold` and against the same target directory, so
+# mlua and the rest of the graph are compiled once and only the three htl crates are built
+# twice. Building is enough: the failure this exists to catch is an expansion-time one, and
+# `include_tl!` runs during the build.
+e2e-scaffold-published:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="$(pwd)"
+    dir="$(mktemp -d)"
+    trap 'rm -rf "$dir"' EXIT
+    cargo run -q -p htl-cli --bin htl -- new "$dir/published" --host rust --lib
+    (
+      cd "$dir/published"
+      # What makes this build the one a user gets: it pins the release, and nothing
+      # redirects that pin at a checkout.
+      grep -q '^htl = ' Cargo.toml
+      ! grep -q 'patch.crates-io' Cargo.toml
+      cargo build --target-dir "${CARGO_TARGET_DIR:-$root/target}/e2e-scaffold"
     )
 
 # Every benchmark: the figures in the README come from these. Ten samples each; a few minutes.
