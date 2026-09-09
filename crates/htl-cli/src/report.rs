@@ -235,7 +235,12 @@ impl Sink {
         } else {
             // Text mode: say a fix exists, so `htl fix` is discoverable from the output.
             match fix.map(|f| f.applicability.as_str()) {
-                Some("safe") => eprintln!("{severity}: {text} (fixable: htl fix)"),
+                // A suggestion is shown by `htl fix` and never written by it; the command
+                // that carries the edit is still `htl fix` (`--diff` prints it), and what
+                // it does with it is what it says when it runs.
+                Some("safe") | Some("suggest") => {
+                    eprintln!("{severity}: {text} (fixable: htl fix)")
+                }
                 Some("unsafe") => eprintln!("{severity}: {text} (fixable: htl fix --unsafe)"),
                 _ => eprintln!("{severity}: {text}"),
             }

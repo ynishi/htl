@@ -157,6 +157,64 @@ fn json_carries_fixes_on_check_and_the_fix_report() {
     assert_eq!(v["files"][0]["changed"], true);
 }
 
+const STRUCT_DEFS: &str = "local record defs\n   ---@struct\n   record Node\n      zeta: string\n\
+   \x20     alpha: integer\n   end\nend\nreturn defs\n";
+const STRUCT_SITE: &str =
+    "local defs = require(\"defs\")\nlocal n: defs.Node = { zeta = \"z\" }\nreturn n\n";
+
+/// A `suggest` fix through the binary: reported as fixable, shown by `--diff`, carried by
+/// JSON, and written by nothing — not even `--unsafe`.
+#[test]
+fn a_suggestion_is_shown_and_never_written() {
+    let dir = scratch("suggest");
+    write(&dir.join("src/defs.tl"), STRUCT_DEFS);
+    write(&dir.join("src/mod.tl"), STRUCT_SITE);
+
+    let (ok, _, err) = htl(&["check", "src"], &dir);
+    assert!(ok, "{err}");
+    assert!(
+        err.contains("[htl struct-fields] (fixable: htl fix)"),
+        "{err}"
+    );
+
+    let (ok, out, err) = htl(&["fix", "src", "--diff"], &dir);
+    assert!(ok, "{err}");
+    assert!(
+        err.contains("skipped: src/mod.tl:2: struct-fields — suggestion only"),
+        "{err}"
+    );
+    assert!(
+        out.contains("(suggested)")
+            && out
+                .contains("+local n: defs.Node = { zeta = \"z\", alpha = htl_fixme(\"integer\") }"),
+        "{out}"
+    );
+
+    for args in [
+        &["fix", "src", "--allow-no-vcs"][..],
+        &["fix", "src", "--allow-no-vcs", "--unsafe"][..],
+    ] {
+        let (ok, _, err) = htl(args, &dir);
+        assert!(ok, "{err}");
+        assert!(err.contains("0 changed"), "{args:?}: {err}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("src/mod.tl")).unwrap(),
+            STRUCT_SITE,
+            "{args:?} left the file alone"
+        );
+    }
+
+    let (_, out, _) = htl(&["check", "src", "--format", "json"], &dir);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let d = &v["diagnostics"][0];
+    assert_eq!(d["rule"], "struct-fields");
+    assert_eq!(d["fix"]["applicability"], "suggest");
+    assert_eq!(
+        d["fix"]["edits"][0]["text"],
+        ", alpha = htl_fixme(\"integer\")"
+    );
+}
+
 #[test]
 fn exit_non_zero_on_fix_for_ci() {
     let Some(root) = repo() else { return };
