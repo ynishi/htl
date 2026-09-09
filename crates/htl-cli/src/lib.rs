@@ -7,6 +7,7 @@
 //! - `htl bundle info <.hb>`  print what a bundle records, without running it
 
 use htl::cache;
+mod junit;
 mod report;
 mod scaffold;
 
@@ -231,6 +232,9 @@ enum Cmd {
         /// Also write the coverage as an lcov tracefile here (implies --coverage)
         #[arg(long, value_name = "FILE")]
         lcov: Option<PathBuf>,
+        /// Also write the run as a JUnit XML report here, for a CI that reads test results
+        #[arg(long, value_name = "FILE")]
+        junit: Option<PathBuf>,
         /// Seed the random stream tests draw from; printed every run, so a failure repeats
         #[arg(long)]
         seed: Option<u64>,
@@ -475,6 +479,7 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
             coverage,
             coverage_lines,
             lcov,
+            junit,
             seed,
             format,
             no_cache,
@@ -493,6 +498,7 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
                 coverage: coverage || lcov.is_some(),
                 coverage_lines,
                 lcov,
+                junit,
                 json: format == Format::Json,
                 no_cache,
                 explain: explain_cache,
@@ -1208,6 +1214,8 @@ struct TestFlags {
     coverage_lines: bool,
     /// Where to write the lcov tracefile, if asked for.
     lcov: Option<PathBuf>,
+    /// Where to write the JUnit XML report, if asked for.
+    junit: Option<PathBuf>,
     json: bool,
     no_cache: bool,
     explain: bool,
@@ -1266,6 +1274,56 @@ fn print_coverage(cov: &report::CoverageReport, with_lines: bool) {
     }
 }
 
+/// One file's report as a JUnit suite.
+///
+/// The assertion library reports a failure as `"<suite > test>: <message>"` and its tests
+/// by the same composed name, so a failing case takes back the message printed under the
+/// file by matching that prefix — including the traceback a runtime error carries, which
+/// belongs in the report for the same reason it belongs on the terminal: it is the part
+/// that says where.
+fn junit_suite(rep: &htl::testing::FileReport) -> junit::Suite {
+    let mut left: Vec<&str> = rep.failures.iter().map(String::as_str).collect();
+    let cases = rep
+        .tests
+        .iter()
+        .map(|t| {
+            let failure = (!t.ok)
+                .then(|| {
+                    let head = format!("{}: ", t.name);
+                    let at = left.iter().position(|m| m.starts_with(&head))?;
+                    Some(left.remove(at)[head.len()..].to_string())
+                })
+                .flatten();
+            junit::Case {
+                name: t.name.clone(),
+                ms: t.ms,
+                // A failing test whose message could not be matched still failed: say so
+                // rather than reporting it as passed.
+                failure: failure.or_else(|| (!t.ok).then(|| "failed".to_string())),
+            }
+        })
+        .collect();
+    let error = if !rep.check.ok() {
+        Some(junit::Error {
+            message: "type check failed".to_string(),
+            kind: "check",
+            body: rep.check.errors.join("\n"),
+        })
+    } else {
+        rep.error.as_ref().map(|e| junit::Error {
+            message: e.clone(),
+            kind: "error",
+            body: e.clone(),
+        })
+    };
+    junit::Suite {
+        file: rep.path.display().to_string(),
+        duration_ms: rep.duration_ms,
+        error,
+        cases,
+    }
+}
+
 fn cmd_test(
     paths: &[PathBuf],
     filter: Option<&str>,
@@ -1312,12 +1370,16 @@ fn cmd_test(
 
     let mut sink = project::Sink::new(report::Out::new(flags.json));
     let mut json_files: Vec<report::TestFile> = Vec::new();
+    let mut junit_suites: Vec<junit::Suite> = Vec::new();
     // What is left of the run here: how a file reads on a terminal, and what the document
     // says about it. Which files run, in what isolation, from what store — and what they
     // draw — is `project::test`'s.
     let rep = project::test(&mut sink, &files, &opts, &mut |rep, sink| {
         if flags.json {
             json_files.push(report::TestFile::from_report(rep, sink.out().take()));
+        }
+        if flags.junit.is_some() {
+            junit_suites.push(junit_suite(rep));
         }
         let f = &rep.path;
         let tag = if rep.ok() { "ok  " } else { "FAIL" };
@@ -1378,6 +1440,12 @@ fn cmd_test(
         }
     })?;
 
+    if let Some(out) = &flags.junit {
+        // The run's own total, not the sum of the files: it is the number the summary
+        // line prints, and the report is there to agree with the summary line.
+        std::fs::write(out, junit::document(&junit_suites, rep.duration_ms))
+            .with_context(|| format!("writing {}", out.display()))?;
+    }
     if let (Some(out), Some(cov)) = (&flags.lcov, &rep.coverage) {
         // Against the project root rather than the working directory: a tracefile is
         // uploaded from wherever CI ran the command and resolved against the repository.

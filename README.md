@@ -40,7 +40,7 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 | `htl new <name>` / `htl init [dir]` | scaffold: `mlua-pkg.toml`, `src/<mod>/init.tl`, `src/main.tl`, `tests/`, README (`--lib` for no entry script; `--host <name>` for a Rust host, `--embed` being the shorthand for `--host rust`) |
 | `htl check [paths] [--strict] [--lint +rule,-rule] [--no-cache] [--cache-mode per-module\|whole-run] [--explain-cache]` | type-check; htl lints as `lint:` (advisory, `--strict` fails on them); a module reached through `require` (an installed dep, a `[check] paths` dir) is checked with the file and its type errors are errors too, once per run, with the file that required it; what has not changed is replayed from `.htl/` (see Caching) |
 | `htl run <file.tl \| app.hb> [args]` | check then execute; `require` of a `.tl` with type errors fails |
-| `htl test [paths] [--filter s] [--lib mod] [--coverage] [--lcov file] [--no-cache]` | `*_test.tl` and `tests/**/*.tl`, one isolated state per file; checking is replayed from `.htl/`, the run never is (see Caching) |
+| `htl test [paths] [--filter s] [--lib mod] [--coverage] [--lcov file] [--junit file] [--no-cache]` | `*_test.tl` and `tests/**/*.tl`, one isolated state per file; checking is replayed from `.htl/`, the run never is (see Caching) |
 | `htl fmt [paths] [--check] [--indent N]` | whitespace formatter (indentation from the syntax tree, blank lines, trailing space) |
 | `htl gen <file.tl> [-o out.lua]` | readable Lua, the escape hatch out of htl |
 | `htl build <entry.tl> -o app.hb [--debug] [--source] [--extra a,b] [--host x,y] [--no-cache] [--explain-cache]` | link the entry's `require` closure into one bundle (see Bundles), replaying from the run cache what still holds (see Caching; the directory form is not cached) |
@@ -1154,6 +1154,20 @@ project root (the `htl.toml` directory) rather than to where the command ran, so
 file resolves against the repository wherever CI stood; a module outside the root is
 written absolute.
 
+`--junit report.xml` writes the run as a JUnit XML report, which is what a CI reads to
+show which tests failed rather than a log to scroll: Jenkins' JUnit plugin, GitLab's
+report ingestion, and the GitHub Actions reporters all take this file. One `<testsuite>`
+per test file, one `<testcase>` per test with `classname` (the file), `name` (the suite
+and test name as the text output composes them) and `time` in seconds; a failing case
+carries a `<failure>` with the message printed under the file, traceback included. The
+totals are the summary line's: the same cases, the same failures. A file that failed to
+type-check, or raised outside any test, is a suite whose cases could not run, so it
+carries an `<error>` and no cases — the distinction a report makes between a test that
+said no and a file that never got to ask. Nothing is ever `<skipped>`: `--filter`
+selects before the run, so an excluded test is absent rather than skipped, while a file
+with no tests did run and is there as a suite with no cases. The flag composes with
+`--filter`, `--seed` and `--format json`, and changes neither the text nor the document.
+
 Randomness: the runner seeds each file before it runs, prints the seed of every run, and
 takes it back with `--seed`, so a test that draws is one whose failure can be looked at
 again:
@@ -1174,7 +1188,7 @@ test that calls `math.randomseed` itself takes over from there; the runner does 
 again.
 
 Runner: `htl test [paths] [--filter substr] [--fail-fast] [-v | -q] [--slow MS]
-[--update] [--seed N] [--coverage [--coverage-lines]] [--lcov FILE]`. Each file runs in a fresh state; `-v` prints every test with its time,
+[--update] [--seed N] [--coverage [--coverage-lines]] [--lcov FILE] [--junit FILE]`. Each file runs in a fresh state; `-v` prints every test with its time,
 `-q` only failures (with their details), errors and the summary line, `--slow 50` the
 tests over 50 ms, `--fail-fast` stops at the first failure. The run has one checker
 (`htl::testing::TestSession`) and one fresh program state per file: globals,
