@@ -23,6 +23,7 @@ pub mod config;
 pub mod contract;
 #[cfg(feature = "dts")]
 pub mod dep_dts;
+pub mod diagnostic;
 #[cfg(feature = "dts")]
 pub mod dts;
 #[cfg(feature = "ffi")]
@@ -33,6 +34,8 @@ pub mod link;
 pub mod pkg;
 pub mod teal;
 pub mod testing;
+
+pub use diagnostic::{Diagnostic, Severity};
 
 /// Registry key under which the prelude table is stored (lets `pkg::TealResolver`
 /// reach the compiler from a bare `&Lua`).
@@ -113,7 +116,11 @@ pub struct DependencyError {
 }
 
 /// How safely a [`Fix`] can be applied without a human looking at it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serializes as its [`as_str`](Applicability::as_str) name, which is what a stored fix
+/// and `--format json` both carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Applicability {
     /// The rewrite does not change what the program does at run time.
     Safe,
@@ -135,7 +142,7 @@ impl Applicability {
 
 /// One text replacement: `[start, end)` in 1-based line / byte-column coordinates;
 /// an insertion has `end == start`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Edit {
     pub line: usize,
     pub col: usize,
@@ -145,7 +152,10 @@ pub struct Edit {
 }
 
 /// A mechanical rewrite attached to a diagnostic (see [`fix`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serializes as [`cache::FixJson`] does, since the two describe the same thing and the
+/// store reads back what `--format json` prints.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Fix {
     pub applicability: Applicability,
     pub edits: Vec<Edit>,
@@ -320,8 +330,11 @@ pub fn contract_lints(
             continue;
         }
         for e in &r.errors {
-            // The stub's own "<contract ...>:L:C: " prefix says nothing useful; keep the message.
-            let msg = e.splitn(4, ':').last().unwrap_or(e).trim();
+            // The stub's own "<contract ...>:L:C: " prefix says nothing useful; keep the
+            // message. The same reading of a diagnostic's text every other caller makes.
+            let msg = diagnostic::position(e)
+                .map_or(e.as_str(), |(_, _, _, msg)| msg)
+                .trim();
             out.push(format!(
                 "{}:1:1: does not satisfy contract {} ({}): {msg} [htl contract]",
                 file.display(),
@@ -607,6 +620,47 @@ impl CheckInfo {
     pub fn clean(&self) -> bool {
         self.errors.is_empty() && self.warnings.is_empty() && self.lints.is_empty()
     }
+
+    /// Everything this check found about the file itself, structured, in the order the
+    /// text output says it: warnings, then lints, then errors.
+    ///
+    /// Errors in what the file *required* are not here — they belong to the module they
+    /// are in, and it is the reporting caller that decides how to say them
+    /// ([`dependency_errors`](Self::dependency_errors)).
+    pub fn diagnostics(&self) -> Vec<Diagnostic> {
+        let mut out = self.warning_diagnostics();
+        out.extend(self.lint_diagnostics());
+        out.extend(self.error_diagnostics());
+        out
+    }
+
+    /// [`errors`](Self::errors) with their positions and their fixes.
+    pub fn error_diagnostics(&self) -> Vec<Diagnostic> {
+        parsed(Severity::Error, &self.errors, &self.error_fixes)
+    }
+
+    /// [`warnings`](Self::warnings) with their positions. Warnings carry no fix.
+    pub fn warning_diagnostics(&self) -> Vec<Diagnostic> {
+        parsed(Severity::Warning, &self.warnings, &[])
+    }
+
+    /// [`lints`](Self::lints) with their positions, their rule names and their fixes.
+    pub fn lint_diagnostics(&self) -> Vec<Diagnostic> {
+        parsed(Severity::Lint, &self.lints, &self.lint_fixes)
+    }
+}
+
+/// `texts[i]` parsed, with `fixes[i]` attached when there is one.
+fn parsed(severity: Severity, texts: &[String], fixes: &[Option<Fix>]) -> Vec<Diagnostic> {
+    texts
+        .iter()
+        .enumerate()
+        .map(|(i, text)| {
+            let mut d = Diagnostic::parse(severity, text);
+            d.fix = fixes.get(i).and_then(|f| f.clone());
+            d
+        })
+        .collect()
 }
 
 /// An mlua state with the Teal compiler loaded.

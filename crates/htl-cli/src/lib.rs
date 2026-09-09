@@ -149,7 +149,7 @@ impl From<CacheModeArg> for cache::Mode {
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use htl::bundle::Bundle;
-use htl::{CheckInfo, Htl};
+use htl::{CheckInfo, Htl, Severity};
 use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1988,7 +1988,7 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
     }
     // Project-level: cycles in the require graph of the files just checked.
     for cyc in htl::require_cycles(&infos) {
-        sink.diag("lint", &cyc);
+        sink.diag(Severity::Lint, &cyc);
         n_lint += 1;
     }
     // A marker that could not be turned into a contract, and a contract that could not be
@@ -1999,14 +1999,14 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
         None => Vec::new(),
     };
     for p in contract_problems.iter().chain(&publish_problems) {
-        sink.diag("lint", p);
+        sink.diag(Severity::Lint, p);
         n_lint += 1;
     }
     // A contract the host never enforces is documentation, not a guarantee.
     if let Some((_, cfg_path, _)) = &cfg {
         let cargo_root = htl::dts::find_cargo_package_root(&paths[0]);
         for l in htl::contract_enforcement_lints(cfg_path, &contracts, cargo_root.as_deref()) {
-            sink.diag("lint", &l);
+            sink.diag(Severity::Lint, &l);
             n_lint += 1;
         }
     }
@@ -2317,7 +2317,7 @@ fn check_one(
     // Two declarations of one module on the path: one was read, the other silently was
     // not. Asked here, while the path this file was checked under is still in place.
     for l in htl::declaration_conflict_lints(h, f, &c)? {
-        sink.diag("lint", &l);
+        sink.diag(Severity::Lint, &l);
         lints += 1;
     }
     // `---@contract`: the type and required fields for files under each contract dir.
@@ -2325,7 +2325,7 @@ fn check_one(
         && c.ok()
     {
         for l in htl::contract_lints(h, root, cfg, contracts, f)? {
-            sink.diag("lint", &l);
+            sink.diag(Severity::Lint, &l);
             lints += 1;
         }
     }
