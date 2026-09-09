@@ -525,6 +525,26 @@ be absent. Adding an unmarked field makes the construction sites that predate it
 which is the point — the default for a new field is mandatory, and `---@optional` is the
 exception you write on purpose.
 
+Growing a record that already has construction sites is that report arriving at all of
+them at once, which is the moment a project either edits every site in one sitting or
+takes the field back out. The way through is two steps, and the first is to add the field
+with `---@optional` on it — a marker that says "not yet", where the ones above it say "not
+always":
+
+```tl
+   ---@optional   -- new: remove once every site sets it
+   color: string
+```
+
+Nothing is reported, so the field can land while the sites are still short. Fill them at
+whatever pace the work allows and then delete the marker line: every site that still
+leaves the field out is reported, and a clean check is what tells you the last one is
+done. Deleting it early is how to read that list at any point in between — `htl check` names every site that is short,
+and `htl fix --diff` spells the missing field into each one as a suggestion it never
+writes (`color = htl_fixme("string")`, a call the checker refuses wherever it lands). That
+is a checklist and a line to paste from, not the migration done for you; a field has no
+honest default, which is why nothing fills it in.
+
 A misspelled field is the case where two rules each hold half the answer: the checker says
 `unknown field colour` about the key that exists, and this says `color` is missing. When
 the key the literal sets is a near miss for the one it wants, the message names it instead
@@ -585,6 +605,15 @@ gate.open or gate.reopen`). The function is matched on the name as written or on
 segment, and a function assigned rather than declared (`gate.judge = function() ... end`)
 counts as the function it is written inside. `-- htl: allow(sealed-record)` keeps one site
 the project stands behind.
+
+A test that compares a whole sealed value builds one, and is reported like anywhere else:
+`t.expect(gate.judge("yes")):to_equal({ verdict = "yes", at = 1 })` writes a literal typed
+as `gate.Judged` in a file that is not `gate.tl`, which is the rule working rather than
+misfiring. Both ways through are ordinary. Either the assertion carries
+`-- htl: allow(sealed-record)`, which says this literal exists to be compared and never
+leaves the test, or the test asserts the fields it is about
+(`t.expect(j.verdict):to_equal("yes")`), which builds nothing and says which field
+differed when it fails.
 
 A record nested inside a sealed one is not sealed by that; mark it too if it should be.
 Like `---@struct`, this is a lint and not a type: the file stays valid Teal, other tooling
@@ -902,6 +931,39 @@ the assertion surface small enough to read in one screen. Matchers: `to_equal`,
 `to_match` / `to_not_match` (Lua pattern), `to_have_length`, `to_error`. A function returning two values is asserted with
 `t.expect_all(f()):to_equal(false, "no door")` (`t.expect(f())` is a 2-argument call and
 a type error; the message says so).
+
+A test builds values far more often than it asserts them, and what it builds is usually
+one valid value with a single thing varied, so a record with a handful of fields and a
+dozen tests is a dozen places that spell every field. Adding a field to it then means a
+dozen edits, and under `---@struct` a dozen reports at once. A factory in a helper module
+beside the tests turns those into one place — a table of defaults, and a parameter that
+names what this test varies:
+
+```tl
+local record factory
+   record Over          -- what a test varies, not the record itself
+      id: string
+      hp: integer
+   end
+end
+
+function factory.make_def(over: factory.Over): defs.MonsterDef
+   return {
+      id = over.id or "rat",
+      hp = over.hp or 3,
+      color = "grey",
+   }
+end
+```
+
+`factory.make_def{ hp = 1 }` then reads as the one thing the test is about, and a field
+added to `MonsterDef` is filled in the factory and nowhere else. The overlay is a record
+of its own, listing the fields a test may vary — usually fewer than all of them — and it
+has to be: typed as `MonsterDef` it would make every call a literal built as that record,
+reported like any other construction site, which is the factory handing back exactly what
+it was written to remove. No lint asks for any of this; it is one way of writing tests
+among others, and it is here because the marker is what makes the cost of the other way
+arrive all at once.
 
 Snapshots: `t.expect(session.frame(s)):to_match_snapshot("first floor")` compares
 the value with `tests/__snapshots__/<test file>/<name>.snap`. The first run writes the
