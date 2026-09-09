@@ -29,7 +29,9 @@ pub fn lib_dir() -> Result<PathBuf> {
 impl Htl {
     /// Make `require("htl.test")` work at runtime and its types visible to the checker.
     pub fn install_test_lib(&self) -> Result<()> {
-        self.preload(DEFAULT_LIB, TEST_LUA)?;
+        // A label, not a path: the library ships inside the binary, so `htl/test.tl` is
+        // not a file anyone could open. Its frames read `htl.test:404` and stop there.
+        self.preload_at(DEFAULT_LIB, &format!("={DEFAULT_LIB}"), TEST_LUA)?;
         self.add_path(&lib_dir()?)?;
         Ok(())
     }
@@ -481,7 +483,9 @@ fn run_in(h: &Htl, path: &Path, r: RunIn<'_>, out_code: &mut Option<String>) -> 
         h.coverage_start()?;
     }
     if let Err(e) = h.exec(&code, &format!("@{}", path.display()), &[]) {
-        rep.error = Some(crate::user_message(&e));
+        // With the frames: a file that raised while loading is a development failure, and
+        // the per-test failures beside it have carried a traceback all along.
+        rep.error = Some(crate::developer_message(&e));
         if opts.coverage {
             rep.coverage = h.coverage_stop()?;
         }

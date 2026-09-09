@@ -1198,7 +1198,9 @@ fn cmd_test(
         let detail = if !rep.check.ok() {
             "type check failed".to_string()
         } else if let Some(e) = &rep.error {
-            format!("error: {e}")
+            // The cause on the file's own line, its frames under it: a traceback inside
+            // the parenthesised summary would push `12 ms` past a screen of stack.
+            format!("error: {}", e.lines().next().unwrap_or_default())
         } else if rep.file_level {
             "ran to completion (no test library used)".to_string()
         } else {
@@ -1213,6 +1215,11 @@ fn cmd_test(
                 f.display(),
                 rep.duration_ms
             );
+            if let Some(e) = &rep.error {
+                for line in e.lines().skip(1) {
+                    eprintln!("      {line}");
+                }
+            }
         }
         for tr in &rep.tests {
             let slow = flags.slow.is_some_and(|ms| tr.ms >= ms);
@@ -1910,7 +1917,9 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
         return Ok(match h.run_bundle(&b, args) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("{}", htl::user_message(&e));
+                // A bundle's frames are as good as its payload: stripped bytecode has no
+                // lines to show, and `htl build --debug` is what keeps them.
+                eprintln!("{}", htl::developer_message(&e));
                 ExitCode::FAILURE
             }
         });
@@ -1927,8 +1936,10 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
     match h.exec(&code, &format!("@{}", file.display()), args) {
         Ok(()) => Ok(ExitCode::SUCCESS),
         Err(e) => {
-            // Innermost cause, no Lua traceback (`--trace` would be the place to show it).
-            eprintln!("{}", htl::user_message(&e));
+            // Innermost cause and the frames that reached it. `htl run` is a development
+            // command, so the frames are the default; `htl::user_message` is what an
+            // embedding host shows people who did not write the Teal.
+            eprintln!("{}", htl::developer_message(&e));
             Ok(ExitCode::FAILURE)
         }
     }

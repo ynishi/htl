@@ -169,7 +169,8 @@ fn main() -> Result<()> {
         h.run_bundle(&htl::bundle::Bundle::decode(BUNDLE)?, &args)?;
         return Ok(());
     }
-    h.preload_bytes("util", UTIL)?;
-    h.exec(MAIN, "=main.tl", &args)?;
+    h.preload_bytes("util", UTIL)?; // stripped: its frames read `?`, with no line
+    // Source, named for the file it came from: its frames read `scripts/main.tl:<line>`.
+    h.exec(MAIN, "@scripts/main.tl", &args)?;
     Ok(())
 }

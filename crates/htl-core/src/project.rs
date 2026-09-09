@@ -1322,7 +1322,8 @@ pub fn test<O: Output>(
         };
         if coverage_wanted {
             for (source, lines) in &rep.coverage {
-                // Lua names a file chunk "@<path>"; bundles and preloads ("=name") have no file.
+                // Lua names a file chunk "@<path>"; a label ("=name") — a bundle entry, the
+                // test library — names no file and has no source to attribute lines to.
                 let Some(path) = source.strip_prefix('@') else {
                     continue;
                 };

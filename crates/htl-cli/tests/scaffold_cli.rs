@@ -81,7 +81,7 @@ fn embed_scaffold_fills_arg_before_running_main() {
         .find("h.set_arg(\"main.tl\", &args)?")
         .expect("set_arg call");
     let exec = main_rs
-        .find("h.exec(MAIN, \"=main.tl\", &args)?")
+        .find("h.exec(MAIN, \"@src/main.tl\", &args)?")
         .expect("exec call");
     assert!(set < exec, "set_arg comes before exec:\n{main_rs}");
 }

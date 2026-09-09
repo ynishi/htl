@@ -345,8 +345,10 @@ pub fn fail<E: fmt::Display + Any>(e: E) -> Status {
 ///
 /// An mlua error's `Display` is the innermost cause plus Lua's `stack traceback:` block,
 /// which is for a log and not for the message a host puts in front of a player;
-/// [`crate::user_message_lua`] is what `htl run` and `htl test` print, and it is what
-/// crosses here too.
+/// [`crate::user_message_lua`] drops the frames and is what crosses here. A C caller is
+/// an embedding host, so this side takes the same answer the Rust side's
+/// [`crate::user_message`] gives — not [`crate::developer_message`], which is what the
+/// development commands `htl run` and `htl test` print.
 fn classify(any: &dyn Any) -> (Status, Option<String>) {
     if let Some(m) = any.downcast_ref::<mlua::Error>() {
         return (lua_status(m), Some(crate::user_message_lua(m)));
