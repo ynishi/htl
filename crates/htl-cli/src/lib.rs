@@ -375,6 +375,26 @@ enum Cmd {
         #[arg(long)]
         explain_cache: bool,
     },
+    /// Report what no entry's `require` closure reaches: modules, and `mlua-pkg.toml`
+    /// dependencies (see README, "Unused")
+    Unused {
+        /// What to report on (default: the working directory). The walk is the project's
+        /// either way: a module reached only from `tests/` is reached
+        paths: Vec<PathBuf>,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+        /// Exit 1 when anything is reported (for CI)
+        #[arg(long)]
+        exit_non_zero_on_unused: bool,
+        /// Build the graph from a fresh check even if a cached one is available, and
+        /// store none
+        #[arg(long)]
+        no_cache: bool,
+        /// Say why the cache was not used, and what this run did with it
+        #[arg(long)]
+        explain_cache: bool,
+    },
     /// Read a `.hb` bundle without running it (see README, "Bundles")
     Bundle {
         #[command(subcommand)]
@@ -572,6 +592,21 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
                 host,
             },
             BuildCache {
+                use_cache: !no_cache,
+                explain: explain_cache,
+            },
+        ),
+        Cmd::Unused {
+            paths,
+            format,
+            exit_non_zero_on_unused,
+            no_cache,
+            explain_cache,
+        } => cmd_unused(
+            &paths,
+            UnusedFlags {
+                json: format == Format::Json,
+                fail_on_unused: exit_non_zero_on_unused,
                 use_cache: !no_cache,
                 explain: explain_cache,
             },
@@ -1060,6 +1095,16 @@ fn cmd_types_add(library: &str, from: Option<&Path>, force: bool) -> Result<Exit
         eprintln!("htl: nothing written; --force replaces what is already there");
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// What `htl unused` was asked for, beyond the paths.
+struct UnusedFlags {
+    json: bool,
+    /// Exit 1 when anything was reported. Off by default: "unused" is a question about
+    /// intent, so CI opts in rather than out.
+    fail_on_unused: bool,
+    use_cache: bool,
+    explain: bool,
 }
 
 /// What `htl check` was asked for, beyond the paths and the lint selection.
@@ -1731,6 +1776,81 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// Report what no entry's `require` closure reaches.
+///
+/// The graph is the check's — `htl check` resolves every `require` already, and the
+/// `require-cycle` lint reads the same edges — so this is that walk plus the entries the
+/// project declares (`htl::unused`). What is left here is the flags, the printing and the
+/// exit code.
+fn cmd_unused(paths: &[PathBuf], flags: UnusedFlags) -> Result<ExitCode> {
+    let UnusedFlags {
+        json,
+        fail_on_unused,
+        use_cache,
+        explain,
+    } = flags;
+    let paths = if paths.is_empty() {
+        vec![PathBuf::from(".")]
+    } else {
+        paths.to_vec()
+    };
+    let cfg = load_config(&paths[0])?;
+    // A `.d.tl` written from Rust source is an input to the check the graph comes from,
+    // exactly as it is for `htl check`.
+    auto_dts(&paths[0])?;
+    let rep = htl::unused::unused(&htl::unused::Options {
+        paths: &paths,
+        config: &cfg,
+        cache: project::cache_options(use_cache, None, &cfg, explain),
+    })?;
+    let s = &rep.summary;
+    if json {
+        report::emit(&rep)?;
+    } else if s.no_entry {
+        eprintln!(
+            "htl unused: nothing to start from, so nothing is reported. An entry is \
+             src/main.tl, a test file, a module under a [[contract]] directory, or a name \
+             in [build] extra / host"
+        );
+    } else {
+        if s.check_errors > 0 {
+            eprintln!(
+                "htl unused: {} error(s) in the check this graph comes from — what those \
+                 files require is missing from it (htl check)",
+                s.check_errors
+            );
+        }
+        for m in &rep.modules {
+            match &m.module {
+                Some(n) => eprintln!("module: {} ({n})", m.path),
+                None => eprintln!("module: {}", m.path),
+            }
+        }
+        for d in &rep.dependencies {
+            eprintln!("dependency: {}", d.name);
+        }
+        eprintln!(
+            "htl unused: {}, {} [{} considered, {} reached, {}]",
+            count(s.modules, "module", "modules"),
+            count(s.dependencies, "dependency", "dependencies"),
+            s.considered,
+            s.reached,
+            count(s.entries, "entry", "entries"),
+        );
+    }
+    Ok(if fail_on_unused && !s.ok {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+/// `1 module` / `2 modules`: a count whose noun agrees with it, for a line short enough
+/// that `module(s)` would be the loudest thing on it.
+fn count(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 /// Delete this project's cache store.
