@@ -279,6 +279,18 @@ enum Cmd {
         /// Crate root or any path inside it (default: current directory)
         dir: Option<PathBuf>,
     },
+    /// Report the project's public Teal surface — the package entry, the `#[host_module]`
+    /// declarations, the `---@contract` types — as one sorted file to commit and diff
+    Api {
+        /// Project root or any path inside it (default: current directory)
+        dir: Option<PathBuf>,
+        /// Write the report here instead of to standard output
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+    },
     /// Create a new Teal project directory
     New {
         name: String,
@@ -534,6 +546,9 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
             } => cmd_cache_status(path.as_deref(), format == Format::Json, entries),
         },
         Cmd::Dts { dir } => cmd_dts(dir.as_deref()),
+        Cmd::Api { dir, out, format } => {
+            cmd_api(dir.as_deref(), out.as_deref(), format == Format::Json)
+        }
         Cmd::New {
             name,
             lib,
@@ -757,6 +772,72 @@ fn cmd_dts(dir: Option<&Path>) -> Result<ExitCode> {
     results.extend(dep_results);
     report_dts(&results, &root);
     Ok(code(failed))
+}
+
+/// Write the public surface report. Standard output by default: the command writes no
+/// file it was not asked for (`htl dts` writes only what a declaration named), and where
+/// the report is kept stays the project's choice — `htl api --out api.txt` is the form
+/// the README recommends committing.
+///
+/// Non-zero when part of the surface could not be read, for the same reason `htl dts`
+/// exits non-zero on a contract it could not publish: a report that is quietly short is
+/// worse than no report, because it is the shortness that gets committed.
+fn cmd_api(dir: Option<&Path>, out: Option<&Path>, json: bool) -> Result<ExitCode> {
+    let start = match dir {
+        Some(d) => d.to_path_buf(),
+        None => std::env::current_dir()?,
+    };
+    let cargo_root = htl::dts::find_cargo_package_root(&start);
+    let config = load_config(&start)?;
+    // Where paths are reported from: the htl.toml project, else the mlua-pkg package,
+    // else the Rust crate. A report whose paths are relative to somewhere else in the
+    // tree would move its every line when the command is run from another directory.
+    let root = match (&config, htl::pkg::Project::find(&start), &cargo_root) {
+        (Some((root, _, _)), _, _) => root.clone(),
+        (None, Some(p), _) => p.root,
+        (None, None, Some(c)) => c.clone(),
+        (None, None, None) => bail!(
+            "no htl.toml, mlua-pkg.toml or Cargo.toml with a [package] section at or above {}",
+            start.display()
+        ),
+    };
+    let cfg = config.map(|(_, _, c)| c).unwrap_or_default();
+    let report = htl::api::collect(&root, &cfg, cargo_root.as_deref());
+    let text = if json {
+        htl::api::render_json(&report) + "\n"
+    } else {
+        htl::api::render(&report)
+    };
+    match out {
+        Some(path) => {
+            let written = htl::write_if_changed(path, &text)
+                .map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))?;
+            eprintln!(
+                "htl api: {} entr{} {} {}",
+                report.entries.len(),
+                if report.entries.len() == 1 {
+                    "y"
+                } else {
+                    "ies"
+                },
+                if written {
+                    "written to"
+                } else {
+                    "unchanged in"
+                },
+                path.display()
+            );
+        }
+        None => print!("{text}"),
+    }
+    for n in &report.notes {
+        eprintln!("  {n}");
+    }
+    Ok(if report.notes.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }
 
 fn report_dts(results: &[(PathBuf, bool)], root: &Path) {

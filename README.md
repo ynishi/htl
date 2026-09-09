@@ -53,6 +53,7 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 | `htl pkg patch <dep> [--force]` | take that dependency's source into `patches/<dep>/`, where the project owns it and install resolves it from (see Patched dependencies) |
 | `htl types add <library> [--from dir] [--force]` | the declarations a library never shipped, from [teal-types](https://github.com/teal-language/teal-types), into `types/` with the commit they came from recorded beside each |
 | `htl cache status [path] [--entries]` / `htl cache clear [path]` | report what the store holds, or empty it (see Caching) |
+| `htl api [dir] [--out file] [--format json]` | the project's public Teal surface — the package entry, the `#[host_module]` declarations, the `---@contract` types — as one sorted report to commit and diff (see The public surface) |
 | `htl dts [dir]` | write the `.d.tl` files this project declares: from Rust source, the ones `#[host_module]` / `#[derive(TealRecord)]` ask for, no build needed; from Teal, the module each `---@contract` type is declared in; from the crate graph, the ones a dependency ships (`[package.metadata.htl] dts`) into `types/<crate>/`. `check` / `run` / `test` / `build` do this automatically; exits non-zero when something it was asked to write could not be |
 
 `mlua-pkg.toml` is detected by walking up from the file: installed deps become
@@ -947,6 +948,70 @@ takes a path rather than a `true` because the file has to exist: a name that poi
 nothing is reported under the same rule, whether or not the call was found elsewhere, so
 the key stays a claim `htl check` can hold to something rather than a per-contract off
 switch.
+
+## The public surface (`htl api`)
+
+The declarations above are generated and committed, so a change to what this project
+publishes does show up in a pull request — spread over as many files as the project has
+surfaces, each written for a compiler. `htl api` gathers them into one sorted report, so
+that a reviewer answers "did what a consumer can name change, and how" by reading one
+diff:
+
+```text
+# htl api 1
+#
+# The public Teal surface of this project: what a consumer of it can name. Written by
+# `htl api`, and meant to be committed — a diff of this file is a change to that surface.
+# Each entry is the published declaration, one line per member.
+
+package demo  require("demo")  src/demo/init.tl
+  local record demo
+     record Point
+        x: number
+        y: number
+     end
+     origin: function(): demo.Point
+  end
+
+host module host  types/host.d.tl
+  local record host
+     add: function(self: host, a: integer, b: integer): integer
+  end
+
+contract defs.Mod  types/defs.d.tl
+  local record defs
+     record Mod   ---@contract("mods")
+        name: string   ---@required
+     end
+  end
+```
+
+Three surfaces, and they are the three ways a consumer reaches this project: the module
+`mlua-pkg.toml` names as the package entry (`require("<name>")`, declared the way a
+contract module is — bodies removed, functions folded into the record they are on), the
+`.d.tl` a `#[host_module]` in the tree publishes, and the module each `---@contract` type
+is declared in. What is left out is as deliberate: the declarations a *dependency* ships
+into `types/<crate>/` describe somebody else's crate, and a diff of them is news about an
+upgrade rather than about this project's promise; the `.h` a `#[c_export]` block writes is
+a surface, but not a Teal one, and a C caller reads that header itself.
+
+The report goes to standard output, and `--out <file>` writes it instead — `htl api --out
+api.txt`, committed beside the `.d.tl` files it summarises, is the form to hold a project
+to in CI (regenerate, and fail on a dirty tree). `--format json` is the same entries for a
+reader that is not a person. Nothing is built to produce any of it, and the declarations
+are computed from the source rather than read from the committed copies, so the report is
+right on a tree where `htl dts` has not been run since the last edit.
+
+Two runs over an unchanged tree write the same bytes: entries are sorted by kind and name,
+blank lines are dropped, and the header carries no count — so an added function moves one
+line, a renamed field moves one line, and a widened parameter moves the line that declares
+it. A project with no host module, no contract type and no package entry gets a report
+that says so, rather than an empty file that would as easily mean the command broke.
+
+Exit is non-zero when part of the surface could not be read — a contract that cannot be
+published, a package entry whose module is not where the manifest says — for the reason
+`htl dts` fails on the same thing: a report that is quietly short is worse than none,
+because it is the shortness that gets committed.
 
 ## Patched dependencies (`htl pkg patch`)
 
