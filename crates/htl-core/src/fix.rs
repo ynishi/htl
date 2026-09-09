@@ -62,6 +62,10 @@ pub struct FileOutcome {
     pub oscillation: Option<String>,
     /// The new contents (dry run: what would be written); `None` when unchanged.
     pub contents: Option<String>,
+    /// The file as the `suggest` fixes would additionally leave it, over whatever was
+    /// applied. Never written: a suggestion is shown and the value in it is the author's
+    /// to choose (`htl fix --diff` is where it is shown). `None` when there are none.
+    pub suggested: Option<String>,
     /// Diagnostics after the last pass (what `htl check` would now say).
     pub check: CheckInfo,
 }
@@ -170,6 +174,18 @@ pub fn fix_file(h: &Htl, path: &Path, opts: &FixOptions) -> Result<FileOutcome> 
             let _ = std::fs::remove_dir(d);
         }
     }
+    // What the suggestions would insert, computed once from the last check and never
+    // written. `candidates` skipped them with a reason; this is the same set from the
+    // other side, so `--diff` can show the edit a person is meant to finish.
+    if !has_syntax_error(&check) {
+        let sug = suggestions(&check, opts);
+        if !sug.is_empty() {
+            let (text, applied, _) = apply_non_overlapping(&current, &sug);
+            if !applied.is_empty() && text != current {
+                out.suggested = Some(text);
+            }
+        }
+    }
     if current != original {
         out.contents = Some(current);
     }
@@ -196,15 +212,10 @@ struct Candidate {
     edits: Vec<Edit>,
 }
 
-/// Which of the file's fixes may be applied under `opts`; the rest go to `skipped`.
-fn candidates(
-    check: &CheckInfo,
-    opts: &FixOptions,
-    skipped: &mut Vec<Skipped>,
-    path: &Path,
-) -> Vec<Candidate> {
-    let mut out = Vec::new();
-    let items = check
+/// Every diagnostic of `check` that carries a fix, errors before lints, as
+/// (message, fix, is_error).
+fn fixable(check: &CheckInfo) -> impl Iterator<Item = (&String, &crate::Fix, bool)> {
+    check
         .errors
         .iter()
         .zip(check.error_fixes.iter())
@@ -215,9 +226,33 @@ fn candidates(
                 .iter()
                 .zip(check.lint_fixes.iter())
                 .map(|(m, f)| (m, f, false)),
-        );
-    for (msg, fix, is_error) in items {
-        let Some(fix) = fix else { continue };
+        )
+        .filter_map(|(m, f, e)| f.as_ref().map(|f| (m, f, e)))
+}
+
+/// The edits of one fix as a candidate's key: what tells two passes apart.
+fn edit_key(fix: &crate::Fix) -> String {
+    fix.edits
+        .iter()
+        .map(|e| {
+            format!(
+                "{}:{}:{}:{}:{}",
+                e.line, e.col, e.end_line, e.end_col, e.text
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+/// Which of the file's fixes may be applied under `opts`; the rest go to `skipped`.
+fn candidates(
+    check: &CheckInfo,
+    opts: &FixOptions,
+    skipped: &mut Vec<Skipped>,
+    path: &Path,
+) -> Vec<Candidate> {
+    let mut out = Vec::new();
+    for (msg, fix, is_error) in fixable(check) {
         let rule = rule_of(msg, is_error);
         let line = line_of(msg);
         if !opts.only.is_empty() && !opts.only.iter().any(|r| r == &rule) {
@@ -260,23 +295,40 @@ fn candidates(
             }
             _ => {}
         }
-        let key = fix
-            .edits
-            .iter()
-            .map(|e| {
-                format!(
-                    "{}:{}:{}:{}:{}",
-                    e.line, e.col, e.end_line, e.end_col, e.text
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("|");
         out.push(Candidate {
             rule,
             line,
-            key,
+            key: edit_key(fix),
             is_error,
             applicability,
+            edits: fix.edits.clone(),
+        });
+    }
+    out
+}
+
+/// The `suggest` fixes of `check`, under the same `--rule` and `[fix] disable` filtering
+/// as the rest. They are never applied to the file; `fix_file` renders them onto a copy
+/// so that what they would insert can be shown.
+fn suggestions(check: &CheckInfo, opts: &FixOptions) -> Vec<Candidate> {
+    let mut out = Vec::new();
+    for (msg, fix, is_error) in fixable(check) {
+        if fix.applicability != Applicability::Suggest {
+            continue;
+        }
+        let rule = rule_of(msg, is_error);
+        if !opts.only.is_empty() && !opts.only.iter().any(|r| r == &rule) {
+            continue;
+        }
+        if opts.disabled.iter().any(|r| r == &rule) {
+            continue;
+        }
+        out.push(Candidate {
+            line: line_of(msg),
+            rule,
+            key: edit_key(fix),
+            is_error,
+            applicability: fix.applicability,
             edits: fix.edits.clone(),
         });
     }
@@ -308,7 +360,8 @@ fn line_of(msg: &str) -> usize {
 /// diagnostic order. Returns (new text, applied candidate indexes, deferred count).
 fn apply_non_overlapping(src: &str, candidates: &[Candidate]) -> (String, Vec<usize>, usize) {
     let index = LineIndex::new(src);
-    let mut accepted: Vec<(usize, usize, &str, usize)> = Vec::new(); // (start, end, text, candidate)
+    // (start, end, text, candidate, edit within it)
+    let mut accepted: Vec<(usize, usize, &str, usize, usize)> = Vec::new();
     let mut applied = Vec::new();
     let mut deferred = 0usize;
     'cand: for (ci, c) in candidates.iter().enumerate() {
@@ -330,7 +383,7 @@ fn apply_non_overlapping(src: &str, candidates: &[Candidate]) -> (String, Vec<us
         // Overlap = a non-empty intersection with an accepted span; two insertions at
         // one point are fine and keep their order.
         for (s, t, _) in &spans {
-            for (as_, at, _, _) in &accepted {
+            for (as_, at, _, _, _) in &accepted {
                 let disjoint = *t <= *as_ || *at <= *s || (*s == *t && *as_ == *at && *s == *as_);
                 let touching_insert = (*s == *t && (*s == *as_ || *s == *at))
                     || (*as_ == *at && (*as_ == *s || *as_ == *t));
@@ -340,15 +393,18 @@ fn apply_non_overlapping(src: &str, candidates: &[Candidate]) -> (String, Vec<us
                 }
             }
         }
-        for (s, t, text) in spans {
-            accepted.push((s, t, text, ci));
+        for (ei, (s, t, text)) in spans.into_iter().enumerate() {
+            accepted.push((s, t, text, ci, ei));
         }
         applied.push(ci);
     }
-    // Apply from the end so earlier offsets stay valid; equal starts keep insertion order.
-    accepted.sort_by(|a, b| b.0.cmp(&a.0).then(b.3.cmp(&a.3)));
+    // Apply from the end so earlier offsets stay valid. Insertions at one point are
+    // applied back to front — by candidate, then by edit within it — which is what leaves
+    // them in the text in the order they were listed: one fix inserting a field per edit
+    // gets them in the order it named them.
+    accepted.sort_by(|a, b| b.0.cmp(&a.0).then(b.3.cmp(&a.3)).then(b.4.cmp(&a.4)));
     let mut out = src.to_string();
-    for (s, t, text, _) in accepted {
+    for (s, t, text, _, _) in accepted {
         out.replace_range(s..t, text);
     }
     (out, applied, deferred)

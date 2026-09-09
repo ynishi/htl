@@ -104,31 +104,41 @@ local function indent_of(line)
    return #(line:match("^(%s*)") or "")
 end
 
--- Fields of the record declared at `file:y`, as name -> the line it is declared on.
+-- Fields of the record declared at `file:y`: a map of name -> the line it is declared on,
+-- and the same fields in declaration order carrying the type each is written with.
 -- A source scan: the record's fields are the `name: type` lines between the declaration
 -- and the `end` that closes it, which is the first `end` indented no deeper than the
--- declaration itself.
+-- declaration itself. The map answers "is this one marked `---@optional`"; the order and
+-- the type are what a fix spells at a construction site, and neither survives the
+-- checker's own view of the record (`t.fields` is a hash, and a type there is a resolved
+-- object rather than the words the author wrote).
 local function field_lines(lines, y)
-   local out = {}
+   local at, order = {}, {}
    local decl = lines[y]
-   if not decl then return out end
+   if not decl then return at, order end
    local base = indent_of(decl)
    for i = y + 1, #lines do
       local l = lines[i]
       if l:match("^%s*end%f[%W]") and indent_of(l) <= base then break end
-      local name = l:match("^%s*([%w_]+)%s*:")
-      if name then out[name] = i end
+      local name, written = l:match("^%s*([%w_]+)%s*:%s*(.-)%s*$")
+      if name then
+         at[name] = i
+         -- `inflicts: string   ---@optional` is the type up to the comment.
+         local ty = written:gsub("%s*%-%-.*$", "")
+         order[#order + 1] = { name = name, type = ty }
+      end
    end
-   return out
+   return at, order
 end
 
 -- What `struct_at` returns for a position that holds a `---@struct` record:
--- { name = "MonsterDef", required = { id = true, hp = true } }.
+-- { name = "MonsterDef", required = { id = true, hp = true },
+--   fields = { { name = "id", type = "string" }, { name = "hp", type = "integer" } } }.
 local function struct_spec(cache, t)
    local lines = source_lines(cache, t.file)
    if not lines then return nil end
    if not has_marker(lines, t.y, "struct") then return nil end
-   local at = field_lines(lines, t.y)
+   local at, order = field_lines(lines, t.y)
    local required, declared = {}, {}
    local any = false
    for name in pairs(t.fields or {}) do
@@ -139,9 +149,20 @@ local function struct_spec(cache, t)
       end
    end
    if not any then return nil end
+   -- `fields` is the required ones in declaration order: a fix that spells them at the
+   -- site says them in the order a reader finds them in the declaration. It is filtered
+   -- through the checker's field set, so a line the scan picked up from a nested record
+   -- is not mistaken for one of this record's own.
+   local fields, seen = {}, {}
+   for _, f in ipairs(order) do
+      if required[f.name] and not seen[f.name] then
+         seen[f.name] = true
+         fields[#fields + 1] = f
+      end
+   end
    -- `declared` as well as `required`: a key the literal sets that the record does not
    -- declare is how a misspelling looks from here, and the optional fields are declared.
-   return { name = t.str or "record", required = required, declared = declared }
+   return { name = t.str or "record", required = required, declared = declared, fields = fields }
 end
 
 -- Resolver for the `struct-fields` lint: the `---@struct` record being built at (y, x),

@@ -338,13 +338,15 @@ local LUA_KEYWORDS = {
    ["until"] = true, ["while"] = true,
 }
 
+-- `open`, or `["end"]` for a word a bare key cannot spell.
+local function entry_key(name)
+   if name:match("^[%a_][%w_]*$") and not LUA_KEYWORDS[name] then return name end
+   return "[" .. string.format("%q", name) .. "]"
+end
+
 -- `open = "open"`, or `["end"] = "end"` for a value that is not a bare key.
 local function entry_text(name)
-   local quoted = string.format("%q", name)
-   if name:match("^[%a_][%w_]*$") and not LUA_KEYWORDS[name] then
-      return name .. " = " .. quoted
-   end
-   return "[" .. quoted .. "] = " .. quoted
+   return entry_key(name) .. " = " .. string.format("%q", name)
 end
 
 -- The line with its trailing comment removed. Quotes are tracked so that a `--` inside a
@@ -366,10 +368,18 @@ local function strip_comment(s)
    return s
 end
 
--- Edits that add `name = "name"` for each missing value to the constructor `n`. The
--- layout comes from the source, not the tree: where the last entry ends, whether it ends
--- in a comma, and how far it is indented are all things only the lines know.
-local function table_entry_fix(lines, n, names)
+-- Edits that add an entry for each of `names` to the constructor `n`. The layout comes
+-- from the source, not the tree: where the last entry ends, whether it ends in a comma,
+-- and how far it is indented are all things only the lines know.
+--
+-- `opts.entry(name)` writes one entry and defaults to the identity mapping `enum-table`
+-- fills a lookup in with; `opts.applicability` classes the fix; `opts.split` gives every
+-- name an edit of its own, so an editor can offer one code action per name rather than
+-- one for the lot.
+local function table_entry_fix(lines, n, names, opts)
+   opts = opts or {}
+   local entry = opts.entry or entry_text
+   local applicability = opts.applicability or "safe"
    if not lines or not n.yend or not n.xend then return nil end
    local last_y, last_x
    for y = n.yend, n.y, -1 do
@@ -386,23 +396,45 @@ local function table_entry_fix(lines, n, names)
          end
       end
    end
-   if not last_y then return nil end
+   -- An empty constructor has no entry to read a layout off. On one line the entries go
+   -- between the braces, spaced the way `{ a = 1 }` is written; written open across lines
+   -- there is nothing to copy and no fix.
+   if not last_y then
+      if n.y ~= n.yend or not opts.split then return nil end
+      local col = n.x + 1
+      local pad = lines[n.yend]:sub(n.xend - 1, n.xend - 1):match("%s") and "" or " "
+      local edits = {}
+      for i, name in ipairs(names) do
+         edits[#edits + 1] = {
+            line = n.y, col = col, end_line = n.y, end_col = col,
+            text = (i == 1 and " " or ", ") .. entry(name) .. (i == #names and pad or ""),
+         }
+      end
+      return { applicability = applicability, edits = edits }
+   end
    local comma = lines[last_y]:sub(last_x, last_x) == "," and "" or ","
    -- The closing brace on the last entry's own line: everything stays on that line.
    if last_y == n.yend then
-      local parts = {}
-      for _, name in ipairs(names) do parts[#parts + 1] = entry_text(name) end
-      return {
-         applicability = "safe",
-         edits = { {
-            line = last_y, col = last_x + 1, end_line = last_y, end_col = last_x + 1,
+      local col = last_x + 1
+      local edits = {}
+      if opts.split then
+         for i, name in ipairs(names) do
+            edits[#edits + 1] = {
+               line = last_y, col = col, end_line = last_y, end_col = col,
+               text = (i == 1 and comma or ",") .. " " .. entry(name),
+            }
+         end
+      else
+         local parts = {}
+         for _, name in ipairs(names) do parts[#parts + 1] = entry(name) end
+         edits[1] = {
+            line = last_y, col = col, end_line = last_y, end_col = col,
             text = comma .. " " .. table.concat(parts, ", "),
-         } },
-      }
+         }
+      end
+      return { applicability = applicability, edits = edits }
    end
    local indent = lines[last_y]:match("^(%s*)") or ""
-   local text = {}
-   for _, name in ipairs(names) do text[#text + 1] = indent .. entry_text(name) .. ",\n" end
    -- Insert before the brace, or before its indentation when it sits on its own line, so
    -- that the brace keeps the column it had.
    local before = lines[n.yend]:sub(1, n.xend - 1)
@@ -413,10 +445,23 @@ local function table_entry_fix(lines, n, names)
          line = last_y, col = last_x + 1, end_line = last_y, end_col = last_x + 1, text = comma,
       }
    end
-   edits[#edits + 1] = {
-      line = n.yend, col = col, end_line = n.yend, end_col = col, text = table.concat(text),
-   }
-   return { applicability = "safe", edits = edits }
+   local text = {}
+   for _, name in ipairs(names) do
+      local line = indent .. entry(name) .. ",\n"
+      if opts.split then
+         edits[#edits + 1] = {
+            line = n.yend, col = col, end_line = n.yend, end_col = col, text = line,
+         }
+      else
+         text[#text + 1] = line
+      end
+   end
+   if #text > 0 then
+      edits[#edits + 1] = {
+         line = n.yend, col = col, end_line = n.yend, end_col = col, text = table.concat(text),
+      }
+   end
+   return { applicability = applicability, edits = edits }
 end
 
 -- The keys the constructor lists, in source order, or nil when one of them is not a
@@ -869,6 +914,30 @@ local function near_bound(name)
    return #name >= 8 and 2 or 1
 end
 
+-- What a missing field is given by the fix: not a value at all. A record field has a type
+-- and no honest zero -- `hp: integer` is not 0 and `name: string` is not "" -- and
+-- `hp = nil` type-checks, since every Teal record field is nilable, which is the whole
+-- reason `---@struct` exists. A fix that filled the gap would satisfy the lint, pass the
+-- checker and ship the wrong value silently; this one has to be replaced, and says so by
+-- being refused where it stands.
+--
+-- The form is a call to a name the project does not have, carrying the type the field is
+-- declared with: `hp = htl_fixme("integer")`. The type is there to be read, and the call
+-- is what refuses -- `unknown variable: htl_fixme`, wherever it lands.
+--
+-- The type spelled bare (`hp = integer`) was the other candidate and does not hold. Two
+-- of the three kinds of type pass the checker that way [measured on this tl]: a record's
+-- name in value position is the type's own table, and assigning it to a field of that
+-- record is accepted (`child = Child` reports nothing), as is `x = any` on a field typed
+-- `any`. Only the primitives refuse. A type that is not a name at all (`{string}`,
+-- `function(integer): string`, a union) would not even parse where a value goes, and a
+-- suggestion that turns the file into a syntax error is worse than one that says what is
+-- wanted. Quoted inside a call, every type reads the same way and none of them checks.
+local function field_placeholder(ty)
+   if not ty or ty == "" then return "htl_fixme()" end
+   return "htl_fixme(" .. string.format("%q", ty) .. ")"
+end
+
 local function lint_struct_fields(ast, report, extra)
    local struct_at = extra and extra.struct_at
    if not struct_at then return end
@@ -923,11 +992,36 @@ local function lint_struct_fields(ast, report, extra)
          tail = (" (the literal sets %s)"):format(table.concat(parts, ", "))
       end
 
+      -- The fix spells the missing fields at the site, in the order the record declares
+      -- them, for the author to put values on -- one edit each. A field the message
+      -- already blames on a misspelling is left out of it: the answer there is to correct
+      -- the key that is there, not to add a second one beside it.
+      local misspelled = {}
+      for _, h in ipairs(hints) do misspelled[h.want] = true end
+      local names, ty = {}, {}
+      for _, f in ipairs(spec.fields or {}) do
+         if not present[f.name] and not misspelled[f.name] then
+            names[#names + 1] = f.name
+            ty[f.name] = f.type
+         end
+      end
+      local fix
+      if #names > 0 then
+         fix = table_entry_fix(extra.lines, n, names, {
+            applicability = "suggest",
+            split = true,
+            entry = function(name)
+               return entry_key(name) .. " = " .. field_placeholder(ty[name])
+            end,
+         })
+      end
+
       report(
          "struct-fields",
          n.y,
          n.x,
-         spec.name .. " is built without " .. table.concat(missing, ", ") .. tail
+         spec.name .. " is built without " .. table.concat(missing, ", ") .. tail,
+         fix
       )
    end)
 end

@@ -482,7 +482,7 @@ unloads a library compares before calling anything else).
 | rule | default | catches |
 |---|---|---|
 | `nil-index` | on | `t[k].x`, `t[k]:m()`, `t[k]()`, `t[k][j]` — Teal types a map/array lookup as `V`, not `V \| nil` |
-| `struct-fields` | on | a table built for a record marked `---@struct` that leaves out a field the record declares and `---@optional` does not exempt. Silent until a record carries the marker (see below) |
+| `struct-fields` | on | a table built for a record marked `---@struct` that leaves out a field the record declares and `---@optional` does not exempt. Silent until a record carries the marker (see below). `htl fix` spells the missing fields at the site, as a suggestion it never applies |
 | `sealed-record` | on | a table built for a record marked `---@sealed`, or an `as` cast to one, outside the file that declares it — outside the functions the marker names, when it names any (`---@sealed(gate.judge)`). Silent until a record carries the marker (see below) |
 | `enum-exhaustive` | on | `if e == "a" ... elseif e == "b" ... end` over an enum with a value left unhandled and no `else`; enums nested in records and enums from required modules count |
 | `enum-cast` | on | `e as E` where `E` is an enum and the checker types `e` as `string`: `as` is erased, so the word enters the enum with nothing checking it. A string literal (`"open" as E`) and a value already typed as the enum are not reported (see below) |
@@ -978,11 +978,20 @@ and `--format json` carries the edits. `htl fix [paths]` applies them:
   never applied). Today: a forward reference gets its declaration inserted into the
   record (safe); `explicit-number` gets `: number` (safe); `enum-table` gets the entries
   a `{string: E}` lookup is missing (safe — the entry it adds is the identity mapping the
-  table already states for every other value); `no-global` becomes `local` (unsafe). `htl.toml` `[fix] unsafe = ["no-global"]` promotes a rule, `disable = [..]`
+  table already states for every other value); `struct-fields` gets the fields the site
+  leaves out, one entry each, in the order the record declares them, laid out where the
+  entries already there are (**suggest** — there is no honest value to put in one. A
+  record field has a type and no zero, `hp: integer` is not `0`, and `hp = nil`
+  type-checks, so a fix that filled the gap would satisfy the lint, pass the checker and
+  ship the wrong value silently. What it writes is `hp = htl_fixme("integer")`: the
+  declared type to read, in a call to a name the project does not have, so the checker
+  refuses it until a person replaces it); `no-global` becomes `local` (unsafe). `htl.toml` `[fix] unsafe = ["no-global"]` promotes a rule, `disable = [..]`
   turns its fix off; `--rule a,b` limits a run.
 - The working tree is the undo. A file git reports as modified or staged is refused
   (`--allow-dirty`), and so is a file outside a repository (`--allow-no-vcs`).
   `--dry-run` reports without writing; `--diff` prints a unified diff per file instead.
+  A `suggest` fix is listed as skipped and its insertion printed under `--diff`, as a
+  second diff headed `<file> (suggested)`, since nothing ever writes it.
 - A file with a syntax error is never touched. Type errors elsewhere do not block (a
   fix is often what removes one); after each pass the file is re-checked and put back
   if it has more errors than before. Edits that overlap an applied one wait for the

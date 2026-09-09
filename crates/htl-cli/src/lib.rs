@@ -1753,6 +1753,19 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
             {
                 print!("{}", unified_diff(&f.display().to_string(), b, a));
             }
+            // A suggestion is never written, so the diff is the only place it is shown.
+            // Against what was applied, when something was: the two are one edit session.
+            if flags.diff
+                && let (Some(b), Some(s)) = (
+                    out.contents.as_ref().or(before.as_ref()),
+                    out.suggested.as_ref(),
+                )
+            {
+                print!(
+                    "{}",
+                    unified_diff(&format!("{} (suggested)", f.display()), b, s)
+                );
+            }
         }
         sink.checkinfo(&out.check);
         sink.dependency_errors(&out.check, &|p| origins.of(p));
