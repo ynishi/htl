@@ -1078,19 +1078,6 @@ pub fn find_cargo_package_root(start: &Path) -> Option<PathBuf> {
 /// requested `.d.tl` (only when content changed). Returns `(target, written)` pairs.
 pub fn generate_crate(manifest_dir: &Path) -> Result<Vec<(PathBuf, bool)>, String> {
     let mut results = Vec::new();
-    for g in scan_crate(manifest_dir)? {
-        let written = crate::write_if_changed(&g.target, &g.text)
-            .map_err(|err| format!("writing {}: {err}", g.target.display()))?;
-        results.push((g.target, written));
-    }
-    Ok(results)
-}
-
-/// The same scan, writing nothing: every declaration this crate asks for, in a stable
-/// order (the walk is sorted by file name). What `htl api` reports the crate's half of
-/// the project's surface from.
-pub fn scan_crate(manifest_dir: &Path) -> Result<Vec<Generated>, String> {
-    let mut results = Vec::new();
     for sub in ["src", "examples", "tests", "benches"] {
         let dir = manifest_dir.join(sub);
         if !dir.is_dir() {
@@ -1102,7 +1089,11 @@ pub fn scan_crate(manifest_dir: &Path) -> Result<Vec<Generated>, String> {
             if !p.is_file() || p.extension().and_then(|s| s.to_str()) != Some("rs") {
                 continue;
             }
-            results.extend(scan_rust_file(p, manifest_dir)?);
+            for g in scan_rust_file(p, manifest_dir)? {
+                let written = crate::write_if_changed(&g.target, &g.text)
+                    .map_err(|err| format!("writing {}: {err}", g.target.display()))?;
+                results.push((g.target, written));
+            }
         }
     }
     Ok(results)
