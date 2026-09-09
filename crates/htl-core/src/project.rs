@@ -16,15 +16,23 @@
 //! *which* diagnostics a run says — a dependency's error is said once per run, and never
 //! on behalf of a file the walk checks itself — and hands each one to an [`Output`], which
 //! is the caller's.
+//!
+//! A test run is the same arrangement over [`crate::testing`]: [`test`] carries the
+//! per-file isolation, the filter, fail-fast, the seed, the store and the coverage hooks,
+//! and hands each [`FileReport`] to the caller as it lands. `htl test` prints them;
+//! [`crate::testing::run_tests`] collects them, which is how a host runs a project's Teal
+//! tests from `cargo test` rather than by shelling out to the binary.
 
 use crate::cache::{self, DependencyJson, FixJson};
 use crate::config::HtlConfig;
 use crate::diagnostic::{Diagnostic, Severity};
+use crate::testing::{FileReport, RunOptions, TestSession};
 use crate::{CheckInfo, Fix, Htl};
 use anyhow::Result;
+use serde::Serialize;
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 // ------------------------------------------------------------------ output
@@ -340,6 +348,28 @@ fn lexical(p: &Path) -> PathBuf {
 /// The tuple `htl-cli` has always passed around — `(root, config file, config)` — named
 /// here so the signatures below read.
 pub type Config = Option<(PathBuf, PathBuf, HtlConfig)>;
+
+/// Nearest `htl.toml` above `first`, in the shape everything below expects.
+pub fn config_of(first: &Path) -> Result<Config> {
+    Ok(HtlConfig::find(first)?.map(|(p, c)| (crate::parent_dir(&p), p, c)))
+}
+
+/// The patched dependencies below `paths` — `patch_dir` deps, as directories.
+///
+/// What a check walks and formatting or a test run does not: the copy is the project's
+/// code, so its type errors are the project's to fix, but rewriting it or running its
+/// tests is doing a dependency's work in the project's name.
+pub fn patched(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for p in paths {
+        for d in crate::patched_dirs(p) {
+            if !out.contains(&d) {
+                out.push(d);
+            }
+        }
+    }
+    out
+}
 
 /// Why a run must not keep a store under `root`, when it must not.
 ///
@@ -927,5 +957,415 @@ pub fn check<O: Output>(
         warnings: n_warn,
         lints: n_lint,
         replayed,
+    })
+}
+
+// ------------------------------------------------------------------ coverage
+
+/// A function of a module no statement of which ran.
+#[derive(Serialize, Debug, Clone)]
+pub struct NeverRan {
+    /// As the source writes it: `f`, `M.f`, `M:f`.
+    pub name: String,
+    pub line: usize,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct CoverageModule {
+    pub path: String,
+    pub executed: usize,
+    pub total: usize,
+    /// Unexecuted statements as `[first_line, last_line]` ranges.
+    pub unexecuted: Vec<(usize, usize)>,
+    /// Functions nothing in the run entered. A percentage says how much of a module
+    /// was missed; this says what was missed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub never_ran: Vec<NeverRan>,
+    /// The module's file, absolute. Not part of the JSON (`path` is the reported
+    /// spelling); the lcov writer resolves it against the project root instead.
+    #[serde(skip)]
+    pub source: PathBuf,
+    /// Every statement as `(first line, ran)`, in source order. What `executed` /
+    /// `total` count, kept for the lcov `DA` records.
+    #[serde(skip)]
+    pub statements: Vec<(usize, bool)>,
+    /// Every function with a body as `(name, line, entered)`, in source order;
+    /// `never_ran` is the `entered == false` subset.
+    #[serde(skip)]
+    pub functions: Vec<(String, usize, bool)>,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+pub struct CoverageReport {
+    pub modules: Vec<CoverageModule>,
+    pub executed: usize,
+    pub total: usize,
+}
+
+impl CoverageReport {
+    /// The run as an lcov tracefile, one record per module in the report's order.
+    ///
+    /// `DA` is one entry per line a statement starts on, with a count of `1` or `0`:
+    /// the hook records whether a line ran, not how often, and a number it does not
+    /// have is not invented. Two statements starting on one line share the entry, so
+    /// `LF` / `LH` equal the table's `total` / `executed` except on such lines. `FN` /
+    /// `FNDA` are the classic two-field forms every consumer reads; there is no branch
+    /// data, so no `BRDA`. `SF` is relative to `root` (the project root, so the file
+    /// resolves against the repository wherever CI ran the command), absolute when the
+    /// module is outside it.
+    pub fn lcov(&self, root: &Path) -> String {
+        use std::collections::BTreeMap;
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        for m in &self.modules {
+            let sf = m
+                .source
+                .strip_prefix(root)
+                .unwrap_or(&m.source)
+                .to_string_lossy();
+            out.push_str("TN:\n");
+            let _ = writeln!(out, "SF:{sf}");
+            for (name, line, _) in &m.functions {
+                let _ = writeln!(out, "FN:{line},{name}");
+            }
+            for (name, _, entered) in &m.functions {
+                let _ = writeln!(out, "FNDA:{},{name}", u8::from(*entered));
+            }
+            let _ = writeln!(out, "FNF:{}", m.functions.len());
+            let _ = writeln!(
+                out,
+                "FNH:{}",
+                m.functions.iter().filter(|(_, _, e)| *e).count()
+            );
+            let mut lines: BTreeMap<usize, bool> = BTreeMap::new();
+            for &(line, ran) in &m.statements {
+                *lines.entry(line).or_default() |= ran;
+            }
+            for (line, ran) in &lines {
+                let _ = writeln!(out, "DA:{line},{}", u8::from(*ran));
+            }
+            let _ = writeln!(out, "LF:{}", lines.len());
+            let _ = writeln!(out, "LH:{}", lines.values().filter(|r| **r).count());
+            out.push_str("end_of_record\n");
+        }
+        out
+    }
+}
+
+/// Coverage over the run: every `.tl` the test files' checks depended on (so a module
+/// no test reached shows 0%), with the executed statements from the line hooks.
+pub fn coverage_report(
+    checker: &Htl,
+    test_files: &[PathBuf],
+    hits: &HashMap<PathBuf, BTreeSet<usize>>,
+    deps: &BTreeSet<PathBuf>,
+) -> Result<CoverageReport> {
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let tests: HashSet<PathBuf> = test_files.iter().map(|p| canon(p)).collect();
+    let mut sources: BTreeSet<PathBuf> = deps.iter().map(|p| canon(p)).collect();
+    sources.extend(hits.keys().cloned());
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let (mut tot_exec, mut tot_all) = (0usize, 0usize);
+    let mut rows: Vec<CoverageModule> = Vec::new();
+    for src in &sources {
+        let name = src.to_string_lossy();
+        if !name.ends_with(".tl")
+            || name.ends_with(".d.tl")
+            || tests.contains(src)
+            || name.contains("/htl-lib-")
+        {
+            continue;
+        }
+        let (ranges, funcs) = checker.coverage_spans(src)?;
+        if ranges.is_empty() {
+            continue;
+        }
+        let empty = BTreeSet::new();
+        let ran = hits.get(src).unwrap_or(&empty);
+        let mut missed = Vec::new();
+        let mut statements = Vec::with_capacity(ranges.len());
+        let mut executed = 0usize;
+        for &(a, b) in &ranges {
+            let hit = ran.range(a..=b).next().is_some();
+            statements.push((a, hit));
+            if hit {
+                executed += 1;
+            } else {
+                missed.push((a, b));
+            }
+        }
+        // The body only. Defining a function runs its `function` line and its `end`
+        // line, so both are silent about whether anything ever entered it.
+        let functions: Vec<(String, usize, bool)> = funcs
+            .into_iter()
+            .map(|f| {
+                let entered = ran.range(f.line + 1..=f.last - 1).next().is_some();
+                (f.name, f.line, entered)
+            })
+            .collect();
+        let never_ran = functions
+            .iter()
+            .filter(|(_, _, entered)| !entered)
+            .map(|(name, line, _)| NeverRan {
+                name: name.clone(),
+                line: *line,
+            })
+            .collect();
+        tot_exec += executed;
+        tot_all += ranges.len();
+        let shown = src
+            .strip_prefix(&cwd)
+            .unwrap_or(src)
+            .to_string_lossy()
+            .into_owned();
+        rows.push(CoverageModule {
+            path: shown,
+            executed,
+            total: ranges.len(),
+            unexecuted: missed,
+            never_ran,
+            source: src.clone(),
+            statements,
+            functions,
+        });
+    }
+    Ok(CoverageReport {
+        modules: rows,
+        executed: tot_exec,
+        total: tot_all,
+    })
+}
+
+// ------------------------------------------------------------------ the test run
+
+/// What a test run needs beyond the files themselves.
+pub struct TestOptions<'a> {
+    /// `htl.toml`, already loaded ([`config_of`]) — it names the project the run belongs
+    /// to (the root the store lives at), the caller reads it for its own decisions, and
+    /// reading it twice would be reading it twice.
+    pub config: &'a Config,
+    /// A lint selection from the caller, merged after the file's own so that it wins.
+    pub lint: Option<&'a str>,
+    /// Module name of the assertion library to ask for the verdict
+    /// ([`crate::testing::DEFAULT_LIB`] unless the caller says otherwise).
+    pub lib: &'a str,
+    /// Run only the tests whose name contains this.
+    pub filter: Option<&'a str>,
+    /// What each file's run is given: fail-fast, snapshot updating, coverage, the seed.
+    ///
+    /// `fail_fast` is read twice over — the library stops at the first failing test in a
+    /// file, and the run stops at the first failing file. `seed: None` means *draw one for
+    /// this run*, which is not what it means to [`crate::testing::run_test_file`] (there it
+    /// leaves the state's own seeding alone): a run has a seed, and [`TestReport::seed`]
+    /// says which, so that `--seed` repeats it.
+    pub run: RunOptions,
+    /// The run cache's switches ([`cache_options`]). A test run's entries are always
+    /// per-module: a whole-run entry over test files would mean one edit anywhere
+    /// re-checks every suite, which is the trade a check offers because a check is one
+    /// answer. A test run is many.
+    pub cache: cache::Options,
+}
+
+/// What a test run found.
+///
+/// The counts are what an exit code and a summary are made of; each file's own report
+/// went to the caller as it finished.
+#[derive(Debug)]
+pub struct TestReport {
+    /// The files the run was given, in the order it ran them.
+    pub files: Vec<PathBuf>,
+    /// How many of them ran. Fewer than `files` when `fail_fast` stopped the run.
+    pub ran: usize,
+    pub passed: usize,
+    pub failed: usize,
+    /// Files that failed to check, raised, or had a failing test.
+    pub files_with_errors: usize,
+    /// Files whose check and codegen came from the store. They still ran: only the work
+    /// before the run is reusable.
+    pub replayed: usize,
+    /// The seed every file's stream was derived from, given or drawn.
+    pub seed: u64,
+    pub duration_ms: f64,
+    /// With `run.coverage`: what the line hooks saw, over the modules the checks reached.
+    pub coverage: Option<CoverageReport>,
+}
+
+impl TestReport {
+    /// Whether the run counts as a success: every file that ran was ok.
+    pub fn ok(&self) -> bool {
+        self.files_with_errors == 0
+    }
+
+    /// Files never run because `fail_fast` stopped the run.
+    pub fn skipped(&self) -> usize {
+        self.files.len() - self.ran
+    }
+}
+
+/// Run a project's test files: one fresh program state each, replaying the check and the
+/// codegen from the store where it still holds, and keeping what this run generated.
+///
+/// `each` is handed every file's report as it finishes, with the sink the file's
+/// diagnostics have just gone to — that is where a caller prints a line, collects a
+/// document, or counts what it likes. `htl test` is this function plus its flags and its
+/// printing.
+pub fn test<O: Output>(
+    sink: &mut Sink<O>,
+    files: &[PathBuf],
+    opts: &TestOptions<'_>,
+    each: &mut dyn FnMut(&FileReport, &mut Sink<O>),
+) -> Result<TestReport> {
+    let TestOptions {
+        config: cfg,
+        lint,
+        lib,
+        filter,
+        run,
+        cache: cache_opts,
+    } = opts;
+    let (cfg, cache_opts) = (*cfg, *cache_opts);
+    let files = files.to_vec();
+
+    // Given, or drawn once for the whole run and reported. Drawn from the clock rather
+    // than from a generator this process also hands to the tests: the seed has to differ
+    // between runs, and nothing else about it matters.
+    let seed = run.seed.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0)
+    });
+    let run = RunOptions {
+        seed: Some(seed),
+        ..run.clone()
+    };
+    let coverage_wanted = run.coverage;
+    let fail_fast = run.fail_fast;
+
+    // The lint selection is part of what a module reports, so it is part of every key.
+    let file_spec = cfg
+        .as_ref()
+        .map(|(_, _, c)| c.lint_spec())
+        .unwrap_or_default();
+    let spec = crate::config::join_specs([file_spec.as_str(), lint.unwrap_or("")]);
+    let lint = if spec.is_empty() {
+        None
+    } else {
+        Some(spec.as_str())
+    };
+
+    let mut cov_hits: HashMap<PathBuf, BTreeSet<usize>> = Default::default();
+    let mut cov_deps: BTreeSet<PathBuf> = Default::default();
+    let (mut passed, mut failed, mut bad_files, mut ran_files) = (0usize, 0usize, 0usize, 0usize);
+    let started = std::time::Instant::now();
+    // One checker for the run; each file still gets a fresh program state.
+    let session = TestSession::new(lint, lib, *filter, run)?;
+
+    // Checking a test file and generating its Lua is most of what a run costs — the tests
+    // themselves are a few percent of it — and none of that work depends on the outcome, so
+    // it is reusable in exactly the way a check's is. Running is not: a test has to run to
+    // say whether it passes, every time.
+    let root = cfg
+        .as_ref()
+        .map(|(r, _, _)| r.clone())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let store = store(&root, cache_opts, None, "htl test");
+    let keys: Vec<cache::Key> = files.iter().map(|f| cache::gen_key(f, lint)).collect();
+    let cfg_inputs: Vec<PathBuf> = cfg.iter().map(|(_, p, _)| p.clone()).collect();
+
+    let mut replayed = 0usize;
+    let harvest = store.as_ref().map(|c| Harvest {
+        store: c,
+        session: &session,
+        cfg_inputs: &cfg_inputs,
+        root: &root,
+        cfg,
+        lint,
+        opts: cache_opts,
+        done: RefCell::new(Default::default()),
+    });
+    for (f, key) in files.iter().zip(&keys) {
+        // A hit needs both halves: the Lua to run, and what checking it said. An entry
+        // missing either is no use, so it is a miss rather than a partial replay.
+        let hit = store
+            .as_ref()
+            .and_then(|c| c.lookup(key))
+            .filter(|m| m.code.is_some() && m.check.is_some());
+        let rep = match &hit {
+            Some(m) => {
+                replayed += 1;
+                let check = m.check.as_ref().expect("filtered above").to_check();
+                let code = m.code.as_deref().expect("filtered above");
+                // Without these, every module this file requires is checked and generated
+                // while it runs — the work skipping `gen_lua` was supposed to avoid.
+                let pre = store
+                    .as_ref()
+                    .map(|c| preloads_for(c, m, lint, cache_opts))
+                    .unwrap_or_default();
+                session.run_file_with(f, Some((code, &check)), &pre)?.0
+            }
+            None => {
+                let (rep, code) = session.run_file_with(f, None, &[])?;
+                // Only when there is code: a file that failed to check has nothing to run,
+                // and storing that would replay an empty run as if it were a result.
+                if let (Some(c), Some(code)) = (&store, code) {
+                    let m = cache::Module::generated(&rep.check, code);
+                    c.store_module(key, f, &cfg_inputs, &search_dirs(f, &root, cfg), &m);
+                    // And the modules it reached, so the next run can preload them. The
+                    // checker's store is warm here, so this generates rather than re-checks.
+                    if let Some(h) = &harvest {
+                        harvest_modules(h, &rep.check, f);
+                    }
+                }
+                rep
+            }
+        };
+        if coverage_wanted {
+            for (source, lines) in &rep.coverage {
+                // Lua names a file chunk "@<path>"; bundles and preloads ("=name") have no file.
+                let Some(path) = source.strip_prefix('@') else {
+                    continue;
+                };
+                let key = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+                cov_hits
+                    .entry(key)
+                    .or_default()
+                    .extend(lines.iter().copied());
+            }
+            cov_deps.extend(rep.check.deps.iter().cloned());
+        }
+        ran_files += 1;
+        sink.checkinfo(&rep.check);
+        each(&rep, sink);
+        passed += rep.passed;
+        failed += rep.failed;
+        if !rep.ok() {
+            bad_files += 1;
+            if fail_fast {
+                break;
+            }
+        }
+    }
+    let coverage = if coverage_wanted {
+        Some(coverage_report(
+            session.checker(),
+            &files,
+            &cov_hits,
+            &cov_deps,
+        )?)
+    } else {
+        None
+    };
+    explain_cache(store.as_ref(), cache_opts);
+    Ok(TestReport {
+        files,
+        ran: ran_files,
+        passed,
+        failed,
+        files_with_errors: bad_files,
+        replayed,
+        seed,
+        duration_ms: started.elapsed().as_secs_f64() * 1000.0,
+        coverage,
     })
 }

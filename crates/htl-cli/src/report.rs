@@ -164,95 +164,10 @@ pub struct TestSummary {
     pub seed: u64,
 }
 
-/// A function of a module no statement of which ran.
-#[derive(Serialize, Debug)]
-pub struct NeverRan {
-    /// As the source writes it: `f`, `M.f`, `M:f`.
-    pub name: String,
-    pub line: usize,
-}
-
-#[derive(Serialize, Debug)]
-pub struct CoverageModule {
-    pub path: String,
-    pub executed: usize,
-    pub total: usize,
-    /// Unexecuted statements as `[first_line, last_line]` ranges.
-    pub unexecuted: Vec<(usize, usize)>,
-    /// Functions nothing in the run entered. A percentage says how much of a module
-    /// was missed; this says what was missed.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub never_ran: Vec<NeverRan>,
-    /// The module's file, absolute. Not part of the JSON (`path` is the reported
-    /// spelling); the lcov writer resolves it against the project root instead.
-    #[serde(skip)]
-    pub source: std::path::PathBuf,
-    /// Every statement as `(first line, ran)`, in source order. What `executed` /
-    /// `total` count, kept for the lcov `DA` records.
-    #[serde(skip)]
-    pub statements: Vec<(usize, bool)>,
-    /// Every function with a body as `(name, line, entered)`, in source order;
-    /// `never_ran` is the `entered == false` subset.
-    #[serde(skip)]
-    pub functions: Vec<(String, usize, bool)>,
-}
-
-#[derive(Serialize, Debug, Default)]
-pub struct CoverageReport {
-    pub modules: Vec<CoverageModule>,
-    pub executed: usize,
-    pub total: usize,
-}
-
-impl CoverageReport {
-    /// The run as an lcov tracefile, one record per module in the report's order.
-    ///
-    /// `DA` is one entry per line a statement starts on, with a count of `1` or `0`:
-    /// the hook records whether a line ran, not how often, and a number it does not
-    /// have is not invented. Two statements starting on one line share the entry, so
-    /// `LF` / `LH` equal the table's `total` / `executed` except on such lines. `FN` /
-    /// `FNDA` are the classic two-field forms every consumer reads; there is no branch
-    /// data, so no `BRDA`. `SF` is relative to `root` (the project root, so the file
-    /// resolves against the repository wherever CI ran the command), absolute when the
-    /// module is outside it.
-    pub fn lcov(&self, root: &std::path::Path) -> String {
-        use std::collections::BTreeMap;
-        use std::fmt::Write as _;
-        let mut out = String::new();
-        for m in &self.modules {
-            let sf = m
-                .source
-                .strip_prefix(root)
-                .unwrap_or(&m.source)
-                .to_string_lossy();
-            out.push_str("TN:\n");
-            let _ = writeln!(out, "SF:{sf}");
-            for (name, line, _) in &m.functions {
-                let _ = writeln!(out, "FN:{line},{name}");
-            }
-            for (name, _, entered) in &m.functions {
-                let _ = writeln!(out, "FNDA:{},{name}", u8::from(*entered));
-            }
-            let _ = writeln!(out, "FNF:{}", m.functions.len());
-            let _ = writeln!(
-                out,
-                "FNH:{}",
-                m.functions.iter().filter(|(_, _, e)| *e).count()
-            );
-            let mut lines: BTreeMap<usize, bool> = BTreeMap::new();
-            for &(line, ran) in &m.statements {
-                *lines.entry(line).or_default() |= ran;
-            }
-            for (line, ran) in &lines {
-                let _ = writeln!(out, "DA:{line},{}", u8::from(*ran));
-            }
-            let _ = writeln!(out, "LF:{}", lines.len());
-            let _ = writeln!(out, "LH:{}", lines.values().filter(|r| **r).count());
-            out.push_str("end_of_record\n");
-        }
-        out
-    }
-}
+// Coverage is the library's too ([`htl::project::coverage_report`]): which modules a run
+// reached, which statements of them ran, and the lcov tracefile that says so. The JSON
+// shape is these types', printed here beside the rest of the document.
+pub use htl::project::CoverageReport;
 
 #[derive(Serialize, Debug)]
 pub struct TestReport {

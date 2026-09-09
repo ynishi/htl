@@ -36,7 +36,7 @@ impl Htl {
 }
 
 /// Outcome of one test file.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct FileReport {
     pub path: PathBuf,
     pub check: CheckInfo,
@@ -171,6 +171,141 @@ pub fn run_test_file(
     opts: &RunOptions,
 ) -> Result<FileReport> {
     TestSession::new(lint_spec, lib, filter, opts.clone())?.run_file(path)
+}
+
+/// A whole project's tests, run from Rust.
+///
+/// [`run_test_file`] runs one file and [`crate::project::test`] runs a project; this is
+/// the second of those with the parts a command line supplies filled in with defaults, so
+/// that a host embedding Teal can put its scripts' tests in `cargo test` instead of
+/// shelling out to `htl test`:
+///
+/// ```rust,ignore
+/// #[test]
+/// fn teal_tests_pass() {
+///     let rep = htl::testing::run_tests(&["scripts".into()], &htl::testing::Suite::default())
+///         .expect("the run itself");
+///     assert!(rep.ok(), "{:#?}", rep.failures());
+/// }
+/// ```
+///
+/// Every field is what `htl test` takes a flag for, and [`Default`] is what the command
+/// does with no flags — except the store, which is off here: a run under `cargo test`
+/// starts wherever cargo put it, and a host that wants the cache asks for it.
+///
+/// A whole project is more than one file, so this is the project layer's
+/// ([`crate::project::test`]) and asks for its features; the umbrella `htl` crate a host
+/// depends on has both.
+#[cfg(all(feature = "pkg", feature = "dts"))]
+#[derive(Debug, Clone, Default)]
+pub struct Suite {
+    /// Run only the tests whose name contains this (`htl test --filter`).
+    pub filter: Option<String>,
+    /// Module name of the assertion library, when it is not [`DEFAULT_LIB`].
+    pub lib: Option<String>,
+    /// A lint selection, merged after `htl.toml`'s so that it wins (`htl test --lint`).
+    pub lint: Option<String>,
+    /// Fail-fast, snapshot updating, coverage and the seed. `seed: None` draws one for the
+    /// run and [`SuiteReport::seed`] says which, so a failure can be repeated.
+    pub run: RunOptions,
+    /// Keep a run cache under the project root, as `htl test` does. Off by default.
+    pub cache: bool,
+}
+
+/// What a [`run_tests`] run found: every file's report, and the counts over them.
+#[cfg(all(feature = "pkg", feature = "dts"))]
+#[derive(Debug)]
+pub struct SuiteReport {
+    /// One per file that ran, in the order they ran.
+    pub files: Vec<FileReport>,
+    /// Every diagnostic the checks produced, over the whole run, as values.
+    pub diagnostics: Vec<crate::Diagnostic>,
+    pub passed: usize,
+    pub failed: usize,
+    /// Files that failed to check, raised, or had a failing test.
+    pub files_with_errors: usize,
+    /// Files discovered but never run, because `fail_fast` stopped the run.
+    pub skipped: usize,
+    /// The seed every file's stream was derived from.
+    pub seed: u64,
+    pub duration_ms: f64,
+    /// With `run.coverage`: what the line hooks saw.
+    pub coverage: Option<crate::project::CoverageReport>,
+}
+
+#[cfg(all(feature = "pkg", feature = "dts"))]
+impl SuiteReport {
+    /// Whether every file that ran was ok. What an assertion in a `#[test]` reads.
+    pub fn ok(&self) -> bool {
+        self.files_with_errors == 0
+    }
+
+    /// What to put in the assertion message: each failing file with what went wrong —
+    /// a check that failed, a file that raised, or the tests that did not pass.
+    pub fn failures(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for f in self.files.iter().filter(|f| !f.ok()) {
+            let at = f.path.display();
+            if !f.check.ok() {
+                out.extend(f.check.errors.iter().map(|e| format!("{at}: {e}")));
+            }
+            if let Some(e) = &f.error {
+                out.push(format!("{at}: {e}"));
+            }
+            out.extend(f.failures.iter().map(|m| format!("{at}: {m}")));
+        }
+        out
+    }
+}
+
+/// Run the tests under `paths` — a project root, a directory, or the files themselves —
+/// and hand back what happened.
+///
+/// Discovery is [`discover_tests_skipping`]'s: `*_test.tl` anywhere and every `.tl` under a
+/// `tests` directory, minus a patched dependency's own suite. `htl.toml` is found from the
+/// first path, as the command does. Nothing is printed and nothing decides an exit code —
+/// [`SuiteReport`] is the whole answer, and asserting on it is the caller's.
+#[cfg(all(feature = "pkg", feature = "dts"))]
+pub fn run_tests(paths: &[PathBuf], suite: &Suite) -> Result<SuiteReport> {
+    use crate::project;
+    let paths: Vec<PathBuf> = if paths.is_empty() {
+        vec![PathBuf::from(".")]
+    } else {
+        paths.to_vec()
+    };
+    let files = discover_tests_skipping(&paths, &project::patched(&paths))?;
+    let cfg = project::config_of(&paths[0])?;
+    let opts = project::TestOptions {
+        config: &cfg,
+        lint: suite.lint.as_deref(),
+        lib: suite.lib.as_deref().unwrap_or(DEFAULT_LIB),
+        filter: suite.filter.as_deref(),
+        run: suite.run.clone(),
+        cache: project::cache_options(
+            suite.cache,
+            Some(crate::cache::Mode::PerModule),
+            &cfg,
+            false,
+        ),
+    };
+    let mut sink = project::Sink::new(project::Collect::default());
+    let mut reports: Vec<FileReport> = Vec::new();
+    let mut diagnostics: Vec<crate::Diagnostic> = Vec::new();
+    let rep = project::test(&mut sink, &files, &opts, &mut |r, sink| {
+        diagnostics.extend(sink.out().take());
+        reports.push(r.clone());
+    })?;
+    Ok(SuiteReport {
+        files: reports,
+        diagnostics,
+        passed: rep.passed,
+        failed: rep.failed,
+        files_with_errors: rep.files_with_errors,
+        skipped: rep.skipped(),
+        seed: rep.seed,
+        duration_ms: rep.duration_ms,
+        coverage: rep.coverage,
+    })
 }
 
 /// One checker for a whole run: every test file gets its own fresh program state

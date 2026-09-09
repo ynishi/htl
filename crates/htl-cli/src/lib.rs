@@ -153,7 +153,6 @@ use htl::bundle::Bundle;
 // what it keeps there. Shared with `include_tl!`, which asks the same of the same store.
 use htl::project;
 use htl::{CheckInfo, Htl};
-use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -1089,90 +1088,6 @@ struct TestFlags {
     seed: Option<u64>,
 }
 
-/// Coverage over the run: every `.tl` the test files' checks depended on (so a module
-/// no test reached shows 0%), with the executed statements from the line hooks.
-fn coverage_report(
-    checker: &Htl,
-    test_files: &[PathBuf],
-    hits: &std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>>,
-    deps: &std::collections::BTreeSet<PathBuf>,
-) -> Result<report::CoverageReport> {
-    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    let tests: std::collections::HashSet<PathBuf> = test_files.iter().map(|p| canon(p)).collect();
-    let mut sources: std::collections::BTreeSet<PathBuf> = deps.iter().map(|p| canon(p)).collect();
-    sources.extend(hits.keys().cloned());
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let (mut tot_exec, mut tot_all) = (0usize, 0usize);
-    let mut rows: Vec<report::CoverageModule> = Vec::new();
-    for src in &sources {
-        let name = src.to_string_lossy();
-        if !name.ends_with(".tl")
-            || name.ends_with(".d.tl")
-            || tests.contains(src)
-            || name.contains("/htl-lib-")
-        {
-            continue;
-        }
-        let (ranges, funcs) = checker.coverage_spans(src)?;
-        if ranges.is_empty() {
-            continue;
-        }
-        let empty = std::collections::BTreeSet::new();
-        let ran = hits.get(src).unwrap_or(&empty);
-        let mut missed = Vec::new();
-        let mut statements = Vec::with_capacity(ranges.len());
-        let mut executed = 0usize;
-        for &(a, b) in &ranges {
-            let hit = ran.range(a..=b).next().is_some();
-            statements.push((a, hit));
-            if hit {
-                executed += 1;
-            } else {
-                missed.push((a, b));
-            }
-        }
-        // The body only. Defining a function runs its `function` line and its `end`
-        // line, so both are silent about whether anything ever entered it.
-        let functions: Vec<(String, usize, bool)> = funcs
-            .into_iter()
-            .map(|f| {
-                let entered = ran.range(f.line + 1..=f.last - 1).next().is_some();
-                (f.name, f.line, entered)
-            })
-            .collect();
-        let never_ran = functions
-            .iter()
-            .filter(|(_, _, entered)| !entered)
-            .map(|(name, line, _)| report::NeverRan {
-                name: name.clone(),
-                line: *line,
-            })
-            .collect();
-        tot_exec += executed;
-        tot_all += ranges.len();
-        let shown = src
-            .strip_prefix(&cwd)
-            .unwrap_or(src)
-            .to_string_lossy()
-            .into_owned();
-        rows.push(report::CoverageModule {
-            path: shown,
-            executed,
-            total: ranges.len(),
-            unexecuted: missed,
-            never_ran,
-            source: src.clone(),
-            statements,
-            functions,
-        });
-    }
-    Ok(report::CoverageReport {
-        modules: rows,
-        executed: tot_exec,
-        total: tot_all,
-    })
-}
-
 fn print_coverage(cov: &report::CoverageReport, with_lines: bool) {
     let width = cov
         .modules
@@ -1237,145 +1152,48 @@ fn cmd_test(
     } else {
         paths.to_vec()
     };
-    // Given, or drawn once for the whole run and printed. Drawn from the clock rather
-    // than from a generator this process also hands to the tests: the seed has to differ
-    // between runs, and nothing else about it matters.
-    let seed = flags.seed.unwrap_or_else(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0)
-    });
-    let opts = htl::testing::RunOptions {
-        fail_fast: flags.fail_fast,
-        update_snapshots: flags.update,
-        coverage: flags.coverage,
-        seed: Some(seed),
-    };
-    let mut cov_hits: std::collections::HashMap<PathBuf, std::collections::BTreeSet<usize>> =
-        Default::default();
-    let mut cov_deps: std::collections::BTreeSet<PathBuf> = Default::default();
     if let Some(first) = paths.first() {
         auto_dts(first)?;
     }
-    let file_spec = load_config(&paths[0])?
-        .map(|(_, _, c)| c.lint_spec())
-        .unwrap_or_default();
-    let spec = htl::config::join_specs([file_spec.as_str(), lint.unwrap_or("")]);
-    let lint = if spec.is_empty() {
-        None
-    } else {
-        Some(spec.as_str())
-    };
     // A patched dependency's `*_test.tl` are its suite, not this project's: `htl pkg patch`
     // takes the whole package root, tests included, and running them here would report a
     // library's own failures as the project's.
-    let files = htl::testing::discover_tests_skipping(&paths, &patched(&paths))?;
+    let files = htl::testing::discover_tests_skipping(&paths, &project::patched(&paths))?;
     if files.is_empty() {
         eprintln!("htl test: no test files found (looked for *_test.tl and tests/**/*.tl)");
         return Ok(ExitCode::FAILURE);
     }
-    let (mut passed, mut failed, mut bad_files, mut ran_files) = (0usize, 0usize, 0usize, 0usize);
-    let started = std::time::Instant::now();
-    // One checker for the run; each file still gets a fresh program state.
-    let session = htl::testing::TestSession::new(lint, lib, filter, opts)?;
-
-    // Checking a test file and generating its Lua is most of what a run costs — the tests
-    // themselves are a few percent of it — and none of that work depends on the outcome, so
-    // it is reusable in exactly the way `htl check`'s is. Running is not: a test has to run
-    // to say whether it passes, every time.
     let cfg = load_config(&paths[0])?;
-    let root = cfg
-        .as_ref()
-        .map(|(r, _, _)| r.clone())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    // Test entries are always per-module: a whole-run entry over test files would mean one
-    // edit anywhere re-checks every suite, which is the trade `htl check` offers because a
-    // check is one answer. A test run is many.
-    let opts = project::cache_options(
-        !flags.no_cache,
-        Some(cache::Mode::PerModule),
-        &cfg,
-        flags.explain,
-    );
-    let store = project::store(&root, opts, None, "htl test");
-    let keys: Vec<cache::Key> = files.iter().map(|f| cache::gen_key(f, lint)).collect();
-    let cfg_inputs: Vec<PathBuf> = cfg.iter().map(|(_, p, _)| p.clone()).collect();
+    let opts = project::TestOptions {
+        config: &cfg,
+        lint,
+        lib,
+        filter,
+        run: htl::testing::RunOptions {
+            fail_fast: flags.fail_fast,
+            update_snapshots: flags.update,
+            coverage: flags.coverage,
+            // Given, or drawn for the run and printed below, so that it can be given back.
+            seed: flags.seed,
+        },
+        cache: project::cache_options(
+            !flags.no_cache,
+            Some(cache::Mode::PerModule),
+            &cfg,
+            flags.explain,
+        ),
+    };
 
     let mut sink = project::Sink::new(report::Out::new(flags.json));
     let mut json_files: Vec<report::TestFile> = Vec::new();
-    let mut replayed = 0usize;
-    let harvest = store.as_ref().map(|c| project::Harvest {
-        store: c,
-        session: &session,
-        cfg_inputs: &cfg_inputs,
-        root: &root,
-        cfg: &cfg,
-        lint,
-        opts,
-        done: RefCell::new(Default::default()),
-    });
-    for (f, key) in files.iter().zip(&keys) {
-        // A hit needs both halves: the Lua to run, and what checking it said. An entry
-        // missing either is no use, so it is a miss rather than a partial replay.
-        let hit = store
-            .as_ref()
-            .and_then(|c| c.lookup(key))
-            .filter(|m| m.code.is_some() && m.check.is_some());
-        let rep = match &hit {
-            Some(m) => {
-                replayed += 1;
-                let check = m.check.as_ref().expect("filtered above").to_check();
-                let code = m.code.as_deref().expect("filtered above");
-                // Without these, every module this file requires is checked and generated
-                // while it runs — the work skipping `gen_lua` was supposed to avoid.
-                let pre = store
-                    .as_ref()
-                    .map(|c| project::preloads_for(c, m, lint, opts))
-                    .unwrap_or_default();
-                session.run_file_with(f, Some((code, &check)), &pre)?.0
-            }
-            None => {
-                let (rep, code) = session.run_file_with(f, None, &[])?;
-                // Only when there is code: a file that failed to check has nothing to run,
-                // and storing that would replay an empty run as if it were a result.
-                if let (Some(c), Some(code)) = (&store, code) {
-                    let m = cache::Module::generated(&rep.check, code);
-                    c.store_module(
-                        key,
-                        f,
-                        &cfg_inputs,
-                        &project::search_dirs(f, &root, &cfg),
-                        &m,
-                    );
-                    // And the modules it reached, so the next run can preload them. The
-                    // checker's store is warm here, so this generates rather than re-checks.
-                    if let Some(h) = &harvest {
-                        project::harvest_modules(h, &rep.check, f);
-                    }
-                }
-                rep
-            }
-        };
-        if flags.coverage {
-            for (source, lines) in &rep.coverage {
-                // Lua names a file chunk "@<path>"; bundles and preloads ("=name") have no file.
-                let Some(path) = source.strip_prefix('@') else {
-                    continue;
-                };
-                let key = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
-                cov_hits
-                    .entry(key)
-                    .or_default()
-                    .extend(lines.iter().copied());
-            }
-            cov_deps.extend(rep.check.deps.iter().cloned());
-        }
-        ran_files += 1;
-        sink.checkinfo(&rep.check);
+    // What is left of the run here: how a file reads on a terminal, and what the document
+    // says about it. Which files run, in what isolation, from what store — and what they
+    // draw — is `project::test`'s.
+    let rep = project::test(&mut sink, &files, &opts, &mut |rep, sink| {
         if flags.json {
-            json_files.push(report::TestFile::from_report(&rep, sink.out().take()));
+            json_files.push(report::TestFile::from_report(rep, sink.out().take()));
         }
+        let f = &rep.path;
         let tag = if rep.ok() { "ok  " } else { "FAIL" };
         let detail = if !rep.check.ok() {
             "type check failed".to_string()
@@ -1425,57 +1243,39 @@ fn cmd_test(
                 eprintln!("snapshot updated: {p}");
             }
         }
-        passed += rep.passed;
-        failed += rep.failed;
-        if !rep.ok() {
-            bad_files += 1;
-            if flags.fail_fast {
-                break;
-            }
-        }
-    }
-    let coverage = if flags.coverage {
-        Some(coverage_report(
-            session.checker(),
-            &files,
-            &cov_hits,
-            &cov_deps,
-        )?)
-    } else {
-        None
-    };
-    if let (Some(out), Some(cov)) = (&flags.lcov, &coverage) {
+    })?;
+
+    if let (Some(out), Some(cov)) = (&flags.lcov, &rep.coverage) {
         // Against the project root rather than the working directory: a tracefile is
         // uploaded from wherever CI ran the command and resolved against the repository.
-        let root = match load_config(&paths[0])? {
-            Some((dir, _, _)) => dir,
+        let root = match &cfg {
+            Some((dir, _, _)) => dir.clone(),
             None => std::env::current_dir()?,
         };
         let root = std::fs::canonicalize(&root).unwrap_or(root);
         std::fs::write(out, cov.lcov(&root))
             .with_context(|| format!("writing {}", out.display()))?;
     }
-    let skipped = files.len() - ran_files;
-    project::explain_cache(store.as_ref(), opts);
-    let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let ok = rep.ok();
     if flags.json {
+        let summary = report::TestSummary {
+            files: rep.files.len(),
+            files_run: rep.ran,
+            passed: rep.passed,
+            failed: rep.failed,
+            files_with_errors: rep.files_with_errors,
+            replayed: rep.replayed,
+            duration_ms: rep.duration_ms,
+            ok,
+            seed: rep.seed,
+        };
         report::emit(&report::TestReport {
             files: json_files,
-            summary: report::TestSummary {
-                files: files.len(),
-                files_run: ran_files,
-                passed,
-                failed,
-                files_with_errors: bad_files,
-                replayed,
-                duration_ms,
-                ok: bad_files == 0,
-                seed,
-            },
-            coverage,
+            summary,
+            coverage: rep.coverage,
         })?;
     } else {
-        if let Some(cov) = &coverage {
+        if let Some(cov) = &rep.coverage {
             print_coverage(cov, flags.coverage_lines);
             if let Some(out) = &flags.lcov {
                 eprintln!("coverage: lcov written to {}", out.display());
@@ -1483,49 +1283,35 @@ fn cmd_test(
         }
         eprintln!(
             "htl test: {} file(s), {} passed, {} failed, {} file(s) with errors{}{} ({:.0} ms)",
-            ran_files,
-            passed,
-            failed,
-            bad_files,
-            if skipped > 0 {
-                format!(", {skipped} file(s) not run (--fail-fast)")
+            rep.ran,
+            rep.passed,
+            rep.failed,
+            rep.files_with_errors,
+            if rep.skipped() > 0 {
+                format!(", {} file(s) not run (--fail-fast)", rep.skipped())
             } else {
                 String::new()
             },
             // Says the checking was reused, not the run: every one of these files ran.
-            if replayed > 0 {
-                format!(", {replayed} checked from cache")
+            if rep.replayed > 0 {
+                format!(", {} checked from cache", rep.replayed)
             } else {
                 String::new()
             },
-            duration_ms
+            rep.duration_ms
         );
         // Always, not only on failure: the seed of a run that passed is what reproduces
         // the run that passes, and a failure two commits later is compared against it.
-        eprintln!("htl test: seed {seed} (repeat with --seed {seed})");
+        eprintln!(
+            "htl test: seed {} (repeat with --seed {})",
+            rep.seed, rep.seed
+        );
     }
-    Ok(if bad_files == 0 {
+    Ok(if ok {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
     })
-}
-
-/// The patched dependencies below `paths` — `patch_dir` deps, as directories.
-///
-/// What `htl check` walks and `htl fmt` / `htl test` do not: the copy is the project's
-/// code, so its type errors are the project's to fix, but rewriting it or running its
-/// tests is doing a dependency's work in the project's name.
-fn patched(paths: &[PathBuf]) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    for p in paths {
-        for d in htl::patched_dirs(p) {
-            if !out.contains(&d) {
-                out.push(d);
-            }
-        }
-    }
-    out
 }
 
 /// Name the patched dependencies this walk enters, in the shape the other reports use.
@@ -1553,8 +1339,8 @@ fn report_patched(paths: &[PathBuf]) {
 }
 
 /// Nearest `htl.toml` above the first path: `(dir holding it, path, config)`.
-fn load_config(first: &Path) -> Result<Option<(PathBuf, PathBuf, htl::config::HtlConfig)>> {
-    Ok(htl::config::HtlConfig::find(first)?.map(|(p, c)| (htl::parent_dir(&p), p, c)))
+fn load_config(first: &Path) -> Result<project::Config> {
+    project::config_of(first)
 }
 
 fn cmd_fmt(paths: &[PathBuf], check: bool, indent: Option<usize>) -> Result<ExitCode> {
@@ -1571,7 +1357,7 @@ fn cmd_fmt(paths: &[PathBuf], check: bool, indent: Option<usize>) -> Result<Exit
     // Not a patched dependency: formatting the copy would turn every one of its files into
     // a diff against the revision it was taken from, and bury the project's own change
     // somewhere inside that.
-    let files = htl::collect_tl_skipping(&paths, &patched(&paths))?;
+    let files = htl::collect_tl_skipping(&paths, &project::patched(&paths))?;
     let (mut changed, mut failed) = (0usize, 0usize);
     for f in &files {
         let before = fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?;
