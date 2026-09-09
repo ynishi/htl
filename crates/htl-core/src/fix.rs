@@ -8,7 +8,7 @@
 //! parser rejects is never touched; type errors do not block (their positions are
 //! sound, and a fix may be what removes them), the revert is the guard.
 
-use crate::{Applicability, CheckInfo, Edit, Htl};
+use crate::{Applicability, CheckInfo, Diagnostic, Edit, Htl};
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -212,22 +212,17 @@ struct Candidate {
     edits: Vec<Edit>,
 }
 
-/// Every diagnostic of `check` that carries a fix, errors before lints, as
-/// (message, fix, is_error).
-fn fixable(check: &CheckInfo) -> impl Iterator<Item = (&String, &crate::Fix, bool)> {
+/// Every diagnostic of `check` that carries a fix, errors before lints. Each one arrives
+/// with its position and its rule already read off it (`crate::Diagnostic`), so nothing
+/// here goes back to the printed line to find them.
+fn fixable(check: &CheckInfo) -> Vec<(Diagnostic, crate::Fix, bool)> {
     check
-        .errors
-        .iter()
-        .zip(check.error_fixes.iter())
-        .map(|(m, f)| (m, f, true))
-        .chain(
-            check
-                .lints
-                .iter()
-                .zip(check.lint_fixes.iter())
-                .map(|(m, f)| (m, f, false)),
-        )
-        .filter_map(|(m, f, e)| f.as_ref().map(|f| (m, f, e)))
+        .error_diagnostics()
+        .into_iter()
+        .map(|d| (d, true))
+        .chain(check.lint_diagnostics().into_iter().map(|d| (d, false)))
+        .filter_map(|(mut d, is_error)| d.fix.take().map(|fix| (d, fix, is_error)))
+        .collect()
 }
 
 /// The edits of one fix as a candidate's key: what tells two passes apart.
@@ -252,9 +247,9 @@ fn candidates(
     path: &Path,
 ) -> Vec<Candidate> {
     let mut out = Vec::new();
-    for (msg, fix, is_error) in fixable(check) {
-        let rule = rule_of(msg, is_error);
-        let line = line_of(msg);
+    for (d, fix, is_error) in fixable(check) {
+        let rule = rule_of(&d, is_error);
+        let line = d.line;
         if !opts.only.is_empty() && !opts.only.iter().any(|r| r == &rule) {
             continue;
         }
@@ -298,10 +293,10 @@ fn candidates(
         out.push(Candidate {
             rule,
             line,
-            key: edit_key(fix),
+            key: edit_key(&fix),
             is_error,
             applicability,
-            edits: fix.edits.clone(),
+            edits: fix.edits,
         });
     }
     out
@@ -312,11 +307,11 @@ fn candidates(
 /// so that what they would insert can be shown.
 fn suggestions(check: &CheckInfo, opts: &FixOptions) -> Vec<Candidate> {
     let mut out = Vec::new();
-    for (msg, fix, is_error) in fixable(check) {
+    for (d, fix, is_error) in fixable(check) {
         if fix.applicability != Applicability::Suggest {
             continue;
         }
-        let rule = rule_of(msg, is_error);
+        let rule = rule_of(&d, is_error);
         if !opts.only.is_empty() && !opts.only.iter().any(|r| r == &rule) {
             continue;
         }
@@ -324,36 +319,27 @@ fn suggestions(check: &CheckInfo, opts: &FixOptions) -> Vec<Candidate> {
             continue;
         }
         out.push(Candidate {
-            line: line_of(msg),
+            line: d.line,
             rule,
-            key: edit_key(fix),
+            key: edit_key(&fix),
             is_error,
             applicability: fix.applicability,
-            edits: fix.edits.clone(),
+            edits: fix.edits,
         });
     }
     out
 }
 
-/// The rule name of a lint line (`... [htl <rule>]`), or a class name for errors.
-fn rule_of(msg: &str, is_error: bool) -> String {
-    if !is_error
-        && msg.ends_with(']')
-        && let Some(start) = msg.rfind(" [htl ")
-    {
-        return msg[start + 6..msg.len() - 1].to_string();
+/// What `--rule` and `[fix] disable` name a diagnostic by: a lint's own rule, or a class
+/// name for an error, which has none of its own.
+fn rule_of(d: &Diagnostic, is_error: bool) -> String {
+    if !is_error && let Some(rule) = &d.rule {
+        return rule.clone();
     }
-    if msg.contains("invalid key '") && msg.contains("is defined at line") {
+    if d.message.contains("invalid key '") && d.message.contains("is defined at line") {
         return "forward-ref".into();
     }
     "error".into()
-}
-
-fn line_of(msg: &str) -> usize {
-    msg.split(':')
-        .nth(1)
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0)
 }
 
 /// Apply the candidates whose edits do not overlap an already accepted edit, in

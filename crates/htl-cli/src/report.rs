@@ -3,88 +3,20 @@
 //! fields may be added, existing ones are not renamed.
 
 use anyhow::Result;
-use htl::CheckInfo;
 use htl::testing::FileReport;
+use htl::{CheckInfo, Fix};
 use serde::Serialize;
 use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
 
-/// One `error:` / `warning:` / `lint:` line, split into its parts.
-#[derive(Serialize, Debug, Clone)]
-pub struct Diagnostic {
-    pub severity: &'static str,
-    pub file: String,
-    pub line: usize,
-    pub col: usize,
-    /// The lint rule (`nil-index`, `contract`, ...) for `lint` diagnostics.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rule: Option<String>,
-    pub message: String,
-    /// A mechanical rewrite `htl fix` may apply, when the diagnostic has one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fix: Option<FixJson>,
-    /// For an error in a module the check reached through `require`: the file whose
-    /// require pulled it in. Absent on the project's own diagnostics.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub required_by: Option<String>,
-    /// Where such a file lives: `dependency` (installed under `.htl/modules`, or a
-    /// vendored copy) or `external` (a `[check] paths` or contract directory). Absent for
-    /// a file of the project's own, and on the project's own diagnostics.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub origin: Option<String>,
-}
+// A diagnostic and its severity are the library's ([`htl::Diagnostic`]), and so is the
+// one place their text is taken apart: an LSP, a `build.rs` and this printer read the
+// same values rather than each splitting the string for itself.
+pub use htl::{Diagnostic, Severity};
 
-// The JSON shapes of a fix and of a dependency diagnostic are the run cache's, since the
-// store reads them back; `--format json` prints the same shapes.
+// The JSON shape of a dependency diagnostic is the run cache's, since the store reads it
+// back; `--format json` prints the same shape.
 pub use htl::cache::{DependencyJson, FixJson};
-
-/// `"<file>:<line>:<col>: <message>"` (what the checker formats) into parts. A line
-/// that does not have that shape keeps its whole text as the message.
-pub fn parse_diag(severity: &'static str, text: &str) -> Diagnostic {
-    let mut parts = text.splitn(4, ':');
-    if let (Some(file), Some(l), Some(c), Some(msg)) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-        && let (Ok(line), Ok(col)) = (l.trim().parse::<usize>(), c.trim().parse::<usize>())
-    {
-        let (message, rule) = split_rule(msg.trim_start());
-        return Diagnostic {
-            severity,
-            file: file.to_string(),
-            line,
-            col,
-            rule,
-            message,
-            fix: None,
-            required_by: None,
-            origin: None,
-        };
-    }
-    let (message, rule) = split_rule(text);
-    Diagnostic {
-        severity,
-        file: String::new(),
-        line: 0,
-        col: 0,
-        rule,
-        message,
-        fix: None,
-        required_by: None,
-        origin: None,
-    }
-}
-
-/// Lint lines end with ` [htl <rule>]`.
-fn split_rule(msg: &str) -> (String, Option<String>) {
-    if msg.ends_with(']')
-        && let Some(start) = msg.rfind(" [htl ")
-    {
-        let rule = &msg[start + " [htl ".len()..msg.len() - 1];
-        if !rule.is_empty() && !rule.contains(' ') {
-            return (msg[..start].to_string(), Some(rule.to_string()));
-        }
-    }
-    (msg.to_string(), None)
-}
 
 /// Where diagnostics go: printed as they come (text) or kept for the document (json).
 ///
@@ -127,20 +59,28 @@ impl Sink {
         self.walked = files.iter().map(|f| canonical(f)).collect();
     }
 
-    pub fn diag(&mut self, severity: &'static str, text: &str) {
+    pub fn diag(&mut self, severity: Severity, text: &str) {
         self.diag_with_fix(severity, text, None);
     }
 
     /// Same order as the text output has always used: warnings, lints, errors.
     pub fn checkinfo(&mut self, c: &CheckInfo) {
         for w in &c.warnings {
-            self.diag("warning", w);
+            self.diag(Severity::Warning, w);
         }
         for (i, l) in c.lints.iter().enumerate() {
-            self.diag_with_fix("lint", l, c.lint_fixes.get(i).and_then(|f| f.as_ref()));
+            self.diag_with_fix(
+                Severity::Lint,
+                l,
+                c.lint_fixes.get(i).and_then(|f| f.as_ref()),
+            );
         }
         for (i, e) in c.errors.iter().enumerate() {
-            self.diag_with_fix("error", e, c.error_fixes.get(i).and_then(|f| f.as_ref()));
+            self.diag_with_fix(
+                Severity::Error,
+                e,
+                c.error_fixes.get(i).and_then(|f| f.as_ref()),
+            );
         }
     }
 
@@ -167,12 +107,12 @@ impl Sink {
                 origin: origin_of(&e.file).map(str::to_string),
             };
             self.recorded.push(crate::cache::Recorded {
-                severity: "error".to_string(),
+                severity: Severity::Error.as_str().to_string(),
                 text: e.text.clone(),
                 fix: None,
                 dependency: Some(dep.clone()),
             });
-            self.emit("error", &e.text, None, Some(&dep));
+            self.emit(Severity::Error, &e.text, None, Some(&dep));
         }
     }
 
@@ -181,15 +121,14 @@ impl Sink {
         self.dependency_errors
     }
 
-    fn diag_with_fix(&mut self, severity: &'static str, text: &str, fix: Option<&htl::Fix>) {
-        let fix = fix.map(FixJson::from_fix);
+    fn diag_with_fix(&mut self, severity: Severity, text: &str, fix: Option<&Fix>) {
         self.recorded.push(crate::cache::Recorded {
-            severity: severity.to_string(),
+            severity: severity.as_str().to_string(),
             text: text.to_string(),
-            fix: fix.clone(),
+            fix: fix.map(FixJson::from_fix),
             dependency: None,
         });
-        self.emit(severity, text, fix.as_ref(), None);
+        self.emit(severity, text, fix, None);
     }
 
     /// The single place a diagnostic becomes output, whether it was just produced or
@@ -201,9 +140,9 @@ impl Sink {
     /// is what makes a replayed entry and a fresh check agree — both come through this.
     fn emit(
         &mut self,
-        severity: &'static str,
+        severity: Severity,
         text: &str,
-        fix: Option<&FixJson>,
+        fix: Option<&Fix>,
         dependency: Option<&DependencyJson>,
     ) {
         if let Some(d) = dependency {
@@ -223,7 +162,7 @@ impl Sink {
         };
         let text = text.as_ref();
         if self.json {
-            let mut d = parse_diag(severity, text);
+            let mut d = Diagnostic::parse(severity, text);
             d.fix = fix.cloned();
             if let Some(dep) = dependency {
                 d.required_by = Some(dep.required_by.clone());
@@ -259,15 +198,14 @@ impl Sink {
         // second time.
         let severities = recorded
             .iter()
-            .map(|r| match r.severity.as_str() {
-                "error" => Ok("error"),
-                "warning" => Ok("warning"),
-                "lint" => Ok("lint"),
-                other => anyhow::bail!("cache entry has an unknown severity: {other}"),
+            .map(|r| match Severity::parse(&r.severity) {
+                Some(s) => Ok(s),
+                None => anyhow::bail!("cache entry has an unknown severity: {}", r.severity),
             })
-            .collect::<Result<Vec<&'static str>>>()?;
+            .collect::<Result<Vec<Severity>>>()?;
         for (severity, r) in severities.into_iter().zip(recorded) {
-            self.emit(severity, &r.text, r.fix.as_ref(), r.dependency.as_ref());
+            let fix = r.fix.as_ref().map(FixJson::to_fix);
+            self.emit(severity, &r.text, fix.as_ref(), r.dependency.as_ref());
         }
         Ok(())
     }
@@ -297,27 +235,16 @@ fn canonical(p: &std::path::Path) -> std::path::PathBuf {
 /// `--format json` would give two `file` spellings for what may be one directory. The walk
 /// and `required_by` carry what the command line said, which is theirs to keep.
 fn shown(text: &str) -> Cow<'_, str> {
-    let Some((file, rest)) = split_file(text) else {
+    // The same reading of the text [`Diagnostic::parse`] makes, and the same one place
+    // making it: a text with no position keeps every character it has.
+    let Some((file, _, _, _)) = htl::diagnostic::position(text) else {
         return Cow::Borrowed(text);
     };
     let shown = display_path(Path::new(file));
     if shown == file {
         return Cow::Borrowed(text);
     }
-    Cow::Owned(format!("{shown}{rest}"))
-}
-
-/// The leading `<file>` of `"<file>:<line>:<col>: <message>"`, and everything after it.
-/// `None` when the text is not in that shape — the same test [`parse_diag`] makes.
-fn split_file(text: &str) -> Option<(&str, &str)> {
-    let mut parts = text.splitn(4, ':');
-    let file = parts.next()?;
-    let line = parts.next()?;
-    let col = parts.next()?;
-    parts.next()?;
-    line.trim().parse::<usize>().ok()?;
-    col.trim().parse::<usize>().ok()?;
-    Some((file, &text[file.len()..]))
+    Cow::Owned(format!("{shown}{}", &text[file.len()..]))
 }
 
 /// Relative to the directory the command ran in when it is under it, normalised absolute
