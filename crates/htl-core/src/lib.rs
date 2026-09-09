@@ -32,6 +32,12 @@ pub mod fix;
 pub mod link;
 #[cfg(feature = "pkg")]
 pub mod pkg;
+// The project layer: a walk over many files, the run cache under it, and the decisions
+// both `htl check` and a macro expansion make about that store. It reaches the mlua-pkg
+// project a file belongs to and the Cargo package around it, so it asks for the two
+// features that provide them; every consumer that has a project to check has both.
+#[cfg(all(feature = "pkg", feature = "dts"))]
+pub mod project;
 pub mod teal;
 pub mod testing;
 

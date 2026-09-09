@@ -149,7 +149,10 @@ impl From<CacheModeArg> for cache::Mode {
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use htl::bundle::Bundle;
-use htl::{CheckInfo, Htl, Severity};
+// The project layer: which files a check walks, what it replays from the run cache and
+// what it keeps there. Shared with `include_tl!`, which asks the same of the same store.
+use htl::project;
+use htl::{CheckInfo, Htl};
 use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1289,20 +1292,20 @@ fn cmd_test(
     // Test entries are always per-module: a whole-run entry over test files would mean one
     // edit anywhere re-checks every suite, which is the trade `htl check` offers because a
     // check is one answer. A test run is many.
-    let opts = cache_options(
+    let opts = project::cache_options(
         !flags.no_cache,
         Some(cache::Mode::PerModule),
         &cfg,
         flags.explain,
     );
-    let store = cache::Cache::open(&root, opts);
+    let store = project::store(&root, opts, None, "htl test");
     let keys: Vec<cache::Key> = files.iter().map(|f| cache::gen_key(f, lint)).collect();
     let cfg_inputs: Vec<PathBuf> = cfg.iter().map(|(_, p, _)| p.clone()).collect();
 
-    let mut sink = report::Sink::new(flags.json);
+    let mut sink = project::Sink::new(report::Out::new(flags.json));
     let mut json_files: Vec<report::TestFile> = Vec::new();
     let mut replayed = 0usize;
-    let harvest = store.as_ref().map(|c| Harvest {
+    let harvest = store.as_ref().map(|c| project::Harvest {
         store: c,
         session: &session,
         cfg_inputs: &cfg_inputs,
@@ -1322,13 +1325,13 @@ fn cmd_test(
         let rep = match &hit {
             Some(m) => {
                 replayed += 1;
-                let check = check_from_json(m.check.as_ref().expect("filtered above"));
+                let check = m.check.as_ref().expect("filtered above").to_check();
                 let code = m.code.as_deref().expect("filtered above");
                 // Without these, every module this file requires is checked and generated
                 // while it runs — the work skipping `gen_lua` was supposed to avoid.
                 let pre = store
                     .as_ref()
-                    .map(|c| preloads_for(c, m, lint, opts))
+                    .map(|c| project::preloads_for(c, m, lint, opts))
                     .unwrap_or_default();
                 session.run_file_with(f, Some((code, &check)), &pre)?.0
             }
@@ -1338,11 +1341,17 @@ fn cmd_test(
                 // and storing that would replay an empty run as if it were a result.
                 if let (Some(c), Some(code)) = (&store, code) {
                     let m = cache::Module::generated(&rep.check, code);
-                    c.store_module(key, f, &cfg_inputs, &search_dirs(f, &root, &cfg), &m);
+                    c.store_module(
+                        key,
+                        f,
+                        &cfg_inputs,
+                        &project::search_dirs(f, &root, &cfg),
+                        &m,
+                    );
                     // And the modules it reached, so the next run can preload them. The
                     // checker's store is warm here, so this generates rather than re-checks.
                     if let Some(h) = &harvest {
-                        harvest_modules(h, &rep.check, f);
+                        project::harvest_modules(h, &rep.check, f);
                     }
                 }
                 rep
@@ -1365,7 +1374,7 @@ fn cmd_test(
         ran_files += 1;
         sink.checkinfo(&rep.check);
         if flags.json {
-            json_files.push(report::TestFile::from_report(&rep, sink.take()));
+            json_files.push(report::TestFile::from_report(&rep, sink.out().take()));
         }
         let tag = if rep.ok() { "ok  " } else { "FAIL" };
         let detail = if !rep.check.ok() {
@@ -1447,7 +1456,7 @@ fn cmd_test(
             .with_context(|| format!("writing {}", out.display()))?;
     }
     let skipped = files.len() - ran_files;
-    explain_cache(store.as_ref(), opts);
+    project::explain_cache(store.as_ref(), opts);
     let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
     if flags.json {
         report::emit(&report::TestReport {
@@ -1682,7 +1691,7 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
         }
     }
 
-    let mut sink = report::Sink::new(flags.json);
+    let mut sink = project::Sink::new(report::Out::new(flags.json));
     // Dependencies are reported as `htl check` reports them and never rewritten: a fix
     // under `.htl/` goes at the next install, one under `[check] paths` is not this
     // project's. `fix_file` only ever writes the file it was given.
@@ -1694,7 +1703,7 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
         Some((r, _, c)) => htl::contract::resolve(r, c).0,
         None => Vec::new(),
     };
-    let origins = Origins::new(&paths[0], &fix_root, &cfg, &contracts);
+    let origins = project::Origins::new(&paths[0], &fix_root, &cfg, &contracts);
     sink.walking(&files);
     let (mut applied, mut skipped, mut json_files) = (Vec::new(), Vec::new(), Vec::new());
     let (mut changed, mut deferred, mut reverted, mut errors_remaining) =
@@ -1789,7 +1798,7 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
                 deferred: out.deferred,
                 reverted: out.reverted.clone(),
                 oscillation: out.oscillation.clone(),
-                diagnostics: sink.take(),
+                diagnostics: sink.out().take(),
             });
         }
     }
@@ -1861,7 +1870,7 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
         explain,
         ..
     } = flags;
-    let mut sink = report::Sink::new(json);
+    let mut sink = project::Sink::new(report::Out::new(json));
     let paths = if paths.is_empty() {
         vec![PathBuf::from(".")]
     } else {
@@ -1897,141 +1906,20 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
         report_patched(&paths);
     }
 
-    // The `---@contract` markers, read once for the run rather than once per file: they
-    // are a property of the project, and every file under a contract dir asks the same
-    // question of them.
-    let (contracts, contract_problems) = match &cfg {
-        Some((r, _, c)) => htl::contract::resolve(r, c),
-        None => (Vec::new(), Vec::new()),
-    };
-
-    // The store lives at the project root, so invocations from different directories in
-    // one project share it; what separates them is the key, which carries the working
-    // directory and each path as written.
-    let root = cfg
-        .as_ref()
-        .map(|(r, _, _)| r.clone())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let opts = cache_options(use_cache, cache_mode, &cfg, explain);
-    let store = cache::Cache::open(&root, opts);
-    let origins = Origins::new(&paths[0], &root, &cfg, &contracts);
-    // A dependency error is said once per run, and not on behalf of a file the walk
-    // checks itself. The rule applies to replayed entries as much as to fresh checks.
-    sink.walking(&files);
-
-    // The lint selection is part of what a module reports, so it is part of every key.
-    let file_spec = cfg
-        .as_ref()
-        .map(|(_, _, c)| c.lint_spec())
-        .unwrap_or_default();
-    let spec = htl::config::join_specs([file_spec.as_str(), lint.unwrap_or("")]);
-
-    // Look every module up before checking any of them, so that a run where nothing moved
-    // never builds a checker at all.
-    let keys: Vec<cache::Key> = files
-        .iter()
-        .map(|f| cache::module_key(f, Some(&spec)))
-        .collect();
-    let run_key = cache::run_key(&files, Some(&spec));
-    let hits: Vec<Option<cache::Module>> = match &store {
-        Some(c) => c.lookup_all(&keys, &run_key, files.len()),
-        None => vec![None; files.len()],
-    };
-    let to_check = hits.iter().filter(|h| h.is_none()).count();
-
-    let h = if to_check > 0 {
-        Some(build_checker(&cfg, &paths, &spec)?)
-    } else {
-        None
-    };
-    let cfg_inputs: Vec<PathBuf> = cfg.iter().map(|(_, p, _)| p.clone()).collect();
-
-    let (mut n_err, mut n_warn, mut n_lint) = (0usize, 0usize, 0usize);
-    let mut infos: Vec<(PathBuf, CheckInfo)> = Vec::with_capacity(files.len());
-    let mut modules: Vec<cache::Module> = Vec::with_capacity(files.len());
-    for ((f, key), hit) in files.iter().zip(&keys).zip(hits) {
-        let m = match hit {
-            Some(m) => {
-                sink.replay(&m.diagnostics)?;
-                m
-            }
-            None => {
-                let h = h.as_ref().expect("a module missed, so a checker was built");
-                let m = check_one(h, &mut sink, f, &cfg, &contracts, &origins)?;
-                // Per-module entries are written as each one is checked; a whole-run entry
-                // cannot be written until the walk is done, so it happens below.
-                if let Some(c) = &store
-                    && c.mode() == cache::Mode::PerModule
-                {
-                    c.store_module(key, f, &cfg_inputs, &search_dirs(f, &root, &cfg), &m);
-                }
-                m
-            }
-        };
-        n_err += m.errors;
-        n_warn += m.warnings;
-        n_lint += m.lints;
-        infos.push((f.clone(), requires_only(&m)));
-        modules.push(m);
-    }
-    // One entry for the walk. Nothing to write when everything replayed: the entry that was
-    // read is the entry that would be written.
-    if let Some(c) = &store
-        && c.mode() == cache::Mode::WholeRun
-        && to_check > 0
-    {
-        let dirs: Vec<PathBuf> = files
-            .iter()
-            .flat_map(|f| search_dirs(f, &root, &cfg))
-            .collect();
-        c.store_run(&run_key, &files, &cfg_inputs, &dirs, &modules);
-    }
-    // Project-level: cycles in the require graph of the files just checked.
-    for cyc in htl::require_cycles(&infos) {
-        sink.diag(Severity::Lint, &cyc);
-        n_lint += 1;
-    }
-    // A marker that could not be turned into a contract, and a contract that could not be
-    // published: reported once for the run, and before the enforcement question, which
-    // cannot be asked about a contract there is no agreement on.
-    let publish_problems = match &cfg {
-        Some((r, _, _)) => htl::contract::publish(r, &contracts).1,
-        None => Vec::new(),
-    };
-    for p in contract_problems.iter().chain(&publish_problems) {
-        sink.diag(Severity::Lint, p);
-        n_lint += 1;
-    }
-    // A contract the host never enforces is documentation, not a guarantee.
-    if let Some((_, cfg_path, _)) = &cfg {
-        let cargo_root = htl::dts::find_cargo_package_root(&paths[0]);
-        for l in htl::contract_enforcement_lints(cfg_path, &contracts, cargo_root.as_deref()) {
-            sink.diag(Severity::Lint, &l);
-            n_lint += 1;
-        }
-    }
-    // Nothing else removes an entry, and this is the only moment the whole set is in hand.
-    if let Some(c) = &store {
-        let keep = match c.mode() {
-            cache::Mode::PerModule => keys.clone(),
-            cache::Mode::WholeRun => vec![run_key.clone()],
-        };
-        c.sweep(&keep, files.len());
-    }
-    explain_cache(store.as_ref(), opts);
-
-    // Errors in dependencies, counted as the sink printed them: a module's own count says
-    // nothing about them, and one required from thirty files was printed once.
-    n_err += sink.dependency_error_count();
-    let replayed = files.len() - to_check;
-    let fail = report_check(
+    // The walk, the store and every decision about them are the library's: `include_tl!`
+    // asks the same questions of the same store, and the two answering them separately is
+    // what let them disagree. What is left here is the flags, the summary and the exit code.
+    let rep = project::check(
         &mut sink,
-        json,
-        files.len(),
-        (n_err, n_warn, n_lint),
-        strict,
-        replayed,
+        &files,
+        &project::Options {
+            paths: &paths,
+            config: &cfg,
+            lint,
+            cache: project::cache_options(use_cache, cache_mode, &cfg, explain),
+        },
     )?;
+    let fail = report_check(sink.out(), json, &rep, strict)?;
     Ok(if fail {
         ExitCode::FAILURE
     } else {
@@ -2072,56 +1960,6 @@ fn cmd_cache_clear(path: Option<&Path>) -> Result<ExitCode> {
         dir.display()
     );
     Ok(ExitCode::SUCCESS)
-}
-
-/// The store's settings for this run: the flag, then the config, then the environment.
-///
-/// **This is the only place any of them is read.** `cache.rs` takes what this decided, so a
-/// run's behaviour is settled in one function rather than wherever each value happens to be
-/// wanted — which is what makes it possible to see, from the code, what a given invocation
-/// will do.
-///
-/// `HTL_CACHE_DEBUG` is the same switch as `--explain-cache`, for turning it on without
-/// editing a command line. `HTL_CACHE_MAX_ENTRIES` has no flag: its only caller is the test
-/// suite, which cannot reach a few hundred entries by honest means.
-fn cache_options(
-    enabled: bool,
-    mode: Option<cache::Mode>,
-    cfg: &Option<(PathBuf, PathBuf, htl::config::HtlConfig)>,
-    explain: bool,
-) -> cache::Options {
-    let mode = mode
-        .or_else(|| {
-            cfg.as_ref()
-                .and_then(|(_, _, c)| c.cache.mode.as_deref())
-                .map(|m| {
-                    cache::Mode::parse(m).unwrap_or_else(|| {
-                        eprintln!("htl: unknown [cache] mode {m:?}, using per-module");
-                        cache::Mode::PerModule
-                    })
-                })
-        })
-        .unwrap_or_default();
-    // The environment's switches are the store's own (`cache::Options::from_env`, shared
-    // with the proc macros); the flag and the config decide over them.
-    let env = cache::Options::from_env();
-    cache::Options {
-        enabled: enabled && env.enabled,
-        mode,
-        explain: explain || env.explain,
-        max_entries: env.max_entries,
-    }
-}
-
-/// Say what the run did with the store, when asked. One line, at the end, from the store's
-/// own counters.
-fn explain_cache(store: Option<&cache::Cache>, opts: cache::Options) {
-    if let Some(c) = store
-        && opts.explain
-        && let Some(line) = c.stats().summary(opts.mode)
-    {
-        eprintln!("{line}");
-    }
 }
 
 /// The project root a cache command works on: beside `htl.toml`, or the working directory.
@@ -2212,339 +2050,22 @@ fn human_age(secs: u64) -> String {
     }
 }
 
-/// A checker set up the way a check of these paths needs it: the lint selection, the
-/// package project, the config's search paths, and the test library.
-///
-/// Only built when something actually has to be checked — a run that replays every module
-/// should not pay the ~13.5 ms this costs.
-fn build_checker(
-    cfg: &Option<(PathBuf, PathBuf, htl::config::HtlConfig)>,
-    paths: &[PathBuf],
-    spec: &str,
-) -> Result<Htl> {
-    let h = Htl::new()?;
-    if !spec.is_empty() {
-        h.configure_lints(spec)?;
-    }
-    if let Some(first) = paths.first() {
-        apply_project(&h, first)?;
-    }
-    if let Some((root, _, c)) = cfg {
-        h.apply_config(root, c)?;
-    }
-    // `*_test.tl` under the checked tree require("htl.test"): make its types visible.
-    h.install_test_lib()?;
-    Ok(h)
-}
-
-/// Where a file a check pulled in lives, for the `origin` a dependency diagnostic carries.
-///
-/// Decided by the directory and reported, never enforced: every file with errors is
-/// reported whatever this says. `dependency` is the installed-deps directory
-/// (`.htl/modules`) and the vendored copies the manifest declares; `external` is a
-/// `[check] paths` or contract directory, supplied from outside the project; anything else
-/// is the project's own and carries no origin. A consumer that counts a dependency's
-/// errors apart from the project's reads this field rather than parsing paths.
-struct Origins {
-    dependency: Vec<PathBuf>,
-    external: Vec<PathBuf>,
-}
-
-impl Origins {
-    fn new(
-        start: &Path,
-        root: &Path,
-        cfg: &Option<(PathBuf, PathBuf, htl::config::HtlConfig)>,
-        contracts: &[htl::contract::Resolved],
-    ) -> Self {
-        let canon = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
-        let mut dependency = Vec::new();
-        if let Some(p) = htl::pkg::Project::find(start) {
-            dependency.push(canon(p.pkgs_dir.clone()));
-            dependency.extend(p.target_dirs.iter().cloned().map(canon));
-        }
-        let mut external = Vec::new();
-        if let Some((r, _, c)) = cfg {
-            external.extend(
-                c.check
-                    .paths
-                    .iter()
-                    .map(|p| canon(htl::config::resolve_path(r, p))),
-            );
-            for c in contracts {
-                external.extend(c.dirs(root).into_iter().map(canon));
-            }
-        }
-        Self {
-            dependency,
-            external,
-        }
-    }
-
-    fn of(&self, file: &Path) -> Option<&'static str> {
-        let file = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
-        if self.dependency.iter().any(|d| file.starts_with(d)) {
-            Some("dependency")
-        } else if self.external.iter().any(|d| file.starts_with(d)) {
-            Some("external")
-        } else {
-            None
-        }
-    }
-}
-
-/// Check one file and collect everything it reported, its contract lints included, and
-/// the errors of what it required after them.
-fn check_one(
-    h: &Htl,
-    sink: &mut report::Sink,
-    f: &Path,
-    cfg: &Option<(PathBuf, PathBuf, htl::config::HtlConfig)>,
-    contracts: &[htl::contract::Resolved],
-    origins: &Origins,
-) -> Result<cache::Module> {
-    // Both `add_layout_paths` and the contract lints prepend to the search path, and
-    // without putting it back the Nth file would be checked against the directories of the
-    // first N-1 as well — so a `require` would resolve against whatever happened to be
-    // walked earlier, and a file's diagnostics would depend on its position in the walk
-    // (#21). `TestSession::run_file` does the same for `htl test`. An error below ends the
-    // process, so the restore is not on that path.
-    let saved = h.search_path()?;
-    h.add_layout_paths(f)?;
-    let c = h.check(f)?;
-    sink.checkinfo(&c);
-    let mut lints = c.lints.len();
-    // Two declarations of one module on the path: one was read, the other silently was
-    // not. Asked here, while the path this file was checked under is still in place.
-    for l in htl::declaration_conflict_lints(h, f, &c)? {
-        sink.diag(Severity::Lint, &l);
-        lints += 1;
-    }
-    // `---@contract`: the type and required fields for files under each contract dir.
-    if let Some((root, _, cfg)) = cfg
-        && c.ok()
-    {
-        for l in htl::contract_lints(h, root, cfg, contracts, f)? {
-            sink.diag(Severity::Lint, &l);
-            lints += 1;
-        }
-    }
-    // What this file required and found broken: `htl run` would refuse the module at its
-    // first `require`, so the check says so first. Recorded into this file's entry like
-    // its own diagnostics, so a replay carries them and an edit to the dependency — which
-    // is among `deps` — invalidates the entry.
-    sink.dependency_errors(&c, &|p| origins.of(p));
-    h.set_search_path(&saved)?;
-    Ok(cache::Module {
-        // Everything this file put into the sink, and nothing from the files before it:
-        // the previous iteration took its own.
-        diagnostics: sink.take_recorded(),
-        errors: c.errors.len(),
-        warnings: c.warnings.len(),
-        lints,
-        deps: c.deps.iter().map(|p| cache::normal(p)).collect(),
-        requires: requires_json(&c),
-        // `htl check` has no use for generated Lua, nor for reading a `CheckInfo` back —
-        // it replays the diagnostics above straight into the sink. `htl test` fills both in.
-        code: None,
-        check: None,
-    })
-}
-
-/// The `(name, file)` pairs an entry's requires resolved to.
-fn resolved_requires(requires: &[cache::RequireJson]) -> Vec<(String, PathBuf)> {
-    requires
-        .iter()
-        .filter_map(|r| {
-            r.path
-                .as_ref()
-                .map(|p| (r.module.clone(), PathBuf::from(p)))
-        })
-        .collect()
-}
-
-/// What a harvest works with, gathered so the call site reads as one thing.
-struct Harvest<'a> {
-    store: &'a cache::Cache,
-    session: &'a htl::testing::TestSession,
-    cfg_inputs: &'a [PathBuf],
-    root: &'a Path,
-    cfg: &'a Option<(PathBuf, PathBuf, htl::config::HtlConfig)>,
-    lint: Option<&'a str>,
-    opts: cache::Options,
-    /// Modules already harvested by an earlier file in this run. Test files overlap heavily,
-    /// and generating one twice writes the same entry twice.
-    done: RefCell<std::collections::HashSet<PathBuf>>,
-}
-
-/// Generate and store every module a checked test file reached, transitively.
-///
-/// Called after a miss, when the checker's store holds everything the check just walked, so
-/// each `gen_lua` here generates rather than re-checks. The point is the next run: with these
-/// stored, a replayed test file can preload what it requires instead of the searcher checking
-/// and generating each module mid-execution.
-///
-/// Best-effort throughout. A module that fails to generate is one the next run will generate
-/// itself, which is what happens today.
-fn harvest_modules(h: &Harvest<'_>, check: &CheckInfo, test_file: &Path) {
-    let Harvest {
-        store,
-        session,
-        cfg_inputs,
-        root,
-        cfg,
-        lint,
-        opts,
-        done,
-    } = h;
-    let (lint, opts) = (*lint, *opts);
-    let done = &mut *done.borrow_mut();
-    // The run put the search path back before returning, so `src/` is no longer on it and
-    // every `require` would resolve to nothing — which is silent: the names come back with
-    // no path, `resolved_requires` drops them, and the closure stops one level in. Put the
-    // file's own layout back for the duration.
-    let saved = session.checker().search_path().ok();
-    let _ = session.checker().add_layout_paths(test_file);
-
-    let mut queue = resolved_requires(&requires_json(check));
-    let (mut stored, mut skipped) = (0usize, 0usize);
-    while let Some((_, path)) = queue.pop() {
-        // `done` spans the whole run, not this file. Test files share their modules — on a
-        // 27-file suite the closures overlapped enough to generate and store 171 times for
-        // 55 distinct modules — and generating one twice writes the same entry twice.
-        if !done.insert(path.clone()) {
-            continue;
-        }
-        // Nor is there anything to do for one another run already stored and that still
-        // holds. Checking that costs a few hashes against a generate.
-        if let Some(m) = store.lookup(&cache::module_gen_key(&path, lint))
-            && m.code.is_some()
-        {
-            queue.extend(resolved_requires(&m.requires));
-            continue;
-        }
-        let Ok((Some(code), c)) = session.checker().gen_lua(&path) else {
-            skipped += 1;
-            continue;
-        };
-        // `gen_lua` comes back without requires for a module the checker already has in its
-        // store — it serves the generated code and does not walk the AST again. The requires
-        // are what the next run's closure is built from, so ask for them separately; the
-        // check is served from the same store and costs almost nothing.
-        // Only when the file could have any (`htl::link::mentions_require`): a check
-        // per leaf module is the wrong price for an empty list that is right already.
-        let c = if c.requires.is_empty() && htl::link::mentions_require(&path) {
-            session.checker().check(&path).unwrap_or(c)
-        } else {
-            c
-        };
-        stored += 1;
-        let m = cache::Module::generated(&c, code);
-        queue.extend(resolved_requires(&m.requires));
-        store.store_module(
-            &cache::module_gen_key(&path, lint),
-            &path,
-            cfg_inputs,
-            &search_dirs(&path, root, cfg),
-            &m,
-        );
-    }
-    if let Some(s) = saved {
-        let _ = session.checker().set_search_path(&s);
-    }
-    if opts.explain {
-        eprintln!("htl cache: harvested {stored} modules, {skipped} could not be generated");
-    }
-}
-
-/// What a replayed test file should have in front of the searcher: every module it requires,
-/// transitively, that the store still holds a valid entry for.
-///
-/// A module the store does not have is simply absent from the list and loads the usual way.
-/// Falling back is always correct — it is what happens without any of this — so a partial
-/// answer here costs time and never correctness.
-fn preloads_for(
-    store: &cache::Cache,
-    entry: &cache::Module,
-    lint: Option<&str>,
-    opts: cache::Options,
-) -> Vec<(String, String, PathBuf)> {
-    let mut out = Vec::new();
-    let mut queue = resolved_requires(&entry.requires);
-    let mut seen: std::collections::HashSet<PathBuf> = Default::default();
-    let mut absent = 0usize;
-    while let Some((name, path)) = queue.pop() {
-        if !seen.insert(path.clone()) {
-            continue;
-        }
-        let Some(m) = store.lookup(&cache::module_gen_key(&path, lint)) else {
-            absent += 1;
-            continue;
-        };
-        let Some(code) = m.code.clone() else { continue };
-        queue.extend(resolved_requires(&m.requires));
-        out.push((name, code, path));
-    }
-    if opts.explain {
-        let names: Vec<&str> = out.iter().map(|(n, _, _)| n.as_str()).collect();
-        eprintln!(
-            "htl cache: preloading {} [{}], {absent} not in the store",
-            out.len(),
-            names.join(" ")
-        );
-    }
-    out
-}
-
-/// What a test file's check reported, in the form an entry stores it.
-/// A `CheckInfo` back from the form an entry stores, for a replayed test file.
-fn check_from_json(j: &cache::CheckInfoJson) -> CheckInfo {
-    j.to_check()
-}
-
-/// `CheckInfo`'s requires in the form an entry stores them.
-fn requires_json(c: &CheckInfo) -> Vec<cache::RequireJson> {
-    cache::requires_json(c)
-}
-
-/// A `CheckInfo` carrying only what the project-level lints read (see
-/// `cache::Module::requires_only`).
-fn requires_only(m: &cache::Module) -> CheckInfo {
-    m.requires_only()
-}
-
-/// Directories a `require` could resolve in, listed whether or not they exist yet.
-///
-/// The ones that do not exist matter most: a `types/` created after an entry was written
-/// changes what a module name resolves to while every file the entry recorded still hashes
-/// the same. Recording only the directories that happened to exist is the hole ccache
-/// documents in its direct mode, and an empty directory hashes differently from one holding
-/// a module, so listing it now is what closes it.
-fn search_dirs(
-    file: &Path,
-    root: &Path,
-    cfg: &Option<(PathBuf, PathBuf, htl::config::HtlConfig)>,
-) -> Vec<PathBuf> {
-    cache::search_dirs(file, root, cfg.as_ref().map(|(r, _, c)| (r.as_path(), c)))
-}
-
 /// The one place a check reports its totals, so a replayed module and a checked one cannot
 /// drift apart in how they are summarized. Returns whether the run counts as a failure.
 fn report_check(
-    sink: &mut report::Sink,
+    out: &mut report::Out,
     json: bool,
-    files: usize,
-    counts: (usize, usize, usize),
+    rep: &project::Report,
     strict: bool,
-    replayed: usize,
 ) -> Result<bool> {
-    let (errors, warnings, lints) = counts;
-    let fail = errors > 0 || (strict && (warnings > 0 || lints > 0));
-    let all_cached = replayed == files && files > 0;
+    let (files, replayed) = (rep.files.len(), rep.replayed);
+    let (errors, warnings, lints) = (rep.errors, rep.warnings, rep.lints);
+    let fail = rep.failed(strict);
+    let all_cached = rep.all_cached();
     if json {
         report::emit(&report::CheckReport {
             files,
-            diagnostics: sink.take(),
+            diagnostics: out.take(),
             summary: report::CheckSummary {
                 errors,
                 warnings,
@@ -2671,13 +2192,13 @@ fn cmd_build(
         .map(|(_, _, c)| c.lint_spec())
         .unwrap_or_default();
     let lint = (!spec.is_empty()).then_some(spec.as_str());
-    let cache_opts = cache_options(
+    let cache_opts = project::cache_options(
         cache_flags.use_cache,
         Some(cache::Mode::PerModule),
         &cfg,
         cache_flags.explain,
     );
-    let store = cache::Cache::open(&root, cache_opts);
+    let store = project::store(&root, cache_opts, None, "htl build");
     let link_store = store.as_ref().map(|c| htl::link::LinkStore {
         cache: c,
         lint,
@@ -2685,7 +2206,7 @@ fn cmd_build(
         config: cfg.as_ref().map(|(_, p, c)| (p.as_path(), c)),
     });
     let linked = htl::link::link_with(&h, entry, &opts, link_store)?;
-    explain_cache(store.as_ref(), cache_opts);
+    project::explain_cache(store.as_ref(), cache_opts);
     for (_, c) in &linked.checks {
         print_checkinfo(c);
     }

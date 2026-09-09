@@ -276,32 +276,26 @@ impl Checker {
     /// The run cache, when there is a project to keep one in: an `htl.toml` was found
     /// (that is the opt-in; `htl init` / `htl new` write it and gitignore `.htl/`), and
     /// its directory is not build scratch — the copy `cargo publish` verifies under
-    /// `target/package/`, where a new file aborts the publish, or a registry checkout
-    /// (`htl_core::cache::scratch_root`). Otherwise `None`, silently: everything is
-    /// generated, which is what happened before there was a store. `HTL_CACHE_DEBUG`
-    /// says which of the two it was.
+    /// `target/package/`, where a new file aborts the publish, or a registry checkout.
+    /// Otherwise `None`, silently: everything is generated, which is what happened before
+    /// there was a store. `HTL_CACHE_DEBUG` says which of the two it was.
+    ///
+    /// Both rules and the opening itself are `htl_core::project`'s, which is where
+    /// `htl check` opens the same store. An expansion and a check reading one store used
+    /// to answer this question with two pieces of code, and a fix to one was not a fix to
+    /// the other (#107).
     ///
     /// Per-module always, like `htl test`: an expansion is one closure, and an edit
     /// anywhere in it should cost that module and its dependents rather than the closure.
     /// Nothing is swept from here — an expansion sees one closure, and only `htl check`,
     /// which sees the project, bounds the store.
     fn store(&self) -> Option<htl_core::cache::Cache> {
-        let opts = htl_core::cache::Options::from_env();
-        let refused = if self.cfg_path.is_none() {
-            Some("no htl.toml".to_string())
-        } else {
-            htl_core::cache::scratch_root(&self.root).map(str::to_string)
-        };
-        if let Some(why) = refused {
-            if opts.explain {
-                eprintln!(
-                    "htl cache: not used by the macro expansion ({why}: {})",
-                    self.root.display()
-                );
-            }
-            return None;
-        }
-        htl_core::cache::Cache::open(&self.root, opts)
+        htl_core::project::store(
+            &self.root,
+            htl_core::cache::Options::from_env(),
+            htl_core::project::store_refusal(&self.root, self.cfg_path.is_some()).as_deref(),
+            "the macro expansion",
+        )
     }
 
     fn link_store<'a>(
