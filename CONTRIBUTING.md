@@ -1,6 +1,9 @@
 # Contributing
 
 Conventions for changes to this repository, for people and coding agents alike.
+The disclosure and public-artifact policy in
+[PUBLIC_DEVELOPMENT.md](PUBLIC_DEVELOPMENT.md) outranks this file.
+
 htl is small (four published crates and two examples in one workspace, one
 `cargo test --workspace` that runs in seconds), so the rules are few; the ones
 here exist because skipping them has cost something at least once.
@@ -28,14 +31,17 @@ Assign at least one when you open an issue. The branch prefix follows the label.
 - **Problem**: what happens, on what input. For dogfood reports: the project
   size, the command, the output, verbatim.
 - **Evidence**: measured, not assumed. A timing says which build (debug or
-  release) and which project. A "type error" quotes the line.
+  release) and what it was measured on. A "type error" quotes the line.
 - **Proposal**: optional. The 4-axis habit from the design discussions applies —
   a patch, an architecture change, a narrower requirement, or "not now" are all
   legitimate answers, and the issue should say which one it is asking for.
 - **Acceptance**: what `htl check` / `htl test` / the CLI prints when it is done.
 
-Keep internal paths and identifiers out of public issues: name the project and
-the file, not the machine it lives on.
+What may appear in a public artifact, and what a public artifact owes its
+reader, are [PUBLIC_DEVELOPMENT.md](PUBLIC_DEVELOPMENT.md)'s subject rather than
+this file's. The short version: describe a project the evidence came from by its
+shape and never by its name, keep machine paths out of everything, and write so
+that somebody who has never seen this machine can act on what you wrote.
 
 ## Branches
 
