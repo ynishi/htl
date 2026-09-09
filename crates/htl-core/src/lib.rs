@@ -378,17 +378,52 @@ pub fn contract_lints(
 /// (`prelude.lua` searches sources across the whole path first), so a require that
 /// landed on a source is not reported, and neither is a module declared once.
 ///
+/// A require that landed on a source is where the other lint here lives.
+/// `host-module-shadowed`: `host_modules` are the names the surrounding crate registers
+/// in `package.preload` (from `#[host_module]`, scanned without a build), and Lua
+/// consults preload before any path searcher. So when a require of one of those names
+/// resolved to a file, the check read the file and the run will load the host: what was
+/// checked is not what runs, and the program fails at the first call of anything the two
+/// do not share. Both halves of that are already in hand at this point — the name the
+/// host registers, and the path the checker read — which is why it is asked here.
+///
+/// A require of a host module name that landed on a `.d.tl` is not reported: a
+/// declaration is how a host module is given types at all, and `htl dts` writes exactly
+/// that file, so the two agree by construction.
+///
 /// Call it with the search path the file was checked under: the answer depends on it.
-pub fn declaration_conflict_lints(h: &Htl, file: &Path, info: &CheckInfo) -> Result<Vec<String>> {
+pub fn declaration_conflict_lints(
+    h: &Htl,
+    file: &Path,
+    info: &CheckInfo,
+    host_modules: &[String],
+) -> Result<Vec<String>> {
     let f: Function = h.h.get("declaration_sites")?;
     let mut out = Vec::new();
     let mut seen: Vec<&str> = Vec::new();
     for site in &info.requires {
-        let Some(read) = site.path.as_ref().filter(|p| is_declaration(p)) else {
+        let Some(read) = site.path.as_ref() else {
             continue;
         };
         // One report per module, not one per `require` of it.
         if seen.contains(&site.module.as_str()) {
+            continue;
+        }
+        if !is_declaration(read) {
+            if host_modules.contains(&site.module) {
+                seen.push(&site.module);
+                out.push(format!(
+                    "{}:{}:{}: {} is a host module of this crate and also {}: the check \
+                     reads the file, the run loads the host — package.preload is consulted \
+                     before any path searcher, so what is checked here is not what runs \
+                     [htl host-module-shadowed]",
+                    file.display(),
+                    site.line,
+                    site.col,
+                    site.module,
+                    read.display(),
+                ));
+            }
             continue;
         }
         let sites: Vec<String> = f
