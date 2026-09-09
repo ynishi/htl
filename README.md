@@ -477,6 +477,11 @@ unloads a library compares before calling anything else).
 
 `htl dts` writes the header too, so it can be regenerated and diffed without a build.
 
+**A project of this shape is `htl new --lib --host ffi <name>`** (see [The C ABI host](#the-c-abi-host---host-ffi)):
+the crate types, the feature, the `#[c_export]` block and — the part a reader of an ABI
+actually needs — a caller in C and a caller in Python that do the round trip and free
+what they are handed.
+
 ## Lints (`htl check`, `include_tl!`)
 
 | rule | default | catches |
@@ -1136,10 +1141,38 @@ no entry script, so there is nothing for the binary to run and it is not written
 what is left is the library, which is the part someone else embeds.
 
 `--host` names an entry in a registry of host kinds rather than adding a flag per kind:
-`rust` is the one today, and the flag reports the rest as they arrive. A name that is not
-registered is refused with the ones that are, before the directory is created, so a typo
-leaves nothing behind. `htl init --host rust` adds the Rust side to a project that
-predates it and lists the files it kept rather than skipping them in silence.
+`rust` and `ffi` are the two today, and the flag reports the rest as they arrive. A name
+that is not registered is refused with the ones that are, before the directory is
+created, so a typo leaves nothing behind. `htl init --host rust` adds the Rust side to a
+project that predates it and lists the files it kept rather than skipping them in
+silence.
+
+### The C ABI host (`--host ffi`)
+
+`htl new --lib --host ffi <name>` is the same library with the C ABI on top, for a caller
+that is not written in Rust:
+
+```text
+├── Cargo.toml             crate-type = ["rlib", "cdylib", "staticlib"], htl with
+│                          features = ["ffi"], serde
+├── src/lib.rs             the #[host_module] the scripts call, and a #[c_export] Game
+│                          the caller holds: open / a text call / JSON / a status / close
+├── include/<mod>.h        written by #[c_export] at cargo build (and by htl dts), committed
+├── examples/c/            main.c + a Makefile: every returned char * goes back to _free
+└── examples/python/       run.py: restype = c_void_p and ctypes.cast, never c_char_p
+```
+
+The two callers are the point. Each language has one way of reading a `char *` that looks
+natural and is wrong — C never makes you think about the pointer at all, and Python's
+`restype = c_char_p` copies the string and drops the pointer, leaking it every call — so
+the scaffold ships a caller in each that does it correctly, and the CI job runs both
+against the library it just built.
+
+`--host ffi` requires `--lib` and is refused without it: a `cdylib` has no entry point of
+its own, so there is no `src/main.tl` for a binary to run. What the callers do have is a
+Lua `error()` and a Rust `Err` to handle — the generated `greet` refuses an empty name in
+Teal and `reset` refuses a no-op in Rust — so both error paths are in front of the reader
+rather than described.
 
 ## Unions of records (`where`)
 

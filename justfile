@@ -36,9 +36,10 @@ e2e:
     cargo run -q -p embed
     cargo run -q -p embed -- --bundle
 
-# The Rust host `htl new --host rust` writes, end to end: scaffolded into a temporary
-# directory outside this repository, pointed back at this checkout so it is *this* htl
-# that is embedded, then built, tested and run. The snapshot tests pin what the scaffold
+# Every host `--host` offers, end to end: scaffolded into a temporary directory outside
+# this repository, pointed back at this checkout so it is *this* htl that is embedded,
+# then built, tested and run — including, for the C ABI host, the reference callers in C
+# and Python that load the library it builds. The snapshot tests pin what the scaffold
 # writes byte for byte; only this says the bytes compile and work.
 e2e-scaffold:
     #!/usr/bin/env bash
@@ -76,6 +77,41 @@ e2e-scaffold:
       test ! -e src/main.rs
       test ! -e src/main.tl
       cargo test "${sample[@]}"
+    )
+    # The C ABI host, whose callers are the part nothing else here compiles: the library
+    # is built, the header the macro writes is checked, and the two reference hosts under
+    # examples/ are run against the artefact — the Python one wherever python3 is, the C
+    # one only where there is a compiler and a make.
+    cargo run -q -p htl-cli --bin htl -- new "$dir/ffisample" --host ffi --lib
+    target="${CARGO_TARGET_DIR:-$root/target}/e2e-scaffold"
+    (
+      cd "$dir/ffisample"
+      test ! -e src/main.rs
+      test ! -e src/main.tl
+      cargo test "${sample[@]}"
+      cargo build "${sample[@]}"
+      # Written by #[c_export] at build time, not by the scaffold: it is not there until
+      # the library is built, and then it declares what the callers below call.
+      grep -q 'ffisample_handle \*ffisample_open(const char \*options_json);' include/ffisample.h
+      test -f "$target/debug/libffisample.a"
+      if command -v python3 >/dev/null; then
+        out="$(CARGO_TARGET_DIR="$target" python3 examples/python/run.py)"
+        printf '%s\n' "$out"
+        printf '%s\n' "$out" | grep -q 'greet          -> the Python host: hello, Ada'
+        printf '%s\n' "$out" | grep -q 'schema v1'
+        # The Lua error the Teal module raises, as a status rather than as a crash.
+        printf '%s\n' "$out" | grep -q 'greet("")      -> NULL, status 4'
+      else
+        echo 'no python3: skipping examples/python'
+      fi
+      if command -v cc >/dev/null && command -v make >/dev/null; then
+        out="$(make -s -C examples/c run LIBDIR="$target/debug")"
+        printf '%s\n' "$out"
+        printf '%s\n' "$out" | grep -q '{"greeted":1,"greeter":"the C host","v":1}'
+        printf '%s\n' "$out" | grep -q 'reset again    -> status 1'
+      else
+        echo 'no C compiler: skipping examples/c'
+      fi
     )
 
 # Every benchmark: the figures in the README come from these. Ten samples each; a few minutes.

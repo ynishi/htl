@@ -132,6 +132,80 @@ fn embed_and_host_rust_write_the_same_thing() {
     }
 }
 
+/// The C ABI host is a library and only a library: a `cdylib` has no entry point, so
+/// `--host ffi` without `--lib` is refused with the flag that fixes it, before the
+/// directory exists.
+#[test]
+fn the_ffi_host_needs_lib_and_says_so_before_writing_anything() {
+    let root = scratch("ffi-needs-lib");
+    let (ok, _, stderr) = htl(&["new", "sample", "--host", "ffi"], &root);
+    assert!(!ok, "{stderr}");
+    assert!(
+        stderr.contains("the `ffi` host writes no entry script, so it needs --lib"),
+        "{stderr}"
+    );
+    assert!(!root.join("sample").exists(), "{stderr}");
+}
+
+/// What `--host ffi` writes that `--host rust` does not: the two extra crate types the
+/// C caller links against, the feature the generated wrappers need, and the attribute
+/// that writes the header. The snapshot pins every byte; this says what the bytes are
+/// *for*, so a reader of the test knows what would break.
+#[test]
+fn the_ffi_scaffold_is_a_c_library_with_the_export_attribute() {
+    let root = scratch("ffi");
+    let (ok, _, stderr) = htl(&["new", "sample", "--lib", "--host", "ffi"], &root);
+    assert!(ok, "{stderr}");
+    let dir = root.join("sample");
+
+    let cargo = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap();
+    assert!(
+        cargo.contains("crate-type = [\"rlib\", \"cdylib\", \"staticlib\"]"),
+        "{cargo}"
+    );
+    assert!(cargo.contains("features = [\"ffi\"]"), "{cargo}");
+
+    let lib_rs = std::fs::read_to_string(dir.join("src/lib.rs")).unwrap();
+    assert!(
+        lib_rs.contains("#[c_export(prefix = \"sample\", header = \"include/sample.h\")]"),
+        "{lib_rs}"
+    );
+    // The other boundary is still here: the scripts get a host module of their own.
+    assert!(lib_rs.contains("#[host_module"), "{lib_rs}");
+
+    // A library, so no binary and no entry script — and the callers that load it.
+    assert!(!dir.join("src/main.rs").exists());
+    assert!(!dir.join("src/main.tl").exists());
+    assert!(dir.join("examples/c/main.c").exists());
+    assert!(dir.join("examples/c/Makefile").exists());
+    assert!(dir.join("examples/python/run.py").exists());
+
+    // The Python caller's one fatal mistake, asserted rather than described: a
+    // `c_char_p` return copies the string and loses the pointer, so every call leaks.
+    let py = std::fs::read_to_string(dir.join("examples/python/run.py")).unwrap();
+    assert!(py.contains("p = ctypes.c_void_p"), "{py}");
+    assert!(
+        py.contains("lib.sample_greet.argtypes, lib.sample_greet.restype = [p, cs], p"),
+        "a `char *` return is declared c_void_p, not c_char_p:\n{py}"
+    );
+    assert!(py.contains("ctypes.cast(p, ctypes.c_char_p)"), "{py}");
+}
+
+/// `--host` is one line of `--help` and the registry fills it, so a host that exists is
+/// a host the flag offers.
+#[test]
+fn host_help_lists_every_registered_host() {
+    let root = scratch("host-help");
+    for cmd in [&["new", "--help"][..], &["init", "--help"][..]] {
+        let (ok, stdout, _) = htl(cmd, &root);
+        assert!(ok);
+        assert!(
+            stdout.contains("[possible values: rust, ffi]"),
+            "{cmd:?}:\n{stdout}"
+        );
+    }
+}
+
 /// A typo in `--host` is answered with the names that would have worked. On the command
 /// line clap answers it, from the same registry that fills `--help`; `scaffold.rs` keeps
 /// its own refusal for callers that do not come through clap. Either way the host is

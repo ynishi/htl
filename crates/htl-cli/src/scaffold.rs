@@ -17,6 +17,10 @@
 //!                                 binary on top when there is an entry script
 //! ```
 //!
+//! A host may add to that: the `ffi` one writes `examples/c/` and `examples/python/`
+//! beside the library, because a C ABI whose reference caller nobody wrote is a C ABI
+//! every caller gets wrong in the same three ways.
+//!
 //! # The Rust host is a profile, not a flag
 //!
 //! Everything above the `Cargo.toml` line is the same for every project. What varies is
@@ -34,6 +38,8 @@
 //! the project has an entry script the host also writes `src/main.rs`, a few lines that
 //! call `preload` and `exec` the script. So what a project grows — a second host module,
 //! a C ABI layer, a window loop — grows in the library, and the binary never holds logic.
+//! The `ffi` host is that taken to its end: a `#[c_export]` block in the same library and
+//! no binary at all, which is why it is the profile that answers [`Script::Forbids`].
 //!
 //! [`scaffold`] therefore does the same three things whatever it is asked for: pick the
 //! host, turn the profile into a list of paths and bodies, write the ones that do not
@@ -41,10 +47,11 @@
 //! separate templates, chosen by the profile.
 //!
 //! Bodies where doubling every brace for `format!` cost more than it was worth — the Rust
-//! host, the Teal sample — live under `crates/htl-cli/templates/` and are read with
-//! `include_str!`, filled by replacing `{{name}}` / `{{mod}}` / `{{htl}}`. They stay in
-//! this crate rather than being fetched, so `htl_dep_version()` keeps pinning a scaffold
-//! to the htl release that wrote it. Short TOML and Markdown stay inline.
+//! host, the Teal sample, a C caller — live under `crates/htl-cli/templates/` and are
+//! read with `include_str!`, filled by replacing `{{name}}` / `{{mod}}` / `{{MOD}}` /
+//! `{{htl}}`. They stay in this crate rather than being fetched, so `htl_dep_version()`
+//! keeps pinning a scaffold to the htl release that wrote it. Short TOML and Markdown
+//! stay inline.
 
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
@@ -57,15 +64,40 @@ pub struct Options {
     pub host: Option<&'static HostProfile>,
 }
 
-/// What a template is filled with: the package name and its Teal identifier. Nothing a
-/// body needs branches on the flags any more — the profile decides which body is written
-/// in the first place — so this is the whole of it.
+/// What a template is filled with: the package name and its Teal identifier. The
+/// templates themselves branch on nothing — the profile decides which body is written in
+/// the first place — but the README is one body for every project, and what it tells the
+/// reader to run does depend on whether there is an entry script, so that answer travels
+/// with the names.
 pub struct Ctx<'a> {
     pub name: &'a str,
     pub module: &'a str,
+    /// Is there a `src/main.tl` to run? The inverse of `--lib`, already reconciled with
+    /// the host by [`resolve_host`].
+    pub script: bool,
 }
 
-/// A dependency line in the host's `Cargo.toml`.
+/// A dependency line in the host's `Cargo.toml`: what to require, and the features the
+/// host turns on.
+pub struct DepLine {
+    pub name: &'static str,
+    pub req: Dep,
+    /// Empty writes the short `name = "req"` form; anything else writes the table.
+    pub features: &'static [&'static str],
+}
+
+impl DepLine {
+    /// The common case: a dependency with no features of its own.
+    const fn plain(name: &'static str, req: Dep) -> Self {
+        DepLine {
+            name,
+            req,
+            features: &[],
+        }
+    }
+}
+
+/// What a dependency line requires.
 pub enum Dep {
     /// This CLI's own release, derived at run time (see [`htl_dep_version`]) so a scaffold
     /// follows the htl that produced it.
@@ -77,9 +109,8 @@ pub enum Dep {
 /// What a host has to say about `src/main.tl`. `--lib` is the user's side of the same
 /// question, and the two are reconciled once, in [`resolve_host`], before anything is
 /// written.
-// `Requires` and `Forbids` are the two halves of the matrix hole; the registry holds only
-// `Either` until #103 and #104 land their profiles, and until then the code that reads them
-// is exercised by this module's tests.
+// `Requires` is the half no registered host has yet — #104's window loop is the one that
+// will — so until then the code that reads it is exercised by this module's tests.
 #[allow(dead_code)]
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub enum Script {
@@ -101,8 +132,10 @@ impl Script {
     }
 }
 
-/// One Rust file a host writes, relative to the project root.
-pub struct RustFile {
+/// One file a host writes, relative to the project root. Mostly Rust — `src/lib.rs`,
+/// `src/main.rs` — but a host that ships reference callers writes their C, Python and
+/// build glue the same way, as a path and a body.
+pub struct HostFile {
     pub path: &'static str,
     pub body: fn(&Ctx<'_>) -> String,
 }
@@ -124,16 +157,26 @@ pub struct HostProfile {
     /// `[lib] crate-type = [...]` beyond the default `rlib`, which needs no section at
     /// all: `["cdylib", "staticlib"]` for a C ABI host.
     pub lib_crate_types: &'static [&'static str],
-    pub deps: &'static [(&'static str, Dep)],
+    pub deps: &'static [DepLine],
     /// Does this host run an entry script, refuse one, or leave it to `--lib`?
     pub script: Script,
     /// `src/lib.rs`: the host module, the embedded Teal, `preload`. Always written.
-    pub lib: RustFile,
+    pub lib: HostFile,
     /// `src/main.rs`: the thin entry, written only when there is an entry script.
-    pub main: Option<RustFile>,
+    pub main: Option<HostFile>,
     /// Anything else the host ships: `examples/`, `include/`, a header.
-    pub extra: &'static [RustFile],
+    pub extra: &'static [HostFile],
+    /// What this host builds that is not worth committing, as `.gitignore` lines
+    /// (filled like a template, so a path may name the module). What it *generates* and
+    /// commits — `src/host.d.tl`, the C header — is deliberately not here.
+    pub ignore: &'static [&'static str],
     pub teal: TealSample,
+    /// The lines this host adds to the README's command block, and the paragraphs that
+    /// follow it. The README is the one body every project has and every host has
+    /// something different to say in, so it is written here rather than branched on the
+    /// host's name where the file is assembled.
+    pub readme_commands: fn(&Ctx<'_>) -> String,
+    pub readme_prose: fn(&Ctx<'_>) -> String,
 }
 
 /// The default host: a library crate holding the host module and the embedded scripts,
@@ -141,28 +184,95 @@ pub struct HostProfile {
 const RUST: HostProfile = HostProfile {
     name: "rust",
     lib_crate_types: &[],
-    deps: &[("htl", Dep::Htl), ("anyhow", Dep::Version("1"))],
+    deps: &[
+        DepLine::plain("htl", Dep::Htl),
+        DepLine::plain("anyhow", Dep::Version("1")),
+    ],
     script: Script::Either,
-    lib: RustFile {
+    lib: HostFile {
         path: "src/lib.rs",
         body: rust_lib_rs,
     },
-    main: Some(RustFile {
+    main: Some(HostFile {
         path: "src/main.rs",
         body: rust_main_rs,
     }),
     extra: &[],
+    ignore: &["/target"],
     teal: TealSample {
         module: teal_module,
         test: teal_test,
         // The entry script talks to the Rust side, so it is the host's, not the default.
         main: rust_main_tl,
     },
+    readme_commands: rust_readme_commands,
+    readme_prose: rust_readme_prose,
 };
 
-/// Every host kind there is. #103 (a C ABI library) and #104 (a macroquad window) are one
-/// entry each.
-pub static PROFILES: &[HostProfile] = &[RUST];
+/// The C ABI host: the same library, plus `#[c_export]` and the two reference callers.
+///
+/// It is a library and nothing else — a `cdylib` has no entry point of its own, and the
+/// caller that loads it brings its own `main` — so [`Script::Forbids`] refuses `--host
+/// ffi` without `--lib` rather than writing a `src/main.rs` nothing would run. The
+/// `staticlib` alongside is what Unity on iOS links; it costs a second artefact and
+/// nothing else.
+const FFI: HostProfile = HostProfile {
+    name: "ffi",
+    lib_crate_types: &["rlib", "cdylib", "staticlib"],
+    deps: &[
+        DepLine {
+            name: "htl",
+            req: Dep::Htl,
+            // The C ABI runtime the generated wrappers call, and `#[c_export]` itself.
+            features: &["ffi"],
+        },
+        DepLine::plain("anyhow", Dep::Version("1")),
+        DepLine {
+            name: "serde",
+            req: Dep::Version("1"),
+            // The options come in as JSON and the records go out as JSON.
+            features: &["derive"],
+        },
+    ],
+    script: Script::Forbids,
+    lib: HostFile {
+        path: "src/lib.rs",
+        body: ffi_lib_rs,
+    },
+    main: None,
+    extra: &[
+        HostFile {
+            path: "examples/c/main.c",
+            body: ffi_example_c,
+        },
+        HostFile {
+            path: "examples/c/Makefile",
+            body: ffi_example_makefile,
+        },
+        HostFile {
+            path: "examples/python/run.py",
+            body: ffi_example_py,
+        },
+    ],
+    // The C caller's binary. The header the macro writes is *not* ignored: it is
+    // generated and committed, like `src/host.d.tl`, so that reading the ABI does not
+    // mean building the crate.
+    ignore: &["/target", "examples/c/{{mod}}_c"],
+    teal: TealSample {
+        module: ffi_teal_module,
+        test: ffi_teal_test,
+        // Unreachable: `Script::Forbids` means there is never a `src/main.tl` to write.
+        // The field is not an `Option` because every other host has one, so this is the
+        // default sample, which is what `htl init --host ffi` on a project that already
+        // has a script would keep anyway.
+        main: teal_main,
+    },
+    readme_commands: ffi_readme_commands,
+    readme_prose: ffi_readme_prose,
+};
+
+/// Every host kind there is. #104 (a macroquad window) is one more entry.
+pub static PROFILES: &[HostProfile] = &[RUST, FFI];
 
 /// The host `--embed` is shorthand for.
 pub const DEFAULT_HOST: &str = "rust";
@@ -181,6 +291,12 @@ const T_TEAL_MAIN: &str = include_str!("../templates/teal/main.tl");
 const T_RUST_MAIN_TL: &str = include_str!("../templates/rust/main.tl");
 const T_RUST_LIB_RS: &str = include_str!("../templates/rust/lib.rs");
 const T_RUST_MAIN_RS: &str = include_str!("../templates/rust/main.rs");
+const T_FFI_LIB_RS: &str = include_str!("../templates/ffi/lib.rs");
+const T_FFI_TEAL_MODULE: &str = include_str!("../templates/ffi/init.tl");
+const T_FFI_TEAL_TEST: &str = include_str!("../templates/ffi/test.tl");
+const T_FFI_MAIN_C: &str = include_str!("../templates/ffi/main.c");
+const T_FFI_MAKEFILE: &str = include_str!("../templates/ffi/Makefile");
+const T_FFI_RUN_PY: &str = include_str!("../templates/ffi/run.py");
 
 /// Teal identifier for a package name (`my-pkg` -> `my_pkg`).
 pub fn module_ident(name: &str) -> String {
@@ -266,7 +382,11 @@ fn script_mismatch(p: &HostProfile, lib: bool) -> String {
 /// Everything the scaffold would write, in the order it is reported, before anything
 /// touches the disk.
 fn plan(dir: &Path, name: &str, module: &str, opts: &Options) -> Vec<(PathBuf, String)> {
-    let ctx = Ctx { name, module };
+    let ctx = Ctx {
+        name,
+        module,
+        script: !opts.lib,
+    };
     let host = opts.host;
     let teal = host.map_or(&DEFAULT_TEAL, |h| &h.teal);
 
@@ -282,8 +402,8 @@ fn plan(dir: &Path, name: &str, module: &str, opts: &Options) -> Vec<(PathBuf, S
             dir.join("tests").join(format!("{module}_test.tl")),
             (teal.test)(&ctx),
         ),
-        (dir.join(".gitignore"), t_gitignore(host.is_some())),
-        (dir.join("README.md"), t_readme(name, module, opts)),
+        (dir.join(".gitignore"), t_gitignore(host, &ctx)),
+        (dir.join("README.md"), t_readme(&ctx, host)),
     ];
     // `--lib` is what "no entry script" means, and a host that disagrees with it was
     // already refused, so the question is answered here for hosted and plain alike.
@@ -344,12 +464,15 @@ pub fn scaffold(dir: &Path, name: &str, opts: &Options, must_be_new: bool) -> Re
     Ok(out)
 }
 
-/// The three placeholders a template file may use. Plain `str::replace`: the bodies are
-/// ours, so there is nothing to escape and no engine to depend on.
+/// The four placeholders a template file may use. Plain `str::replace`: the bodies are
+/// ours, so there is nothing to escape and no engine to depend on. `{{MOD}}` is the
+/// module identifier upper-cased, which is how a generated C header spells its own
+/// constants (`{{MOD}}_OK`), and therefore how a caller written in C has to spell them.
 fn fill(template: &str, ctx: &Ctx<'_>) -> String {
     template
         .replace("{{name}}", ctx.name)
         .replace("{{mod}}", ctx.module)
+        .replace("{{MOD}}", &ctx.module.to_uppercase())
         .replace("{{htl}}", &htl_dep_version())
 }
 
@@ -375,6 +498,30 @@ fn rust_lib_rs(ctx: &Ctx<'_>) -> String {
 
 fn rust_main_rs(ctx: &Ctx<'_>) -> String {
     fill(T_RUST_MAIN_RS, ctx)
+}
+
+fn ffi_lib_rs(ctx: &Ctx<'_>) -> String {
+    fill(T_FFI_LIB_RS, ctx)
+}
+
+fn ffi_teal_module(ctx: &Ctx<'_>) -> String {
+    fill(T_FFI_TEAL_MODULE, ctx)
+}
+
+fn ffi_teal_test(ctx: &Ctx<'_>) -> String {
+    fill(T_FFI_TEAL_TEST, ctx)
+}
+
+fn ffi_example_c(ctx: &Ctx<'_>) -> String {
+    fill(T_FFI_MAIN_C, ctx)
+}
+
+fn ffi_example_makefile(ctx: &Ctx<'_>) -> String {
+    fill(T_FFI_MAKEFILE, ctx)
+}
+
+fn ffi_example_py(ctx: &Ctx<'_>) -> String {
+    fill(T_FFI_RUN_PY, ctx)
 }
 
 fn t_types_readme() -> String {
@@ -432,62 +579,120 @@ fn t_htl_toml() -> String {
         .to_string()
 }
 
-fn t_gitignore(has_host: bool) -> String {
+fn t_gitignore(host: Option<&'static HostProfile>, ctx: &Ctx<'_>) -> String {
     // `.htl/` holds the run cache and the installed deps: generated, machine-local, and
     // keyed on absolute paths, so it is never worth sharing. One line covers both.
     let mut s = String::from(".htl/\n*.hb\n");
-    if has_host {
-        s.push_str("/target\n");
+    for line in host.into_iter().flat_map(|h| h.ignore) {
+        s.push_str(&fill(line, ctx));
+        s.push('\n');
     }
     s
 }
 
-fn t_readme(name: &str, m: &str, opts: &Options) -> String {
-    let host = opts.host.is_some();
-    let script = !opts.lib;
+/// The project README: the part every project has, with the host's own lines spliced
+/// into the command block and its own paragraphs after it.
+fn t_readme(ctx: &Ctx<'_>, host: Option<&'static HostProfile>) -> String {
+    let (name, m) = (ctx.name, ctx.module);
     let mut s = format!(
         "# {name}\n\nTeal project managed with [htl](https://github.com/ynishi/htl).\n\n```sh\nhtl check .            # type-check + lints\n"
     );
-    if script && !host {
+    if ctx.script && host.is_none() {
         s.push_str("htl run src/main.tl    # run the entry script\n");
     }
     s.push_str("htl test               # tests/*_test.tl via htl.test\nhtl fmt .              # whitespace formatter\nhtl pkg install        # fetch [deps] from mlua-pkg.toml\n");
-    if host {
-        if script {
-            s.push_str("cargo run              # the binary: preload, then src/main.tl (type-checked at build)\n");
-            s.push_str("                       # (src/main.tl requires the Rust `host`, so `htl run` cannot run it)\n");
-        }
-        s.push_str(
-            "cargo test             # the library's Rust test: the module loaded through preload\n",
-        );
+    if let Some(h) = host {
+        s.push_str(&(h.readme_commands)(ctx));
     }
     s.push_str(&format!(
         "```\n\nModule: `src/{m}/init.tl` (`require(\"{m}\")` from `src/` and `tests/`).\n\n\
          `mlua-pkg.toml` `entry = \"src/{m}\"` only matters to *consumers* that depend on this\n\
          package through mlua-pkg: they get it as `require(\"{name}\")`. "
     ));
-    if host {
+    match host {
+        Some(h) => s.push_str(&(h.readme_prose)(ctx)),
+        None => s.push_str("Ignore it if nobody depends on this package.\n"),
+    }
+    s
+}
+
+fn rust_readme_commands(ctx: &Ctx<'_>) -> String {
+    let mut s = String::new();
+    if ctx.script {
+        s.push_str("cargo run              # the binary: preload, then src/main.tl (type-checked at build)\n");
+        s.push_str("                       # (src/main.tl requires the Rust `host`, so `htl run` cannot run it)\n");
+    }
+    s.push_str(
+        "cargo test             # the library's Rust test: the module loaded through preload\n",
+    );
+    s
+}
+
+fn rust_readme_prose(ctx: &Ctx<'_>) -> String {
+    let mut s = String::from(
+        "The Rust host is a library:\n`src/lib.rs` holds the `#[host_module]`, embeds this module, and registers both in\n\
+         `preload(&Htl)`. ",
+    );
+    if ctx.script {
         s.push_str(
-            "The Rust host is a library:\n`src/lib.rs` holds the `#[host_module]`, embeds this module, and registers both in\n\
-             `preload(&Htl)`. ",
-        );
-        if script {
-            s.push_str(
-                "`src/main.rs` is a few lines on top of it — `preload`, then the entry\nscript. Grow the library, not the binary.\n\n",
-            );
-        } else {
-            s.push_str(
-                "There is no binary: call `preload` from whatever embeds this\ncrate, and grow the library.\n\n",
-            );
-        }
-        s.push_str(
-            "`src/host.d.tl` is generated from `#[host_module]` in `src/lib.rs`: `cargo build` writes it,\n\
-             and so does `htl dts` / `htl check` without building, so the Teal side always sees the\n\
-             current Rust signatures.\n",
+            "`src/main.rs` is a few lines on top of it — `preload`, then the entry\nscript. Grow the library, not the binary.\n\n",
         );
     } else {
-        s.push_str("Ignore it if nobody depends on this package.\n");
+        s.push_str(
+            "There is no binary: call `preload` from whatever embeds this\ncrate, and grow the library.\n\n",
+        );
     }
+    s.push_str(HOST_DTL);
+    s
+}
+
+/// The generated-declaration paragraph, which every host that writes a `#[host_module]`
+/// says the same way.
+const HOST_DTL: &str = "`src/host.d.tl` is generated from `#[host_module]` in `src/lib.rs`: `cargo build` writes it,\n\
+     and so does `htl dts` / `htl check` without building, so the Teal side always sees the\n\
+     current Rust signatures.\n";
+
+fn ffi_readme_commands(ctx: &Ctx<'_>) -> String {
+    format!(
+        "cargo test             # the library's Rust tests: preload, and the generated header\n\
+         cargo build            # the library, and include/{}.h from #[c_export]\n\
+         make -C examples/c run          # the C caller   (after cargo build)\n\
+         python3 examples/python/run.py  # the Python caller, the same round trip\n",
+        ctx.module
+    )
+}
+
+fn ffi_readme_prose(ctx: &Ctx<'_>) -> String {
+    let m = ctx.module;
+    let mut s = String::from(
+        "This project is a library with two boundaries:\n\
+         `src/lib.rs` holds the `#[host_module]` the *scripts* call and the `#[c_export]` block a\n\
+         *caller that is not written in Rust* calls. There is no binary — a C ABI library has no\n\
+         entry point of its own, which is why `--host ffi` implies `--lib`.\n\n",
+    );
+    s.push_str(HOST_DTL);
+    s.push_str(&format!(
+        "\n## The C ABI\n\n\
+         `cargo build` writes `include/{m}.h` from the same `impl` block, and leaves\n\
+         `target/debug/lib{m}.{{so,dylib,dll}}` for a caller to load and `lib{m}.a` to link\n\
+         statically (Unity on iOS wants the latter). Commit the header: it is generated, and so is\n\
+         `src/host.d.tl`, and both are what someone reads without building this crate.\n\n\
+         Everything that crosses is an opaque `{m}_handle *`, a `char *` this library allocated,\n\
+         or an `int`. Three rules cover the whole ABI:\n\n\
+         - **Every `char *` returned is yours to free**, with `{m}_free()` and nothing else. The\n\
+           call that produced it is not finished until you do.\n\
+         - **An `int` is a status, never a value** (`{}_OK` and friends, in the header). A call\n\
+           that has both writes the value through an `int *out`.\n\
+         - **One handle, one thread.** Using it from another answers `WRONG_THREAD`; the exception\n\
+           is `{m}_interrupt()`, which any thread may call to stop a runaway script.\n\n\
+         A failed call answers `NULL` or a status, and `{m}_last_error()` is the message —\n\
+         a pointer valid until the next call *on that thread*, so copy it (or use\n\
+         `{m}_last_error_into()`) rather than keeping it.\n\n\
+         `examples/c/` and `examples/python/` are two callers doing the same round trip: open,\n\
+         a text call, a JSON call, the two error paths, `free`, close. Each is written the way its\n\
+         own language gets this wrong by default — see the comment at the top of both.\n",
+        m.to_uppercase()
+    ));
     s
 }
 
@@ -524,12 +729,21 @@ fn t_cargo(name: &str, host: &HostProfile) -> String {
         s.push_str(&format!("[lib]\ncrate-type = [{}]\n\n", types.join(", ")));
     }
     s.push_str("[dependencies]\n");
-    for (dep_name, dep) in host.deps {
-        let req = match dep {
+    for d in host.deps {
+        let req = match d.req {
             Dep::Htl => htl_dep_version(),
-            Dep::Version(v) => (*v).to_string(),
+            Dep::Version(v) => v.to_string(),
         };
-        s.push_str(&format!("{dep_name} = \"{req}\"\n"));
+        let name = d.name;
+        if d.features.is_empty() {
+            s.push_str(&format!("{name} = \"{req}\"\n"));
+        } else {
+            let feats: Vec<String> = d.features.iter().map(|f| format!("\"{f}\"")).collect();
+            s.push_str(&format!(
+                "{name} = {{ version = \"{req}\", features = [{}] }}\n",
+                feats.join(", ")
+            ));
+        }
     }
     s.push_str(
         "\n# The Teal checker runs inside htl's proc macros; the dev profile would build it\n\
@@ -542,8 +756,8 @@ fn t_cargo(name: &str, host: &HostProfile) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_HOST, Dep, HostProfile, Result, RustFile, Script, TealSample, host_names,
-        htl_dep_version_of, profile, resolve_host, script_mismatch, t_cargo,
+        Ctx, DEFAULT_HOST, Dep, DepLine, HostFile, HostProfile, Result, Script, TealSample,
+        host_names, htl_dep_version_of, profile, resolve_host, script_mismatch, t_cargo,
     };
 
     #[test]
@@ -602,9 +816,9 @@ mod tests {
         );
     }
 
-    /// The two halves of the matrix hole, with the message that names a way out. No
-    /// registered host has either shape yet (#103 and #104 bring them), so the profiles
-    /// are built here rather than looked up.
+    /// The two halves of the matrix hole, with the message that names a way out. The
+    /// `Forbids` half is the registered `ffi` host; the `Requires` half is #104's, so
+    /// that one is still built here.
     #[test]
     fn a_host_that_disagrees_with_lib_names_the_hosts_that_do_not() {
         let needs = HostProfile {
@@ -614,16 +828,81 @@ mod tests {
         };
         let msg = script_mismatch(&needs, true);
         assert!(msg.contains("the `mq` host runs an entry script"), "{msg}");
-        assert!(msg.contains("hosts that work with --lib: rust"), "{msg}");
+        assert!(
+            msg.contains("hosts that work with --lib: rust, ffi"),
+            "{msg}"
+        );
 
-        let refuses = HostProfile {
-            name: "ffi",
-            script: Script::Forbids,
-            ..probe()
-        };
-        let msg = script_mismatch(&refuses, false);
-        assert!(msg.contains("so it needs --lib"), "{msg}");
+        let msg = script_mismatch(profile("ffi").unwrap(), false);
+        assert!(
+            msg.contains("the `ffi` host writes no entry script"),
+            "{msg}"
+        );
         assert!(msg.contains("hosts that write one: rust"), "{msg}");
+    }
+
+    /// A C ABI library is not a project with an entry script, and the two are reconciled
+    /// before anything is written rather than at the first file.
+    #[test]
+    fn the_ffi_host_is_refused_without_lib_and_taken_with_it() {
+        let e = err(resolve_host(Some("ffi"), false, false));
+        assert!(e.contains("so it needs --lib"), "{e}");
+        let ffi = resolve_host(Some("ffi"), false, true).unwrap().unwrap();
+        assert_eq!(ffi.name, "ffi");
+        // No binary to write, and the reference callers travel with the profile.
+        assert!(ffi.main.is_none());
+        let paths: Vec<&str> = ffi.extra.iter().map(|f| f.path).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "examples/c/main.c",
+                "examples/c/Makefile",
+                "examples/python/run.py"
+            ]
+        );
+    }
+
+    /// The C ABI needs a shared object to load and a static library to link, and the
+    /// runtime the generated wrappers call is behind a feature, so the dependency line
+    /// is the table form rather than a bare requirement.
+    #[test]
+    fn the_ffi_cargo_toml_is_a_c_library_with_the_ffi_feature() {
+        let toml = t_cargo("sample", profile("ffi").unwrap());
+        assert!(
+            toml.contains("[lib]\ncrate-type = [\"rlib\", \"cdylib\", \"staticlib\"]\n"),
+            "{toml}"
+        );
+        assert!(
+            toml.contains(&format!(
+                "htl = {{ version = \"{}\", features = [\"ffi\"] }}\n",
+                super::htl_dep_version()
+            )),
+            "{toml}"
+        );
+        assert!(
+            toml.contains("serde = { version = \"1\", features = [\"derive\"] }\n"),
+            "{toml}"
+        );
+    }
+
+    /// What the reader is told to run follows the project rather than the host's name:
+    /// the C ABI host points at the two reference callers, and the default host at the
+    /// binary it writes only when there is a script to run.
+    #[test]
+    fn the_readme_commands_come_from_the_host() {
+        let ctx = |script| Ctx {
+            name: "sample",
+            module: "sample",
+            script,
+        };
+        let rust = profile(DEFAULT_HOST).unwrap();
+        assert!((rust.readme_commands)(&ctx(true)).contains("cargo run"));
+        assert!(!(rust.readme_commands)(&ctx(false)).contains("cargo run"));
+
+        let ffi = (profile("ffi").unwrap().readme_commands)(&ctx(false));
+        assert!(ffi.contains("make -C examples/c run"), "{ffi}");
+        assert!(ffi.contains("python3 examples/python/run.py"), "{ffi}");
+        assert!(ffi.contains("include/sample.h"), "{ffi}");
     }
 
     #[test]
@@ -658,19 +937,26 @@ mod tests {
         HostProfile {
             name: "probe",
             lib_crate_types: &[],
-            deps: &[("htl", Dep::Htl)],
+            deps: &[DepLine {
+                name: "htl",
+                req: Dep::Htl,
+                features: &[],
+            }],
             script: Script::Either,
-            lib: RustFile {
+            lib: HostFile {
                 path: "src/lib.rs",
                 body: super::rust_lib_rs,
             },
             main: None,
             extra: &[],
+            ignore: &["/target"],
             teal: TealSample {
                 module: super::teal_module,
                 test: super::teal_test,
                 main: super::teal_main,
             },
+            readme_commands: super::rust_readme_commands,
+            readme_prose: super::rust_readme_prose,
         }
     }
 }

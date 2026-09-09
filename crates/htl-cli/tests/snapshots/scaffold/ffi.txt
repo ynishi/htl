@@ -1,0 +1,593 @@
+===== files =====
+.gitignore
+Cargo.toml
+README.md
+examples/c/Makefile
+examples/c/main.c
+examples/python/run.py
+htl.toml
+mlua-pkg.toml
+src/lib.rs
+src/sample/init.tl
+tests/sample_test.tl
+types/README.md
+===== .gitignore =====
+.htl/
+*.hb
+/target
+examples/c/sample_c
+===== Cargo.toml =====
+[package]
+name = "sample"
+version = "0.1.0"
+edition = "2024"
+# authors / license / repository: fill in yourself
+
+[lib]
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[dependencies]
+htl = { version = "0.3", features = ["ffi"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+
+# The Teal checker runs inside htl's proc macros; the dev profile would build it
+# unoptimised and make every `cargo build` that touches a .tl about 3x slower.
+[profile.dev.build-override]
+opt-level = 3
+===== README.md =====
+# sample
+
+Teal project managed with [htl](https://github.com/ynishi/htl).
+
+```sh
+htl check .            # type-check + lints
+htl test               # tests/*_test.tl via htl.test
+htl fmt .              # whitespace formatter
+htl pkg install        # fetch [deps] from mlua-pkg.toml
+cargo test             # the library's Rust tests: preload, and the generated header
+cargo build            # the library, and include/sample.h from #[c_export]
+make -C examples/c run          # the C caller   (after cargo build)
+python3 examples/python/run.py  # the Python caller, the same round trip
+```
+
+Module: `src/sample/init.tl` (`require("sample")` from `src/` and `tests/`).
+
+`mlua-pkg.toml` `entry = "src/sample"` only matters to *consumers* that depend on this
+package through mlua-pkg: they get it as `require("sample")`. This project is a library with two boundaries:
+`src/lib.rs` holds the `#[host_module]` the *scripts* call and the `#[c_export]` block a
+*caller that is not written in Rust* calls. There is no binary — a C ABI library has no
+entry point of its own, which is why `--host ffi` implies `--lib`.
+
+`src/host.d.tl` is generated from `#[host_module]` in `src/lib.rs`: `cargo build` writes it,
+and so does `htl dts` / `htl check` without building, so the Teal side always sees the
+current Rust signatures.
+
+## The C ABI
+
+`cargo build` writes `include/sample.h` from the same `impl` block, and leaves
+`target/debug/libsample.{so,dylib,dll}` for a caller to load and `libsample.a` to link
+statically (Unity on iOS wants the latter). Commit the header: it is generated, and so is
+`src/host.d.tl`, and both are what someone reads without building this crate.
+
+Everything that crosses is an opaque `sample_handle *`, a `char *` this library allocated,
+or an `int`. Three rules cover the whole ABI:
+
+- **Every `char *` returned is yours to free**, with `sample_free()` and nothing else. The
+call that produced it is not finished until you do.
+- **An `int` is a status, never a value** (`SAMPLE_OK` and friends, in the header). A call
+that has both writes the value through an `int *out`.
+- **One handle, one thread.** Using it from another answers `WRONG_THREAD`; the exception
+is `sample_interrupt()`, which any thread may call to stop a runaway script.
+
+A failed call answers `NULL` or a status, and `sample_last_error()` is the message —
+a pointer valid until the next call *on that thread*, so copy it (or use
+`sample_last_error_into()`) rather than keeping it.
+
+`examples/c/` and `examples/python/` are two callers doing the same round trip: open,
+a text call, a JSON call, the two error paths, `free`, close. Each is written the way its
+own language gets this wrong by default — see the comment at the top of both.
+===== examples/c/Makefile =====
+# The C caller. `cargo build` first: this links against what it leaves in target/debug.
+#
+#     make -C examples/c run          # debug
+#     make -C examples/c run PROFILE=release
+#
+# The library is loaded at run time, so the path it was linked from is baked in with
+# -rpath; without that the loader would only look in the system directories.
+
+PROFILE ?= debug
+ROOT    := ../..
+# Override when cargo was pointed elsewhere: make run LIBDIR=/path/to/target/debug
+LIBDIR  ?= $(ROOT)/target/$(PROFILE)
+CFLAGS  += -std=c11 -Wall -Wextra -I $(ROOT)/include
+
+sample_c: main.c $(ROOT)/include/sample.h
+	$(CC) $(CFLAGS) -o $@ main.c -L $(LIBDIR) -lsample -Wl,-rpath,$(abspath $(LIBDIR))
+
+run: sample_c
+	./sample_c
+
+clean:
+	rm -f sample_c
+
+.PHONY: run clean
+===== examples/c/main.c =====
+/* A C caller for libsample, and the shape a C host has to keep.
+ *
+ * What C gets wrong here by default: `char *sample_greet(...)` hands back memory this
+ * library allocated, and C gives you no reason to think about it — printf takes the
+ * pointer and the leak is invisible. Every one of them goes back to sample_free(), on
+ * the failure path too, which is why the calls below hand the pointer to `show()`
+ * instead of using it in place.
+ *
+ * Build and run (after `cargo build` in the project root):
+ *
+ *     make -C examples/c run
+ *
+ * or by hand, from the project root:
+ *
+ *     cc -I include -o /tmp/sample_c examples/c/main.c -L target/debug -lsample \
+ *        -Wl,-rpath,target/debug && /tmp/sample_c
+ */
+
+#include <stdio.h>
+#include <string.h>
+
+#include "sample.h"
+
+/* The message that goes with the last failure on this thread. The pointer belongs to the
+ * library and is only good until the next call, so it is used and not kept. */
+static const char *why(void) {
+   const char *m = sample_last_error();
+   return m ? m : "(no message)";
+}
+
+/* Print a `char *` the library returned, then give it back. NULL means the call failed,
+ * and then the status says which kind of failure it was. */
+static void show(const char *what, char *owned) {
+   if (owned == NULL) {
+      printf("%-14s -> NULL, status %d: %s\n", what, sample_last_status(), why());
+      return;
+   }
+   printf("%-14s -> %s\n", what, owned);
+   sample_free(owned);
+}
+
+int main(void) {
+   printf("abi_version    -> %d (header says %d)\n", sample_abi_version(), SAMPLE_ABI_VERSION);
+   printf("version        -> %s\n", sample_version());
+   printf("threadsafe     -> %d (0 = one handle per thread)\n", sample_threadsafe());
+
+   /* Options are one JSON object: everything the library would otherwise have to read
+    * from the environment or the working directory is passed in. */
+   sample_handle *h = sample_open("{\"greeter\":\"the C host\"}");
+   if (h == NULL) {
+      fprintf(stderr, "open failed: %s\n", why());
+      return 1;
+   }
+
+   show("greet", sample_greet(h, "Ada"));
+   show("state", sample_state(h));
+
+   /* An int is a status, never a value: the count comes back through the out-parameter. */
+   int greeted = -1;
+   if (sample_greeted(h, &greeted) == SAMPLE_OK) {
+      printf("%-14s -> %d\n", "greeted", greeted);
+   }
+
+   /* Error path 1: the failure is Lua's — the Teal module refuses an empty name — and it
+    * crosses as NULL with the LUA status rather than as a crash or an empty string. */
+   show("greet(\"\")", sample_greet(h, ""));
+
+   /* Error path 2: the failure is the Rust side's, on a function whose return *is* the
+    * status. Reset twice: the second one has nothing to do and says so. */
+   printf("%-14s -> status %d\n", "reset", sample_reset(h));
+   int again = sample_reset(h);
+   printf("%-14s -> status %d: %s\n", "reset again", again, why());
+
+   /* A message of your own, copied into your own buffer, for a host that cannot hold a
+    * pointer the library owns. The return is what the message needs, so a bigger buffer
+    * would hold more of it. */
+   char buf[24];
+   int needed = sample_last_error_into(buf, (int) sizeof buf);
+   printf("%-14s -> needed %d, got \"%s\"\n", "into(24)", needed, buf);
+
+   sample_close(h);
+   printf("closed\n");
+   return 0;
+}
+===== examples/python/run.py =====
+#!/usr/bin/env python3
+"""A Python caller for libsample, and the shape a ctypes host has to keep.
+
+What Python gets wrong here by default: `restype = c_char_p` looks right and is the one
+mistake this ABI cannot survive. ctypes copies such a return into a `bytes` and throws
+the pointer away, so the string this library allocated is leaked on every single call and
+there is nothing left to hand to `sample_free`. The fix is two lines, and both of them
+are below:
+
+    fn.restype = ctypes.c_void_p              # keep the address, not a copy
+    text = ctypes.cast(p, ctypes.c_char_p).value.decode()   # read it, then free `p`
+
+Run it (after `cargo build` in the project root):
+
+    python3 examples/python/run.py [path/to/libsample.so]
+"""
+
+import ctypes
+import json
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def library_path() -> Path:
+    """The build cargo left behind: an argument if one was given, else release if it is
+    there and debug otherwise, under CARGO_TARGET_DIR when that is set."""
+    if len(sys.argv) > 1:
+        return Path(sys.argv[1])
+    target = Path(os.environ.get("CARGO_TARGET_DIR") or ROOT / "target")
+    names = ["libsample.so", "libsample.dylib", "sample.dll"]
+    for profile in ("release", "debug"):
+        for name in names:
+            path = target / profile / name
+            if path.exists():
+                return path
+    sys.exit(f"no built library under {target}; run `cargo build` first")
+
+
+def declare(lib: ctypes.CDLL) -> None:
+    """Every signature, spelled out. ctypes assumes `int` for anything it is not told
+    about, which on a 64-bit host truncates a returned pointer to its low 32 bits."""
+    p = ctypes.c_void_p
+    cs = ctypes.c_char_p
+    i = ctypes.c_int
+    lib.sample_abi_version.restype = i
+    lib.sample_version.restype = cs                 # borrowed, static: not ours to free
+    lib.sample_threadsafe.restype = i
+    lib.sample_last_error.restype = cs              # borrowed until the next call
+    lib.sample_last_status.restype = i
+    lib.sample_free.argtypes = [p]
+    lib.sample_open.argtypes, lib.sample_open.restype = [cs], p
+    lib.sample_close.argtypes = [p]
+    lib.sample_greet.argtypes, lib.sample_greet.restype = [p, cs], p
+    lib.sample_state.argtypes, lib.sample_state.restype = [p], p
+    lib.sample_reset.argtypes, lib.sample_reset.restype = [p], i
+    lib.sample_greeted.argtypes = [p, ctypes.POINTER(i)]
+    lib.sample_greeted.restype = i
+
+
+def why(lib: ctypes.CDLL) -> str:
+    m = lib.sample_last_error()
+    return m.decode() if m else "(no message)"
+
+
+def take(lib: ctypes.CDLL, p):
+    """Read a `char *` the library returned and give it back. `p` is an address (an int),
+    because restype is c_void_p; casting is what reads the bytes without losing it."""
+    if not p:
+        return None
+    try:
+        return ctypes.cast(p, ctypes.c_char_p).value.decode()
+    finally:
+        lib.sample_free(p)  # in a finally: a decode error must not leak the string
+
+
+def main() -> int:
+    path = library_path()
+    lib = ctypes.CDLL(str(path))
+    declare(lib)
+
+    shown = os.path.relpath(path, ROOT)
+    print(f"library        -> {path if shown.startswith('..') else shown}")
+    print(f"abi_version    -> {lib.sample_abi_version()}")
+    print(f"version        -> {lib.sample_version().decode()}")
+    print(f"threadsafe     -> {lib.sample_threadsafe()} (0 = one handle per thread)")
+
+    # Options are one JSON object: what the library would otherwise read from the
+    # environment or the working directory is passed in instead.
+    options = json.dumps({"greeter": "the Python host"}).encode()
+    handle = lib.sample_open(options)
+    if not handle:
+        sys.exit(f"open failed: {why(lib)}")
+
+    try:
+        print(f"greet          -> {take(lib, lib.sample_greet(handle, b'Ada'))}")
+
+        # A record crosses as JSON text, with the schema version the runtime stamps on it.
+        state = json.loads(take(lib, lib.sample_state(handle)))
+        print(f"state          -> {state} (schema v{state['v']})")
+
+        # An int is a status, never a value: the count comes through the out-parameter.
+        greeted = ctypes.c_int(-1)
+        if lib.sample_greeted(handle, ctypes.byref(greeted)) == 0:
+            print(f"greeted        -> {greeted.value}")
+
+        # Error path 1: the Teal module refuses an empty name, so the failure is Lua's and
+        # comes back as NULL with the LUA status (4) rather than as an empty string.
+        if take(lib, lib.sample_greet(handle, b"")) is None:
+            print(f'greet("")      -> NULL, status {lib.sample_last_status()}: {why(lib)}')
+
+        # Error path 2: a function whose return *is* the status. The second reset has
+        # nothing to do and says so.
+        print(f"reset          -> status {lib.sample_reset(handle)}")
+        status = lib.sample_reset(handle)
+        print(f"reset again    -> status {status}: {why(lib)}")
+    finally:
+        lib.sample_close(handle)
+        print("closed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+===== htl.toml =====
+# htl project settings (htl check / htl test / htl fmt / include_tl! all read this).
+# Command-line flags and HTL_LINTS / HTL_LINT override it.
+
+[lint]
+# enable  = ["class-record", "explicit-number"]   # opt-in rules (htl check --list-lints)
+# disable = ["shadow-local"]
+# strict  = true   # lints fail check/test and include_tl!; false makes the macro advisory
+
+[fmt]
+indent = 3
+
+[check]
+# paths = ["mods", "~/.cache/sdk"]   # extra dirs require() resolves from while checking
+# (src/ and types/ are always searched; hand-written .d.tl go under types/)
+
+# Where this project accepts modules written outside it:
+# [[contract]]
+# dir = "mods"             # relative to this file; "sites/*" = each subdirectory
+# module = "Site"          # optional: only this module name in each dir
+#
+# The shape those modules must have is declared on the record itself, so the two
+# cannot drift apart:
+#
+#   local record defs
+#      record Mod              ---@contract     -- inherits `dir` above;
+#         name: string         ---@required     -- ---@contract("other") overrides it
+#         monsters: {Monster}  ---@required
+#         factions: {Faction}                   -- unmarked: for the mods that want it
+#      end
+#   end
+#
+# The host must enforce it too: htl::pkg::contract_resolvers(root, &config).
+# `htl check` reports `contract-unenforced` when that call is not in the Rust sources.
+# enforced_by = "mods/_validate.lua"   # ...or name where it is enforced instead,
+#                          # for a Lua-side validator, a sibling crate, generated
+#                          # code. The file has to exist; a missing one is reported.
+===== mlua-pkg.toml =====
+[package]
+name = "sample"
+version = "0.1.0"
+# Consumers `require("sample")` -> this directory's init.tl
+entry = "src/sample"
+
+[deps]
+# lshape = { git = "https://github.com/ynishi/lshape", tag = "v0.1" }
+===== src/lib.rs =====
+//! The project as a library with a C ABI on top: the Rust host the Teal side calls, the
+//! module embedded beside it, `preload`, and a `Game` that a caller which is not written
+//! in Rust holds through `#[c_export]`.
+//!
+//! Two boundaries, pointing opposite ways, from the same crate:
+//!
+//! - `#[host_module]` on `Host` is what the *scripts* call. Its declaration is written to
+//!   `src/host.d.tl`, so a mod that requires `host` is type-checked against the Rust
+//!   signatures.
+//! - `#[c_export]` on `Game` is what the *caller* calls — a Unity script, a Swift app, a
+//!   Python REPL. It writes one `extern "C"` wrapper per method and `include/sample.h`,
+//!   from the same breakdown, so a rename here moves the header with it.
+//!
+//! There is no binary: `--host ffi` is a library, and what a host loads is
+//! `target/debug/libsample.{so,dylib,dll}` (or `libsample.a` to link statically).
+//! `examples/c/` and `examples/python/` are two such hosts, each written the way its
+//! language has to be written to not leak or corrupt the strings it is handed.
+
+use htl::{Htl, c_export, ffi, host_module};
+
+pub struct Host;
+
+/// Exposed to Teal as `require("host")`. Its declaration is written to `src/host.d.tl`
+/// by this macro at build time, and by `htl dts` / `htl check` without building.
+#[host_module(name = "host", dts = "src/host.d.tl")]
+impl Host {
+    pub fn shout(&self, text: &str) -> String {
+        text.to_uppercase()
+    }
+}
+
+// The Teal module, type-checked at `cargo build` and embedded as stripped bytecode. Keep
+// this after `#[host_module]` (same file, source order) so the declaration exists when the
+// module is checked.
+const MODULE: &[u8] = htl::include_tl_bytes!("src/sample/init.tl");
+
+/// Register what this crate provides on a fresh `Htl`: the Rust `host` module, then the
+/// Teal module as `require("sample")`.
+pub fn preload(h: &Htl) -> anyhow::Result<()> {
+    Host.htl_preload(h)?;
+    h.preload_bytes("sample", MODULE)?;
+    Ok(())
+}
+
+/// What `sample_open` is given, as one JSON object. Everything the library would
+/// otherwise read from the environment or the working directory is passed in here — a
+/// game engine and a sandboxed app provide neither.
+#[derive(serde::Deserialize)]
+struct Options {
+    /// Who the greetings come from.
+    greeter: String,
+}
+
+/// What `sample_state` hands back: a record, so it crosses as JSON with a `"v"` schema
+/// version the runtime stamps on it.
+#[derive(serde::Serialize)]
+pub struct State {
+    pub greeter: String,
+    pub greeted: i32,
+}
+
+/// One of these is what a `sample_handle *` points at: the Lua state, and whatever the
+/// C caller's session is made of. One per thread — see `sample_threadsafe()`.
+pub struct Game {
+    h: Htl,
+    greeter: String,
+    greeted: i32,
+}
+
+/// Every method here is one of four shapes, and anything else is a compile error naming
+/// the type: `()` is `void`, a `String` or a serde type is `char *` (yours to free with
+/// `sample_free`), a `Result<(), E>` is an `int` status, and an `i32` is an `int` status
+/// with the value written through `int *out`.
+#[c_export(prefix = "sample", header = "include/sample.h")]
+impl Game {
+    /// The opener. The options as one JSON object, and the flag `sample_interrupt` sets:
+    /// the hook goes on the Lua state while it is being built, which is the one moment
+    /// the handle and the state exist together.
+    pub fn open(options: &str, interrupt: ffi::Interrupt) -> Result<Self, String> {
+        let o: Options = ffi::from_json(options, "options_json")?;
+        let h = Htl::new().map_err(|e| e.to_string())?;
+        preload(&h).map_err(|e| e.to_string())?;
+        interrupt.install(&h).map_err(|e| e.to_string())?;
+        Ok(Game {
+            h,
+            greeter: o.greeter,
+            greeted: 0,
+        })
+    }
+
+    /// `char *`: the text itself. The work happens in Teal, so a mod's `error()` reaches
+    /// the caller as `NULL` with the `LUA` status from `sample_last_status()` — greet
+    /// the empty string to see it.
+    pub fn greet(&mut self, who: &str) -> Result<String, htl::mlua::Error> {
+        let g: htl::mlua::Table = self
+            .h
+            .lua()
+            .load("return require('sample').greet(...)")
+            .call(who)?;
+        self.greeted += 1;
+        Ok(format!("{}: {}", self.greeter, g.get::<String>("text")?))
+    }
+
+    /// `char *`: JSON, with `"v"` on it.
+    pub fn state(&self) -> State {
+        State {
+            greeter: self.greeter.clone(),
+            greeted: self.greeted,
+        }
+    }
+
+    /// `Result<(), E>` -> `int`: a status and nothing else. Refusing a reset that would
+    /// do nothing is what gives a caller an `ERR` to handle that is not a Lua error.
+    pub fn reset(&mut self) -> Result<(), String> {
+        if self.greeted == 0 {
+            return Err("nothing to reset: nobody has been greeted yet".into());
+        }
+        self.greeted = 0;
+        Ok(())
+    }
+
+    /// `i32` -> `int` with an out-parameter: the value never rides in the status, so a
+    /// count of `-1` is a count and not an error.
+    pub fn greeted(&self) -> i32 {
+        self.greeted
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Game, preload};
+    use htl::{Htl, ffi::CExport};
+
+    /// The Teal side, exercised the way a host does it: through `preload`, so the test
+    /// fails if the module stops loading or `greet` changes shape.
+    #[test]
+    fn greet_comes_back_through_preload() -> anyhow::Result<()> {
+        let h = Htl::new()?;
+        preload(&h)?;
+        let g: htl::mlua::Table = h
+            .lua()
+            .load("return require('sample').greet('rust')")
+            .eval()?;
+        assert_eq!(g.get::<String>("text")?, "hello, rust");
+        Ok(())
+    }
+
+    /// The C side without a C compiler: the header is a constant in the library, so what
+    /// `examples/c/` and `examples/python/` call can be checked here. `cargo test` on
+    /// this crate is therefore what catches a rename before a host does.
+    #[test]
+    fn the_header_declares_what_the_examples_call() {
+        assert_eq!(<Game as CExport>::PREFIX, "sample");
+        let h = <Game as CExport>::HEADER;
+        for want in [
+            "sample_handle *sample_open(const char *options_json);",
+            "void sample_close(sample_handle *h);",
+            "char *sample_greet(sample_handle *h, const char *who);",
+            "char *sample_state(sample_handle *h);",
+            "int sample_reset(sample_handle *h);",
+            "int sample_greeted(sample_handle *h, int *out);",
+            "void sample_free(char *s);",
+        ] {
+            assert!(h.contains(want), "the header is missing `{want}`:\n{h}");
+        }
+    }
+}
+===== src/sample/init.tl =====
+local record sample
+   record Greeting
+      who: string
+      text: string
+   end
+end
+
+-- Reached from C through `sample_greet`, so this `error()` is what a caller sees as a
+-- NULL return with the LUA status: the rule a mod breaks is enforced here, and no
+-- wrapper in between has to know about it.
+function sample.greet(who: string): sample.Greeting
+   if who == "" then
+      error("greet: `who` is empty")
+   end
+   return { who = who, text = "hello, " .. who }
+end
+
+return sample
+===== tests/sample_test.tl =====
+local t = require("htl.test")
+local sample = require("sample")
+
+t.describe("sample.greet", function()
+   t.it("greets by name", function()
+      t.expect(sample.greet("teal")):to_equal({ who = "teal", text = "hello, teal" })
+   end)
+
+   -- The failure the C and Python examples show: `htl test` covers it here, where the
+   -- message is readable, and the examples show what it looks like across the boundary.
+   t.it("refuses an empty name", function()
+      t.expect(function() sample.greet("") end):to_error("`who` is empty")
+   end)
+end)
+===== types/README.md =====
+# types/
+
+Hand-written `.d.tl` declarations for modules the host provides at run time and
+that ship no declaration of their own (a Rust crate re-exported to Lua, a runtime
+SDK): `xlib.d.tl` here makes `require("xlib")` typed in `htl check`, `htl test` and
+`include_tl!`. Consulted after the project root and `src/`, before `[check] paths`;
+a `.tl` source anywhere on the path beats a declaration, so nothing here can shadow
+an implementation, and a second declaration of the same module is reported
+(`duplicate-declaration`) rather than silently losing to one of them.
+
+Files htl writes here are the ones the project *publishes*: the module a
+`---@contract` type is declared in, for the authors of the modules that contract
+holds. Declarations generated from this crate's own Rust (`#[host_module]`) are
+written next to the scripts, not here. Both are committed.
+
+So is `<crate>/`, when there is one: a dependency that names its declarations in
+`[package.metadata.htl] dts` has them copied there by `htl dts` (and by check / run
+/ test). Edit the crate, not the copy — the next run writes it again.
