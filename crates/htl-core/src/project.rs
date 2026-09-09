@@ -311,7 +311,11 @@ fn shown(text: &str) -> Cow<'_, str> {
 /// Relative to the directory the command ran in when it is under it, normalised absolute
 /// when it is not — a dependency outside the project reads better that way than as a stack
 /// of `..`.
-fn display_path(p: &Path) -> String {
+///
+/// Public because it is how *a* path reads in this tool's output, not how a diagnostic's
+/// does: [`crate::unused`] reports files the walk found rather than diagnostics, and the
+/// two must spell one file the same way.
+pub fn display_path(p: &Path) -> String {
     let norm = lexical(p);
     match std::env::current_dir()
         .ok()
@@ -785,6 +789,14 @@ pub struct Report {
     pub lints: usize,
     /// How many of `files` were replayed from the store rather than checked.
     pub replayed: usize,
+    /// What each file required, as the checker resolved it: the require graph, in the
+    /// order the walk produced it.
+    ///
+    /// It is built either way — the `require-cycle` lint below is the graph read for
+    /// cycles — and handed back because the complementary question is asked of the same
+    /// edges: what does no entry reach ([`crate::unused`])? A replayed file carries its
+    /// requires in its entry, so the graph is whole whether the run checked or replayed.
+    pub requires: Vec<(PathBuf, Vec<cache::RequireJson>)>,
 }
 
 impl Report {
@@ -875,6 +887,7 @@ pub fn check<O: Output>(
 
     let (mut n_err, mut n_warn, mut n_lint) = (0usize, 0usize, 0usize);
     let mut infos: Vec<(PathBuf, CheckInfo)> = Vec::with_capacity(files.len());
+    let mut requires: Vec<(PathBuf, Vec<cache::RequireJson>)> = Vec::with_capacity(files.len());
     let mut modules: Vec<cache::Module> = Vec::with_capacity(files.len());
     for ((f, key), hit) in files.iter().zip(&keys).zip(hits) {
         let m = match hit {
@@ -898,6 +911,7 @@ pub fn check<O: Output>(
         n_err += m.errors;
         n_warn += m.warnings;
         n_lint += m.lints;
+        requires.push((f.clone(), m.requires.clone()));
         infos.push((f.clone(), m.requires_only()));
         modules.push(m);
     }
@@ -957,6 +971,7 @@ pub fn check<O: Output>(
         warnings: n_warn,
         lints: n_lint,
         replayed,
+        requires,
     })
 }
 

@@ -45,6 +45,7 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 | `htl gen <file.tl> [-o out.lua]` | readable Lua, the escape hatch out of htl |
 | `htl build <entry.tl> -o app.hb [--debug] [--source] [--extra a,b] [--host x,y] [--no-cache] [--explain-cache]` | link the entry's `require` closure into one bundle (see Bundles), replaying from the run cache what still holds (see Caching; the directory form is not cached) |
 | `htl bundle info <app.hb> [--format json]` | what a bundle records, without running it: format, the htl that built it, payload kind, the Lua its bytecode is for, entry, modules, host-provided names |
+| `htl unused [paths] [--format json] [--exit-non-zero-on-unused] [--no-cache]` | the complement of the same closure: modules no entry reaches, and `[deps]` no reached module requires (see Unused) |
 | `htl pkg install` | fetch every dependency `mlua-pkg.toml` declares into `.htl/modules/` and write `mlua-pkg.lock`; the deps' own `types/` are then copied into the project's (see `types/`) |
 | `htl pkg add <name> <git> [--tag t \| --rev r \| --branch b] [--entry dir] [--target-dir dir]` | write the dependency into the manifest (`install` fetches it); a `patch_dir` the entry already declared is kept |
 | `htl pkg update [name] [--dry-run] [--force]` | refresh dependencies and bump the pins that follow releases, then install |
@@ -1155,7 +1156,8 @@ and `--format json` carries the edits. `htl fix [paths]` applies them:
 
 ## Machine-readable output
 
-`htl check --format json` and `htl test --format json` print one JSON document on
+`htl check --format json`, `htl test --format json` and `htl unused --format json` print
+one JSON document on
 stdout and nothing on stderr (the text form is stderr-only, so the two never mix).
 The exit code is the same as in text mode. Field names are stable; fields may be
 added, not renamed.
@@ -1173,6 +1175,13 @@ added, not renamed.
   duration_ms, ok, seed }, coverage?: { modules: [{ path, executed, total, unexecuted:
   [[first, last]], never_ran?: [{ name, line }] }], executed, total } }` (`coverage`
   with `--coverage`; `never_ran` is absent when every function of the module ran).
+- `unused`: `{ modules: [{ path, module? }], dependencies: [{ name }], entries: [{ path,
+  module?, kind: "main"|"test"|"contract"|"build"|"host" }], summary: { considered,
+  reached, entries, modules, dependencies, no_entry, check_errors, ok } }`. The two kinds
+  carry the names the text form prints them under (`module:` / `dependency:`); `module`
+  is the name a `require` would have to spell, absent when the search path gives the file
+  none. `check_errors` is what the check behind the graph reported: a file that does not
+  check contributes no edges, so a report from a run with any is a guess.
 
 GitHub Actions annotations from a check, for instance:
 
@@ -1248,6 +1257,62 @@ a module missing), and emit `cargo:rerun-if-changed=<file>` for each of
 `Linked::inputs()`. Name files, not the directory: cargo compares the mtime of the
 path it is given, and editing a file inside a directory does not change the
 directory's.
+
+## Unused (`htl unused`)
+
+`htl check` answers whether every file it was given is correct. It never answers whether
+every file it was given is *reached*. `htl unused` asks the second question of the same
+graph a bundle is linked from — a module nobody requires, and a dependency declared and
+never used, both keep checking clean forever:
+
+```text
+module: src/legacy/parser.tl (legacy.parser)
+dependency: strx
+htl unused: 1 module, 1 dependency [68 considered, 67 reached, 39 entries]
+```
+
+Nothing new is parsed. `htl check` already resolves every `require` — that is what the
+`require-cycle` lint reads and what a cached entry carries — so this walks those edges
+from the entries and reports the complement, replaying the check from `.htl/` when
+nothing moved.
+
+**Where it starts is not a guess.** The equivalent tools for JavaScript need a plugin
+per framework to work out where a project starts; here the project has already said, in
+the files `htl test`, `htl build`, `[[contract]]` and a Rust host are pointed at:
+
+- `src/main.tl` (or `main.tl` at the root);
+- every test file, as `htl test` discovers them — so a module used only by a test is
+  reached, not reported;
+- every module directly under a `[[contract]]` directory: those are loaded by name at run
+  time, from a mods directory the project does not own. The `exclude`d ones too —
+  `exclude` says a module is not held to the contract, not that nothing loads it;
+- anything named in `[build] extra` / `[build] host`, which is where a dynamic
+  `require(expr)` already has to list its targets for `htl build` to bundle them;
+- the file a Rust host embeds: the first argument of an `include_bundle!` / `include_tl!`
+  / `include_tl_bytes!` in the crate around the project. A project whose `main` is in Rust
+  has no `src/main.tl`, and its entry is named there and nowhere else.
+
+A project with none of these gets a message saying so rather than a list of everything.
+
+`paths` narrows what is **reported**, never what is walked: reachability is a property of
+the project, so `htl unused src` still reads `tests/`, and a module only a test requires
+stays quiet. The dependency question is asked of `mlua-pkg.toml` `[deps]`: a name counts
+as required when a reached module says `require("mathx")` or `require("mathx.vec")`, or
+when what a reached module required resolved to a file inside that dependency — both,
+because a dependency that is declared but not installed resolves to nothing and is still
+required by name.
+
+The exit code is 0 whatever it finds, unless `--exit-non-zero-on-unused` says otherwise:
+"unused" is a question about intent, and CI should opt in to failing on it rather than
+out. Deleting is nobody's business here either — `htl fix` applies mechanical rewrites,
+and "this module is unreachable" is not one of those; the fix is a decision.
+
+**Exports are not a kind.** A third question — which field of a module record no reached
+module reads — was considered and left out. htl's premise is a Rust host embedding Teal,
+so a module's caller is routinely outside the Teal sources entirely: a `#[host_module]`
+calling into a preloaded module, a `---@contract` type published for mod authors, an SDK
+a consumer requires. Every one of those reads a field no walk of this project's `.tl` can
+see, and a rule that fires on them is a rule nobody can act on.
 
 ## Layout of a project (`htl new`)
 

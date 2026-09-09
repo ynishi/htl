@@ -40,6 +40,10 @@ pub mod pkg;
 pub mod project;
 pub mod teal;
 pub mod testing;
+// The complement of the require closure: what no entry reaches. On the project layer,
+// whose check hands it the graph, so it carries that layer's features.
+#[cfg(all(feature = "pkg", feature = "dts"))]
+pub mod unused;
 
 pub use diagnostic::{Diagnostic, Severity};
 
