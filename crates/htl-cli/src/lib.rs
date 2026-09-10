@@ -150,11 +150,12 @@ impl From<CacheModeArg> for cache::Mode {
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use htl::Htl;
 use htl::bundle::Bundle;
 // The project layer: which files a check walks, what it replays from the run cache and
-// what it keeps there. Shared with `include_tl!`, which asks the same of the same store.
+// what it keeps there, and which of a run's findings are said. Shared with `include_tl!`,
+// which asks the same of the same store.
 use htl::project;
-use htl::{CheckInfo, Htl};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -719,16 +720,18 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
     }
 }
 
-fn print_checkinfo(c: &CheckInfo) {
-    for w in &c.warnings {
-        eprintln!("warning: {w}");
-    }
-    for l in &c.lints {
-        eprintln!("lint: {l}");
-    }
-    for e in &c.errors {
-        eprintln!("error: {e}");
-    }
+/// The reporting layer, for the commands that report without a `--format` of their own.
+///
+/// `htl check` and `htl test` hand their findings to a [`project::Sink`] over a
+/// [`report::Out`]; `gen` / `run` / `build` used to loop `eprintln!` over the three
+/// vectors themselves, so the same finding read differently depending on which verb was
+/// typed. They come through here instead, and there is one renderer again.
+///
+/// One sink per command run, not per file: what the layer decides once per run — a
+/// dependency's error said once, and never on behalf of a file the run checks itself —
+/// is then once per *command*, which is what `htl build` over a closure of modules wants.
+fn text_sink() -> project::Sink<report::Out> {
+    project::Sink::new(report::Out::new(false))
 }
 
 /// (Re)generate the `.d.tl` files this project declares: the ones a Rust crate's
@@ -2189,7 +2192,7 @@ fn cmd_gen(file: &Path, out: Option<&Path>) -> Result<ExitCode> {
     auto_dts(file)?;
     apply_project(&h, file)?;
     let (code, c) = h.gen_lua(file)?;
-    print_checkinfo(&c);
+    text_sink().checkinfo(&c);
     let Some(mut code) = code else {
         return Ok(ExitCode::FAILURE);
     };
@@ -2226,7 +2229,7 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
     h.install_searcher()?;
     h.set_arg(&file.to_string_lossy(), args)?;
     let (code, c) = h.gen_lua(file)?;
-    print_checkinfo(&c);
+    text_sink().checkinfo(&c);
     let Some(code) = code else {
         return Ok(ExitCode::FAILURE);
     };
@@ -2301,8 +2304,11 @@ fn cmd_build(
     });
     let linked = htl::link::link_with(&h, entry, &opts, link_store)?;
     project::explain_cache(store.as_ref(), cache_opts);
+    // One sink for the whole closure: a build is many modules, and what the layer says
+    // once per run is said once for the build rather than once per module.
+    let mut sink = text_sink();
     for (_, c) in &linked.checks {
-        print_checkinfo(c);
+        sink.checkinfo(c);
     }
     let n_err = linked.errors.len();
     for e in linked
@@ -2366,10 +2372,11 @@ fn cmd_build_dir(
         ..Default::default()
     };
     let mut n_err = 0usize;
+    let mut sink = text_sink();
     for f in &files {
         let name = htl::module_name(dir, f)?;
         let (code, c) = h.gen_lua(f)?;
-        print_checkinfo(&c);
+        sink.checkinfo(&c);
         n_err += c.errors.len();
         let Some(code) = code else { continue };
         let (kind, payload) = if opts.source {
