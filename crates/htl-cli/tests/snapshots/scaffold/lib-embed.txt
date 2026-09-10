@@ -58,7 +58,8 @@ current Rust signatures.
 [lint]
 # enable  = ["class-record", "explicit-number"]   # opt-in rules (htl check --list-lints)
 # disable = ["shadow-local"]
-# strict  = true   # lints fail check/test and include_tl!; false makes the macro advisory
+# strict  = true   # warnings and lints fail htl check (not htl test); lints fail
+#                    include_tl!; false makes the macro advisory
 
 [fmt]
 indent = 3

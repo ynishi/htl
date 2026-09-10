@@ -557,7 +557,8 @@ fn t_htl_toml() -> String {
      [lint]\n\
      # enable  = [\"class-record\", \"explicit-number\"]   # opt-in rules (htl check --list-lints)\n\
      # disable = [\"shadow-local\"]\n\
-     # strict  = true   # lints fail check/test and include_tl!; false makes the macro advisory\n\n\
+     # strict  = true   # warnings and lints fail htl check (not htl test); lints fail\n\
+     #                    include_tl!; false makes the macro advisory\n\n\
      [fmt]\n\
      indent = 3\n\n\
      [check]\n\

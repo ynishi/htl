@@ -7,7 +7,7 @@
 //! [lint]
 //! enable  = ["class-record", "explicit-number"]
 //! disable = ["shadow-local"]
-//! strict  = true            # lints are errors (htl check) / compile errors (include_tl!)
+//! strict  = true            # warnings and lints fail htl check; lints fail include_tl!
 //!
 //! [fmt]
 //! indent = 3
@@ -219,8 +219,13 @@ pub struct LintConfig {
     /// Rules to turn off.
     #[serde(default)]
     pub disable: Vec<String>,
-    /// `true`: lints fail `htl check` / `htl test` and `include_tl!`. `false`: advisory
-    /// everywhere (including the macro, whose built-in default is strict).
+    /// `true`: Teal's warnings and htl's lints fail `htl check`, and lints fail
+    /// `include_tl!` (the macro reports Teal's warnings and builds anyway). `false`:
+    /// advisory everywhere (including the macro, whose built-in default is strict).
+    ///
+    /// `htl test` does not read it, by design: a test run's verdict is its tests, plus
+    /// the type errors that stop a file from running at all. Warnings and lints are
+    /// still reported there; `htl check` is where they are judged.
     pub strict: Option<bool>,
 }
 
