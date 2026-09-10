@@ -636,6 +636,11 @@ from — one file's syntax tree, the project layer once the files are checked, o
 vendored compiler — changes nothing about how it is named, configured or judged; one
 registry holds the rules.
 
+The listing is every rule a **check** reports under, which is not quite every name htl
+takes: `htl fix` also files an error's fix under a class (`forward-ref`, `tl:error`), and
+those two are names for `--rule` and `[fix]` only — no level, not in `[lint.rules]`, not in
+`--lint`. See [Fixing](#fixing-htl-fix).
+
 On the command line and in `HTL_LINTS`, `+rule` and `-rule` are the older spelling and say
 the same thing a level does: `+` is `=warn` (report it) and `-` is `=allow` (do not). The
 level form is what can also say `deny`. Later entries win, so a flag raises or lowers what
@@ -1337,6 +1342,19 @@ and `--format json` carries the edits. `htl fix [paths]` applies them:
   declared type to read, in a call to a name the project does not have, so the checker
   refuses it until a person replaces it); `no-global` becomes `local` (unsafe). `htl.toml` `[fix] unsafe = ["no-global"]` promotes a rule, `disable = [..]`
   turns its fix off; `--rule a,b` limits a run.
+- **The names those three take** are every rule `htl check --list-lints` names, plus two
+  that it does not: `forward-ref` and `tl:error`. A Teal error carries no rule of its own,
+  so those two are the classes an error's fix is filed under — `forward-ref` when the
+  message is a record key used before the function that defines it, `tl:error` for any
+  other error. They are names for fixes and nothing else: no check reports under either,
+  so neither has a level, neither is in `[lint.rules]` or `--lint`, and
+  `-- htl: allow(forward-ref)` silences nothing. A name from neither set is refused rather
+  than quietly matching nothing (`--rule forwardref` is an error, not a run that fixed
+  nothing). `tl:error` was called `error` before it joined the same namespace as Teal's
+  warnings; writing the old name says so.
+- **A rule with no fix is a name these take and nothing more.** `--rule require-cycle`
+  is a run that fixes nothing, not an error: which rules carry fixes is a fact about the
+  implementations, and `[fix] disable = ["contract"]` stays valid if one gains a fix later.
 - The working tree is the undo. A file git reports as modified or staged is refused
   (`--allow-dirty`), and so is a file outside a repository (`--allow-no-vcs`).
   `--dry-run` reports without writing; `--diff` prints a unified diff per file instead.

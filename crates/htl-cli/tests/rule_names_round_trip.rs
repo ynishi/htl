@@ -280,6 +280,39 @@ fn the_listing_accounts_for_every_rule() {
     assert_eq!(listed.len(), 24, "{listed:?}");
 }
 
+/// The listing and a spec take the same names, and neither takes the two that `htl fix`
+/// files an error under. Those exist — `htl fix --rule tl:error` is a run, not an error —
+/// but a check reports under neither, so there is no level to print and none to set. A
+/// spec says that rather than saying "unknown", which would send a reader looking for a
+/// spelling that does not exist.
+#[test]
+fn the_listing_does_not_name_what_only_a_fix_takes() {
+    let dir = scratch("surfaces");
+    write(&dir.join("src/a.tl"), "return {}\n");
+    let listing = Command::new(env!("CARGO_BIN_EXE_htl"))
+        .args(["check", "--list-lints"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let listed = String::from_utf8_lossy(&listing.stdout).into_owned();
+    assert!(!listed.contains("forward-ref"), "{listed}");
+    assert!(!listed.contains("tl:error"), "{listed}");
+
+    for rule in ["forward-ref", "tl:error"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+            .args(["check", "src", "--no-cache", "--lint", &format!("-{rule}")])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{rule} was taken as a level: {err}");
+        assert!(err.contains("not a lint rule"), "{err}");
+        assert!(err.contains("htl fix --rule"), "{err}");
+        // The name it refuses is the one that was written, so the reader can see it.
+        assert!(err.contains(rule), "{err}");
+    }
+}
+
 /// A name that is not a rule is still refused, and says which word it did not know.
 #[test]
 fn an_unknown_name_is_still_an_error() {

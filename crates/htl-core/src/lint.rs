@@ -20,16 +20,24 @@
 //! (`[lint.rules]`, `--lint`), which is what lets one rule be advice while another stops
 //! the run. `strict` is not a fourth thing: it promotes every `warn` of the run to `deny`.
 //!
-//! What this module does *not* decide is whether a name is a rule at all. Every entry of
-//! [`RULES`] is both a name htl prints and a name a run can turn off, and there are names
-//! in the first set that do not belong in the second: `forward-ref` and `error` are the
-//! classes `htl fix` gives to Teal errors that have no rule of their own, read by
-//! `htl fix --rule` and `[fix] disable` and consulted by nothing in a check. Registering
-//! them as `RULES` stands would put them in `--list-lints` and make `--lint -forward-ref`
-//! parse into an off switch nothing reads. The seam for that split is
-//! [`rule_defaults`]/[`rule_names`] (what the listing prints) against
-//! [`Selection::parse`] (what a spec accepts): one list feeds both today, and separating
-//! them is where a `Rule` gains a field saying which surfaces it appears on.
+//! Not every entry of [`RULES`] is a name a run can turn off. Two of them —
+//! `forward-ref` and `tl:error` — are the classes `htl fix` gives to a Teal error that has
+//! no rule of its own: read by `htl fix --rule` and `[fix] disable`, consulted by nothing
+//! in a check. So each entry says which surfaces it appears on ([`Surfaces`]), and the two
+//! sides ask different questions of the list. What the listing prints and a spec takes
+//! ([`rule_defaults`], [`rule_names`], [`Selection::parse`]) is the rules a check reports
+//! under; what a fix filter takes ([`fix_rule_names`], [`check_fix_rules`]) is all of them,
+//! since a fix travels with the diagnostic of whatever named it. Without the split,
+//! `--list-lints` would print a name no level applies to and `--lint -forward-ref` would
+//! parse into an off switch nothing reads.
+//!
+//! A rule can also be renamed, and [`RENAMED`] is where the old spelling is kept so that a
+//! project which wrote it is told what to write instead. There is one entry: bare `error`
+//! became `tl:error` when it joined the identity space, because `error` as a name collides
+//! with everything and Teal's errors belong in the same namespace as its warnings. The
+//! fix filters match by string, so without the entry `--rule error` would select nothing
+//! and report that it fixed nothing — which reads exactly like a project with nothing to
+//! fix.
 
 use crate::{Diagnostic, Severity};
 use anyhow::{Result, bail};
@@ -106,13 +114,42 @@ impl std::fmt::Display for Level {
     }
 }
 
+/// Which of htl's two rule-name surfaces a rule appears on.
+///
+/// Two things in htl take a rule by name and they do not take the same set. One is the
+/// lint surface — `htl check --list-lints`, `[lint.rules]`, `--lint`, `HTL_LINTS`, and the
+/// `-- htl: allow(...)` comment — which answers "is this said, and does it stop the run".
+/// The other is the fix surface — `htl fix --rule`, `[fix] disable`, `[fix] unsafe` —
+/// which answers "may a tool rewrite this". The two questions are independent (a level
+/// never decides applicability and applicability never decides a level), and `[lint]` and
+/// `[fix]` stay two tables; what this says is only *which names each table may contain*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Surfaces {
+    /// Both. A rule some check reports under: the listing prints it with its default
+    /// level, a spec sets that level, an allow comment silences one occurrence — and a
+    /// fix filter names it too, because a finding under it may carry a fix.
+    LintAndFix,
+    /// The fix surface alone. A class `htl fix` gives to a Teal error that has no rule of
+    /// its own: nothing in a check reports under the name, so there is no level for a
+    /// project to set, nothing for the listing to print and nothing an allow comment
+    /// could silence. `htl fix --rule` and `[fix] disable` still have to name it, which is
+    /// why it is a registered rule rather than a bare string in `fix.rs`.
+    FixOnly,
+}
+
 /// One rule: the name it is reported and configured under, the level a project that says
-/// nothing about it gets, and which half implements it.
+/// nothing about it gets, which half implements it, and where the name is taken.
 #[derive(Debug, Clone, Copy)]
 pub struct Rule {
     pub name: &'static str,
+    /// What a check says under this name for a project that configures nothing. A
+    /// [`Surfaces::FixOnly`] rule is [`Level::Allow`], which is not a placeholder: no
+    /// check reports under it, so "nothing is said under this name" is the true answer,
+    /// and it is the answer nothing can change — the listing does not print it and a spec
+    /// refuses to set it.
     pub default: Level,
     pub side: Side,
+    pub surfaces: Surfaces,
 }
 
 impl Rule {
@@ -122,6 +159,7 @@ impl Rule {
             name,
             default: Level::Warn,
             side,
+            surfaces: Surfaces::LintAndFix,
         }
     }
 
@@ -132,14 +170,32 @@ impl Rule {
             name,
             default: Level::Allow,
             side,
+            surfaces: Surfaces::LintAndFix,
         }
+    }
+
+    /// A name only `htl fix` uses: the class it files an error's fix under when the error
+    /// has no rule to file it under.
+    const fn fix_class(name: &'static str, side: Side) -> Self {
+        Self {
+            name,
+            default: Level::Allow,
+            side,
+            surfaces: Surfaces::FixOnly,
+        }
+    }
+
+    /// Whether the listing prints this rule and a spec may set its level.
+    pub fn is_lint(&self) -> bool {
+        matches!(self.surfaces, Surfaces::LintAndFix)
     }
 }
 
-/// Every rule there is, in the order `htl check --list-lints` prints them: the file-level
-/// rules first, in the order `lint.lua` runs them, then the ones the project layer asks
-/// once the files have been checked, then the warning kinds the vendored Teal compiler
-/// reports for itself.
+/// Every rule there is. The first twenty-four are the lint surface, in the order
+/// `htl check --list-lints` prints them: the file-level rules first, in the order
+/// `lint.lua` runs them, then the ones the project layer asks once the files have been
+/// checked, then the warning kinds the vendored Teal compiler reports for itself. The last
+/// two are `htl fix`'s error classes, which the listing does not print — see [`Surfaces`].
 pub const RULES: &[Rule] = &[
     Rule::warn("nil-index", Side::Lua),
     Rule::warn("struct-fields", Side::Lua),
@@ -178,22 +234,97 @@ pub const RULES: &[Rule] = &[
     Rule::warn("tl:branch", Side::Tl),
     Rule::warn("tl:hint", Side::Tl),
     Rule::warn("tl:debug", Side::Tl),
+    // The classes `htl fix` files an error's fix under. A Teal error carries no rule of
+    // its own — the compiler does not name its errors the way it names its warning kinds —
+    // so `--rule` and `[fix] disable` would have nothing to say about one. These two are
+    // that name. `forward-ref` is the class htl recognises by its message (a record key
+    // used before the function that defines it); `tl:error` is every other error, in the
+    // same namespace as the compiler's warnings because it is the same compiler speaking.
+    //
+    // Both are `Side::Tl` — the compiler is what produced the diagnostic — and neither is
+    // a lint: no check reports under either name, and `--list-lints` and `[lint.rules]`
+    // say so by not having them.
+    Rule::fix_class("forward-ref", Side::Tl),
+    Rule::fix_class("tl:error", Side::Tl),
 ];
 
-fn index_of(name: &str) -> Option<usize> {
-    RULES.iter().position(|r| r.name == name)
+/// Old spellings and what they are called now: consulted only to answer a project that
+/// wrote one, never to accept it.
+///
+/// `error` was the class of every fixable Teal error that was not a forward reference,
+/// and it was a name a project could write into `--rule` and `[fix] disable`. Renaming it
+/// is a breaking change made on purpose (`docs/releasing.md`), so what it must not be is a
+/// *silent* one: the filters match by string, and an unrecognised name would simply match
+/// nothing and report that nothing was fixed.
+pub const RENAMED: &[(&str, &str)] = &[("error", "tl:error")];
+
+/// The rules of the lint surface, with their position in a [`Selection`].
+fn lint_rules() -> impl Iterator<Item = (usize, &'static Rule)> {
+    RULES.iter().filter(|r| r.is_lint()).enumerate()
 }
 
-/// The name of every rule, in [`RULES`] order.
+/// Where `name` sits in a [`Selection`], or `None` when it is not a rule of the lint
+/// surface (a fix class, or not a rule at all).
+fn index_of(name: &str) -> Option<usize> {
+    lint_rules().find(|(_, r)| r.name == name).map(|(i, _)| i)
+}
+
+/// The name of every rule of the lint surface, in [`RULES`] order.
 pub fn rule_names() -> Vec<&'static str> {
+    lint_rules().map(|(_, r)| r.name).collect()
+}
+
+/// Every rule of the lint surface with the level a project that says nothing gets, in
+/// [`RULES`] order. What `htl check --list-lints` prints, which is the one place a reader
+/// sees which rules are `allow` without having to fail to provoke one.
+pub fn rule_defaults() -> Vec<(&'static str, Level)> {
+    lint_rules().map(|(_, r)| (r.name, r.default)).collect()
+}
+
+/// The names `htl fix --rule`, `[fix] disable` and `[fix] unsafe` take: every rule there
+/// is. A fix travels with a diagnostic, so any rule that can report can carry one, and the
+/// two classes exist for the errors that report under no rule.
+///
+/// A rule with no fix to its name is accepted here and matches nothing — `--rule
+/// require-cycle` is a run that fixes nothing rather than an error — because which rules
+/// carry fixes is a fact about today's implementations, not about the vocabulary.
+pub fn fix_rule_names() -> Vec<&'static str> {
     RULES.iter().map(|r| r.name).collect()
 }
 
-/// Every rule with the level a project that says nothing gets, in [`RULES`] order. What
-/// `htl check --list-lints` prints, which is the one place a reader sees which rules are
-/// `allow` without having to fail to provoke one.
-pub fn rule_defaults() -> Vec<(&'static str, Level)> {
-    RULES.iter().map(|r| (r.name, r.default)).collect()
+/// Refuse the names a fix filter was given that no fix could ever be filed under.
+///
+/// `surface` is what the message calls the filter (`htl fix --rule`, `[fix] disable`,
+/// `[fix] unsafe`). A name that was renamed is answered with the name it has now: this is
+/// the only place that knows the old spelling meant something, and a project reading
+/// "unknown" about a word that used to work would be left guessing.
+pub fn check_fix_rules(names: &[String], surface: &str) -> Result<()> {
+    for name in names {
+        if RULES.iter().any(|r| r.name == name.as_str()) {
+            continue;
+        }
+        if let Some((_, now)) = RENAMED.iter().find(|(old, _)| *old == name.as_str()) {
+            bail!(
+                "{surface}: `{name}` is now `{now}` — Teal's errors are named in the `tl:` \
+                 namespace, as its warnings are"
+            );
+        }
+        bail!(
+            "{surface}: unknown rule `{name}`. Takes any rule `htl check --list-lints` \
+             names, or one of the classes an error's fix is filed under: {}",
+            fix_classes().join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// The names that exist on the fix surface and nowhere else.
+pub fn fix_classes() -> Vec<&'static str> {
+    RULES
+        .iter()
+        .filter(|r| !r.is_lint())
+        .map(|r| r.name)
+        .collect()
 }
 
 /// What level each rule has for a run: the defaults, with a spec applied over them.
@@ -204,14 +335,15 @@ pub fn rule_defaults() -> Vec<(&'static str, Level)> {
 /// lower what the file set.
 #[derive(Debug, Clone)]
 pub struct Selection {
-    /// Parallel to [`RULES`].
+    /// Parallel to the lint surface of [`RULES`] — a fix class has no level to carry, so
+    /// there is no slot for one here either.
     levels: Vec<Level>,
 }
 
 impl Default for Selection {
     fn default() -> Self {
         Self {
-            levels: RULES.iter().map(|r| r.default).collect(),
+            levels: lint_rules().map(|(_, r)| r.default).collect(),
         }
     }
 }
@@ -227,6 +359,10 @@ impl Selection {
     /// silently turned nothing on would read exactly like a rule that found nothing. So
     /// is an unknown level, for the same reason — a misspelt `deny` that meant "fail the
     /// run" must not read as "everything passed".
+    ///
+    /// A name that is a rule but not one of this surface ([`Surfaces::FixOnly`]) is
+    /// refused too, and says so rather than saying "unknown": the name exists, and what a
+    /// reader needs to hear is that a level is not a thing it has.
     pub fn parse(spec: &str) -> Result<Self> {
         let mut sel = Self::default();
         for item in spec
@@ -246,6 +382,13 @@ impl Selection {
                 },
             };
             let Some(i) = index_of(name) else {
+                if RULES.iter().any(|r| r.name == name) {
+                    bail!(
+                        "not a lint rule: {name} is the class `htl fix` files an error's \
+                         fix under, taken by `htl fix --rule` and `[fix] disable`. No \
+                         check reports under it, so it has no level"
+                    );
+                }
                 bail!("unknown lint rule: {item}");
             };
             sel.levels[i] = level;
@@ -267,15 +410,14 @@ impl Selection {
 
     /// The rules of one side and whether each is on, for a consumer that has to be handed
     /// the selection rather than ask about it — `lint.lua`, which runs its twelve from a
-    /// table.
+    /// table. Fix classes are not among them: no producer produces one, so there is
+    /// nothing to tell a producer about them.
     ///
     /// A producer is told whether to produce and not how much it matters: the level of
     /// what it produced is read where the run is judged ([`Lints::level`]), so a rule
     /// moving between `warn` and `deny` changes no producer's work.
     pub fn of_side(&self, side: Side) -> impl Iterator<Item = (&'static str, bool)> + '_ {
-        RULES
-            .iter()
-            .enumerate()
+        lint_rules()
             .filter(move |(_, r)| r.side == side)
             .map(|(i, r)| (r.name, self.levels[i].is_on()))
     }
@@ -503,6 +645,87 @@ mod tests {
     fn an_unknown_name_is_refused_as_written() {
         let err = Selection::parse("+nil-idex").unwrap_err().to_string();
         assert_eq!(err, "unknown lint rule: +nil-idex");
+    }
+
+    /// The two surfaces do not take the same names any more. The listing is the smaller
+    /// set, and every name in it round-trips through a spec — which is the property the
+    /// registry exists for, held here for whatever the listing prints rather than for a
+    /// list written out by hand.
+    #[test]
+    fn the_listing_prints_fewer_names_than_a_fix_filter_takes() {
+        let listed = rule_names();
+        let fixable = fix_rule_names();
+        for name in &listed {
+            assert!(fixable.contains(name), "{name} is not a name a fix takes");
+            Selection::parse(&format!("{name}=deny"))
+                .unwrap_or_else(|e| panic!("the listing prints {name} and a spec refuses it: {e}"));
+        }
+        let only_fix: Vec<&str> = fixable
+            .iter()
+            .copied()
+            .filter(|n| !listed.contains(n))
+            .collect();
+        assert_eq!(only_fix, fix_classes());
+        assert_eq!(only_fix, ["forward-ref", "tl:error"], "{only_fix:?}");
+    }
+
+    /// A fix class is refused by a spec, and told apart from a typo: the name exists, and
+    /// what a reader needs to hear is that a level is not something it has.
+    #[test]
+    fn a_fix_class_has_no_level_to_set() {
+        for name in fix_classes() {
+            let err = Selection::parse(&format!("-{name}"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.starts_with("not a lint rule: "), "{err}");
+            assert!(
+                err.contains(name) && err.contains("htl fix --rule"),
+                "{err}"
+            );
+            // And it is not silently on: nothing produces one, so nothing reports one.
+            assert!(!Selection::default().is_on(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_fix_filter_takes_a_class_and_a_rule_and_refuses_a_typo() {
+        let names = |s: &[&str]| s.iter().map(|n| (*n).to_string()).collect::<Vec<_>>();
+        check_fix_rules(
+            &names(&["tl:error", "forward-ref", "no-global"]),
+            "[fix] disable",
+        )
+        .unwrap();
+        let err = check_fix_rules(&names(&["forwardref"]), "htl fix --rule")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("htl fix --rule: unknown rule `forwardref`"),
+            "{err}"
+        );
+        // The message says where to look, and names the classes the listing will not.
+        assert!(
+            err.contains("--list-lints") && err.contains("tl:error"),
+            "{err}"
+        );
+    }
+
+    /// The rename is breaking and says so. A project that wrote `error` is told the name
+    /// it has now, rather than being told it is unknown — or, worse, being told nothing
+    /// and shown a run that fixed nothing.
+    #[test]
+    fn the_old_error_spelling_names_what_replaced_it() {
+        for surface in ["htl fix --rule", "[fix] disable", "[fix] unsafe"] {
+            let err = check_fix_rules(&["error".to_string()], surface)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(
+                err,
+                format!(
+                    "{surface}: `error` is now `tl:error` — Teal's errors are named in the \
+                     `tl:` namespace, as its warnings are"
+                )
+            );
+        }
     }
 
     #[test]

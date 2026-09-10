@@ -30,6 +30,23 @@ pub struct FixOptions {
     pub dry_run: bool,
 }
 
+impl FixOptions {
+    /// Refuse a rule name none of these filters could ever match.
+    ///
+    /// The filters are string comparisons against the name a candidate was filed under
+    /// ([`rule_of`]), so a name that is not a rule quietly matches nothing: `--rule
+    /// nil-idex` would report a run that fixed nothing, which is what a project with
+    /// nothing to fix also reports. The names come from a person either way — a flag or
+    /// `[fix]` in `htl.toml` — so they are held to the registry the way a lint spec is
+    /// ([`crate::lint::check_fix_rules`]).
+    pub fn validate(&self) -> Result<()> {
+        crate::lint::check_fix_rules(&self.only, "htl fix --rule")?;
+        crate::lint::check_fix_rules(&self.disabled, "[fix] disable")?;
+        crate::lint::check_fix_rules(&self.promoted, "[fix] unsafe")?;
+        Ok(())
+    }
+}
+
 /// One fix that was (or would be) applied.
 #[derive(Debug, Clone)]
 pub struct Applied {
@@ -73,6 +90,9 @@ pub struct FileOutcome {
 /// Fix one file in place (or in memory with `dry_run`). The checker's search path
 /// must already cover the project.
 pub fn fix_file(h: &Htl, path: &Path, opts: &FixOptions) -> Result<FileOutcome> {
+    // Before reading the file: a misspelt rule is a fact about the request, and answering
+    // it after the first file has been rewritten would be the wrong way round.
+    opts.validate()?;
     let original =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let mut current = original.clone();
@@ -332,6 +352,11 @@ fn suggestions(check: &CheckInfo, opts: &FixOptions) -> Vec<Candidate> {
 
 /// What `--rule` and `[fix] disable` name a diagnostic by: a lint's own rule, or a class
 /// name for an error, which has none of its own.
+///
+/// Both classes are registered rules ([`crate::lint::RULES`], `Surfaces::FixOnly`), so a
+/// filter naming one is a filter naming something that exists. `tl:error` is spelt in the
+/// compiler's namespace like its warning kinds, and for the same reason: it is the
+/// compiler speaking, and bare `error` as a rule name would collide with everything.
 fn rule_of(d: &Diagnostic, is_error: bool) -> String {
     if !is_error && let Some(rule) = &d.rule {
         return rule.clone();
@@ -339,7 +364,7 @@ fn rule_of(d: &Diagnostic, is_error: bool) -> String {
     if d.message.contains("invalid key '") && d.message.contains("is defined at line") {
         return "forward-ref".into();
     }
-    "error".into()
+    "tl:error".into()
 }
 
 /// Apply the candidates whose edits do not overlap an already accepted edit, in

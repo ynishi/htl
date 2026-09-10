@@ -227,3 +227,50 @@ fn exit_non_zero_on_fix_for_ci() {
     );
     assert!(ok, "second run changes nothing: {err}");
 }
+
+/// `--rule` and `[fix] disable` take the rules `--list-lints` names *and* the two classes
+/// an error's fix is filed under, which the listing does not name. A name from neither set
+/// is refused rather than matching nothing.
+#[test]
+fn the_fix_filters_take_the_rules_and_the_error_classes() {
+    let Some(root) = repo() else { return };
+    // The run happens (it reports on the file); its exit code is about what the file still
+    // has wrong, which is not what this is asking.
+    for rule in ["tl:error", "forward-ref", "explicit-number"] {
+        let (_, _, err) = htl(&["fix", "src", "--dry-run", "--rule", rule], &root);
+        assert!(err.contains("htl fix: 1 file(s)"), "--rule {rule}: {err}");
+        assert!(!err.contains("unknown rule"), "--rule {rule}: {err}");
+    }
+    let (ok, _, err) = htl(&["fix", "src", "--dry-run", "--rule", "forwardref"], &root);
+    assert!(!ok, "a name that is not a rule: {err}");
+    assert!(err.contains("unknown rule `forwardref`"), "{err}");
+    assert!(err.contains("--list-lints"), "{err}");
+}
+
+/// The old spelling of the second class. Renaming it is breaking on purpose; what a
+/// project gets is the new name, not a run that silently fixed nothing.
+#[test]
+fn the_old_error_spelling_says_what_it_is_called_now() {
+    let Some(root) = repo() else { return };
+    let want = "`error` is now `tl:error`";
+
+    let (ok, _, err) = htl(&["fix", "src", "--dry-run", "--rule", "error"], &root);
+    assert!(!ok && err.contains(want), "{err}");
+    assert!(err.contains("htl fix --rule:"), "{err}");
+
+    write(
+        &root.join("htl.toml"),
+        "[lint.rules]\nexplicit-number = \"warn\"\n\n[fix]\ndisable = [\"error\"]\n",
+    );
+    let (ok, _, err) = htl(&["fix", "src", "--dry-run"], &root);
+    assert!(!ok && err.contains(want), "{err}");
+    assert!(err.contains("[fix] disable:"), "{err}");
+
+    // And the name it points at is one the same table takes.
+    write(
+        &root.join("htl.toml"),
+        "[lint.rules]\nexplicit-number = \"warn\"\n\n[fix]\ndisable = [\"tl:error\"]\n",
+    );
+    let (ok, _, err) = htl(&["fix", "src", "--dry-run"], &root);
+    assert!(ok, "{err}");
+}

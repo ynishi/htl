@@ -8,7 +8,7 @@
 //! as a lint that quietly stops firing.
 
 use htl_core::Htl;
-use htl_core::lint::{Level, RULES, Side};
+use htl_core::lint::{Level, RULES, Side, Surfaces};
 
 #[test]
 fn lint_lua_implements_exactly_the_lua_side_of_the_registry() {
@@ -78,12 +78,15 @@ fn the_registry_carries_exactly_the_vendored_compilers_warning_kinds() {
         .collect();
     assert_eq!(kinds.len(), 7, "{kinds:?}");
 
+    // The `tl` side also holds the two classes `htl fix` files an error under, which are
+    // not warning kinds and are not lints: they belong to the fix surface alone, and the
+    // test below is what holds them.
     let mut registered: Vec<String> = RULES
         .iter()
-        .filter(|r| r.side == Side::Tl)
+        .filter(|r| r.side == Side::Tl && r.is_lint())
         .map(|r| r.name.to_string())
         .collect();
-    for r in RULES.iter().filter(|r| r.side == Side::Tl) {
+    for r in RULES.iter().filter(|r| r.side == Side::Tl && r.is_lint()) {
         assert_eq!(
             r.default,
             Level::Warn,
@@ -98,6 +101,25 @@ fn the_registry_carries_exactly_the_vendored_compilers_warning_kinds() {
         "the vendored compiler's warning kinds and the tl side of lint::RULES have to be \
          the same names"
     );
+}
+
+/// The registry also holds the two names that are not lints: the classes `htl fix` files
+/// an error's fix under. A check reports under neither, so what is asserted is the
+/// negative — they are on the fix surface only, which is what keeps them out of
+/// `--list-lints` and out of `[lint.rules]`.
+#[test]
+fn the_registry_holds_the_fix_classes_and_marks_them_as_not_lints() {
+    let classes: Vec<&str> = RULES
+        .iter()
+        .filter(|r| !r.is_lint())
+        .map(|r| r.name)
+        .collect();
+    assert_eq!(classes, ["forward-ref", "tl:error"], "{classes:?}");
+    for r in RULES.iter().filter(|r| !r.is_lint()) {
+        assert_eq!(r.surfaces, Surfaces::FixOnly, "{}", r.name);
+        // The compiler is what produced the diagnostic; htl only chose what to call it.
+        assert_eq!(r.side, Side::Tl, "{}", r.name);
+    }
 }
 
 /// A state nobody configured runs the defaults. The defaults live on the Rust side now,
