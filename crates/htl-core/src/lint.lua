@@ -28,23 +28,12 @@
 local tl = require("tl")
 local L = {}
 
-L.DEFAULT = {
-   ["nil-index"] = true,
-   -- On by default and still silent by default: nothing is reported until a record is
-   -- marked `---@struct`, which is a thing someone had to write.
-   ["struct-fields"] = true,
-   -- Same: nothing is reported until a record is marked `---@sealed`.
-   ["sealed-record"] = true,
-   ["enum-exhaustive"] = true,
-   ["enum-cast"] = true,
-   ["enum-table"] = true,
-   ["union-exhaustive"] = true,
-   ["shadow-local"] = true,
-   ["no-global"] = true,
-   ["no-any"] = false,
-   ["explicit-number"] = false,
-   ["class-record"] = false,
-}
+-- Which rules are on is not decided here. The registry — every rule name there is, its
+-- default, and which half of htl implements it — is `lint::RULES` in lint.rs, because the
+-- project layer reports under those names too and could not read a list kept in Lua. What
+-- this file owns is the twelve implementations below (`RULES`), and `L.run` is handed the
+-- selection to run them under. `struct-fields` and `sealed-record` are on and still say
+-- nothing until a record carries `---@struct` / `---@sealed`, which someone had to write.
 
 local SKIP_KEYS = { if_parent = true, type = true, newtype = true, decltuple = true, expected = true }
 
@@ -1135,25 +1124,13 @@ function L.rule_names()
    return out
 end
 
--- Parse `+rule,-rule,...` on top of the defaults. Returns enabled set or nil, err.
-function L.config(spec)
-   local cfg = {}
-   for k, v in pairs(L.DEFAULT) do cfg[k] = v end
-   for item in (spec or ""):gmatch("[^,%s]+") do
-      local sign, name = item:match("^([%+%-]?)([%w%-]+)$")
-      if not name or cfg[name] == nil then
-         return nil, "unknown lint rule: " .. tostring(item)
-      end
-      cfg[name] = (sign ~= "-")
-   end
-   return cfg
-end
-
 -- Returns list of { rule, y, x, msg } sorted by position, or nil, err on syntax error.
 -- `extra` = { enums = name -> enumset, subject_enum = fn(y, x, key) } feeds
 -- enum-exhaustive with what the checker resolved (see prelude.lua).
+-- `cfg` is rule -> on, as the Rust side resolved it (`Htl::select_lints`). Nothing is a
+-- rule this file decides for itself, so a missing table runs nothing.
 function L.run(src, filename, cfg, extra)
-   cfg = cfg or L.DEFAULT
+   cfg = cfg or {}
    -- Always a fresh parse. The checker's AST looks like a free second copy, but the
    -- checker hangs resolved types off nodes, and through them the declarations of
    -- *other* files become reachable: `no-any` then reported `any`s from test.d.tl at

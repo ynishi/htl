@@ -29,7 +29,10 @@ pub mod dts;
 #[cfg(feature = "ffi")]
 pub mod ffi;
 pub mod fix;
+// The rules there are, and which of them a run has on. Both halves of htl report under
+// these names, so the list is here rather than in `lint.lua`, which is one of the halves.
 pub mod link;
+pub mod lint;
 #[cfg(feature = "pkg")]
 pub mod pkg;
 // The project layer: a walk over many files, the run cache under it, and the decisions
@@ -1052,11 +1055,16 @@ impl Htl {
             .eval()
             .context("loading htl prelude")?;
         lua.set_named_registry_value(PRELUDE_REGISTRY_KEY, h.clone())?;
-        Ok(Self {
+        let this = Self {
             lua,
             h,
             split: false,
-        })
+        };
+        // The defaults come from the registry, and this is where a state gets them: the
+        // Lua side holds no rule list of its own, so a state nobody configures would
+        // otherwise run no lints at all.
+        this.select_lints(&lint::Selection::default())?;
+        Ok(this)
     }
 
     pub fn lua(&self) -> &Lua {
@@ -1101,18 +1109,37 @@ impl Htl {
     }
 
     /// Configure lint rules: `"+no-any,-shadow-local"` on top of the defaults.
+    ///
+    /// The spec is resolved against [`lint::RULES`], so a name the project layer reports
+    /// under is a name this takes; an unknown one is `unknown lint rule: <item>`.
     pub fn configure_lints(&self, spec: &str) -> Result<()> {
-        let f: Function = self.h.get("set_lints")?;
-        let (ok, err): (Option<bool>, Option<String>) = f.call(spec)?;
-        if ok.unwrap_or(false) {
-            Ok(())
-        } else {
-            bail!("{}", err.unwrap_or_else(|| "invalid lint spec".into()))
-        }
+        self.select_lints(&lint::Selection::parse(spec)?)
     }
 
-    /// Names of all lint rules (enabled or not).
+    /// Hand the checker a selection resolved elsewhere — what a caller that also has to
+    /// ask about the project-layer rules has in hand ([`lint::Lints`]), so that the file
+    /// rules and the project rules of one run come from one resolution of one spec.
+    ///
+    /// Only the rules `lint.lua` implements cross: it runs from this table and keeps no
+    /// defaults of its own.
+    pub fn select_lints(&self, sel: &lint::Selection) -> Result<()> {
+        let t = self.lua.create_table()?;
+        for (name, on) in sel.of_side(lint::Side::Lua) {
+            t.set(name, on)?;
+        }
+        let f: Function = self.h.get("set_lints")?;
+        f.call::<()>(t)?;
+        Ok(())
+    }
+
+    /// Names of all lint rules (enabled or not), the project layer's among them.
     pub fn lint_rules(&self) -> Result<Vec<String>> {
+        Ok(lint::rule_names().into_iter().map(str::to_string).collect())
+    }
+
+    /// The rules `lint.lua` implements, as it knows them. The registry is
+    /// [`lint::RULES`]; this is the list to hold it to (`tests/lint_registry.rs`).
+    pub fn lua_lint_rules(&self) -> Result<Vec<String>> {
         let f: Function = self.h.get("lint_rules")?;
         let t: Table = f.call(())?;
         Ok(t.sequence_values::<String>().collect::<mlua::Result<_>>()?)

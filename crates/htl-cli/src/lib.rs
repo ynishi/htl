@@ -208,7 +208,10 @@ Caching: https://github.com/ynishi/htl#caching
         #[arg(long)]
         strict: bool,
         /// Lint rules on top of the defaults, e.g. `+no-any,-shadow-local`
-        #[arg(long)]
+        // A spec that turns a rule off starts with `-`, and without this clap reads
+        // `--lint -contract` as a cluster of short flags and answers `unexpected argument
+        // '-c'`: the documented way to turn one rule off never reached the spec parser.
+        #[arg(long, allow_hyphen_values = true)]
         lint: Option<String>,
         /// List lint rules and exit
         #[arg(long)]
@@ -246,7 +249,7 @@ Examples:
         #[arg(long, default_value = htl::testing::DEFAULT_LIB)]
         lib: String,
         /// Lint rules on top of the defaults, e.g. `+no-any`
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         lint: Option<String>,
         /// Stop at the first failure (within a file, and across files)
         #[arg(long)]
@@ -1961,10 +1964,12 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
     } else {
         paths.to_vec()
     };
-    // Listing the rules reports nothing about the project and shares nothing with a run.
+    // Listing the rules reports nothing about the project and shares nothing with a run —
+    // and now not even a Lua state: the registry is Rust (`htl_core::lint::RULES`), which
+    // is what lets the rules the project layer reports under be listed beside the ones
+    // `lint.lua` implements.
     if list_lints {
-        let h = Htl::new()?;
-        for r in h.lint_rules()? {
+        for r in htl::lint::rule_names() {
             println!("{r}");
         }
         return Ok(ExitCode::SUCCESS);

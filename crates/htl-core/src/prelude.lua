@@ -23,16 +23,18 @@ do
    end
 end
 
-H.lint_cfg = lint.DEFAULT
+-- Rule -> on, for the rules lint.lua implements. Set by the Rust side, which resolves the
+-- `+rule,-rule` spec against the registry (`lint::RULES`) and hands over the answer; the
+-- state gets the defaults that way too, at construction. Nothing here has a rule list of
+-- its own, which is what keeps the names a project may write and the names that run the
+-- same set.
+H.lint_cfg = {}
 
--- `+rule,-rule,...` on top of the defaults. Returns nil, err on unknown rule.
-function H.set_lints(spec)
-   local cfg, err = lint.config(spec)
-   if not cfg then return nil, err end
+function H.set_lints(cfg)
    H.lint_cfg = cfg
-   return true
 end
 
+-- The rules lint.lua implements, for the test that holds this list to the registry.
 function H.lint_rules()
    return lint.rule_names()
 end

@@ -469,11 +469,9 @@ pub fn search_dirs(file: &Path, root: &Path, cfg: &Config) -> Vec<PathBuf> {
 ///
 /// Only built when something actually has to be checked — a run that replays every module
 /// should not pay the ~13.5 ms this costs.
-pub fn checker(cfg: &Config, paths: &[PathBuf], spec: &str) -> Result<Htl> {
+pub fn checker(cfg: &Config, paths: &[PathBuf], sel: &crate::lint::Selection) -> Result<Htl> {
     let h = Htl::new()?;
-    if !spec.is_empty() {
-        h.configure_lints(spec)?;
-    }
+    h.select_lints(sel)?;
     if let Some(first) = paths.first()
         && let Some(p) = crate::pkg::Project::find(first)
     {
@@ -543,17 +541,34 @@ impl Origins {
     }
 }
 
+/// What a walk settled before it checked anything, and every file of it is checked
+/// against: the config, the contracts resolved from it, where a file a check pulls in
+/// lives, the module names the host registers, and the rules this run reports under.
+///
+/// One value rather than five parameters, because they are one decision — a walk is not
+/// free to answer any of them differently from one file to the next.
+pub struct Walk<'a> {
+    pub cfg: &'a Config,
+    pub contracts: &'a [crate::contract::Resolved],
+    pub origins: &'a Origins,
+    pub host_modules: &'a [String],
+    pub lints: &'a crate::lint::Lints,
+}
+
 /// Check one file and collect everything it reported, its contract lints included, and
 /// the errors of what it required after them.
+///
+/// The checker was built with the walk's rule selection, so the file's own lints arrive
+/// already filtered; what is decided here is the rules this layer asks itself — and the
+/// `-- htl: allow(...)` comments those answer to.
 pub fn check_one<O: Output>(
     h: &Htl,
     sink: &mut Sink<O>,
     f: &Path,
-    cfg: &Config,
-    contracts: &[crate::contract::Resolved],
-    origins: &Origins,
-    host_modules: &[String],
+    w: &Walk<'_>,
 ) -> Result<cache::Module> {
+    let (cfg, contracts, origins, host_modules, lints) =
+        (w.cfg, w.contracts, w.origins, w.host_modules, w.lints);
     // Both `add_layout_paths` and the contract lints prepend to the search path, and
     // without putting it back the Nth file would be checked against the directories of the
     // first N-1 as well — so a `require` would resolve against whatever happened to be
@@ -564,21 +579,25 @@ pub fn check_one<O: Output>(
     h.add_layout_paths(f)?;
     let c = h.check(f)?;
     sink.checkinfo(&c);
-    let mut lints = c.lints.len();
+    let mut lints_said = c.lints.len();
     // Two declarations of one module on the path: one was read, the other silently was
     // not. And a require of a name the host registers that landed on a file instead.
-    // Asked here, while the path this file was checked under is still in place.
-    for l in crate::declaration_conflict_lints(h, f, &c, host_modules)? {
-        sink.diag(Severity::Lint, &l);
-        lints += 1;
+    // Asked here, while the path this file was checked under is still in place — and only
+    // when the run reports at least one of the two, since one walk answers both.
+    if lints.on("duplicate-declaration") || lints.on("host-module-shadowed") {
+        for l in lints.keep(crate::declaration_conflict_lints(h, f, &c, host_modules)?) {
+            sink.diag(Severity::Lint, &l);
+            lints_said += 1;
+        }
     }
     // `---@contract`: the type and required fields for files under each contract dir.
     if let Some((root, _, cfg)) = cfg
         && c.ok()
+        && lints.on("contract")
     {
-        for l in crate::contract_lints(h, root, cfg, contracts, f)? {
+        for l in lints.keep(crate::contract_lints(h, root, cfg, contracts, f)?) {
             sink.diag(Severity::Lint, &l);
-            lints += 1;
+            lints_said += 1;
         }
     }
     // What this file required and found broken: `htl run` would refuse the module at its
@@ -593,7 +612,7 @@ pub fn check_one<O: Output>(
         diagnostics: sink.take_recorded(),
         errors: c.errors.len(),
         warnings: c.warnings.len(),
-        lints,
+        lints: lints_said,
         deps: c.deps.iter().map(|p| cache::normal(p)).collect(),
         requires: cache::requires_json(&c),
         // `htl check` has no use for generated Lua, nor for reading a `CheckInfo` back —
@@ -866,6 +885,10 @@ pub fn check<O: Output>(
         .map(|(_, _, c)| c.lint_spec())
         .unwrap_or_default();
     let spec = crate::config::join_specs([file_spec.as_str(), lint.unwrap_or("")]);
+    // One resolution of that spec for the run. The checker is configured from it below, so
+    // the rules `lint.lua` runs and the rules this layer asks are the same answer to the
+    // same question — and an unknown name is refused here, before anything is checked.
+    let lints = crate::lint::Lints::parse(&spec)?;
 
     // The module names the host registers in `package.preload`, read from the crate's
     // Rust sources once for the run: `host-module-shadowed` asks the same question of
@@ -897,7 +920,7 @@ pub fn check<O: Output>(
     let to_check = hits.iter().filter(|h| h.is_none()).count();
 
     let h = if to_check > 0 {
-        Some(checker(cfg, paths, &spec)?)
+        Some(checker(cfg, paths, lints.selection())?)
     } else {
         None
     };
@@ -915,7 +938,18 @@ pub fn check<O: Output>(
             }
             None => {
                 let h = h.as_ref().expect("a module missed, so a checker was built");
-                let m = check_one(h, sink, f, cfg, &contracts, &origins, &host_modules)?;
+                let m = check_one(
+                    h,
+                    sink,
+                    f,
+                    &Walk {
+                        cfg,
+                        contracts: &contracts,
+                        origins: &origins,
+                        host_modules: &host_modules,
+                        lints: &lints,
+                    },
+                )?;
                 // Per-module entries are written as each one is checked; a whole-run entry
                 // cannot be written until the walk is done, so it happens below.
                 if let Some(c) = &store
@@ -946,9 +980,11 @@ pub fn check<O: Output>(
         c.store_run(&run_key, &files, &cfg_inputs, &dirs, &modules);
     }
     // Project-level: cycles in the require graph of the files just checked.
-    for cyc in crate::require_cycles(&infos) {
-        sink.diag(Severity::Lint, &cyc);
-        n_lint += 1;
+    if lints.on("require-cycle") {
+        for cyc in lints.keep(crate::require_cycles(&infos)) {
+            sink.diag(Severity::Lint, &cyc);
+            n_lint += 1;
+        }
     }
     // A marker that could not be turned into a contract, and a contract that could not be
     // published: reported once for the run, and before the enforcement question, which
@@ -957,13 +993,28 @@ pub fn check<O: Output>(
         Some((r, _, _)) => crate::contract::publish(r, &contracts).1,
         None => Vec::new(),
     };
-    for p in contract_problems.iter().chain(&publish_problems) {
-        sink.diag(Severity::Lint, p);
+    // Both report under `contract`, so both go through the selection. Publishing itself is
+    // not gated on it: writing a contract's type where the config says to put it is work
+    // the command was asked to do, and only what it has to say about it is a finding.
+    let problems: Vec<String> = contract_problems
+        .iter()
+        .chain(&publish_problems)
+        .cloned()
+        .collect();
+    for p in lints.keep(problems) {
+        sink.diag(Severity::Lint, &p);
         n_lint += 1;
     }
-    // A contract the host never enforces is documentation, not a guarantee.
-    if let Some((_, cfg_path, _)) = cfg {
-        for l in crate::contract_enforcement_lints(cfg_path, &contracts, cargo_root.as_deref()) {
+    // A contract the host never enforces is documentation, not a guarantee. The scan reads
+    // every Rust source of the crate, so a run with the rule off does not start it.
+    if let Some((_, cfg_path, _)) = cfg
+        && lints.on("contract-unenforced")
+    {
+        for l in lints.keep(crate::contract_enforcement_lints(
+            cfg_path,
+            &contracts,
+            cargo_root.as_deref(),
+        )) {
             sink.diag(Severity::Lint, &l);
             n_lint += 1;
         }
