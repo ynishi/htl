@@ -73,15 +73,24 @@ no `[patch.crates-io]`, against the crate the project actually pins, and the CI 
 runs it. `just e2e-scaffold` cannot — it points the three crates at this checkout, where
 every key this branch added exists.
 
-It says so during the cycle and not at the end of one. The pin is derived from the CLI's own
-version, so on the release commit it names the version being released, and that version is
-not on crates.io until the chain puts it there. A build attempted then reports that
-`htl = "0.4"` selects nothing — a fact about the registry, not about the scaffold, and one
-that turns the CI scaffold job red for as long as the release takes. So the recipe asks the
-index which case it is in, and when the pin is unpublished it names the pin it could not
-resolve and defers rather than building. What it defers to is the chain below, which runs it
-after `htl` is published and before `htl-cli` is: the one moment the question both has an
-answer and can still change what goes out.
+During the cycle is the whole of that recipe's job, and the reason to keep it: a commit that
+teaches the scaffold to write an unreadable key is caught on the commit that writes it, weeks
+before the release it would break. A check that only ran at the release would meet the same
+commit a cycle later, merged, with the fix owed to the release it is holding up.
+
+The pin is derived from the CLI's own version, so on the release commit it names the version
+being released, and that version is not on crates.io until the chain puts it there. A build
+attempted then reports that `htl = "0.4"` selects nothing — a fact about the registry, not
+about the scaffold, and one that turns the CI scaffold job red for as long as the release
+takes. So the recipe asks the index which case it is in, and when the pin is unpublished it
+names the pin it could not resolve and defers rather than building.
+
+Nothing waits on that deferral now. `just e2e-scaffold-packaged` answers the same question on
+the release commit and needs nothing published to answer it: it scaffolds all three host
+profiles and builds them against the four `.crate` files the publish would upload, patched at
+the extracted trees through `--config` so each generated `Cargo.toml` is still byte for byte
+the one a user gets. The chain below runs it before the first `cargo publish`, so what goes
+out is gated whether or not the deferral fires.
 
 ### At each release
 
@@ -94,41 +103,68 @@ answer and can still change what goes out.
 - [ ] Did anything added to the scaffold's templates this cycle need an unpublished htl?
       Same answer, same list. This cycle the `ffi` host profile is the case to know about:
       it pins `htl = { version = "0.4", features = ["ffi"] }`, and the `ffi` feature is
-      published by the same 0.4.0, so the two arrive together. Nothing here checks that —
-      `e2e-scaffold-published` scaffolds `--host rust --lib` only, so a feature a profile
-      names is never resolved against the registry.
-- [ ] Run `just e2e-scaffold-published` from inside the chain, not before it. On the release
-      commit the pin is the version being released, so the recipe defers and says so; that
-      deferral is not a pass and the step in the chain is where it stops being one. Do not
-      drop the step to make the chain shorter.
+      published by the same 0.4.0, so the two arrive together. `e2e-scaffold-packaged`
+      scaffolds that profile and builds it, so the feature is resolved against the `htl`
+      tarball about to be published — the same bytes, one step before the registry holds
+      them. `e2e-scaffold-published`, the recipe that asks the registry itself, still
+      scaffolds `--host rust --lib` only.
+- [ ] Run `just e2e-scaffold-packaged` before the first `cargo publish`, as the chain below
+      does. It is the step that can still change what goes out; every step after it cannot.
+      On the release commit `e2e-scaffold-published` will defer and say so, and that
+      deferral is not a pass — it is a question the gate has already answered against the
+      tarballs, which is why the chain no longer stops for it.
 
 ## The chain
 
-Four crates, published in dependency order. Each waits for the previous one to be
-visible in the index before it can be verified.
+The gate first, then four crates published in dependency order, each waiting for the
+previous one to be visible in the index before it can be verified.
 
 ```sh
+cargo publish --dry-run --workspace && \
+just e2e-scaffold-packaged && \
 cargo publish -p htl-core && sleep 30 && \
 cargo publish -p htl-macros && sleep 30 && \
 cargo publish -p htl && sleep 30 && \
-just e2e-scaffold-published && \
 cargo publish -p htl-cli && \
 git tag v<version> && git push origin main && git push origin v<version>
 ```
 
-The scaffold check sits between the third crate and the fourth because that is the only
-place it can be asked and still be worth asking. A generated project depends on `htl`
-alone, and `htl` is third; `htl-cli`, the binary that writes the scaffold and derives its
-pin, is fourth. In the gap between them crates.io holds exactly what a scaffold pins, and
-nobody can yet obtain the CLI that pins it — so a scaffold that does not build against the
-crates just published stops the chain before `htl-cli` goes out. The window in which a
-broken scaffold is installable is not narrowed; there is no window.
+`cargo publish --dry-run --workspace` packages all four and stops short of uploading, which
+is the cheap way to be told about a manifest the registry would refuse. `just
+e2e-scaffold-packaged` then takes the same four tarballs to the other side and builds a
+consumer out of them: the CLI installed from the extracted `htl-cli`, the three host
+profiles it scaffolds, each compiled against the extracted `htl`, `htl-core` and
+`htl-macros`. Between them they ask, of the artefact rather than of the checkout, both
+halves of "would this release work" that can be asked without a registry.
 
-Recovery from a failure there is cheaper than it sounds. Three crates are out and are
-right — what failed is what the CLI writes, not what the library is. Fix the scaffold and
-let `htl-cli` publish at the next patch: the pin it writes is minor-level (`0.4` whether the
-CLI says 0.4.0 or 0.4.1), so it still names the `htl` already on crates.io and still
-resolves. Nothing has to be yanked and no number has to move.
+They go first because everything below them is irreversible. A version on crates.io cannot
+be replaced, only yanked and superseded, and the four steps below are four of those.
+
+The previous release put the scaffold check between the third crate and the fourth and
+argued that the window in which a broken scaffold is installable is therefore zero: a
+generated project depends on `htl`, which is third, and `htl-cli`, which writes it, is
+fourth, so a failure there stops the chain before anyone can obtain the CLI. That is true,
+and it is not what a gate is for. The recovery it offered — fix the scaffold, let `htl-cli`
+publish at the next patch, since the pin it writes is minor-level (`0.4` whether the CLI
+says 0.4.0 or 0.4.1) and still resolves — describes living with the failure rather than
+undoing it. Three crates are on crates.io at a version whose CLI does not exist, the release
+is half-shipped until another one is made, and nothing that went out comes back. A gate is a
+step whose answer can still change what is published; once the first `cargo publish`
+returns, no step below it is one.
+
+What the gate cannot see is what no local check can: crates.io's own acceptance of the
+upload, index propagation between the steps (the reason for the `sleep 30`s), and docs.rs,
+whose build environment is not this one.
+
+Once the last publish is through, the registry question is a lookup rather than a build —
+whether the index carries what a generated project pins:
+
+```sh
+curl -sS --fail https://index.crates.io/3/h/htl | grep '"vers":"<version>"'
+```
+
+That is all it can say, and all that is left to ask: whether a project pinning it builds was
+answered by the gate, against the same bytes, before any of this ran.
 
 The chain is `&&`-joined on purpose: if a step fails, nothing after it runs, so a
 failure leaves no half-tagged, half-pushed state. Before re-running, check which
