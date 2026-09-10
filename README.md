@@ -826,6 +826,61 @@ other code minted the value. It pairs with `---@struct` on the same record, whic
 every field is set where this says who may set them; both report at the same site with
 their own message.
 
+### Records a table may carry more than (`---@extensible`)
+
+Every Teal record is closed: a table typed as a record may not carry a key the record does
+not declare. That is an error rather than a lint, so no allow comment and no `[lint]`
+setting reaches it. The two markers above move a different boundary — `---@optional` and
+`---@required` decide which *declared* fields a literal may leave out. `---@extensible` is
+about the key the declaration has never heard of:
+
+```tl
+   record Mod              ---@contract ---@extensible
+      name: string         ---@required
+      monsters: {Monster}  ---@required
+      factions: {Faction}
+   end
+```
+
+A table built as a `Mod` may now set keys the record does not declare, and htl drops the
+checker's `unknown field` for exactly those keys. What it is for is the direction
+`---@required` does not cover: a mod written against a newer SDK, a save file from a later
+version, a table a host will grow next release. Each carries one key more than the
+declaration knows about, and without this each is refused the same way a mod that is
+*short* is refused — which leaves a lockstep edit of every declaration as the only way for
+a producer to ship a new field.
+
+The marker goes where the record is **declared**, in both forms — trailing, or on a line
+of its own above it — like `---@struct` and `---@sealed`. A record nested inside an
+extensible one is not extensible by that; mark it too if it should be. On a contract
+record it travels with the published declaration (`---@contract("mods") ---@extensible` in
+`types/defs.d.tl`), so a mod author checking against what was published gets what the
+declaring project has.
+
+Three things it deliberately does not do:
+
+- **The keys stay unreadable.** `m.extra` through the record type is still an error
+  (`invalid key 'extra' in record 'm'`). The marker buys tolerance where a value is built
+  and nothing else. A program that wants to *read* what it did not declare wants a map
+  field — `extra: {string: any}` — which works today and needs nothing from htl. That is
+  the right answer when the keys are to be used and the wrong one at a data boundary,
+  since every producer then has to nest its extra keys under an agreed name, which is a
+  change to the wire shape rather than to the type.
+- **It does not relax which declared fields must be set.** `---@struct` and `---@required`
+  are untouched: a record can be open at one end (keys nobody declared) and closed at the
+  other (the fields it does declare), and `struct-fields` still names the near-miss key
+  when a required field is short.
+- **It changes nothing for an unmarked record**, which stays closed, as every record is
+  today.
+
+What it costs is one case, and it is worth knowing before you write the marker: a
+misspelled **optional** field becomes silence. `colour` is no longer an unknown field, and
+`struct-fields` has nothing to say because nothing is missing — the required case is still
+caught, the optional case is not. That is the price of the marker rather than an
+oversight. A near-miss heuristic here would fire on the very keys the marker exists to
+allow, and a warning that is wrong whenever the marker is doing its job is worse than the
+silence.
+
 ### The string boundary of an enum (`enum-cast`, `enum-table`)
 
 A Teal enum is a string at run time and `as` is erased along with the types, so
@@ -1051,6 +1106,11 @@ The default is the opposite of `---@struct`'s, and each marker says which regime
 record is under: `---@struct` is about a record the program builds itself, where a new
 field is mandatory unless marked `---@optional`; `---@contract` is about a value arriving
 from outside, where a new field is optional unless marked `---@required`.
+
+Both markers are about the fields the record declares. A module that sets a key it does
+*not* declare — written against a newer SDK than this declaration is — is refused by the
+checker, and [`---@extensible`](#records-a-table-may-carry-more-than----extensible) beside
+`---@contract` is what allows it.
 
 A bare `---@contract` inherits the directory from `htl.toml`, which is what a project with
 one contract writes. `---@contract("plugins")` names its own, `---@contract(module = "S")`
