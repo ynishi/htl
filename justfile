@@ -56,57 +56,24 @@ check:
 build:
     cargo build --workspace --all-targets
 
-# One recipe rather than four, because the cases below ask one question of four surfaces, and
-# because each of them answers with a pass or a fail rather than with figures for a person to
-# read and judge.
-# The CLI, the embedding example, the run cache and every host `--host` offers, end to end.
+# What is left here is what a Rust test cannot ask: whether a binary crate embedding htl
+# builds and runs, and whether the three scaffolded hosts do. The CLI's own behaviour on
+# files — check, test, the run cache, `cache status`, and the two suites meant to fail —
+# moved to `crates/htl-cli/tests/sample_project.rs`, where a failure names a file, a line
+# and what it saw instead of reporting that a `grep` exited 1. `just check` runs those.
+# The embedding example and every host `--host` offers, end to end.
 e2e:
     #!/usr/bin/env bash
     set -euo pipefail
     root="$(pwd)"
-    # Built once and then invoked by path, rather than through `cargo run` each time: the
-    # cache case below runs from a directory outside this workspace, where `cargo run` has no
-    # manifest to find, and the scaffold case wants the same binary anyway.
+    # Built once and then invoked by path, rather than through `cargo run`: the scaffold case
+    # below runs from a directory outside this workspace, where `cargo run` has no manifest
+    # to find.
     cargo build -q -p htl-cli --bin htl
     htl="${CARGO_TARGET_DIR:-$root/target}/debug/htl"
-    # The CLI on the repository's own .tl (examples/tl/failing/ is meant to fail and is not
-    # run here), and the embed example through both the include_tl! and the include_bundle!
-    # path.
-    "$htl" check examples/tl/util.tl examples/tl/main.tl examples/tl/util_test.tl
-    "$htl" test examples/tl/util_test.tl
+    # The embed example through both the include_tl! and the include_bundle! path.
     cargo run -q -p embed
     cargo run -q -p embed -- --bundle
-    # The run cache, checked twice over the same three files: once against a store that does
-    # not exist yet, once against the one the first run left. A store lives beside the
-    # `htl.toml` a project has and this repository's root has none, so the CLI falls back to
-    # the working directory — which is why the pair runs from a temporary one. That is what
-    # makes "cold" mean cold on a machine that has checked this repository before, and it
-    # leaves nothing behind in the checkout.
-    dir="$(mktemp -d)"
-    trap 'rm -rf "$dir"' EXIT
-    files=("$root/examples/tl/util.tl" "$root/examples/tl/main.tl" "$root/examples/tl/util_test.tl")
-    (
-      cd "$dir"
-      # Two claims per run, and only the second is the point. --explain-cache prints the
-      # store's own counters, and the check prints its summary, which ends in `[cached]`
-      # only when every file in the walk was replayed rather than checked. Both are on
-      # stderr, where everything a person reads goes (stdout is kept for --format json), so
-      # the run is captured whole rather than by stream. A store that was written and a run
-      # that was answered out of it are different facts, and a case that asserted the first
-      # would pass while the cache saved nothing.
-      "$htl" check "${files[@]}" --explain-cache >cold.log 2>&1
-      cat cold.log
-      grep -q '^htl cache: 0 hit, 0 missed, 3 written,' cold.log
-      "$htl" check "${files[@]}" --explain-cache >warm.log 2>&1
-      cat warm.log
-      grep -q '^htl cache: 3 hit, 0 missed, 0 written,' warm.log
-      grep -q ' \[cached\]$' warm.log
-      # And the store from the outside, which is the other half of the same fact: three
-      # modules were checked, so three entries are what the second run had to read.
-      "$htl" cache status >status.log 2>&1
-      cat status.log
-      grep -q '^htl cache: 3 entries,' status.log
-    )
     # Every host `--host` offers: scaffolded into a temporary directory outside this
     # repository, pointed back at this checkout so it is *this* htl that is embedded, then
     # built, tested and run — including, for the C ABI host, the reference callers in C and
