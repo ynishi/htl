@@ -31,6 +31,15 @@ fn defs_src(marks: [&str; 2]) -> String {
 
 const REQUIRED: &str = "---@required";
 
+/// A module declaring one contract record, for the projects below that need more than one
+/// of them: `module` is what the file returns, `dir` what its record claims.
+fn contract_module(module: &str, dir: &str) -> String {
+    format!(
+        "local record {module}\n   record Mod   ---@contract({dir:?})\n      \
+         name: string   ---@required\n   end\nend\nreturn {module}\n"
+    )
+}
+
 /// Project with `htl.toml`, `src/defs.tl` and three mods: conforming, wrong field
 /// type, and one that leaves a required field out.
 fn project(name: &str) -> (PathBuf, HtlConfig) {
@@ -1053,6 +1062,120 @@ fn a_contract_declared_in_types_is_not_republished() {
     let found = contracts(&root, &cfg);
     let (written, problems) = htl_core::contract::publish(&root, &found);
     assert!(written.is_empty() && problems.is_empty(), "{written:?}");
+}
+
+/// Two contracts, and the declarations published from them: the scan finds four claims on
+/// the search path and they are two records. A published declaration is the record it was
+/// published from, not a second claimant of the directory, and saying so is what keeps a
+/// project quiet for having added its second contract.
+///
+/// The two directories each hold a module called `one`, which is also not a collision: a
+/// contract directory is resolved as a directory and is not on the project's search path,
+/// so those are two modules, each held to the record its own directory is under.
+#[test]
+fn a_published_declaration_is_not_a_second_claimant() {
+    let root = scratch("two-contracts");
+    write(
+        &root.join("htl.toml"),
+        "[[contract]]\ndir = \"mods_a\"\n\n[[contract]]\ndir = \"mods_b\"\n",
+    );
+    write(
+        &root.join("src/p1/init.tl"),
+        &contract_module("p1", "mods_a"),
+    );
+    write(
+        &root.join("src/p2/init.tl"),
+        &contract_module("p2", "mods_b"),
+    );
+    write(&root.join("mods_a/one.tl"), "return { name = \"a\" }\n");
+    write(&root.join("mods_b/one.tl"), "return { name = \"b\" }\n");
+    let (_, cfg) = HtlConfig::find(&root)
+        .unwrap()
+        .expect("htl.toml just written");
+
+    let found = contracts(&root, &cfg);
+    assert_eq!(found.len(), 2, "{found:?}");
+    let (written, problems) = htl_core::contract::publish(&root, &found);
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(written.len(), 2, "one file each: {written:?}");
+
+    // And again, with both declarations now written and on the search path.
+    let (again, problems) = htl_core::contract::resolve(&root, &cfg);
+    assert!(problems.is_empty(), "a record against itself: {problems:?}");
+    assert_eq!(again.len(), 2, "{again:?}");
+    for c in &again {
+        assert!(
+            c.declared_in.starts_with(root.join("src")),
+            "the source is the one kept: {:?}",
+            c.declared_in
+        );
+    }
+}
+
+/// Two *different* records claiming one directory is the collision it always was — each
+/// would have to be the one enforced there — and the report names both sources.
+#[test]
+fn two_records_claiming_one_directory_are_reported_with_both_sources() {
+    let root = scratch("two-claims");
+    write(&root.join("htl.toml"), CONTRACT_TOML);
+    write(&root.join("src/p1/init.tl"), &contract_module("p1", "mods"));
+    write(&root.join("src/p2/init.tl"), &contract_module("p2", "mods"));
+    write(&root.join("mods/one.tl"), "return { name = \"a\" }\n");
+    let (_, cfg) = HtlConfig::find(&root)
+        .unwrap()
+        .expect("htl.toml just written");
+
+    let (found, problems) = htl_core::contract::resolve(&root, &cfg);
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].contains("p2.Mod claims directory \"mods\"")
+            && problems[0].contains("p1.Mod already claims")
+            && problems[0].contains("p1/init.tl"),
+        "both sources named: {}",
+        problems[0]
+    );
+}
+
+/// Two records in one module publish that module once. A pass per record wrote the file
+/// twice over — each pass rewriting its own marker and putting the other's back the way
+/// the author left it — so `dts: wrote` was said twice and the file changed again on
+/// every run.
+#[test]
+fn two_contracts_in_one_module_publish_it_once() {
+    let root = scratch("two-in-one");
+    write(&root.join("htl.toml"), "[[contract]]\ndir = \"mods_a\"\n");
+    write(
+        &root.join("src/defs.tl"),
+        "local record defs\n   record ModA   ---@contract\n      name: string   \
+         ---@required\n   end\n   record ModB   ---@contract(\"mods_b\")\n      \
+         name: string   ---@required\n   end\nend\nreturn defs\n",
+    );
+    write(&root.join("mods_a/one.tl"), "return { name = \"a\" }\n");
+    write(&root.join("mods_b/one.tl"), "return { name = \"b\" }\n");
+    let (_, cfg) = HtlConfig::find(&root)
+        .unwrap()
+        .expect("htl.toml just written");
+
+    let target = root.join("types/defs.d.tl");
+    let found = contracts(&root, &cfg);
+    assert_eq!(found.len(), 2, "{found:?}");
+    let (written, problems) = htl_core::contract::publish(&root, &found);
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(written, vec![(target.clone(), true)]);
+
+    // Both markers stand on their own: the reader of a declaration does not have the
+    // htl.toml the bare one inherited from.
+    let d = std::fs::read_to_string(&target).unwrap();
+    assert!(
+        d.contains("---@contract(\"mods_a\")") && d.contains("---@contract(\"mods_b\")"),
+        "got:\n{d}"
+    );
+
+    // And it settles: a second run finds the file current and writes nothing.
+    let (again, problems) = htl_core::contract::publish(&root, &contracts(&root, &cfg));
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(again, vec![(target, false)]);
 }
 
 /// The three constructors build one thing, so they resolve from one set of paths. This

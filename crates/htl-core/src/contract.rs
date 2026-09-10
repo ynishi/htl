@@ -149,11 +149,18 @@ pub fn resolve(root: &Path, cfg: &HtlConfig) -> (Vec<Resolved>, Vec<String>) {
             Err(msgs) => problems.extend(msgs),
         }
     }
-    // A published declaration carries the marker it was copied from, so the same contract
-    // is found twice — once in the source, once in `types/`. That is one contract, and
-    // the source is the one to keep (a `.tl` beats a `.d.tl` everywhere else too).
+    // A published declaration carries the marker it was copied from, so the same record
+    // is found twice — once in the source, once in the file written from it. That is one
+    // record making one claim, and the source is the one to keep (a `.tl` beats a `.d.tl`
+    // everywhere else too).
     out.sort_by_key(|c| crate::is_declaration(&c.declared_in));
-    out.dedup_by(|a, b| a.dir == b.dir && a.type_path == b.type_path);
+    let mut kept: Vec<Resolved> = Vec::with_capacity(out.len());
+    for c in out {
+        if !kept.iter().any(|k| same_record(root, k, &c)) {
+            kept.push(c);
+        }
+    }
+    let out = kept;
 
     // Two *different* types for one directory would each have to be the one enforced
     // there.
@@ -186,6 +193,33 @@ pub fn dts_target(root: &Path, c: &Resolved) -> Option<PathBuf> {
     })
 }
 
+/// Is `later` the record `earlier` already is, found a second time? The claim check is
+/// between records, and a record's declaration is that record rather than a second
+/// claimant of the directory.
+///
+/// Two ways one record turns up twice. It was published: `htl dts` writes the module a
+/// `---@contract` type is declared in, and `types/` is on the search path, so the scan
+/// reads the claim back out of the file it just wrote. Or the same file was reached
+/// through two search paths. Which file a publication is is the publish's own answer
+/// ([`dts_target`]) — nothing here recognises a `types/` directory or a `.d.tl` name, so
+/// a project that publishes somewhere else is the same case — and the directory is what
+/// says the two claims are one claim, since that is what the published marker carries.
+///
+/// A module of the same name in each of two contract directories is *not* this: a
+/// contract directory is resolved as a directory ([`crate::pkg::TealResolver::for_contract_dir`]
+/// roots one resolver at each) and is not on the project's search path, so `mods_a/one.tl`
+/// and `mods_b/one.tl` are two modules, each held to the record its own directory is
+/// under. There is nothing there for the claim check to report.
+fn same_record(root: &Path, earlier: &Resolved, later: &Resolved) -> bool {
+    if earlier.dir != later.dir {
+        return false;
+    }
+    if crate::same_file(&earlier.declared_in, &later.declared_in) {
+        return earlier.type_path == later.type_path;
+    }
+    dts_target(root, earlier).is_some_and(|t| crate::same_file(&t, &later.declared_in))
+}
+
 /// Publish each contract's declaration: the module that declares the contract type is
 /// what an outside author writes against, so `htl` writes it out rather than leaving the
 /// host to copy the file at run time. Returns the targets it wrote (`true`) or found
@@ -196,9 +230,18 @@ pub fn dts_target(root: &Path, c: &Resolved) -> Option<PathBuf> {
 /// (`function m.f(a: integer): string` -> `f: function(a: integer): string`), which is
 /// what a hand-written `.d.tl` says. A module of declarations is copied unchanged,
 /// because there is nothing to remove.
+///
+/// One write per file, not one per contract. Two records in one module publish that one
+/// module, and a pass per record would write the file twice over — each pass rewriting
+/// its own marker and leaving the other's as the author left it, so the two passes
+/// disagree, `dts: wrote` is said twice, and the file never settles. A file's markers are
+/// made self-contained together, once.
 pub fn publish(root: &Path, contracts: &[Resolved]) -> (Vec<(PathBuf, bool)>, Vec<String>) {
     let mut written = Vec::new();
     let mut problems = Vec::new();
+    // Each file to write and the module it is written from, in the order the contracts
+    // came in.
+    let mut targets: Vec<(PathBuf, &Resolved)> = Vec::new();
     for c in contracts {
         let Some(target) = dts_target(root, c) else {
             continue;
@@ -207,10 +250,34 @@ pub fn publish(root: &Path, contracts: &[Resolved]) -> (Vec<(PathBuf, bool)>, Ve
         if crate::same_file(&target, &c.declared_in) {
             continue;
         }
+        match targets.iter().find(|(t, _)| crate::same_file(t, &target)) {
+            // Two modules cannot both be one declaration: whichever was written last
+            // would be the file, and the other would have been published and lost.
+            Some((_, first)) if !crate::same_file(&first.declared_in, &c.declared_in) => problems
+                .push(format!(
+                    "{}:{}:1: {} publishes to {}, where {} is already published from {} \
+                     [htl contract]",
+                    c.declared_in.display(),
+                    c.declared_at,
+                    c.type_path,
+                    target.display(),
+                    first.type_path,
+                    first.declared_in.display(),
+                )),
+            Some(_) => {}
+            None => targets.push((target, c)),
+        }
+    }
+    for (target, c) in targets {
         let Ok(src) = std::fs::read_to_string(&c.declared_in) else {
             continue;
         };
-        let src = self_contained_marker(&src, c);
+        // Every marker the file carries, not only the one that sent it here: what is
+        // published has to stand on its own whichever record a reader opens it for.
+        let src = contracts
+            .iter()
+            .filter(|o| crate::same_file(&o.declared_in, &c.declared_in))
+            .fold(src, |s, o| self_contained_marker(&s, o));
         let text = match declaration_of(&src) {
             Ok(t) => t,
             Err(msgs) => {
