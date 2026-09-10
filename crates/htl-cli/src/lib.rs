@@ -305,7 +305,8 @@ Examples:
 ")]
     Fix {
         paths: Vec<PathBuf>,
-        /// Only fixes of these rules (e.g. `forward-ref,explicit-number`)
+        /// Only fixes of these rules: any rule `htl check --list-lints` names, or
+        /// `forward-ref` / `tl:error`, the classes an error's fix is filed under
         #[arg(long, value_delimiter = ',')]
         rule: Vec<String>,
         /// Also apply `unsafe` fixes (may change what the program does)
@@ -1746,6 +1747,9 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
         only: flags.rule.clone(),
         dry_run: flags.dry_run,
     };
+    // Here as well as inside `fix_file`, so a misspelt rule is answered even when the
+    // paths hold no `.tl` at all — the request is wrong either way.
+    opts.validate()?;
     let files = htl::collect_tl(&paths)?;
 
     // The working tree is the undo: refuse to rewrite what git could not give back.

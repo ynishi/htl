@@ -359,3 +359,138 @@ fn a_fix_that_makes_things_worse_is_reverted() {
         out.reverted
     );
 }
+
+// ------------------------------------------------- the names the filters take (#147)
+
+/// A Teal error has no rule of its own, so `--rule` and `[fix] disable` name it by class.
+/// There are two, and they are not interchangeable: `forward-ref` is the class htl
+/// recognises by its message, `tl:error` is every other error. Naming one selects that one.
+#[test]
+fn the_two_error_classes_select_different_things() {
+    let dir = scratch("classes");
+    write(&dir.join("world.tl"), FWD);
+    let h = Htl::new().unwrap();
+    h.add_path(&dir).unwrap();
+
+    // `tl:error` is a name the filter takes, and this file has no error of that class.
+    let out = fix_file(
+        &h,
+        &dir.join("world.tl"),
+        &FixOptions {
+            only: vec!["tl:error".into()],
+            dry_run: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        out.applied.is_empty() && out.contents.is_none(),
+        "a forward reference is not filed under tl:error: {:?}",
+        out.applied
+    );
+
+    // The class this file's errors are filed under fixes both of them.
+    let out = fix_file(
+        &h,
+        &dir.join("world.tl"),
+        &FixOptions {
+            only: vec!["forward-ref".into()],
+            dry_run: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(out.applied.len(), 2, "{:?}", out.skipped);
+    assert!(out.applied.iter().all(|a| a.rule == "forward-ref"));
+
+    // And `[fix] disable` takes the same names, on the class that does apply.
+    let out = fix_file(
+        &h,
+        &dir.join("world.tl"),
+        &FixOptions {
+            disabled: vec!["tl:error".into(), "forward-ref".into()],
+            dry_run: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(out.applied.is_empty(), "{:?}", out.applied);
+    assert_eq!(out.skipped.len(), 2);
+    assert!(
+        out.skipped
+            .iter()
+            .all(|s| s.reason == "disabled by [fix] disable")
+    );
+}
+
+/// The rename is breaking, and the break is loud. `error` was the name of the second
+/// class; a project that still writes it is told what to write now, rather than watching a
+/// run that fixes nothing and reads like a project with nothing to fix.
+#[test]
+fn the_old_error_spelling_is_refused_by_name() {
+    let dir = scratch("renamed");
+    write(&dir.join("world.tl"), FWD);
+    let h = Htl::new().unwrap();
+    h.add_path(&dir).unwrap();
+    for (opts, surface) in [
+        (
+            FixOptions {
+                only: vec!["error".into()],
+                dry_run: true,
+                ..Default::default()
+            },
+            "htl fix --rule",
+        ),
+        (
+            FixOptions {
+                disabled: vec!["error".into()],
+                dry_run: true,
+                ..Default::default()
+            },
+            "[fix] disable",
+        ),
+        (
+            FixOptions {
+                promoted: vec!["error".into()],
+                dry_run: true,
+                ..Default::default()
+            },
+            "[fix] unsafe",
+        ),
+    ] {
+        let err = fix_file(&h, &dir.join("world.tl"), &opts)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            format!(
+                "{surface}: `error` is now `tl:error` — Teal's errors are named in the \
+                 `tl:` namespace, as its warnings are"
+            )
+        );
+    }
+}
+
+/// A name that was never a rule is refused too, and the message says where the names are.
+#[test]
+fn a_name_that_is_not_a_rule_is_refused_before_anything_is_read() {
+    let dir = scratch("typo");
+    // No file written: the request is wrong whatever the tree holds.
+    let h = Htl::new().unwrap();
+    let err = fix_file(
+        &h,
+        &dir.join("absent.tl"),
+        &FixOptions {
+            only: vec!["forwardref".into()],
+            dry_run: true,
+            ..Default::default()
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("unknown rule `forwardref`"), "{err}");
+    assert!(
+        err.contains("--list-lints") && err.contains("tl:error"),
+        "{err}"
+    );
+}
