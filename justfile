@@ -1,5 +1,13 @@
 # Development tasks for htl. `just` on its own lists them.
 #
+# The three gates are named for a moment rather than for their contents: `pre-commit`,
+# `pre-push`, `pre-publish`. Each is a superset of the one before it, because each of those
+# moments is harder to take back than the last — a commit is amended, a push is reverted in
+# public, a publish is yanked and never replaced — and a name that says *when* is the one
+# thing a person can act on without reading the recipe. The parts they are assembled from
+# stay runnable on their own for when you already know which answer you want: `fmt`,
+# `check`, `build`, `e2e`, `e2e-scaffold-packaged`, `bench`.
+#
 # These wrap what CONTRIBUTING.md already asks for, so that "did I run everything?" has one
 # answer instead of four commands to remember in the right order.
 
@@ -7,29 +15,42 @@ _default:
     @just --list
 
 # Everything before a commit: format, then the green CONTRIBUTING defines.
-preflight: fmt check
+pre-commit: fmt check
 
-# Green: the whole workspace, tests and lints. What CI runs.
-check:
-    cargo test --workspace
-    cargo clippy --workspace --all-targets
+# `check` directly rather than a dependency on `pre-commit`, which would also run `fmt`.
+# Reformatting the tree at push time either does nothing, or it edits files the commits
+# being pushed do not contain — and then what goes out is not what was reviewed, while the
+# reformat itself goes out unrecorded. Formatting belongs at the commit above, where it is
+# still part of a commit.
+#
+# `build` and `e2e` are here and not there because of what the two moments ask. A commit is
+# a local checkpoint, and the question then is whether the workspace still holds together,
+# which `check` answers on its own. A push hands the branch to CI and to whoever reads it,
+# so the questions worth asking are the ones CI would otherwise ask minutes later: this is
+# the same work its two jobs do, and a red run there reproduces here. `build` is not
+# redundant beside `check` — run after `cargo test` and clippy have both finished green it
+# still compiles, because it is the one of the three that emits each target's artefact
+# rather than checking it.
+# Everything before a push: the green, a full compile, and every end-to-end case.
+pre-push: check build e2e
+
+# The gate goes last, and not only because it is the slowest thing here. It asks git what
+# belongs in a tarball, so it is the one recipe that an uncommitted change can stop — a
+# change to a file one of the four crates ships, that is, which it names; a dirty justfile
+# or doc does not stop it, because neither would have reached a tarball either way. Running
+# it after everything cheaper means its minute is spent on a tree that has already answered
+# every question answerable without packaging.
+# Everything before a publish: `pre-push`, then the release gate on the four tarballs.
+pre-publish: pre-push e2e-scaffold-packaged
 
 # Format in place.
 fmt:
     cargo fmt --all
 
-# Fail if anything is unformatted, without changing it.
-fmt-check:
-    cargo fmt --all -- --check
-
-# The gate at the end is last because it is the slower of the two end-to-end recipes, and
-# because it asks git what to put in a tarball. An uncommitted change to a file one of the
-# four crates ships stops it, and it names that file; a change to anything else — this
-# justfile, a doc, a test — does not, because it would not have reached the tarball either
-# way. So a dirty checkout is not a reason not to run this, but a dirty *crate* is a reason
-# it will refuse.
-# Everything CI runs on a push, in the same order, so a failure there reproduces here.
-ci: build check e2e e2e-scaffold-packaged
+# Green: the whole workspace, tests and lints. What CI runs.
+check:
+    cargo test --workspace
+    cargo clippy --workspace --all-targets
 
 # Compile everything, including tests and benches, without running any of it.
 build:
@@ -270,7 +291,3 @@ bench:
     cargo bench -p htl-core --bench check
     cargo bench -p htl-core --bench fix
     cargo bench -p htl-cli --bench cached_check
-
-# A release binary, for timing against a real project rather than a generated one.
-release:
-    cargo build --release -p htl-cli
