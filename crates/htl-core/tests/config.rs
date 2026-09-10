@@ -104,13 +104,16 @@ fn verdicts(h: &Htl, resolvers: Vec<htl_core::pkg::TealResolver>) -> [Result<(),
 #[test]
 fn parse_sections_and_lint_spec() {
     let cfg = HtlConfig::parse(
-        "[lint]\nenable = [\"class-record\", \"explicit-number\"]\ndisable = [\"shadow-local\"]\nstrict = true\n\
+        "[lint]\nstrict = true\n\n[lint.rules]\nclass-record = \"warn\"\n\
+         explicit-number = \"deny\"\nshadow-local = \"allow\"\n\
          [fmt]\nindent = 2\n[[contract]]\ndir = \"mods\"\n",
     )
     .unwrap();
+    // Rendered in the table's own (sorted) order, so two runs that say the same thing
+    // produce the same spec and so the same cache key.
     assert_eq!(
         cfg.lint_spec(),
-        "+class-record,+explicit-number,-shadow-local"
+        "class-record=warn,explicit-number=deny,shadow-local=allow"
     );
     assert_eq!(cfg.lint.strict, Some(true));
     assert_eq!(cfg.fmt.indent, Some(2));
@@ -118,13 +121,77 @@ fn parse_sections_and_lint_spec() {
     assert_eq!(cfg.contract[0].dir, "mods");
     assert_eq!(cfg.contract[0].module, None);
     assert_eq!(
-        join_specs([cfg.lint_spec().as_str(), "", "+shadow-local"]),
-        "+class-record,+explicit-number,-shadow-local,+shadow-local"
+        join_specs([cfg.lint_spec().as_str(), "", "shadow-local=deny"]),
+        "class-record=warn,explicit-number=deny,shadow-local=allow,shadow-local=deny"
     );
     assert!(
         HtlConfig::parse("[lint]\nstrictness = true\n").is_err(),
         "unknown keys are errors"
     );
+}
+
+/// A rule name is a key of `[lint.rules]`, and Teal's kinds carry a `:` that TOML will not
+/// take as a bare key. Quoting is the whole of what a project has to know about it.
+#[test]
+fn a_teal_warning_kind_is_a_quoted_key() {
+    let cfg = HtlConfig::parse("[lint.rules]\n\"tl:hint\" = \"allow\"\n").unwrap();
+    assert_eq!(cfg.lint_spec(), "tl:hint=allow");
+}
+
+/// The level words are the three there are. A misspelt one is refused where it is
+/// written, because the alternative is a rule the project believes fails the run and does
+/// not.
+#[test]
+fn an_unknown_level_is_refused() {
+    let err = format!(
+        "{:#}",
+        HtlConfig::parse("[lint.rules]\nnil-index = \"error\"\n")
+            .expect_err("a level that is not one should not parse")
+    );
+    assert!(err.contains("unknown variant `error`"), "{err}");
+    assert!(
+        err.contains("allow"),
+        "and says which words it takes: {err}"
+    );
+}
+
+/// `enable` and `disable` are gone rather than deprecated, and the message writes their
+/// replacement out of the file's own names: `enable` meant "report it" (`warn`) and
+/// `disable` meant "do not" (`allow`).
+#[test]
+fn the_removed_lint_lists_name_what_replaces_them() {
+    let err = format!(
+        "{:#}",
+        HtlConfig::parse(
+            "[lint]\nenable = [\"class-record\"]\ndisable = [\"shadow-local\", \"tl:hint\"]\n",
+        )
+        .expect_err("a removed key is refused")
+    );
+    assert!(
+        err.contains("[lint] enable and disable replaced by a level per rule"),
+        "{err}"
+    );
+    assert!(err.contains("[lint.rules]"), "{err}");
+    // The block is padded so its `#` line up, so the assertions read it unpadded.
+    let flat = err.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("\"class-record\" = \"warn\" # was in enable"),
+        "the line to write instead: {err}"
+    );
+    assert!(
+        flat.contains("\"shadow-local\" = \"allow\" # was in disable")
+            && flat.contains("\"tl:hint\" = \"allow\" # was in disable"),
+        "every name it had, at the level it had: {err}"
+    );
+
+    // One of the two on its own is named on its own.
+    let err = format!(
+        "{:#}",
+        HtlConfig::parse("[lint]\ndisable = [\"nil-index\"]\n").expect_err("also refused")
+    );
+    assert!(err.contains("[lint] disable replaced"), "{err}");
+    assert!(!err.contains("enable"), "{err}");
+    assert!(err.contains("\"nil-index\" = \"allow\""), "{err}");
 }
 
 /// `[toolchain] htl`: the comparison, and the two answers that are not a comparison at

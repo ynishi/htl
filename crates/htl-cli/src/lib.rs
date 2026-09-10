@@ -195,26 +195,27 @@ enum Cmd {
     #[command(after_long_help = "\
 Examples:
   htl check src                  every .tl under src/
-  htl check src --strict         lints and warnings fail the run too
-  htl check src --lint +no-any,-shadow-local
-                                 one rule on, one of the defaults off
-  htl check src --lint -tl:hint  a warning kind of the Teal compiler off
-  htl check --list-lints         the rules and what each is for, then exit
+  htl check src --strict         every warn counts as deny: warnings and lints fail
+  htl check src --lint nil-index=deny,no-any=warn
+                                 one rule fails the run, another is advice
+  htl check src --lint -tl:hint  a warning kind of the Teal compiler silenced
+  htl check --list-lints         every rule with its default level, then exit
 
 Caching: https://github.com/ynishi/htl#caching
 ")]
     Check {
         paths: Vec<PathBuf>,
-        /// Treat warnings and lints as errors
+        /// Treat every `warn` as `deny`: warnings and lints fail the run
         #[arg(long)]
         strict: bool,
-        /// Rules on top of the defaults, e.g. `+no-any,-shadow-local,-tl:hint`
-        // A spec that turns a rule off starts with `-`, and without this clap reads
+        /// Rule levels over the defaults, e.g. `nil-index=deny,no-any=warn` (`-rule` =
+        /// allow, `+rule` = warn)
+        // A spec that silences a rule starts with `-`, and without this clap reads
         // `--lint -contract` as a cluster of short flags and answers `unexpected argument
         // '-c'`: the documented way to turn one rule off never reached the spec parser.
         #[arg(long, allow_hyphen_values = true)]
         lint: Option<String>,
-        /// List lint rules and exit
+        /// List every lint rule with its default level and exit
         #[arg(long)]
         list_lints: bool,
         /// Output format
@@ -1970,8 +1971,17 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
     // is what lets the rules the project layer reports under be listed beside the ones
     // `lint.lua` implements.
     if list_lints {
-        for r in htl::lint::rule_names() {
-            println!("{r}");
+        // The name and the level a project that says nothing gets. Two columns rather than
+        // one because the default is a level now, and the three rules at `allow` are
+        // otherwise invisible: a reader would have to turn one on to find out it was off.
+        // Still one rule per line, name first, so it reads and greps as it always did.
+        let width = htl::lint::rule_names()
+            .iter()
+            .map(|r| r.len())
+            .max()
+            .unwrap_or(0);
+        for (name, level) in htl::lint::rule_defaults() {
+            println!("{name:width$}  {level}");
         }
         return Ok(ExitCode::SUCCESS);
     }
@@ -2321,6 +2331,7 @@ fn report_check(
                 errors,
                 warnings,
                 lints,
+                denied: rep.denied,
                 strict,
                 ok: !fail,
                 cached: all_cached,
@@ -2336,8 +2347,16 @@ fn report_check(
         } else {
             String::new()
         };
+        // The three counts say what kinds of thing the run said; `at deny` says how much
+        // of that it failed on, and is left out when it is none of it — its being there at
+        // all is the news. A run with two warnings and one denied lint reads as
+        // `0 error(s), 2 warning(s), 1 lint(s), 1 at deny`.
+        let denied = match rep.denied {
+            0 => String::new(),
+            n => format!(", {n} at deny"),
+        };
         eprintln!(
-            "htl check: {files} file(s), {errors} error(s), {warnings} warning(s), {lints} lint(s){}{cached}",
+            "htl check: {files} file(s), {errors} error(s), {warnings} warning(s), {lints} lint(s){denied}{}{cached}",
             if strict { " [strict]" } else { "" }
         );
     }

@@ -8,8 +8,8 @@
 //!
 //! The round trip below is the whole point of the registry, so it is tested as a round
 //! trip: provoke the finding, read the name out of the JSON, and hand that same string back
-//! three ways — `--lint`, `[lint] disable` in `htl.toml`, and `-- htl: allow(...)` on the
-//! line the finding points at.
+//! three ways — `--lint`, a key of `[lint.rules]` in `htl.toml`, and `-- htl: allow(...)`
+//! on the line the finding points at.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -77,12 +77,15 @@ fn round_trip(root: &Path, target: &str, rule: &str, at_the_site: bool) {
     let other = under(root, target, rule, &["--lint", "-no-global"]);
     assert_eq!(other.len(), 1, "-no-global silenced {rule}: {other:?}");
 
-    // 2. The name in `[lint] disable`.
+    // 2. The name as a key of `[lint.rules]`, at `allow`.
     let cfg = root.join("htl.toml");
     let before = std::fs::read_to_string(&cfg).unwrap_or_default();
-    write(&cfg, &format!("{before}\n[lint]\ndisable = [\"{rule}\"]\n"));
+    write(
+        &cfg,
+        &format!("{before}\n[lint.rules]\n{rule:?} = \"allow\"\n"),
+    );
     let off = under(root, target, rule, &[]);
-    assert!(off.is_empty(), "[lint] disable left {rule}: {off:?}");
+    assert!(off.is_empty(), "[lint.rules] allow left {rule}: {off:?}");
     write(&cfg, &before);
     if !at_the_site {
         return;
@@ -195,7 +198,7 @@ fn contract_unenforced_comes_back() {
 /// `contract-unenforced` points at the `---@contract` marker, and a marker owns the rest
 /// of its line: `-- htl: allow(contract-unenforced)` written there is read as an argument
 /// to the marker and reported as a malformed one, which is worse than not being silenced.
-/// So that rule is turned off by name (`[lint] disable`, `--lint`) or answered with
+/// So that rule is turned off by name (`[lint.rules]`, `--lint`) or answered with
 /// `[[contract]] enforced_by`, and it is the one rule of the five with no site switch.
 #[test]
 fn an_allow_comment_cannot_be_written_on_a_marker_line() {
@@ -226,6 +229,10 @@ fn an_allow_comment_cannot_be_written_on_a_marker_line() {
 /// having to provoke one first. Sixteen was the count while the project layer's five were
 /// absent and `lint.lua`'s twelve were all there was; seventeen once they were registered,
 /// and twenty-four now that Teal's seven warning kinds are names too.
+///
+/// Each line is the name and the level a project that says nothing gets, so the listing
+/// also answers which rules are `allow` — which a reader used to have to turn a rule on to
+/// find out.
 #[test]
 fn the_listing_accounts_for_every_rule() {
     let dir = scratch("listing");
@@ -234,11 +241,26 @@ fn the_listing_accounts_for_every_rule() {
         .current_dir(&dir)
         .output()
         .unwrap();
-    let listed: Vec<String> = String::from_utf8_lossy(&out.stdout)
+    let lines: Vec<(String, String)> = String::from_utf8_lossy(&out.stdout)
         .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
+        .filter_map(|l| l.split_once("  "))
+        .map(|(name, level)| (name.trim().to_string(), level.trim().to_string()))
         .collect();
+    let listed: Vec<String> = lines.iter().map(|(name, _)| name.clone()).collect();
+    let allow: Vec<&str> = lines
+        .iter()
+        .filter(|(_, level)| level == "allow")
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(
+        allow,
+        ["no-any", "explicit-number", "class-record"],
+        "the three opinions, and nothing else, is what a project does not get by default"
+    );
+    assert!(
+        lines.iter().all(|(_, l)| l == "allow" || l == "warn"),
+        "nothing defaults to deny: {lines:?}"
+    );
     for rule in [
         "nil-index",
         "class-record",

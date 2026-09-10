@@ -136,18 +136,31 @@ pub fn position(text: &str) -> Option<(&str, usize, usize, &str)> {
     ))
 }
 
+/// The rule name a finding's text ends with (` [htl <rule>]`), borrowed from it.
+///
+/// For a caller that has the text and wants only the name: which rule a run reported
+/// under, so its level can be asked for. Reading the whole diagnostic is
+/// [`Diagnostic::parse`], and both take the suffix apart here.
+pub fn rule_of(text: &str) -> Option<&str> {
+    if !text.ends_with(']') {
+        return None;
+    }
+    let start = text.rfind(" [htl ")?;
+    let rule = &text[start + " [htl ".len()..text.len() - 1];
+    (!rule.is_empty() && !rule.contains(' ')).then_some(rule)
+}
+
 /// Lint messages end with ` [htl <rule>]`. Splitting it off leaves the message reading
 /// as a sentence and the rule available as a name to filter on.
 fn split_rule(msg: &str) -> (String, Option<String>) {
-    if msg.ends_with(']')
-        && let Some(start) = msg.rfind(" [htl ")
-    {
-        let rule = &msg[start + " [htl ".len()..msg.len() - 1];
-        if !rule.is_empty() && !rule.contains(' ') {
-            return (msg[..start].to_string(), Some(rule.to_string()));
-        }
+    match rule_of(msg) {
+        // The suffix is ` [htl ` + the name + `]`: seven characters around it.
+        Some(rule) => (
+            msg[..msg.len() - rule.len() - 7].to_string(),
+            Some(rule.to_string()),
+        ),
+        None => (msg.to_string(), None),
     }
-    (msg.to_string(), None)
 }
 
 #[cfg(test)]

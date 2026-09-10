@@ -82,8 +82,13 @@ pub struct CheckSummary {
     pub errors: usize,
     pub warnings: usize,
     pub lints: usize,
+    /// How many of `warnings` + `lints` were said under a rule the project set to `deny`.
+    /// A count of levels, so it overlaps those two rather than adding to them.
+    pub denied: usize,
+    /// Every `warn` counted as `deny` for this run.
     pub strict: bool,
-    /// What the exit code says: no errors, and under `strict` no warnings or lints.
+    /// What the exit code says: no errors and nothing at `deny` — and under `strict`,
+    /// nothing reported at all.
     pub ok: bool,
     /// Every module came from the cache, so no checker was built. The diagnostics are the
     /// same either way; this says nothing ran to produce them.

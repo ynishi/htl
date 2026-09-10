@@ -9,7 +9,7 @@
 //! The kind is now carried through as the ` [htl tl:<kind>]` suffix htl's own lints already
 //! use, and the seven are registry entries (`htl_core::lint::RULES`), so they are addressed
 //! exactly as every other rule is. That is what the tests below hold: the name is printed,
-//! the name is in the JSON, and the name comes back — from `--lint`, from `[lint] disable`
+//! the name is in the JSON, and the name comes back — from `--lint`, from `[lint.rules]`
 //! and from an allow comment at the site.
 
 use std::path::{Path, PathBuf};
@@ -152,10 +152,10 @@ fn a_kind_goes_off_from_the_config() {
     let root = project("config");
     write(
         &root.join("htl.toml"),
-        "[check]\npaths = [\"src\"]\n\n[lint]\ndisable = [\"tl:redeclaration\"]\n",
+        "[check]\npaths = [\"src\"]\n\n[lint.rules]\n\"tl:redeclaration\" = \"allow\"\n",
     );
     let off = under(&root, "tl:redeclaration", &[]);
-    assert!(off.is_empty(), "[lint] disable left it: {off:?}");
+    assert!(off.is_empty(), "[lint.rules] allow left it: {off:?}");
     assert_eq!(under(&root, "tl:unused", &[]).len(), 1);
 }
 
@@ -231,12 +231,15 @@ fn the_name_out_of_a_diagnostic_is_a_name_htl_takes_back() {
     let off = under(&root, &rule, &["--lint", &format!("-{rule}")]);
     assert!(off.is_empty(), "--lint -{rule} left it: {off:?}");
 
-    // 2. `[lint] disable`.
+    // 2. `[lint.rules]`, at `allow`.
     let cfg = root.join("htl.toml");
     let before = std::fs::read_to_string(&cfg).unwrap();
-    write(&cfg, &format!("{before}\n[lint]\ndisable = [\"{rule}\"]\n"));
+    write(
+        &cfg,
+        &format!("{before}\n[lint.rules]\n{rule:?} = \"allow\"\n"),
+    );
     let off = under(&root, &rule, &[]);
-    assert!(off.is_empty(), "[lint] disable left {rule}: {off:?}");
+    assert!(off.is_empty(), "[lint.rules] allow left {rule}: {off:?}");
     write(&cfg, &before);
 
     // 3. An allow comment on the line the diagnostic points at.
