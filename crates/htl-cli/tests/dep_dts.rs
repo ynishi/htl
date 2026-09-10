@@ -150,9 +150,8 @@ fn a_declaration_left_by_a_dependency_that_is_gone_is_reported_not_deleted() {
     );
     let out = htl(&root, &["dts"]);
     let msg = err(&out);
-    assert!(msg.contains("types/dep/dep.d.tl"), "{msg}");
+    assert!(msg.contains("left in place: types/dep/dep.d.tl"), "{msg}");
     assert!(msg.contains("dep is no longer a dependency"), "{msg}");
-    assert!(msg.contains("orphaned-declaration"), "{msg}");
     // Reported, not fatal: the project decides what to do with the file.
     assert!(out.status.success(), "{msg}");
     assert!(root.join("types/dep/dep.d.tl").is_file());
@@ -168,7 +167,52 @@ fn a_crate_naming_a_file_it_does_not_ship_fails_naming_the_crate() {
     let out = htl(&root, &["dts"]);
     let msg = err(&out);
     assert!(!out.status.success(), "{msg}");
-    assert!(msg.contains("dep 0.1.0"), "{msg}");
+    assert!(msg.contains("not written: dep 0.1.0"), "{msg}");
     assert!(msg.contains("dts/dep.d.tl"), "{msg}");
-    assert!(msg.contains("shipped-declaration"), "{msg}");
+}
+
+/// Neither report is a lint, so neither wears a lint's `[htl <rule>]` suffix — the suffix
+/// that would send a reader to `--list-lints` and `[lint]` for a name that is in neither.
+/// Both conditions at once, because the two used to be told apart only by which of them
+/// carried which rule name.
+#[test]
+fn the_report_carries_no_rule_name_for_either_condition() {
+    let root = project("no-rule-name");
+    assert!(htl(&root, &["dts"]).status.success());
+    // A dependency that is gone (its declaration stays under types/), and a declaration
+    // the surviving manifest names but does not ship.
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname = \"consumer\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+         [dependencies]\nother = { path = \"../other\" }\n",
+    );
+    let other = root.parent().unwrap().join("other");
+    write(
+        &other.join("Cargo.toml"),
+        "[package]\nname = \"other\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+         [package.metadata.htl]\ndts = [\"dts/other.d.tl\"]\n",
+    );
+    write(&other.join("src/lib.rs"), "");
+    let out = htl(&root, &["dts"]);
+    let msg = err(&out);
+    assert!(msg.contains("not written: other 0.1.0"), "{msg}");
+    assert!(msg.contains("left in place: types/dep/dep.d.tl"), "{msg}");
+    assert!(!msg.contains("[htl "), "{msg}");
+    assert!(!msg.contains("shipped-declaration"), "{msg}");
+    assert!(!msg.contains("orphaned-declaration"), "{msg}");
+    // The exit code is about the one it was asked to write and could not, and says
+    // nothing about the one it left alone.
+    assert!(!out.status.success(), "{msg}");
+}
+
+/// The names are gone from the output, and they were never configurable: nothing sends a
+/// reader to `--list-lints` for either of them, and neither is there.
+#[test]
+fn neither_condition_is_a_configurable_lint_name() {
+    let root = project("not-a-lint");
+    let out = htl(&root, &["check", "--list-lints"]);
+    let listed = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(out.status.success(), "{}", err(&out));
+    assert!(!listed.contains("shipped-declaration"), "{listed}");
+    assert!(!listed.contains("orphaned-declaration"), "{listed}");
 }
