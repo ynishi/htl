@@ -22,8 +22,12 @@ fmt:
 fmt-check:
     cargo fmt --all -- --check
 
+# The gate at the end is last because it is the slowest of the three scaffold recipes, and
+# because it wants what CI always has and a working checkout often does not: a committed
+# tree. Run this on one — from a dirty tree the gate stops on the uncommitted files by
+# design, and names them.
 # Everything CI runs on a push, in the same order, so a failure there reproduces here.
-ci: build check e2e e2e-scaffold e2e-scaffold-published
+ci: build check e2e e2e-scaffold e2e-scaffold-published e2e-scaffold-packaged
 
 # Compile everything, including tests and benches, without running any of it.
 build:
@@ -45,25 +49,44 @@ e2e-scaffold:
     #!/usr/bin/env bash
     set -euo pipefail
     root="$(pwd)"
-    # Scaffolding inside the repository would leave a Cargo package in the checkout and
-    # run the CLI against the repository's own htl.toml, so the project goes elsewhere
-    # entirely and only its build artefacts come back.
-    dir="$(mktemp -d)"
-    trap 'rm -rf "$dir"' EXIT
     # A scaffolded project depends on the released htl, which is what a user gets; for the
     # change under test to be the one that runs, point the three crates at this checkout.
     # Its artefacts land beside the workspace's under a directory of their own, because
     # the scaffold sets `[profile.dev.build-override]` and sharing one target directory
     # would rebuild the proc macro dependencies on every switch.
-    sample=(--config "patch.crates-io.htl.path='$root/crates/htl'"
-            --config "patch.crates-io.htl-core.path='$root/crates/htl-core'"
-            --config "patch.crates-io.htl-macros.path='$root/crates/htl-macros'"
-            --target-dir "${CARGO_TARGET_DIR:-$root/target}/e2e-scaffold")
-    # Each project is built in a subshell: `cargo run -p htl-cli` below has to be back in
+    {{just_executable()}} _scaffold-hosts "cargo run -q -p htl-cli --bin htl --" \
+      "${CARGO_TARGET_DIR:-$root/target}/e2e-scaffold" \
+      "$root/crates/htl" "$root/crates/htl-core" "$root/crates/htl-macros"
+
+# The three host projects, and everything asked of them, in one place: `e2e-scaffold` above
+# and `e2e-scaffold-packaged` below differ in exactly two things — which htl writes the
+# projects ({{htl}}) and which trees they are built against ({{htl_path}}, {{core_path}},
+# {{macros_path}}) — and in nothing else. That is the point of the split: a release gate
+# that checked less than the loop that runs on every commit would be the wrong way round.
+_scaffold-hosts htl target htl_path core_path macros_path:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Scaffolding inside the repository would leave a Cargo package in the checkout and
+    # run the CLI against the repository's own htl.toml, so the project goes elsewhere
+    # entirely and only its build artefacts come back.
+    dir="$(mktemp -d)"
+    trap 'rm -rf "$dir"' EXIT
+    target="{{target}}"
+    sample=(--config "patch.crates-io.htl.path='{{htl_path}}'"
+            --config "patch.crates-io.htl-core.path='{{core_path}}'"
+            --config "patch.crates-io.htl-macros.path='{{macros_path}}'"
+            --target-dir "$target")
+    # Each project is built in a subshell: the scaffolding command above has to be back in
     # this workspace, not in the one that was just scaffolded.
-    cargo run -q -p htl-cli --bin htl -- new "$dir/hostsample" --host rust
+    {{htl}} new "$dir/hostsample" --host rust
     (
       cd "$dir/hostsample"
+      # What a user's project holds, and what these must keep holding whoever built them:
+      # a plain pin on the released htl, with nothing in the manifest redirecting it. The
+      # patch above is handed to cargo through --config, off to one side, so that a
+      # generated Cargo.toml stays byte for byte the one a user gets.
+      grep -q '^htl = ' Cargo.toml
+      ! grep -q 'patch.crates-io' Cargo.toml
       cargo test "${sample[@]}"
       out="$(cargo run -q "${sample[@]}" -- Ada)"
       printf '%s\n' "$out"
@@ -71,23 +94,28 @@ e2e-scaffold:
     )
     # --lib is the same host without a binary: the library still builds and its test still
     # goes through preload, and there is no entry point for cargo run to find.
-    cargo run -q -p htl-cli --bin htl -- new "$dir/libsample" --host rust --lib
+    {{htl}} new "$dir/libsample" --host rust --lib
     (
       cd "$dir/libsample"
       test ! -e src/main.rs
       test ! -e src/main.tl
+      grep -q '^htl = ' Cargo.toml
+      ! grep -q 'patch.crates-io' Cargo.toml
       cargo test "${sample[@]}"
     )
     # The C ABI host, whose callers are the part nothing else here compiles: the library
     # is built, the header the macro writes is checked, and the two reference hosts under
     # examples/ are run against the artefact — the Python one wherever python3 is, the C
     # one only where there is a compiler and a make.
-    cargo run -q -p htl-cli --bin htl -- new "$dir/ffisample" --host ffi --lib
-    target="${CARGO_TARGET_DIR:-$root/target}/e2e-scaffold"
+    {{htl}} new "$dir/ffisample" --host ffi --lib
     (
       cd "$dir/ffisample"
       test ! -e src/main.rs
       test ! -e src/main.tl
+      # The same pin, with the feature the profile needs on it — `htl = { version = "0.4",
+      # features = ["ffi"] }` is still a plain pin, and still nothing patches it here.
+      grep -q '^htl = ' Cargo.toml
+      ! grep -q 'patch.crates-io' Cargo.toml
       cargo test "${sample[@]}"
       cargo build "${sample[@]}"
       # Written by #[c_export] at build time, not by the scaffold: it is not there until
@@ -114,6 +142,61 @@ e2e-scaffold:
       fi
     )
 
+# The release gate: the same three host projects, built against the four `.crate` files
+# `cargo publish` would upload rather than against this checkout. Everything `e2e-scaffold`
+# cannot see lives in the difference between the two — `include` / `exclude` deciding
+# which files reach the tarball, an `include_str!` target that is untracked or ignored, the
+# manifest normalisation that strips `[workspace]` and rewrites every path dependency to
+# its version key — and each of those breaks a release while leaving every check that runs
+# on the checkout green. So this asks the question of the artefact, and the chain
+# (docs/releasing.md § The chain) asks it before the first `cargo publish`, because after
+# that there is nothing left to do with the answer.
+e2e-scaffold-packaged:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="$(pwd)"
+    # The same target directory as the two recipes around it: mlua and the graph beneath it
+    # are compiled once, and what is built again is the htl crates, from their new paths.
+    target="${CARGO_TARGET_DIR:-$root/target}/e2e-scaffold"
+    # Four crates in one command, because three of them depend on each other at versions
+    # nobody has published: while it verifies each tarball by building it, cargo overlays
+    # the packages it is building on the registry, so `htl`'s requirement on `htl-core`
+    # 0.4.0 resolves to the `htl-core` 0.4.0 being packaged beside it. No `--allow-dirty`:
+    # what is under test has to be what git has, or it is not the tarball that would be
+    # uploaded — and a clean worktree is also what puts .cargo_vcs_info.json inside it.
+    cargo package --target-dir "$target" -p htl-core -p htl-macros -p htl -p htl-cli
+    ver="$(cargo pkgid -p htl-core | sed 's/.*[#@]//')"
+    dir="$(mktemp -d)"
+    trap 'rm -rf "$dir"' EXIT
+    # Extracted out of the repository, rather than read where cargo leaves its own unpack,
+    # for two reasons. The tarball is the artefact and the unpack is a by-product of
+    # verifying it, so untarring is the step that says what a consumer receives. And that
+    # unpack sits under this workspace root with `[workspace]` stripped from its manifest,
+    # which is precisely the arrangement cargo refuses to build: it walks up, finds this
+    # workspace, and reports a package that believes it is not in one.
+    for crate in htl-core htl-macros htl htl-cli; do
+      tar -xzf "$target/package/$crate-$ver.crate" -C "$dir"
+    done
+    # The binary that writes the scaffolds below, built from the extracted tree, so that
+    # the CLI under test is the one being shipped and the thirteen templates it reads with
+    # `include_str!` are proved to be in the tarball rather than only in the checkout. Its
+    # three library dependencies are patched at their extracted trees for the same reason
+    # the projects below are: the version they name is not on crates.io while this runs,
+    # and this is the run that decides whether it should be. --debug because the question
+    # is what it builds and what it writes, and a debug build shares the graph the projects
+    # below compile against instead of compiling a second one. cargo reports the htl-macros
+    # patch as unused here and is right to: the CLI takes `htl` with default features off,
+    # so the proc macros are not in its graph. It is passed anyway, because the alternative
+    # to patching a crate that is not published is resolving it, and if this dependency ever
+    # arrives the failure should not be a resolution error about crates.io.
+    cargo install --locked --debug --path "$dir/htl-cli-$ver" --root "$dir/cli" \
+      --target-dir "$target" \
+      --config "patch.crates-io.htl.path='$dir/htl-$ver'" \
+      --config "patch.crates-io.htl-core.path='$dir/htl-core-$ver'" \
+      --config "patch.crates-io.htl-macros.path='$dir/htl-macros-$ver'"
+    {{just_executable()}} _scaffold-hosts "$dir/cli/bin/htl" "$target" \
+      "$dir/htl-$ver" "$dir/htl-core-$ver" "$dir/htl-macros-$ver"
+
 # The same scaffold, built against the htl on crates.io rather than this checkout: no
 # `[patch.crates-io]`, so the project compiles against the crate it actually pins — a
 # release behind the workspace, which is what a user has. That gap is the point. A key
@@ -126,14 +209,20 @@ e2e-scaffold:
 # twice. Building is enough: the failure this exists to catch is an expansion-time one, and
 # `include_tl!` runs during the build.
 #
+# What it is for is the weeks before a release rather than the release: the commit that
+# teaches the scaffold to write a key no published htl can parse is caught here, on the
+# commit that writes it, and a gate at the release would find it a cycle later with the
+# change already merged.
+#
 # The gap being one release is a premise, not a law: the pin comes from the CLI's own
 # version, so on the release commit — where the number has moved and nothing is published
 # under it — the pin names a version crates.io does not have, and cargo says so at
 # resolution, about a crate that does not exist, instead of anything about the scaffold. So
 # the recipe asks the registry which case it is in rather than assuming, and when the answer
-# is "not published yet" it says which pin went unanswered and defers, because the release
-# chain (docs/releasing.md § The chain) runs this between publishing `htl` and publishing
-# `htl-cli` — where the same question has a published crate to be asked about.
+# is "not published yet" it says which pin went unanswered and defers. Nothing in the
+# release chain waits on that deferral any more: `e2e-scaffold-packaged` above asks the
+# same question of the tarballs, before the first `cargo publish` rather than in the middle
+# of the four, and it needs no published crate to ask it.
 e2e-scaffold-published:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -167,14 +256,15 @@ e2e-scaffold-published:
       )
     else
       # Deferred, and to be read as deferred: nothing was built and nothing was proved. The
-      # scaffold is correct or not either way, and the run that finds out is the one the
-      # chain makes, before the CLI that writes this pin is installable by anyone.
+      # scaffold is correct or not either way, and the run that finds out is the gate, which
+      # asks the tarballs instead of the registry and so has an answer on this commit too.
       echo "e2e-scaffold-published: DEFERRED, nothing built."
       echo "  The scaffold pins htl = \"$pin\" and crates.io has no release matching it, which"
       echo "  is the release commit and no other: the version has moved and the publish has"
-      echo "  not happened. Whether a project pinning \"$pin\" builds is answered by the chain"
-      echo "  in docs/releasing.md, which runs this recipe between 'cargo publish -p htl' and"
-      echo "  'cargo publish -p htl-cli', and stops the chain there if the answer is no."
+      echo "  not happened. Whether a project pinning \"$pin\" builds is answered on this commit"
+      echo "  by 'just e2e-scaffold-packaged', which builds the same three projects against the"
+      echo "  .crate files the publish would upload, and which the chain in docs/releasing.md"
+      echo "  runs before the first 'cargo publish'."
     fi
 
 # Every benchmark: the figures in the README come from these. Ten samples each; a few minutes.

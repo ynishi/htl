@@ -64,3 +64,11 @@ jobs:
       # runner and same target directory as the step above on purpose: the marginal cost is
       # rebuilding the three htl crates, not the graph under them.
       - run: just e2e-scaffold-published
+      # The release gate, run on every commit rather than only at a release. It needs two
+      # things this job already has: a clean worktree, because `cargo package` is told by
+      # git which files reach the tarball and refuses to guess, and the compiled graph the
+      # two steps above leave in the same target directory. What it catches — a file an
+      # `include` glob drops, an `include_str!` target that is not tracked — is introduced
+      # by a commit, so this is the commit that should go red for it, not the release weeks
+      # later that inherits it.
+      - run: just e2e-scaffold-packaged
