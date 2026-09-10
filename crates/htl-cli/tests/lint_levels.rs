@@ -26,7 +26,7 @@ fn write(path: &Path, text: &str) {
 
 /// The exit code and stderr: the verdict, and what it was reached on.
 fn htl(args: &[&str], cwd: &Path) -> (i32, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+    let out = Command::new(common::htl_bin())
         .args(args)
         .current_dir(cwd)
         .output()
@@ -228,7 +228,7 @@ fn the_old_keys_are_refused_with_the_replacement() {
 #[test]
 fn the_listing_says_each_rules_default_level() {
     let dir = scratch("listing");
-    let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+    let out = Command::new(common::htl_bin())
         .args(["check", "--list-lints"])
         .current_dir(&dir)
         .output()

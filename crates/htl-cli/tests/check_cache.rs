@@ -21,7 +21,7 @@ fn write(path: &Path, text: &str) {
 }
 
 fn htl(args: &[&str], cwd: &Path) -> (bool, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+    let out = Command::new(common::htl_bin())
         .args(args)
         .current_dir(cwd)
         .output()
@@ -326,7 +326,7 @@ fn entries(root: &Path) -> usize {
 fn check_bounded(root: &Path, bound: usize, args: &[&str]) -> serde_json::Value {
     let mut a = vec!["check", "src", "--format", "json"];
     a.extend_from_slice(args);
-    let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+    let out = Command::new(common::htl_bin())
         .args(&a)
         .env("HTL_CACHE_MAX_ENTRIES", bound.to_string())
         .current_dir(root)

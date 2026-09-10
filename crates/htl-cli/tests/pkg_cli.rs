@@ -21,7 +21,7 @@ fn write(path: &Path, text: &str) {
 /// The CLI with an empty `PATH`: nothing of the host's is reachable, so anything that
 /// works here is htl's own code.
 fn htl(args: &[&str], cwd: &Path) -> (bool, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+    let out = Command::new(common::htl_bin())
         .args(args)
         .current_dir(cwd)
         .env("PATH", "")

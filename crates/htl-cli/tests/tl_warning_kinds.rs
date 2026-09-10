@@ -52,7 +52,7 @@ fn project(name: &str) -> PathBuf {
 }
 
 fn run(root: &Path, args: &[&str]) -> (i32, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+    let out = Command::new(common::htl_bin())
         .args(args)
         .current_dir(root)
         .output()
@@ -67,7 +67,7 @@ fn run(root: &Path, args: &[&str]) -> (i32, String) {
 /// reports. `rule` is the empty string when the field is absent or null, which is what it
 /// was for every Teal warning before this change.
 fn diagnostics(root: &Path, args: &[&str]) -> Vec<(String, String, String, u64)> {
-    let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+    let out = Command::new(common::htl_bin())
         .args(["check", "src", "--format", "json", "--no-cache"])
         .args(args)
         .current_dir(root)

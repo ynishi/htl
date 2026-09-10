@@ -58,7 +58,7 @@ fn project(name: &str) -> PathBuf {
 
 /// Every diagnostic as `(rule, line, message)`.
 fn diagnostics(root: &Path, args: &[&str]) -> Vec<(String, u64, String)> {
-    let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+    let out = Command::new(common::htl_bin())
         .args(["check", "src", "--format", "json", "--no-cache"])
         .args(args)
         .current_dir(root)

@@ -16,7 +16,7 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 fn htl(args: &[&str], cwd: &Path) -> (bool, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+    let out = Command::new(common::htl_bin())
         .args(args)
         .current_dir(cwd)
         .output()

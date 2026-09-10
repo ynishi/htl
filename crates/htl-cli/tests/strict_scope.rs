@@ -28,7 +28,7 @@ fn write(path: &Path, text: &str) {
 
 /// The exit code and stderr: the verdict, and what it was reached on.
 fn htl(args: &[&str], cwd: &Path) -> (i32, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+    let out = Command::new(common::htl_bin())
         .args(args)
         .current_dir(cwd)
         .output()
