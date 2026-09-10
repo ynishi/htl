@@ -1120,15 +1120,20 @@ impl Htl {
     /// ask about the project-layer rules has in hand ([`lint::Lints`]), so that the file
     /// rules and the project rules of one run come from one resolution of one spec.
     ///
-    /// Only the rules `lint.lua` implements cross: it runs from this table and keeps no
-    /// defaults of its own.
+    /// Two tables cross, one per producer on the Lua side: the rules `lint.lua` implements,
+    /// which it runs from, and Teal's warning kinds, which the prelude filters the
+    /// checker's warnings by as it collects them. Neither keeps defaults of its own.
     pub fn select_lints(&self, sel: &lint::Selection) -> Result<()> {
         let t = self.lua.create_table()?;
         for (name, on) in sel.of_side(lint::Side::Lua) {
             t.set(name, on)?;
         }
+        let tl = self.lua.create_table()?;
+        for (name, on) in sel.of_side(lint::Side::Tl) {
+            tl.set(name, on)?;
+        }
         let f: Function = self.h.get("set_lints")?;
-        f.call::<()>(t)?;
+        f.call::<()>((t, tl))?;
         Ok(())
     }
 

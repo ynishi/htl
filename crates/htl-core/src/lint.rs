@@ -1,11 +1,11 @@
 //! The rules a finding can be reported under, and which of them a run has on.
 //!
-//! Every rule name htl prints — the ` [htl <rule>]` suffix a lint's message ends with, and
-//! the `rule` field of `--format json` — is one entry of [`RULES`]. Twelve of them are
-//! implemented in `lint.lua` and five in the project layer, and that difference used to
-//! decide what a project could say about them: the registry was `L.DEFAULT` in `lint.lua`,
-//! so `--lint` and `[lint]` knew the twelve and answered `unknown lint rule: contract` to a
-//! name htl had just printed.
+//! Every rule name htl prints — the ` [htl <rule>]` suffix a finding's message ends with,
+//! and the `rule` field of `--format json` — is one entry of [`RULES`]. Twelve of them are
+//! implemented in `lint.lua`, five in the project layer and seven by the vendored Teal
+//! compiler, and that difference used to decide what a project could say about them: the
+//! registry was `L.DEFAULT` in `lint.lua`, so `--lint` and `[lint]` knew the twelve and
+//! answered `unknown lint rule: contract` to a name htl had just printed.
 //!
 //! The list lives on this side because both sides can read it here and only one of them
 //! could read it there. The Lua side keeps no defaults of its own any more: it is handed
@@ -23,15 +23,19 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Which half of htl implements a rule. It decides nothing a user can see — both halves
-/// are configured by the same names and silenced by the same comment — and exists so the
-/// selection can be handed to `lint.lua` without the rules it does not implement.
+/// Which part of htl produces a finding under a rule. It decides nothing a user can see —
+/// all three are configured by the same names and silenced by the same comment — and
+/// exists so that a selection can be handed to a producer without the rules it does not
+/// produce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
     /// A rule of `lint.lua`, run over one file's syntax tree.
     Lua,
     /// A rule of the project layer, run over what a check resolved.
     Rust,
+    /// A warning kind of the vendored Teal compiler, reported under the name Teal gives
+    /// it. htl decides whether it is said; it does not decide what it says.
+    Tl,
 }
 
 /// One rule: the name it is reported and configured under, whether a project that says
@@ -63,7 +67,8 @@ impl Rule {
 
 /// Every rule there is, in the order `htl check --list-lints` prints them: the file-level
 /// rules first, in the order `lint.lua` runs them, then the ones the project layer asks
-/// once the files have been checked.
+/// once the files have been checked, then the warning kinds the vendored Teal compiler
+/// reports for itself.
 pub const RULES: &[Rule] = &[
     Rule::on("nil-index", Side::Lua),
     Rule::on("struct-fields", Side::Lua),
@@ -85,6 +90,22 @@ pub const RULES: &[Rule] = &[
     Rule::on("contract", Side::Rust),
     Rule::on("contract-unenforced", Side::Rust),
     Rule::on("require-cycle", Side::Rust),
+    // Teal's warning kinds, kept in the compiler's own vocabulary behind a `tl:` prefix.
+    // The prefix is not decoration. `unused` already means something else here — `htl
+    // unused` reports modules nothing requires, not locals nothing reads — and these seven
+    // words are Teal's to rename, not htl's; keeping them in a namespace of their own says
+    // where they came from and leaves htl's twelve free of them.
+    //
+    // All on. They are what the compiler chose to say about the code, and htl forwarded
+    // them long before it could name them; what changes here is that a project which wants
+    // one quiet has a name to write instead of nothing.
+    Rule::on("tl:unknown", Side::Tl),
+    Rule::on("tl:unused", Side::Tl),
+    Rule::on("tl:unread", Side::Tl),
+    Rule::on("tl:redeclaration", Side::Tl),
+    Rule::on("tl:branch", Side::Tl),
+    Rule::on("tl:hint", Side::Tl),
+    Rule::on("tl:debug", Side::Tl),
 ];
 
 fn index_of(name: &str) -> Option<usize> {
@@ -299,6 +320,18 @@ mod tests {
             let sel = Selection::parse(&format!("-{rule}")).unwrap();
             assert!(!sel.is_on(rule), "{rule} stayed on");
         }
+    }
+
+    #[test]
+    fn a_teal_warning_kind_is_a_name_a_spec_takes() {
+        // The `:` is inside the name, not a separator: a spec splits on commas and
+        // whitespace only, so `-tl:hint` is one item naming one rule.
+        let sel = Selection::parse("-tl:hint,-tl:unused").unwrap();
+        assert!(!sel.is_on("tl:hint"));
+        assert!(!sel.is_on("tl:unused"));
+        assert!(sel.is_on("tl:redeclaration"), "the rest keep their default");
+        // And the prefix is load-bearing: htl has no rule called `hint`.
+        assert!(Selection::parse("-hint").is_err());
     }
 
     #[test]

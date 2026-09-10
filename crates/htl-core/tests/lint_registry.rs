@@ -49,6 +49,48 @@ fn the_registry_knows_the_rules_the_project_layer_reports_under() {
     }
 }
 
+/// The third producer is the vendored Teal compiler, whose seven warning kinds are
+/// registered under a `tl:` prefix. Their names are not htl's to choose — the compiler
+/// tags each warning with one — so what is held here is that the registry carries every
+/// kind the vendored `tl.warning_kinds` declares, and none that it does not. A Teal
+/// upgrade that adds an eighth fails this test rather than shipping a kind that
+/// `--list-lints` never mentions and `[lint]` refuses by name.
+#[test]
+fn the_registry_carries_exactly_the_vendored_compilers_warning_kinds() {
+    let vendored = include_str!("../vendor/tl.lua");
+    // `local wk = { ["unused"] = true, ... }` — the table `tl.warning_kinds` is set from.
+    let table = vendored
+        .split_once("local wk = {")
+        .expect("the warning-kind table")
+        .1
+        .split_once('}')
+        .expect("the end of it")
+        .0;
+    let mut kinds: Vec<String> = table
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .map(|k| format!("tl:{k}"))
+        .collect();
+    assert_eq!(kinds.len(), 7, "{kinds:?}");
+
+    let mut registered: Vec<String> = RULES
+        .iter()
+        .filter(|r| r.side == Side::Tl)
+        .map(|r| r.name.to_string())
+        .collect();
+    for r in RULES.iter().filter(|r| r.side == Side::Tl) {
+        assert!(r.default_on, "{} is on: Teal chose to say it", r.name);
+    }
+    kinds.sort();
+    registered.sort();
+    assert_eq!(
+        kinds, registered,
+        "the vendored compiler's warning kinds and the tl side of lint::RULES have to be \
+         the same names"
+    );
+}
+
 /// A state nobody configured runs the defaults. The defaults live on the Rust side now,
 /// so this is the assertion that they still reach Lua.
 #[test]
@@ -74,4 +116,31 @@ fn a_fresh_checker_runs_the_default_rules() {
         "an off-by-default rule: {:?}",
         c.lints
     );
+}
+
+/// The kind reaches `CheckInfo.warnings` in the shape every other rule name arrives in,
+/// which is what lets `Diagnostic::parse` read it with no case of its own.
+#[test]
+fn a_teal_warning_carries_its_kind_into_the_check_result() {
+    let dir = std::env::temp_dir().join("htl-core-lint-registry-warnings");
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("warned.tl");
+    std::fs::write(
+        &f,
+        "local function go(): integer\n   local unread = 1\n   return 2\nend\nreturn go\n",
+    )
+    .unwrap();
+
+    let h = Htl::new().unwrap();
+    let c = h.check(&f).unwrap();
+    assert!(
+        c.warnings.iter().any(|w| w.contains("[htl tl:unused]")),
+        "{:?}",
+        c.warnings
+    );
+    let d = c.warning_diagnostics();
+    let named = d.iter().find(|d| d.rule.as_deref() == Some("tl:unused"));
+    let named = named.unwrap_or_else(|| panic!("no tl:unused among {d:?}"));
+    // The name is split off, so the message still reads as a sentence.
+    assert!(!named.message.contains("[htl"), "{}", named.message);
 }
