@@ -23,9 +23,11 @@ fmt-check:
     cargo fmt --all -- --check
 
 # The gate at the end is last because it is the slowest of the three scaffold recipes, and
-# because it wants what CI always has and a working checkout often does not: a committed
-# tree. Run this on one — from a dirty tree the gate stops on the uncommitted files by
-# design, and names them.
+# because it asks git what to put in a tarball. An uncommitted change to a file one of the
+# four crates ships stops it, and it names that file; a change to anything else — this
+# justfile, a doc, a test — does not, because it would not have reached the tarball either
+# way. So a dirty checkout is not a reason not to run this, but a dirty *crate* is a reason
+# it will refuse.
 # Everything CI runs on a push, in the same order, so a failure there reproduces here.
 ci: build check e2e e2e-scaffold e2e-scaffold-published e2e-scaffold-packaged
 
@@ -175,6 +177,9 @@ e2e-scaffold-packaged:
     # 0.4.0 resolves to the `htl-core` 0.4.0 being packaged beside it. No `--allow-dirty`:
     # what is under test has to be what git has, or it is not the tarball that would be
     # uploaded — and a clean worktree is also what puts .cargo_vcs_info.json inside it.
+    # Cargo scopes that to the files it is about to ship, which is the right scope and
+    # narrower than it sounds: an uncommitted README or justfile is not refused here,
+    # because neither is in any of the four tarballs.
     cargo package --target-dir "$target" -p htl-core -p htl-macros -p htl -p htl-cli
     ver="$(cargo pkgid -p htl-core | sed 's/.*[#@]//')"
     dir="$(mktemp -d)"
