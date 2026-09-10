@@ -548,9 +548,11 @@ fn t_types_readme() -> String {
 /// It may only name keys the htl this scaffold *pins* can read. A host project depends on
 /// the released crate ([`htl_dep_version`]), and `HtlConfig` is `deny_unknown_fields`, so a
 /// key this workspace added but no release carries yet fails the project's first
-/// `cargo build` inside `include_tl!` rather than being ignored. `[toolchain]` is out for
-/// that reason and comes back in the release after the one that publishes it
-/// (`docs/releasing.md` § What the scaffold may write).
+/// `cargo build` inside `include_tl!` rather than being ignored. So a key crosses in two
+/// steps: it lands in `htl-core` and is published, and only the release *after* that may
+/// write it into a scaffold. `[toolchain]` is out for that reason, and it is the key this
+/// was learned on — it was written a release early, and every project `htl new` wrote in
+/// between failed to build.
 ///
 /// `[lint.rules]` is out for the same reason, and a commented example of it would be too:
 /// a comment is one user action away from being a key, and the user who uncomments it is

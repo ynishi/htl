@@ -233,9 +233,10 @@ _scaffold-hosts htl target htl_path core_path macros_path:
 #
 # It is its own recipe rather than a case in `e2e` because it needs a clean worktree and
 # several minutes, and a case that refuses to run while a commit is being written does not
-# belong in the recipe run while one is. The chain (docs/releasing.md § The chain) runs it
-# before the first `cargo publish`, because after that there is nothing left to do with the
-# answer.
+# belong in the recipe run while one is. `pre-publish` is what runs it, and it has to be the
+# last thing asked before the first `cargo publish`: a version on crates.io is yanked and
+# superseded, never replaced, so this is the last step whose answer can still change what
+# goes out.
 # The release gate, asked of the four tarballs a publish would upload rather than of the checkout.
 e2e-scaffold-packaged:
     #!/usr/bin/env bash

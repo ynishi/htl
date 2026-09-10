@@ -971,8 +971,7 @@ the requirement is refused before anything is read, naming both versions and thi
 htl installs nothing, so the answer is `cargo install htl-cli`. Leave the key out and any
 command runs the project, as before — which is what `htl new` currently writes, because a
 scaffolded Rust host builds against the released `htl` crate and that crate rejects a key
-newer than itself (`docs/releasing.md` § What the scaffold may write). Add it by hand to
-pin a project whose htl already knows it.
+newer than itself. Add it by hand to pin a project whose htl already knows it.
 
 `[check] paths` is for modules the host supplies at run time from somewhere the
 checker would not look (an SDK cache, a mods dir): the CLI, `include_tl!` and
@@ -1769,13 +1768,32 @@ what a reader meets first, and it reads like a dead end rather than a pointer to
   arguments" at `expect`. htl names the expanding call and the two fixes (bind first,
   or parenthesize to keep the first value).
 
-## Releasing and using a local checkout
+## Running against an unpublished htl
 
-`docs/releasing.md`: the publish order, the crates.io per-crate 24-hour version limit
-and what to do when it hits, and how a consumer runs against an unpublished htl with
-`[patch.crates-io]` (all three crates, plus one `cargo update -p htl -p htl-core -p
-htl-macros`, without which cargo keeps the locked version and warns that the patch
-was not used).
+A consumer that needs a change before it is on crates.io points at a checkout, in its own
+`Cargo.toml`:
+
+```toml
+[patch.crates-io]
+htl = { path = "/path/to/htl/crates/htl" }
+htl-core = { path = "/path/to/htl/crates/htl-core" }
+htl-macros = { path = "/path/to/htl/crates/htl-macros" }
+```
+
+All three, not one. `htl` re-exports `htl-core`, and the proc macros in `htl-macros` run
+`htl-core` at expansion time, so patching only `htl` builds two versions of the same code
+into one graph.
+
+**The patch is ignored until the lockfile is updated.** `Cargo.lock` keeps the version it
+already resolved, and cargo says so rather than switching:
+
+```
+warning: patch `htl v0.4.0 (...)` was not used in the crate graph
+```
+
+Run `cargo update -p htl -p htl-core -p htl-macros` once and the lock points at the local
+paths. To go back once the version is published, delete the `[patch.crates-io]` block and
+run the same `cargo update` again.
 
 ## What is deliberately not here
 

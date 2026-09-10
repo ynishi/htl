@@ -24,7 +24,7 @@ Assign at least one when you open an issue. The branch prefix follows the label.
 | `enhancement`   | behaviour that does not exist yet              | `feat/`     |
 | `refactor`      | behaviour unchanged                            | `refactor/` |
 | `chore`         | production code untouched — CI, tests, tooling | `chore/`    |
-| `documentation` | prose only (README, docs/, doc comments)       | `docs/`     |
+| `documentation` | prose only (README, doc comments)              | `docs/`     |
 
 ### What an issue says
 
@@ -96,12 +96,9 @@ thick rather than thin: the design is in there, not only the signatures.
 `cargo doc` is where a reader is sent. When a comment and an issue or a chat
 disagree, the code wins, then the comment.
 
-Beyond doc comments there are two places, and nothing else:
-
-- README.md: the user-facing reference (CLI table, embedding, lints, tests,
-  `htl.toml`, bundles, pitfalls). A new flag, lint or config key is not done
-  until it is in there.
-- `docs/`: runbooks for things that are done by hand (`docs/releasing.md`).
+Beyond doc comments there is one place, and nothing else: README.md, the
+user-facing reference (CLI table, embedding, lints, tests, `htl.toml`, bundles,
+pitfalls). A new flag, lint or config key is not done until it is in there.
 
 Write a rule once, where the thing it constrains is defined, and link to it
 from anywhere else; a second copy is the one nobody updates.
