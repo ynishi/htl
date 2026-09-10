@@ -734,6 +734,10 @@ fn read_file(file: &Path, src: &str, cfg: &HtlConfig) -> Result<Vec<Resolved>, V
 /// The line above counts only when the marker is the whole of it. A marker trailing a
 /// declaration belongs to that declaration, and reading it from the line below as well
 /// would make one `---@required` mark two fields.
+///
+/// What is read stops at the next `---@`: a declaration may carry two markers on one line
+/// (`record Mod   ---@contract ---@extensible`), and the second one is the other marker's
+/// text rather than this one's argument list.
 fn marker_on(lines: &[&str], i: usize, name: &str) -> Option<String> {
     let needle = format!("---@{name}");
     let above = i
@@ -748,7 +752,8 @@ fn marker_on(lines: &[&str], i: usize, name: &str) -> Option<String> {
                 .next()
                 .is_none_or(|c| !c.is_alphanumeric() && c != '_')
             {
-                return Some(rest.trim().to_string());
+                let mine = rest.split("---@").next().unwrap_or(rest);
+                return Some(mine.trim().to_string());
             }
         }
     }

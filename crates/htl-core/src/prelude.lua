@@ -204,7 +204,9 @@ end
 -- Read more strictly than `has_marker`, which also accepts the line above the declaration.
 -- A record nested directly under `record Judged   ---@sealed` sits on that line, and a
 -- marker read that loosely would seal the nested one too; on its own line the marker has
--- to be on a line that is only a marker comment.
+-- to be on a line that is only a marker comment. `marker_on` is the reader `---@sealed`
+-- and `---@extensible` (below) share, since both mark a record and both are read from a
+-- declaring file that may nest one record inside another.
 local function marker_args(line, marker)
    if not line then return false, nil end
    local at = line:find("%-%-%-@" .. marker .. "%f[%W]")
@@ -213,12 +215,12 @@ local function marker_args(line, marker)
    return true, args and args:sub(2, -2) or nil
 end
 
-local function sealed_marker(lines, y)
+local function marker_on(lines, y, marker)
    if not lines or not y then return false, nil end
-   local found, args = marker_args(lines[y], "sealed")
+   local found, args = marker_args(lines[y], marker)
    if found then return true, args end
    local above = lines[y - 1]
-   if above and above:match("^%s*%-%-%-@") then return marker_args(above, "sealed") end
+   if above and above:match("^%s*%-%-%-@") then return marker_args(above, marker) end
    return false, nil
 end
 
@@ -265,7 +267,7 @@ end
 local function sealed_spec(cache, t, filename)
    local lines = source_lines(cache, t.file)
    if not lines then return nil end
-   local found, args = sealed_marker(lines, t.y)
+   local found, args = marker_on(lines, t.y, "sealed")
    if not found then return nil end
    local fns
    if args then
@@ -304,6 +306,94 @@ local function sealed_resolver(result, filename)
       if specs[id] == nil then specs[id] = sealed_spec(sources, t, filename) or false end
       return specs[id] or nil
    end
+end
+
+-- `---@extensible`: records a table may carry keys beyond the ones they declare. Every
+-- Teal record is closed, and a value arriving from outside the program is where that
+-- costs: a mod written against a newer SDK, a save file from a later version, a table a
+-- host will grow next release, each carrying one key more than the declaration knows
+-- about. The marker says the declaration is not the whole set, and the only thing it
+-- buys is that tl's `unknown field <k>` is dropped for the keys it does not declare.
+--
+-- Read from the declaring file, in both forms, like the markers above and for the same
+-- reason: the checker discards comments, and the file being checked is rarely the one
+-- that declares the record.
+--
+-- Nothing here relaxes which *declared* fields a literal must set. `---@struct` and
+-- `---@required` are answered elsewhere and are untouched by this, so a record can be
+-- open at one end (keys nobody declared) and closed at the other (fields it does).
+local function extensible_declared(cache, t)
+   local lines = source_lines(cache, t.file)
+   if not lines then return nil end
+   if not marker_on(lines, t.y, "extensible") then return nil end
+   local declared = {}
+   for name in pairs(t.fields or {}) do declared[name] = true end
+   return declared
+end
+
+local function literal_key(item)
+   local key = item.key
+   if type(key) ~= "table" then return nil end
+   -- `name = 1` parses as a string key whose `tk` is quoted; `["name"] = 1` reaches the
+   -- checker the same way. `conststr` is what the checker itself keys the field by.
+   if key.conststr then return key.conststr end
+   if key.kind == "string" and type(key.tk) == "string" then return key.tk:sub(2, -2) end
+   return nil
+end
+
+-- Where tl's `unknown field <k>` is the marker working rather than a mistake: `out[y:x]`
+-- is the key named there, for every key an `---@extensible` record does not declare that
+-- a literal built as one sets. Keyed by the table item's own position, which is where tl
+-- raises it (`add_in_context(node[i], node, "unknown field " .. ck)` in the vendored
+-- compiler), so the drop is on position and message and nothing wider.
+--
+-- The type side is answered the way `struct_at` answers it -- `tl.get_types`' `by_pos` at
+-- the literal's position -- and the keys are read off the checker's own tree, since this
+-- runs where the lint pass may not (a dependency's errors, and the resolver's
+-- `gen_string` at the run boundary, both reach `collect_errors` with no lints asked for).
+local function extensible_keys(filename, result)
+   local out = {}
+   if not result or not result.ast then return out end
+   local ok, report = pcall(tl.get_types, result)
+   if not ok or type(report) ~= "table" then return out end
+   local by_pos = report.by_pos and report.by_pos[filename]
+   if not by_pos then return out end
+   local declareds, sources = {}, {}
+   local function deref(id, depth)
+      local t = report.types[id]
+      if t and t.ref and depth < 8 then return deref(t.ref, depth + 1) end
+      return t
+   end
+   local function declared_at(y, x)
+      local id = by_pos[y] and by_pos[y][x]
+      if not id then return nil end
+      local t = deref(id, 0)
+      if not t or not t.fields or not t.file or not t.y then return nil end
+      if declareds[id] == nil then declareds[id] = extensible_declared(sources, t) or false end
+      return declareds[id] or nil
+   end
+   local seen = {}
+   local function go(n)
+      if type(n) ~= "table" or seen[n] then return end
+      seen[n] = true
+      if n.kind == "literal_table" and n.y and n.x then
+         local declared = declared_at(n.y, n.x)
+         if declared then
+            for _, item in ipairs(n) do
+               local name = type(item) == "table" and item.y and item.x and literal_key(item)
+               if name and not declared[name] then
+                  out[item.y .. ":" .. item.x] = name
+               end
+            end
+         end
+      end
+      for k, v in pairs(n) do
+         if k ~= "if_parent" and k ~= "type" and k ~= "newtype" and k ~= "decltuple" and k ~= "expected"
+            and type(v) == "table" then go(v) end
+      end
+   end
+   go(result.ast)
+   return out
 end
 
 -- Resolver for the `union-exhaustive` lint: the members of the union type at (y, x), as
@@ -741,6 +831,14 @@ local function collect_errors(filename, result, src)
       end
    end
    local hinted = {} -- lines where an arity error was explained by a multi-value call
+   -- Keys an `---@extensible` record allows, resolved on the first `unknown field` error
+   -- and not before: the walk and the type report cost something, and a file with no such
+   -- error has nothing for them to answer.
+   local extensible
+   local function extensible_allows(e, key)
+      if extensible == nil then extensible = extensible_keys(filename, result) end
+      return extensible[(e.y or 0) .. ":" .. (e.x or 0)] == key
+   end
    for _, e in ipairs(result.type_errors or {}) do
       local msg = explain_self_require(filename, e)
       local own = e.filename == nil or e.filename == filename
@@ -752,7 +850,14 @@ local function collect_errors(filename, result, src)
       end
       -- tl follows the arity error with "argument N: got X, expected T (unresolved
       -- generic)" for the very same call: a consequence, not a second mistake.
-      if not (own and hinted[e.y] and msg:find("(unresolved generic)", 1, true)) then
+      local dropped = own and hinted[e.y] and msg:find("(unresolved generic)", 1, true)
+      -- `unknown field extra` about a key an `---@extensible` record does not declare is
+      -- the marker working: the record said its declaration is not the whole set.
+      if not dropped then
+         local key = own and msg:match("unknown field ([%w_]+)$")
+         dropped = key and extensible_allows(e, key)
+      end
+      if not dropped then
          errors[#errors + 1] = fmt(filename, { filename = e.filename, y = e.y, x = e.x, msg = msg })
          error_fixes[#errors] = fix or false
       end
