@@ -76,17 +76,29 @@ _scaffold-hosts htl target htl_path core_path macros_path:
             --config "patch.crates-io.htl-core.path='{{core_path}}'"
             --config "patch.crates-io.htl-macros.path='{{macros_path}}'"
             --target-dir "$target")
+    # What each of these projects holds, and what they must keep holding whoever built them:
+    # a pin on the released htl, with nothing in the manifest redirecting it. The patch above
+    # is handed to cargo through --config, off to one side, so that a generated Cargo.toml
+    # stays byte for byte the one a user gets. Both halves are spelled `if …; then exit 1`
+    # rather than `! grep …`, because that second form cannot fail a recipe: bash exempts a
+    # command whose status is inverted with `!` from `set -e`, so it reported nothing however
+    # the manifest looked.
+    assert_unpatched_pin() {
+      if ! grep -q '^htl = ' Cargo.toml; then
+        echo "$PWD/Cargo.toml: names no htl to build against" >&2
+        exit 1
+      fi
+      if grep -q 'patch.crates-io' Cargo.toml; then
+        echo "$PWD/Cargo.toml: redirects its own pin, so this is not the manifest a user gets" >&2
+        exit 1
+      fi
+    }
     # Each project is built in a subshell: the scaffolding command above has to be back in
     # this workspace, not in the one that was just scaffolded.
     {{htl}} new "$dir/hostsample" --host rust
     (
       cd "$dir/hostsample"
-      # What a user's project holds, and what these must keep holding whoever built them:
-      # a plain pin on the released htl, with nothing in the manifest redirecting it. The
-      # patch above is handed to cargo through --config, off to one side, so that a
-      # generated Cargo.toml stays byte for byte the one a user gets.
-      grep -q '^htl = ' Cargo.toml
-      ! grep -q 'patch.crates-io' Cargo.toml
+      assert_unpatched_pin
       cargo test "${sample[@]}"
       out="$(cargo run -q "${sample[@]}" -- Ada)"
       printf '%s\n' "$out"
@@ -99,8 +111,7 @@ _scaffold-hosts htl target htl_path core_path macros_path:
       cd "$dir/libsample"
       test ! -e src/main.rs
       test ! -e src/main.tl
-      grep -q '^htl = ' Cargo.toml
-      ! grep -q 'patch.crates-io' Cargo.toml
+      assert_unpatched_pin
       cargo test "${sample[@]}"
     )
     # The C ABI host, whose callers are the part nothing else here compiles: the library
@@ -113,9 +124,9 @@ _scaffold-hosts htl target htl_path core_path macros_path:
       test ! -e src/main.rs
       test ! -e src/main.tl
       # The same pin, with the feature the profile needs on it — `htl = { version = "0.4",
-      # features = ["ffi"] }` is still a plain pin, and still nothing patches it here.
-      grep -q '^htl = ' Cargo.toml
-      ! grep -q 'patch.crates-io' Cargo.toml
+      # features = ["ffi"] }` is still one `htl =` line naming the release, and still
+      # nothing patches it here.
+      assert_unpatched_pin
       cargo test "${sample[@]}"
       cargo build "${sample[@]}"
       # Written by #[c_export] at build time, not by the scaffold: it is not there until
@@ -197,17 +208,24 @@ e2e-scaffold-packaged:
     {{just_executable()}} _scaffold-hosts "$dir/cli/bin/htl" "$target" \
       "$dir/htl-$ver" "$dir/htl-core-$ver" "$dir/htl-macros-$ver"
 
-# The same scaffold, built against the htl on crates.io rather than this checkout: no
-# `[patch.crates-io]`, so the project compiles against the crate it actually pins — a
+# The same three scaffolds, built against the htl on crates.io rather than this checkout: no
+# `[patch.crates-io]`, so each project compiles against the crate it actually pins — a
 # release behind the workspace, which is what a user has. That gap is the point. A key
 # written into htl.toml before a release carries it, a template that only the workspace's
-# checker accepts, a dependency requirement that does not resolve: none of it is visible to
-# `e2e-scaffold` above, which patches the disagreement away by construction.
+# checker accepts, a dependency requirement or a feature that does not resolve: none of it is
+# visible to `e2e-scaffold` above, which patches the disagreement away by construction.
+#
+# All three profiles rather than one, because the manifest is written per profile: `ffi` pins
+# `htl = { version = "0.4", features = ["ffi"] }`, and whether the published crate carries
+# that feature is a different question from whether it exists at that version. This is where
+# either is asked of the registry.
 #
 # It runs in the same CI job as `e2e-scaffold` and against the same target directory, so
-# mlua and the rest of the graph are compiled once and only the three htl crates are built
-# twice. Building is enough: the failure this exists to catch is an expansion-time one, and
-# `include_tl!` runs during the build.
+# mlua and the rest of the graph are compiled once and what is built again is htl — twice
+# over, once with default features for the two Rust hosts and once with `ffi` for the third.
+# Building is enough, and is all three do: the failure this exists to catch is an
+# expansion-time one, `include_tl!` runs during the build, and what a scaffolded project does
+# once built is `e2e-scaffold`'s question, asked there of the same generated bytes.
 #
 # What it is for is the weeks before a release rather than the release: the commit that
 # teaches the scaffold to write a key no published htl can parse is caught here, on the
@@ -229,18 +247,46 @@ e2e-scaffold-published:
     root="$(pwd)"
     dir="$(mktemp -d)"
     trap 'rm -rf "$dir"' EXIT
-    cargo run -q -p htl-cli --bin htl -- new "$dir/published" --host rust --lib
-    (
-      cd "$dir/published"
-      # What makes this build the one a user gets: it pins the release, and nothing
-      # redirects that pin at a checkout.
-      grep -q '^htl = ' Cargo.toml
-      ! grep -q 'patch.crates-io' Cargo.toml
-    )
-    # Read back out of the manifest rather than recomputed here, so what is looked up below
-    # is the requirement the generated project will hand cargo, character for character.
-    pin="$(sed -n 's/^htl = "\([^"]*\)"$/\1/p' "$dir/published/Cargo.toml")"
-    test -n "$pin"
+    # Every profile `--host` offers, not one of them: each writes its own Cargo.toml, with
+    # its own requirement on htl and its own feature set, so whether what the scaffold
+    # writes resolves against the registry is three questions rather than one. The
+    # `ffi` profile is the one that asks anything new — it pins a feature as well as a
+    # version, and a feature is something the published crate either carries or does not.
+    profiles=("hostsample:--host rust" "libsample:--host rust --lib" "ffisample:--host ffi --lib")
+    pin=
+    for profile in "${profiles[@]}"; do
+      name="${profile%%:*}"
+      cargo run -q -p htl-cli --bin htl -- new "$dir/$name" ${profile#*:}
+      manifest="$dir/$name/Cargo.toml"
+      # What makes this build the one a user gets: the manifest names the released htl, and
+      # nothing in it redirects that name at a checkout. The requirement is read back out
+      # rather than recomputed here, so what is looked up below is the one the generated
+      # project will hand cargo, character for character — and reading it is how the first
+      # half is asserted. There are two forms to read, because a profile that needs a
+      # feature writes a table: `htl = "0.4"`, and `htl = { version = "0.4", features =
+      # ["ffi"] }`. What is the same in both is the version, which is the whole question
+      # here; the feature is answered by the build below either way.
+      got="$(sed -n -e 's/^htl = "\([^"]*\)"$/\1/p' \
+                    -e 's/^htl = { version = "\([^"]*\)".*/\1/p' "$manifest")"
+      if [ -z "$got" ]; then
+        echo "$name/Cargo.toml: names no htl version to look up" >&2
+        exit 1
+      fi
+      if grep -q 'patch.crates-io' "$manifest"; then
+        echo "$name/Cargo.toml: redirects its own pin, so this would not be the registry's htl" >&2
+        exit 1
+      fi
+      # Three manifests and one lookup below, which is honest only while the three pins are
+      # one pin. They are: `htl_dep_version()` derives the requirement from the CLI's own
+      # version and every profile takes it from there, whichever form it writes it in. If
+      # that ever stops being true the lookup would be answering for one profile and
+      # guessing at the other two, so it is checked here rather than assumed.
+      if [ -n "$pin" ] && [ "$got" != "$pin" ]; then
+        echo "the profiles disagree on the pin ($pin and $got): one lookup cannot answer for both" >&2
+        exit 1
+      fi
+      pin="$got"
+    done
     # crates.io's sparse index at its documented layout: a three-character name lives under
     # 3/<first character>/<name>, one JSON object per line. `cargo info htl@<pin>` cannot
     # answer this from in here — it resolves the name against the workspace first and reports
@@ -250,21 +296,23 @@ e2e-scaffold-published:
     # of those the versions cargo's caret accepts are exactly the ones beginning `<pin>.`, so
     # the prefix is the whole question. A yanked version answers no.
     if grep "\"vers\":\"$pin\." "$dir/index" | grep -qv '"yanked":true'; then
-      (
-        cd "$dir/published"
-        cargo build --target-dir "${CARGO_TARGET_DIR:-$root/target}/e2e-scaffold"
-      )
+      for profile in "${profiles[@]}"; do
+        (
+          cd "$dir/${profile%%:*}"
+          cargo build --target-dir "${CARGO_TARGET_DIR:-$root/target}/e2e-scaffold"
+        )
+      done
     else
       # Deferred, and to be read as deferred: nothing was built and nothing was proved. The
       # scaffold is correct or not either way, and the run that finds out is the gate, which
       # asks the tarballs instead of the registry and so has an answer on this commit too.
       echo "e2e-scaffold-published: DEFERRED, nothing built."
-      echo "  The scaffold pins htl = \"$pin\" and crates.io has no release matching it, which"
-      echo "  is the release commit and no other: the version has moved and the publish has"
-      echo "  not happened. Whether a project pinning \"$pin\" builds is answered on this commit"
-      echo "  by 'just e2e-scaffold-packaged', which builds the same three projects against the"
-      echo "  .crate files the publish would upload, and which the chain in docs/releasing.md"
-      echo "  runs before the first 'cargo publish'."
+      echo "  All three host profiles pin htl \"$pin\" and crates.io has no release matching it,"
+      echo "  which is the release commit and no other: the version has moved and the publish"
+      echo "  has not happened. Whether a project pinning \"$pin\" builds is answered on this"
+      echo "  commit by 'just e2e-scaffold-packaged', which builds the same three projects"
+      echo "  against the .crate files the publish would upload, and which the chain in"
+      echo "  docs/releasing.md runs before the first 'cargo publish'."
     fi
 
 # Every benchmark: the figures in the README come from these. Ten samples each; a few minutes.
