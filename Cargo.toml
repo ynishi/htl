@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 authors = ["Yutaka Nishimura"]
 license = "MIT OR Apache-2.0"
@@ -22,14 +22,14 @@ rust-version = "1.88"
 
 [workspace.dependencies]
 # default-features off at the workspace level so members opt in (`features = [...]`).
-htl-core = { path = "crates/htl-core", version = "0.3.0", default-features = false }
-htl-macros = { path = "crates/htl-macros", version = "0.3.0" }
-htl = { path = "crates/htl", version = "0.3.0", default-features = false }
+htl-core = { path = "crates/htl-core", version = "0.4.0", default-features = false }
+htl-macros = { path = "crates/htl-macros", version = "0.4.0" }
+htl = { path = "crates/htl", version = "0.4.0", default-features = false }
 mlua = { version = "0.12.1", features = ["lua54", "vendored", "error-send"] }
 mlua-pkg = "0.11.0"
 anyhow = "1.0.104"
 # `[toolchain] htl` in htl.toml: cargo's own requirement syntax and matching rule, so a
-# pin on the command reads and behaves as the `htl = "0.3"` beside it in Cargo.toml.
+# pin on the command reads and behaves as the `htl = "0.4"` beside it in Cargo.toml.
 # Already in the graph (mlua-pkg resolves versions with it) and it has no dependencies.
 semver = "1.0.28"
 clap = { version = "4.6.6", features = ["derive"] }

@@ -937,7 +937,7 @@ override it (`htl new` writes a commented one).
 
 ```toml
 [toolchain]
-htl = "0.3"               # the htl command this project expects; a mismatch is refused
+htl = "0.4"               # the htl command this project expects; a mismatch is refused
 
 [lint]
 strict = true             # for this run, every warn counts as deny (htl check only);
@@ -960,7 +960,7 @@ dir = "mods"              # relative to htl.toml; "sites/*" = every subdirectory
 # module = "Site"         # optional: only this module name (in each dir) is held to it
 ```
 
-`[toolchain] htl` is a cargo requirement (`"0.3"` = 0.3.x) on the *command*, which
+`[toolchain] htl` is a cargo requirement (`"0.4"` = 0.4.x) on the *command*, which
 `Cargo.toml` does not pin — it pins the crate a Rust host builds against. The command
 is what decides whether the project checks: three lints were added on one day and all
 three are reported by default, so a project quiet under the release before them says
