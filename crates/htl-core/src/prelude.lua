@@ -1017,27 +1017,68 @@ function H.resolve_module(name)
    return found, lua_path
 end
 
--- Every `<name>.d.tl` reachable on the current `package.path`, in the order the path is
--- consulted. `package.searchpath` answers with the first hit and says nothing about the
--- rest, which is the whole problem: two declarations of one module means one is read and
--- the other is not, decided by a position nobody wrote down.
-function H.declaration_sites(name)
+-- Every file on the current `package.path` that could answer `require(name)`, in the
+-- order the searchers consult them: sources across the whole path, then declarations,
+-- then plain Lua — the order the wrapper at the top of this file gives `tl.search_module`,
+-- which is why source beats declaration wherever the two sit.
+--
+-- The searchers answer with the first hit and say nothing about the rest, which is the
+-- whole question: one file is read, the others are not, decided by a position nobody
+-- wrote down. Each entry is { path, kind = "source" | "declaration" | "lua", dir },
+-- `dir` being the search-path directory the template it was found through belongs to.
+function H.module_candidates(name)
    local out, seen = {}, {}
    local relative = (name:gsub("%.", "/"))
-   for template in package.path:gmatch("[^;]+") do
-      -- The path templates end in `.lua` (tl rewrites the suffix when it searches);
-      -- anything else on the path is not ours to interpret.
-      local decl = template:gsub("%.lua$", ".d.tl")
-      if decl ~= template then
-         local p = (decl:gsub("%?", relative))
-         if not seen[p] then
-            seen[p] = true
-            local fd = io.open(p, "r")
-            if fd then
-               fd:close()
-               out[#out + 1] = p
+   for _, ext in ipairs({ { ".tl", "source" }, { ".d.tl", "declaration" }, { ".lua", "lua" } }) do
+      for template in package.path:gmatch("[^;]+") do
+         -- The path templates end in `.lua` (the searchers rewrite the suffix); anything
+         -- else on the path is not ours to interpret.
+         if template:sub(-4) == ".lua" then
+            local p = (template:sub(1, -5) .. ext[1]):gsub("%?", relative)
+            if not seen[p] then
+               seen[p] = true
+               local fd = io.open(p, "r")
+               if fd then
+                  fd:close()
+                  out[#out + 1] = { path = p, kind = ext[2], dir = H.template_dir(template) }
+               end
             end
          end
+      end
+   end
+   return out
+end
+
+-- The directory a `package.path` template searches: everything before its first `?`,
+-- without the separator. `?.lua` (the cwd) is ".".
+function H.template_dir(template)
+   local head = template:match("^([^?]*)") or ""
+   head = head:gsub("/+$", "")
+   if head == "" then return "." end
+   return head
+end
+
+-- The directories `package.path` searches, in order, one entry each however many
+-- templates a directory contributes (`add_path` adds three).
+function H.search_dirs()
+   local out, seen = {}, {}
+   for template in package.path:gmatch("[^;]+") do
+      local dir = H.template_dir(template)
+      if not seen[dir] then
+         seen[dir] = true
+         out[#out + 1] = dir
+      end
+   end
+   return out
+end
+
+-- Every `<name>.d.tl` reachable on the current `package.path`, in the order the path is
+-- consulted: the declarations of `module_candidates`, which is the same walk.
+function H.declaration_sites(name)
+   local out = {}
+   for _, c in ipairs(H.module_candidates(name)) do
+      if c.kind == "declaration" then
+         out[#out + 1] = c.path
       end
    end
    return out

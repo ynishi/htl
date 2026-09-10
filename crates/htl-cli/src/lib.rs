@@ -13,8 +13,8 @@ mod scaffold;
 
 /// Output format of every command that has `--format`. One enum, so its help must be
 /// true of all of them: `check` / `test` / `fix` put their text form on stderr (README,
-/// "Machine-readable output" says why), `cache status` / `bundle info` are reports and
-/// put it on stdout. Which stream is the README's to say, not this help's.
+/// "Machine-readable output" says why), `cache status` / `bundle info` / `resolve` are
+/// reports and put it on stdout. Which stream is the README's to say, not this help's.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
 enum Format {
     /// Human-readable lines
@@ -485,6 +485,32 @@ Examples:
         #[arg(long)]
         explain_cache: bool,
     },
+    /// Which file `require("<module>")` resolves to, and what that hides
+    ///
+    /// The whole chain in search order: what is read, what is reachable and not read, and
+    /// which crate or dependency each one came from. An override on the search path is the
+    /// mechanism working, and this is how to see it. README, "Which file a name resolves
+    /// to": https://github.com/ynishi/htl#which-file-a-name-resolves-to-htl-resolve
+    #[command(after_long_help = "\
+Examples:
+  htl resolve mq                 the chain for require(\"mq\")
+  htl resolve socket.http        a name with dots, as a require spells it
+  htl resolve mq --format json   the same rows as one JSON document
+
+Exits 1 when the name resolves to nothing, so a script can ask.
+
+`htl.test` is not on a project's search path: `htl test` preloads it into the state it
+runs, and the declarations behind it come from the binary rather than the project.
+")]
+    Resolve {
+        /// The module name a `require` would spell (`mq`, `socket.http`)
+        module: String,
+        /// A path inside the project (default: the working directory)
+        path: Option<PathBuf>,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+    },
     /// Read a `.hb` bundle without running it
     ///
     /// README, "Bundles": https://github.com/ynishi/htl#bundles-htl-build
@@ -714,6 +740,11 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
                 explain: explain_cache,
             },
         ),
+        Cmd::Resolve {
+            module,
+            path,
+            format,
+        } => cmd_resolve(&module, path.as_deref(), format == Format::Json),
         Cmd::Bundle { cmd } => match cmd {
             BundleCmd::Info { file, format } => cmd_bundle_info(&file, format == Format::Json),
         },
@@ -2012,6 +2043,91 @@ fn cmd_unused(paths: &[PathBuf], flags: UnusedFlags) -> Result<ExitCode> {
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// Say which file a module name resolves to, and what that hides.
+///
+/// The chain comes from the library ([`htl::resolve`]), over a checker set up exactly as a
+/// check of this project sets one up — the installed deps, then the config's search paths,
+/// in that order, because `add_path` prepends and the order is the whole answer. Asking
+/// any other way would report a path nothing else uses.
+///
+/// A report, so both forms go to stdout (README, "Machine-readable output").
+fn cmd_resolve(module: &str, path: Option<&Path>, json: bool) -> Result<ExitCode> {
+    let start = path.unwrap_or(Path::new("."));
+    let cfg = load_config(start)?;
+    // The declarations a check generates before it reads anything are inputs to the
+    // answer — `types/<crate>/` is written by `htl dts` — and a report without them would
+    // describe a project nobody checks.
+    auto_dts(start)?;
+    let h = Htl::new()?;
+    let project = apply_project(&h, start)?;
+    if let Some((root, _, c)) = &cfg {
+        h.apply_config(root, c)?;
+    }
+    let rep = htl::resolve::resolve(
+        &h,
+        module,
+        cfg.as_ref().map(|(r, _, _)| r.as_path()),
+        project.as_ref(),
+    )?;
+    if json {
+        report::emit(&rep)?;
+    } else {
+        print_resolution(&rep);
+    }
+    Ok(if rep.summary.ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+/// The text form of a resolution: a table in search order, then the directories that were
+/// consulted. The order column is the reason one row is read and the others are not, which
+/// is why it is printed rather than left to be looked up.
+fn print_resolution(r: &htl::resolve::Resolution) {
+    match &r.read {
+        Some(read) => println!("htl resolve {}: {read}", r.module),
+        None => println!(
+            "htl resolve {}: nothing on the search path answers require(\"{}\")",
+            r.module, r.module
+        ),
+    }
+    if !r.candidates.is_empty() {
+        let w = |f: fn(&htl::resolve::Candidate) -> usize, head: usize| {
+            r.candidates.iter().map(f).max().unwrap_or(0).max(head)
+        };
+        let file = w(|c| c.path.len(), 4);
+        let kind = w(|c| c.kind.as_str().len(), 4);
+        let read_at = r
+            .candidates
+            .iter()
+            .find(|c| c.status == htl::resolve::Status::Read)
+            .map(|c| c.order);
+        println!();
+        println!("  order  {:file$}  {:kind$}  status", "file", "kind");
+        for c in &r.candidates {
+            let status = match (c.status, c.shadowed_by, read_at) {
+                (htl::resolve::Status::Shadowed, Some(by), _) => format!("shadowed by {by}"),
+                // Not hidden by the row that is read: typed by it, and loaded by the run.
+                (htl::resolve::Status::Runtime, _, Some(by)) => format!("runtime, typed by {by}"),
+                (s, _, _) => s.as_str().to_string(),
+            };
+            let origin = match &c.origin {
+                Some(o) => format!("  ({})", o.describe()),
+                None => String::new(),
+            };
+            println!(
+                "  {:<5}  {:file$}  {:kind$}  {status}{origin}",
+                c.order,
+                c.path,
+                c.kind.as_str()
+            );
+        }
+    }
+    println!();
+    println!("  searched, in order: {}", r.searched.join(", "));
 }
 
 /// `1 module` / `2 modules`: a count whose noun agrees with it, for a line short enough
