@@ -121,3 +121,41 @@ fn a_declaration_only_module_is_published_and_announced() {
         "nothing changed, nothing written"
     );
 }
+
+/// A project with two contracts, run twice: it says what it wrote once per file, and it
+/// has nothing to say about its own declarations. Both were symptoms of the same thing —
+/// the published declaration read back as a second claimant of the directory, and the
+/// module publishing once per contract instead of once.
+#[test]
+fn two_contracts_are_published_once_each_and_report_nothing() {
+    let root = scratch("two-contracts");
+    write(
+        &root.join("htl.toml"),
+        "[[contract]]\ndir = \"mods_a\"\n\n[[contract]]\ndir = \"mods_b\"\n",
+    );
+    write(
+        &root.join("src/defs.tl"),
+        "local record defs\n   record ModA   ---@contract(\"mods_a\")\n      name: string   \
+         ---@required\n   end\n   record ModB   ---@contract(\"mods_b\")\n      name: string   \
+         ---@required\n   end\nend\nreturn defs\n",
+    );
+    write(&root.join("mods_a/one.tl"), "return { name = \"a\" }\n");
+    write(&root.join("mods_b/one.tl"), "return { name = \"b\" }\n");
+
+    let first = htl(&root, &["check", ".", "--no-cache"]);
+    let said = String::from_utf8_lossy(&first.stderr).to_string();
+    assert_eq!(
+        said.matches("dts: wrote").count(),
+        1,
+        "one file written, said once: {said}"
+    );
+    assert!(!said.contains("[htl contract]"), "{said}");
+
+    let second = htl(&root, &["check", ".", "--no-cache"]);
+    let said = String::from_utf8_lossy(&second.stderr).to_string();
+    assert!(!said.contains("dts: wrote"), "it settled: {said}");
+    assert!(
+        !said.contains("[htl contract]"),
+        "and the declaration it wrote is not a second claimant: {said}"
+    );
+}

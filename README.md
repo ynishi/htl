@@ -915,6 +915,15 @@ field the record already declares is left as the author wrote it, and a method k
 since whoever reads the declaration does not have the `htl.toml` a bare `---@contract`
 inherits from. A function on a table the module declares no record for is reported rather
 than dropped — a declaration missing a function is worse than one that was not written.
+A module declaring two contract types is one file and is published once, both markers
+named outright.
+
+`types/` is searched, so the published declaration puts the claim on the path a second
+time. That is one record found twice, not a second claimant of the directory, and only two
+*different* records claiming one directory is reported. Nor do two contract directories
+collide over a name: a contract directory is resolved as a directory and is not on the
+project's search path, so `mods_a/one.tl` and `mods_b/one.tl` are two modules, each held
+to the record its own directory is under.
 
 Two lints follow:
 
