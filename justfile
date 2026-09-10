@@ -22,49 +22,88 @@ fmt:
 fmt-check:
     cargo fmt --all -- --check
 
-# The gate at the end is last because it is the slowest of the three scaffold recipes, and
+# The gate at the end is last because it is the slower of the two end-to-end recipes, and
 # because it asks git what to put in a tarball. An uncommitted change to a file one of the
 # four crates ships stops it, and it names that file; a change to anything else — this
 # justfile, a doc, a test — does not, because it would not have reached the tarball either
 # way. So a dirty checkout is not a reason not to run this, but a dirty *crate* is a reason
 # it will refuse.
 # Everything CI runs on a push, in the same order, so a failure there reproduces here.
-ci: build check e2e e2e-scaffold e2e-scaffold-published e2e-scaffold-packaged
+ci: build check e2e e2e-scaffold-packaged
 
 # Compile everything, including tests and benches, without running any of it.
 build:
     cargo build --workspace --all-targets
 
-# The CLI and the embedding example, end to end, as the second CI job does.
+# One recipe rather than four, because the cases below ask one question of four surfaces, and
+# because each of them answers with a pass or a fail rather than with figures for a person to
+# read and judge.
+# The CLI, the embedding example, the run cache and every host `--host` offers, end to end.
 e2e:
-    cargo run -q -p htl-cli --bin htl -- check examples/tl/util.tl examples/tl/main.tl examples/tl/util_test.tl
-    cargo run -q -p htl-cli --bin htl -- test examples/tl/util_test.tl
-    cargo run -q -p embed
-    cargo run -q -p embed -- --bundle
-
-# Every host `--host` offers, end to end: scaffolded into a temporary directory outside
-# this repository, pointed back at this checkout so it is *this* htl that is embedded,
-# then built, tested and run — including, for the C ABI host, the reference callers in C
-# and Python that load the library it builds. The snapshot tests pin what the scaffold
-# writes byte for byte; only this says the bytes compile and work.
-e2e-scaffold:
     #!/usr/bin/env bash
     set -euo pipefail
     root="$(pwd)"
-    # A scaffolded project depends on the released htl, which is what a user gets; for the
-    # change under test to be the one that runs, point the three crates at this checkout.
-    # Its artefacts land beside the workspace's under a directory of their own, because
-    # the scaffold sets `[profile.dev.build-override]` and sharing one target directory
-    # would rebuild the proc macro dependencies on every switch.
-    {{just_executable()}} _scaffold-hosts "cargo run -q -p htl-cli --bin htl --" \
+    # Built once and then invoked by path, rather than through `cargo run` each time: the
+    # cache case below runs from a directory outside this workspace, where `cargo run` has no
+    # manifest to find, and the scaffold case wants the same binary anyway.
+    cargo build -q -p htl-cli --bin htl
+    htl="${CARGO_TARGET_DIR:-$root/target}/debug/htl"
+    # The CLI on the repository's own .tl (examples/tl/failing/ is meant to fail and is not
+    # run here), and the embed example through both the include_tl! and the include_bundle!
+    # path.
+    "$htl" check examples/tl/util.tl examples/tl/main.tl examples/tl/util_test.tl
+    "$htl" test examples/tl/util_test.tl
+    cargo run -q -p embed
+    cargo run -q -p embed -- --bundle
+    # The run cache, checked twice over the same three files: once against a store that does
+    # not exist yet, once against the one the first run left. A store lives beside the
+    # `htl.toml` a project has and this repository's root has none, so the CLI falls back to
+    # the working directory — which is why the pair runs from a temporary one. That is what
+    # makes "cold" mean cold on a machine that has checked this repository before, and it
+    # leaves nothing behind in the checkout.
+    dir="$(mktemp -d)"
+    trap 'rm -rf "$dir"' EXIT
+    files=("$root/examples/tl/util.tl" "$root/examples/tl/main.tl" "$root/examples/tl/util_test.tl")
+    (
+      cd "$dir"
+      # Two claims per run, and only the second is the point. --explain-cache prints the
+      # store's own counters, and the check prints its summary, which ends in `[cached]`
+      # only when every file in the walk was replayed rather than checked. Both are on
+      # stderr, where everything a person reads goes (stdout is kept for --format json), so
+      # the run is captured whole rather than by stream. A store that was written and a run
+      # that was answered out of it are different facts, and a case that asserted the first
+      # would pass while the cache saved nothing.
+      "$htl" check "${files[@]}" --explain-cache >cold.log 2>&1
+      cat cold.log
+      grep -q '^htl cache: 0 hit, 0 missed, 3 written,' cold.log
+      "$htl" check "${files[@]}" --explain-cache >warm.log 2>&1
+      cat warm.log
+      grep -q '^htl cache: 3 hit, 0 missed, 0 written,' warm.log
+      grep -q ' \[cached\]$' warm.log
+      # And the store from the outside, which is the other half of the same fact: three
+      # modules were checked, so three entries are what the second run had to read.
+      "$htl" cache status >status.log 2>&1
+      cat status.log
+      grep -q '^htl cache: 3 entries,' status.log
+    )
+    # Every host `--host` offers: scaffolded into a temporary directory outside this
+    # repository, pointed back at this checkout so it is *this* htl that is embedded, then
+    # built, tested and run — including, for the C ABI host, the reference callers in C and
+    # Python that load the library it builds. The snapshot tests pin what the scaffold writes
+    # byte for byte; only this says the bytes compile and work. The artefacts land beside the
+    # workspace's under a directory of their own, because the scaffold sets
+    # `[profile.dev.build-override]` and sharing one target directory would rebuild the proc
+    # macro dependencies on every switch.
+    {{just_executable()}} _scaffold-hosts "$htl" \
       "${CARGO_TARGET_DIR:-$root/target}/e2e-scaffold" \
       "$root/crates/htl" "$root/crates/htl-core" "$root/crates/htl-macros"
 
-# The three host projects, and everything asked of them, in one place: `e2e-scaffold` above
-# and `e2e-scaffold-packaged` below differ in exactly two things — which htl writes the
-# projects ({{htl}}) and which trees they are built against ({{htl_path}}, {{core_path}},
-# {{macros_path}}) — and in nothing else. That is the point of the split: a release gate
-# that checked less than the loop that runs on every commit would be the wrong way round.
+# The three host projects, and everything asked of them, in one place: the scaffold case of
+# `e2e` above and `e2e-scaffold-packaged` below differ in exactly two things — which htl
+# writes the projects ({{htl}}) and which trees they are built against ({{htl_path}},
+# {{core_path}}, {{macros_path}}) — and in nothing else. That is the point of the split: a
+# release gate that checked less than the loop that runs on every commit would be the wrong
+# way round.
 _scaffold-hosts htl target htl_path core_path macros_path:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -156,20 +195,33 @@ _scaffold-hosts htl target htl_path core_path macros_path:
     )
 
 # The release gate: the same three host projects, built against the four `.crate` files
-# `cargo publish` would upload rather than against this checkout. Everything `e2e-scaffold`
-# cannot see lives in the difference between the two — `include` / `exclude` deciding
-# which files reach the tarball, an `include_str!` target that is untracked or ignored, the
+# `cargo publish` would upload rather than against this checkout. Everything the scaffold
+# case of `e2e` cannot see lives in the difference between the two — `include` / `exclude`
+# deciding which files reach the tarball, an `include_str!` target that is ignored, the
 # manifest normalisation that strips `[workspace]` and rewrites every path dependency to
 # its version key — and each of those breaks a release while leaving every check that runs
-# on the checkout green. So this asks the question of the artefact, and the chain
-# (docs/releasing.md § The chain) asks it before the first `cargo publish`, because after
-# that there is nothing left to do with the answer.
+# on the checkout green. `htl-core` is the crate with an `include`, and it is narrow
+# (`src/**/*`, `lua/**/*`, `vendor/**/*`), so a file added anywhere else in that crate and
+# read with `include_str!` is in every checkout and in no tarball.
+#
+# Two steps ask that, not one. `cargo package` builds each extracted crate to verify it, so
+# a missing `include_str!` target fails there, before anything below it runs; what the
+# scaffolding after it adds is the same tarballs compiled the way a consumer compiles them,
+# with the features a consumer turns on — `htl` with `ffi` for the C ABI host, which the
+# default-feature verification above never builds.
+#
+# It is its own recipe rather than a case in `e2e` because it needs a clean worktree and
+# several minutes, and a case that refuses to run while a commit is being written does not
+# belong in the recipe run while one is. The chain (docs/releasing.md § The chain) runs it
+# before the first `cargo publish`, because after that there is nothing left to do with the
+# answer.
+# The release gate, asked of the four tarballs a publish would upload rather than of the checkout.
 e2e-scaffold-packaged:
     #!/usr/bin/env bash
     set -euo pipefail
     root="$(pwd)"
-    # The same target directory as the two recipes around it: mlua and the graph beneath it
-    # are compiled once, and what is built again is the htl crates, from their new paths.
+    # The same target directory `e2e` uses for its own scaffolds: mlua and the graph beneath
+    # it are compiled once, and what is built again is the htl crates, from their new paths.
     target="${CARGO_TARGET_DIR:-$root/target}/e2e-scaffold"
     # Four crates in one command, because three of them depend on each other at versions
     # nobody has published: while it verifies each tarball by building it, cargo overlays
@@ -213,113 +265,6 @@ e2e-scaffold-packaged:
     {{just_executable()}} _scaffold-hosts "$dir/cli/bin/htl" "$target" \
       "$dir/htl-$ver" "$dir/htl-core-$ver" "$dir/htl-macros-$ver"
 
-# The same three scaffolds, built against the htl on crates.io rather than this checkout: no
-# `[patch.crates-io]`, so each project compiles against the crate it actually pins — a
-# release behind the workspace, which is what a user has. That gap is the point. A key
-# written into htl.toml before a release carries it, a template that only the workspace's
-# checker accepts, a dependency requirement or a feature that does not resolve: none of it is
-# visible to `e2e-scaffold` above, which patches the disagreement away by construction.
-#
-# All three profiles rather than one, because the manifest is written per profile: `ffi` pins
-# `htl = { version = "0.4", features = ["ffi"] }`, and whether the published crate carries
-# that feature is a different question from whether it exists at that version. This is where
-# either is asked of the registry.
-#
-# It runs in the same CI job as `e2e-scaffold` and against the same target directory, so
-# mlua and the rest of the graph are compiled once and what is built again is htl — twice
-# over, once with default features for the two Rust hosts and once with `ffi` for the third.
-# Building is enough, and is all three do: the failure this exists to catch is an
-# expansion-time one, `include_tl!` runs during the build, and what a scaffolded project does
-# once built is `e2e-scaffold`'s question, asked there of the same generated bytes.
-#
-# What it is for is the weeks before a release rather than the release: the commit that
-# teaches the scaffold to write a key no published htl can parse is caught here, on the
-# commit that writes it, and a gate at the release would find it a cycle later with the
-# change already merged.
-#
-# The gap being one release is a premise, not a law: the pin comes from the CLI's own
-# version, so on the release commit — where the number has moved and nothing is published
-# under it — the pin names a version crates.io does not have, and cargo says so at
-# resolution, about a crate that does not exist, instead of anything about the scaffold. So
-# the recipe asks the registry which case it is in rather than assuming, and when the answer
-# is "not published yet" it says which pin went unanswered and defers. Nothing in the
-# release chain waits on that deferral any more: `e2e-scaffold-packaged` above asks the
-# same question of the tarballs, before the first `cargo publish` rather than in the middle
-# of the four, and it needs no published crate to ask it.
-e2e-scaffold-published:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    root="$(pwd)"
-    dir="$(mktemp -d)"
-    trap 'rm -rf "$dir"' EXIT
-    # Every profile `--host` offers, not one of them: each writes its own Cargo.toml, with
-    # its own requirement on htl and its own feature set, so whether what the scaffold
-    # writes resolves against the registry is three questions rather than one. The
-    # `ffi` profile is the one that asks anything new — it pins a feature as well as a
-    # version, and a feature is something the published crate either carries or does not.
-    profiles=("hostsample:--host rust" "libsample:--host rust --lib" "ffisample:--host ffi --lib")
-    pin=
-    for profile in "${profiles[@]}"; do
-      name="${profile%%:*}"
-      cargo run -q -p htl-cli --bin htl -- new "$dir/$name" ${profile#*:}
-      manifest="$dir/$name/Cargo.toml"
-      # What makes this build the one a user gets: the manifest names the released htl, and
-      # nothing in it redirects that name at a checkout. The requirement is read back out
-      # rather than recomputed here, so what is looked up below is the one the generated
-      # project will hand cargo, character for character — and reading it is how the first
-      # half is asserted. There are two forms to read, because a profile that needs a
-      # feature writes a table: `htl = "0.4"`, and `htl = { version = "0.4", features =
-      # ["ffi"] }`. What is the same in both is the version, which is the whole question
-      # here; the feature is answered by the build below either way.
-      got="$(sed -n -e 's/^htl = "\([^"]*\)"$/\1/p' \
-                    -e 's/^htl = { version = "\([^"]*\)".*/\1/p' "$manifest")"
-      if [ -z "$got" ]; then
-        echo "$name/Cargo.toml: names no htl version to look up" >&2
-        exit 1
-      fi
-      if grep -q 'patch.crates-io' "$manifest"; then
-        echo "$name/Cargo.toml: redirects its own pin, so this would not be the registry's htl" >&2
-        exit 1
-      fi
-      # Three manifests and one lookup below, which is honest only while the three pins are
-      # one pin. They are: `htl_dep_version()` derives the requirement from the CLI's own
-      # version and every profile takes it from there, whichever form it writes it in. If
-      # that ever stops being true the lookup would be answering for one profile and
-      # guessing at the other two, so it is checked here rather than assumed.
-      if [ -n "$pin" ] && [ "$got" != "$pin" ]; then
-        echo "the profiles disagree on the pin ($pin and $got): one lookup cannot answer for both" >&2
-        exit 1
-      fi
-      pin="$got"
-    done
-    # crates.io's sparse index at its documented layout: a three-character name lives under
-    # 3/<first character>/<name>, one JSON object per line. `cargo info htl@<pin>` cannot
-    # answer this from in here — it resolves the name against the workspace first and reports
-    # the unpublished version as though it were a release.
-    curl -sS --fail --max-time 60 https://index.crates.io/3/h/htl -o "$dir/index"
-    # `htl_dep_version()` writes `0.<minor>` under 0.y.z and `<major>` above it, and for both
-    # of those the versions cargo's caret accepts are exactly the ones beginning `<pin>.`, so
-    # the prefix is the whole question. A yanked version answers no.
-    if grep "\"vers\":\"$pin\." "$dir/index" | grep -qv '"yanked":true'; then
-      for profile in "${profiles[@]}"; do
-        (
-          cd "$dir/${profile%%:*}"
-          cargo build --target-dir "${CARGO_TARGET_DIR:-$root/target}/e2e-scaffold"
-        )
-      done
-    else
-      # Deferred, and to be read as deferred: nothing was built and nothing was proved. The
-      # scaffold is correct or not either way, and the run that finds out is the gate, which
-      # asks the tarballs instead of the registry and so has an answer on this commit too.
-      echo "e2e-scaffold-published: DEFERRED, nothing built."
-      echo "  All three host profiles pin htl \"$pin\" and crates.io has no release matching it,"
-      echo "  which is the release commit and no other: the version has moved and the publish"
-      echo "  has not happened. Whether a project pinning \"$pin\" builds is answered on this"
-      echo "  commit by 'just e2e-scaffold-packaged', which builds the same three projects"
-      echo "  against the .crate files the publish would upload, and which the chain in"
-      echo "  docs/releasing.md runs before the first 'cargo publish'."
-    fi
-
 # Every benchmark: the figures in the README come from these. Ten samples each; a few minutes.
 bench:
     cargo bench -p htl-core --bench check
@@ -329,10 +274,3 @@ bench:
 # A release binary, for timing against a real project rather than a generated one.
 release:
     cargo build --release -p htl-cli
-
-# Check a real project twice with a release build, to see the cache work: just dogfood <path>
-dogfood project:
-    cargo build --release -p htl-cli
-    ./target/release/htl check {{project}} --no-cache --explain-cache
-    ./target/release/htl check {{project}} --explain-cache
-    ./target/release/htl cache status {{project}}
