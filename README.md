@@ -605,12 +605,27 @@ what they are handed.
 | `no-any` | off | explicit `any` annotations and `as any` casts |
 | `explicit-number` | off | `local n = 0` (inferred `integer`) that is later assigned a number expression (`n = n * 1.5`, `n = a / b`): names the declaration and the assignment; write `local n: number = 0`. Plain integer counters are not reported |
 | `class-record` | off | a record declaring metamethods (`metamethod __index: Actor` = a class): its metatable is attached by `setmetatable` at run time and is not part of the value, so serialization and the Rust boundary drop it; keep such records out of saved data and host signatures |
-| `host-module-shadowed` | on (always) | a `require` of a name a `#[host_module]` in the surrounding crate registers that resolved to a Teal file of that name: `package.preload` beats the path searcher at run time, so the file is what is checked and the host is what runs. Reported at the require, naming both (see "Rust host") |
-| `require-cycle` | on (project-level) | a loop in the require graph of the files `htl check <dir>` just checked, e.g. `a.tl -> b.tl -> a.tl`. Teal types the back edge as an opaque circular require, so without this the symptom is "cannot index" somewhere else |
+| `duplicate-declaration` | on | two `.d.tl` for one module both reachable on the search path: position alone decides which is read, and nothing wrote that order down. Names the one read and the one that was not (see "Project config") |
+| `host-module-shadowed` | on | a `require` of a name a `#[host_module]` in the surrounding crate registers that resolved to a Teal file of that name: `package.preload` beats the path searcher at run time, so the file is what is checked and the host is what runs. Reported at the require, naming both (see "Rust host") |
+| `contract` | on | a module under a `[[contract]]` directory that does not satisfy the contract's type or its `---@required` fields, and a `---@contract` marker that cannot be turned into a contract or published (see "Data from outside the program") |
+| `contract-unenforced` | on | a contract the host never builds resolvers for, so it is documentation rather than a run-time guarantee. Say where the enforcement lives with `[[contract]] enforced_by` when the scan cannot see it |
+| `require-cycle` | on | a loop in the require graph of the files `htl check <dir>` just checked, e.g. `a.tl -> b.tl -> a.tl`. Teal types the back edge as an opaque circular require, so without this the symptom is "cannot index" somewhere else |
 
-Silence one occurrence with a trailing `-- htl: allow(nil-index)`. `include_tl!`
-treats lints as errors (`HTL_LINT=warn` downgrades, `HTL_LINTS=+no-any,-shadow-local`
-configures).
+Every name in this table is a name you can write back: `--lint -contract`, `[lint] disable
+= ["require-cycle"]`, `HTL_LINTS=-duplicate-declaration`, and `htl check --list-lints`
+lists them all. The last five are found by the project layer rather than by reading one
+file, and nothing else about them is different — one registry holds the rules, whichever
+half of htl implements them.
+
+Silence one occurrence with a trailing `-- htl: allow(nil-index)`, at the line the
+finding points at. That works for the project-level rules too — the require a cycle
+passes through, the require that resolved to a shadowed declaration, the module that
+misses its contract — with one exception: `contract-unenforced` points at the
+`---@contract` marker, and a marker owns the rest of its line, so a comment there is read
+as an argument to it. Turn that one off by name, or answer it with `enforced_by`.
+
+`include_tl!` treats lints as errors (`HTL_LINT=warn` downgrades,
+`HTL_LINTS=+no-any,-shadow-local` configures).
 
 A lint is a finding about your code, and everything `htl` prints with an `[htl <rule>]`
 name is one. `htl dts`'s `not written` and `left in place` lines are the command

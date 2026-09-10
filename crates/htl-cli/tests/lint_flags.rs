@@ -67,6 +67,14 @@ fn a_rule_can_be_turned_off_for_a_run() {
     let dir = project("off");
     let (_, on) = htl(&["check", ".", "--no-cache"], &dir);
     assert!(on.contains("enum-cast"), "{on}");
-    let (_, off) = htl(&["check", ".", "--no-cache", "--lint", "-enum-cast"], &dir);
+    let (out, off) = htl(&["check", ".", "--no-cache", "--lint", "-enum-cast"], &dir);
+    // The spec has to have been read, not just absent from the output: clap used to take
+    // `-enum-cast` for a cluster of short flags and answer `unexpected argument '-e'`,
+    // which is a run that says nothing about `enum-cast` for the wrong reason.
+    assert!(!off.contains("unexpected argument"), "{off}");
+    assert!(
+        out.contains("0 lint(s)") || off.contains("0 lint(s)"),
+        "{off}"
+    );
     assert!(!off.contains("enum-cast"), "{off}");
 }
