@@ -30,45 +30,27 @@ jobs:
       - run: cargo test --workspace
       - run: cargo clippy --workspace --all-targets
 
-  examples:
-    name: CLI and embed example end to end
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # The CLI on the repository's own .tl (examples/tl/failing/ is meant to fail and
-      # is not run here), and the embed example through both the include_tl! and the
-      # include_bundle! path.
-      - run: cargo run -q -p htl-cli --bin htl -- check examples/tl/util.tl examples/tl/main.tl examples/tl/util_test.tl
-      - run: cargo run -q -p htl-cli --bin htl -- test examples/tl/util_test.tl
-      - run: cargo run -q -p embed
-      - run: cargo run -q -p embed -- --bundle
-
-  scaffold:
-    name: scaffolded hosts end to end
+  e2e:
+    name: end to end
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: extractions/setup-just@v2
-      # `htl new --host rust` and `--host ffi` into a temporary directory, patched back at
-      # this checkout, then built, tested and run — the C ABI project's library loaded by
-      # the reference callers it ships, with cc, make and python3 all present on this
-      # runner (the recipe says so and skips either caller where they are not).
-      - run: just e2e-scaffold
-      # The same scaffold without the patch, so the generated project is compiled against
-      # the htl on crates.io — the crate it pins, a release behind this checkout. The step
-      # above cannot see a disagreement between the two because it patches it away. Same
-      # runner and same target directory as the step above on purpose: the marginal cost is
-      # rebuilding the three htl crates, not the graph under them.
-      - run: just e2e-scaffold-published
+      # Every end-to-end case in one step because they are one recipe: the CLI on the
+      # repository's own .tl, the embed example through both macro paths, the run cache
+      # cold and then warm, and `htl new` for each `--host` built, tested and run — the C
+      # ABI project's library loaded by the reference callers it ships, with cc, make and
+      # python3 all present on this runner (the recipe says so and skips either caller
+      # where they are not). The cheap cases come first inside it, so a break in one of
+      # them still fails within a minute of the job starting.
+      - run: just e2e
       # The release gate, run on every commit rather than only at a release. It needs two
       # things this job already has: a clean worktree, because `cargo package` is told by
       # git which files reach the tarball and refuses to guess, and the compiled graph the
-      # two steps above leave in the same target directory. What it catches — a file an
-      # `include` glob drops, an `include_str!` target that is not tracked — is introduced
-      # by a commit, so this is the commit that should go red for it, not the release weeks
+      # step above leaves in the same target directory. What it catches — a file an
+      # `include` glob drops, an `include_str!` target that is ignored — is introduced by a
+      # commit, so this is the commit that should go red for it, not the release weeks
       # later that inherits it.
       - run: just e2e-scaffold-packaged

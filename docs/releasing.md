@@ -68,37 +68,27 @@ hand a fresh project a line the CLI that just made it rejects — breaking `htl 
 first thing a user runs. A scaffold that cannot name either names neither, and points at a
 command instead (`htl check --list-lints`), which answers from whichever binary is in hand.
 
-`just e2e-scaffold-published` is what says so during the cycle: it scaffolds all three host
-profiles and builds each with no `[patch.crates-io]`, against the crate that project actually
-pins, and the CI scaffold job runs it. `just e2e-scaffold` cannot — it points the three
-crates at this checkout, where every key this branch added exists.
+Two things say so, and neither of them asks crates.io. `cargo test --workspace` carries the
+assertion for the key this was learned on: the scaffold round-trip test reads the `htl.toml`
+`htl new` wrote and fails if `[toolchain]` is in it, which is a check on the commit that adds
+the key rather than on the release that would break. And `just e2e-scaffold-packaged`
+scaffolds all three host profiles and builds them against the four `.crate` files the publish
+would upload, patched at the extracted trees through `--config` so each generated
+`Cargo.toml` is still byte for byte the one a user gets. The chain below runs it before the
+first `cargo publish`, so what goes out is gated by it.
 
-All three, because the manifest is written per profile and so is the question. `--host rust`
-and `--host rust --lib` pin `htl = "0.4"`; `--host ffi --lib` pins `htl = { version = "0.4",
-features = ["ffi"] }`, and whether the published crate carries a feature is not answered by
-whether it exists at that version. The version is the same in all three — every profile takes
-it from `htl_dep_version()`, derived from the CLI's own release — which is why one index
-lookup can still stand for all of them, and why the recipe checks that they agree rather than
-assuming it.
+All three profiles, because the manifest is written per profile and so is the question.
+`--host rust` and `--host rust --lib` pin `htl = "0.4"`; `--host ffi --lib` pins
+`htl = { version = "0.4", features = ["ffi"] }`, and whether the crate carries a feature is
+not answered by whether it exists at that version. The version is the same in all three —
+every profile takes it from `htl_dep_version()`, derived from the CLI's own release.
 
-During the cycle is the whole of that recipe's job, and the reason to keep it: a commit that
-teaches the scaffold to write an unreadable key is caught on the commit that writes it, weeks
-before the release it would break. A check that only ran at the release would meet the same
-commit a cycle later, merged, with the fix owed to the release it is holding up.
-
-The pin is derived from the CLI's own version, so on the release commit it names the version
-being released, and that version is not on crates.io until the chain puts it there. A build
-attempted then reports that `htl = "0.4"` selects nothing — a fact about the registry, not
-about the scaffold, and one that turns the CI scaffold job red for as long as the release
-takes. So the recipe asks the index which case it is in, and when the pin is unpublished it
-names the pin it could not resolve and defers rather than building.
-
-Nothing waits on that deferral now. `just e2e-scaffold-packaged` answers the same question on
-the release commit and needs nothing published to answer it: it scaffolds all three host
-profiles and builds them against the four `.crate` files the publish would upload, patched at
-the extracted trees through `--config` so each generated `Cargo.toml` is still byte for byte
-the one a user gets. The chain below runs it before the first `cargo publish`, so what goes
-out is gated whether or not the deferral fires.
+What the gate builds against is this workspace's own tarballs, so it resolves a key against
+the htl about to be published rather than against the one already out there. That gap is what
+the checklist below is for: a key added to `htl-core` this cycle is readable by the crate
+the *next* cycle's scaffold pins, and the release where the scaffold starts writing it is the
+one after the release that publishes it. The arithmetic is the whole answer, and it is worth
+more than a build that could only confirm it a release later.
 
 ### At each release
 
@@ -115,16 +105,11 @@ out is gated whether or not the deferral fires.
       ["ffi"] }`, and the `ffi` feature is published by the same 0.4.0, so the two arrive
       together. `e2e-scaffold-packaged` scaffolds that profile and builds it, so the feature
       is resolved against the `htl` tarball about to be published — the same bytes, one step
-      before the registry holds them. `e2e-scaffold-published`, the recipe that asks the
-      registry itself, scaffolds all three profiles too, so during the cycle a feature a
-      profile names is resolved against the *published* crate on the commit that names it —
-      which is the only place that particular mistake is visible, since the gate patches the
-      three crates at trees where every feature this branch added exists.
+      before the registry holds them. Whether the *already published* crate carries it is not
+      asked anywhere any more, which is why this checkbox is a question rather than a build:
+      answer it from the list above, not from a green CI run.
 - [ ] Run `just e2e-scaffold-packaged` before the first `cargo publish`, as the chain below
       does. It is the step that can still change what goes out; every step after it cannot.
-      On the release commit `e2e-scaffold-published` will defer and say so, and that
-      deferral is not a pass — it is a question the gate has already answered against the
-      tarballs, which is why the chain no longer stops for it.
 
 ## The chain
 
