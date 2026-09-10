@@ -264,6 +264,9 @@ fn the_listing_accounts_for_every_rule() {
     for rule in [
         "nil-index",
         "class-record",
+        // Narrowed to shadowing a required module (#167), and still a rule with a name: a
+        // project turns it off, or back on, by writing this word.
+        "shadow-local",
         "require-cycle",
         "duplicate-declaration",
         "host-module-shadowed",

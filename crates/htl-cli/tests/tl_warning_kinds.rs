@@ -26,18 +26,27 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
-/// A module with one `tl:unused` (a local nothing reads, line 5) and one
-/// `tl:redeclaration` (an inner `outer` over the outer one, line 8), and neither an error
-/// nor an htl lint of its own beyond the `shadow-local` that sits on the same line as the
-/// redeclaration — which is the subject of its own test below.
-const SRC: &str = "local record m\nend\n\nfunction m.go(s: string): integer\n   \
-                   local unread_one = 1\n   local outer = 2\n   do\n      local outer = 3\n\
-                   \x20     print(outer)\n   end\n   print(string.rep(s, 2))\n   \
-                   return outer\nend\n\nreturn m\n";
+/// A module with one `tl:unused` (a local nothing reads, line 6) and one
+/// `tl:redeclaration` (a parameter over the module required on line 1, line 5), and
+/// neither an error nor an htl lint of its own beyond the `shadow-local` that sits on the
+/// same line as the redeclaration — which is the subject of its own test below.
+///
+/// The shadowed name is a required module because that is the case where the two still
+/// coincide: `shadow-local` was reduced to it (#167), an ordinary local shadowed in an
+/// inner scope being `tl:redeclaration` alone now. What is wanted here is a line that both
+/// halves of htl report on, so that one printed shape can be seen carrying both.
+const SRC: &str = "local dep = require(\"dep\")\nlocal record m\nend\n\n\
+                   function m.go(s: string, dep: string): integer\n   local unread_one = 1\n   \
+                   print(string.rep(s, 2), dep)\n   return 1\nend\n\nprint(dep.note())\n\
+                   return m\n";
 
 fn project(name: &str) -> PathBuf {
     let root = scratch(name);
     write(&root.join("htl.toml"), "[check]\npaths = [\"src\"]\n");
+    write(
+        &root.join("src/dep.tl"),
+        "local record dep\nend\nfunction dep.note(): string\n   return \"n\"\nend\nreturn dep\n",
+    );
     write(&root.join("src/a.tl"), SRC);
     root
 }
@@ -102,7 +111,7 @@ fn the_kind_is_printed_in_the_shape_the_lints_use() {
         "{said}"
     );
     assert!(
-        said.contains("variable shadows previous declaration of 'outer'")
+        said.contains("variable shadows previous declaration of 'dep'")
             && said.contains("[htl tl:redeclaration]"),
         "{said}"
     );
@@ -196,8 +205,8 @@ fn a_kind_goes_off_at_the_site() {
     write(
         &at,
         &src.replace(
-            "      local outer = 3",
-            "      local outer = 3  -- htl: allow(tl:redeclaration)",
+            "function m.go(s: string, dep: string): integer",
+            "function m.go(s: string, dep: string): integer  -- htl: allow(tl:redeclaration)",
         )
         .replace(
             "   local unread_one = 1",
