@@ -14,8 +14,10 @@
 --   enum-table       a table constructor whose declared type maps an enum (`{string: E}`,
 --                    `{E: T}`) and that leaves a variant out (or lists a word that is not
 --                    one).
---   shadow-local     a local (or loop / parameter name) reuses the name of a local in an
---                    enclosing scope.
+--   shadow-local     a local (or loop / parameter name) reuses the name an enclosing scope
+--                    bound to a `require`d module, which the shadowed scope cannot reach.
+--                    Shadowing an ordinary outer local is `tl:redeclaration`, which says
+--                    more about it (the kind declared, and the origin's line and column).
 --   no-global        `global` declarations (prefer locals + module return).
 --   no-any           explicit `any` in annotations or `as any` casts.   [allow: not said
 --                    unless a project asks for it]
@@ -616,9 +618,12 @@ local function lint_shadow(ast, report)
    local scopes = {}
    local function push() scopes[#scopes + 1] = {} end
    local function pop() scopes[#scopes] = nil end
-   -- `module` = the `require("...")` name the outer local was bound to, if any. In a
-   -- growing codebase the typical hit is a new parameter or local taking the name of a
-   -- module required at the top of the file; say so instead of pointing at a line.
+   -- `module` = the `require("...")` name the outer local was bound to, if any. Only that
+   -- case is reported: shadowing an ordinary outer local is what Teal's `redeclaration`
+   -- warning already says, in more detail, at the same line and column. What Teal cannot
+   -- say is that the name it saw came from a `require`, and in a growing codebase the
+   -- typical hit is exactly that — a new parameter or local taking the name of a module
+   -- required at the top of the file, which the rest of the scope then cannot reach.
    local function declare(name, y, x, module)
       if type(name) ~= "string" or name == "self" or name == "..." or name:sub(1, 1) == "_" then
          return
@@ -626,18 +631,19 @@ local function lint_shadow(ast, report)
       for i = #scopes - 1, 1, -1 do
          local outer = scopes[i][name]
          if outer then
-            if outer.module then
+            if outer ~= true then
                report("shadow-local", y, x,
                   "local '" .. name .. "' shadows the module '" .. outer.module .. "' required at line "
                   .. outer.y .. "; inside this scope the module is unreachable, rename the local")
-            else
-               report("shadow-local", y, x,
-                  "local '" .. name .. "' shadows an outer local declared at line " .. outer.y)
             end
             break
          end
       end
-      scopes[#scopes][name] = { y = y, module = module }
+      -- Every declaration is recorded, module-bound or not, because the search above stops
+      -- at the innermost one: a plain local between a module and an inner declaration is
+      -- what that inner declaration shadows, and the module was already out of reach. Only
+      -- a module-bound name carries anything to say, so the rest are bare markers.
+      scopes[#scopes][name] = module and { y = y, module = module } or true
    end
    -- `require("<name>")` in expression position: the module name, else nil.
    local function required_module(exp)

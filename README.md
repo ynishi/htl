@@ -615,7 +615,7 @@ no-any = "warn"           # allow by default; see it while you migrate, without 
 | `enum-cast` | warn | `e as E` where `E` is an enum and the checker types `e` as `string`: `as` is erased, so the word enters the enum with nothing checking it. A string literal (`"open" as E`) and a value already typed as the enum are not reported (see below) |
 | `enum-table` | warn | a table constructor whose declared type maps an enum (`{string: E}`, `{E: T}`) and that leaves a value of the enum out, or lists a word that is not one. An array of the enum (`{E}`) is a selection, not a mapping, and is not reported. `htl fix enum-table` fills a `{string: E}` one in |
 | `union-exhaustive` | warn | `if x is A ... elseif x is B ... end` over a union with a variant never tested and no `else`. The variants come from the checker, so a chain that predates a variant is reported once the union gains it (see "Unions of records") |
-| `shadow-local` | warn | a local / loop var / parameter reusing an enclosing local's name; when that outer local is a `require`d module the message says which module and where it was required |
+| `shadow-local` | warn | a local / loop var / parameter reusing the name an enclosing scope bound to a `require`d module: the message names the module, where it was required, and that the module is unreachable for the rest of that scope. Shadowing an *ordinary* outer local is not this rule — it is `tl:redeclaration`, which reports the same line and column and says more about it (see below) |
 | `no-global` | warn | `global` declarations |
 | `no-any` | allow | explicit `any` annotations and `as any` casts |
 | `explicit-number` | allow | `local n = 0` (inferred `integer`) that is later assigned a number expression (`n = n * 1.5`, `n = a / b`): names the declaration and the assignment; write `local n: number = 0`. Plain integer counters are not reported |
@@ -667,9 +667,11 @@ the rest of its line, so a comment there is read as an argument to it. Turn that
 by name, or answer it with `enforced_by`.
 
 A comment silences the names it lists and no others, which matters where two rules land on
-one line: `tl:redeclaration` and `shadow-local` report the same shadowing at the same
-position, so a line that wants both quiet says
-`-- htl: allow(tl:redeclaration, shadow-local)`.
+one line: a local over a required module is both a redeclaration and the thing
+`shadow-local` reports, at the same position, so a line that wants both quiet says
+`-- htl: allow(tl:redeclaration, shadow-local)`. The two say different things about that
+line — one that a name is shadowed, the other which module it was — which is the whole of
+why both are still reported there and nowhere else.
 
 `include_tl!` treats lints as errors (`HTL_LINT=warn` downgrades, `[lint] strict = false`
 downgrades, `HTL_LINTS=no-any=warn,-shadow-local` configures which rules run). Teal's
@@ -694,7 +696,7 @@ and htl reports it under that kind's name in the `tl:` namespace — as
 |---|---|---|
 | `tl:unused` | warn | a local, parameter, label or loop variable nothing uses |
 | `tl:unread` | warn | a variable written and never read after |
-| `tl:redeclaration` | warn | a declaration over a name already declared — including two in the *same* scope, which `shadow-local` does not see |
+| `tl:redeclaration` | warn | a declaration over a name already declared, naming the kind declared and the line and column of the one it shadows. This is where shadowing is reported, `shadow-local` having been narrowed to the one thing the compiler cannot say — that the shadowed name was a required module. It also sees two declarations in the *same* scope, which `shadow-local` never could |
 | `tl:unknown` | warn | a variable the checker cannot resolve |
 | `tl:branch` | warn | a test that can never hold, e.g. `x is B` where `x` has been narrowed out of `B` |
 | `tl:hint` | warn | the compiler's suggestions: `.` where `:` was meant, `pairs` over an array, a `string.format` pattern that does not match its arguments, and more |

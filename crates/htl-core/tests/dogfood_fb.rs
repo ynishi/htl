@@ -186,8 +186,13 @@ fn forward_reference_gets_the_declaration_line() {
     assert!(!e.contains("defined at line"), "{e}");
 }
 
-/// A parameter named like a required module: the message names the module and the
-/// require line, not just "an outer local".
+/// A parameter named like a required module: the message names the module and the require
+/// line, which is the one thing about shadowing the compiler's own warning cannot say.
+///
+/// The plain `count` over `count` further down is not the lint's to report — it is
+/// `tl:redeclaration`, which says the same thing about it and more. This test asserted
+/// both messages while the lint had a second, generic branch; that branch is gone, so what
+/// it holds now is that the module case survives and the ordinary one is left to Teal.
 #[test]
 fn shadowing_a_required_module_is_named_as_such() {
     let dir = scratch("shadow-mod");
@@ -210,17 +215,25 @@ fn shadowing_a_required_module_is_named_as_such() {
         .iter()
         .filter(|l| l.contains("shadow-local"))
         .collect();
-    assert_eq!(shadows.len(), 2, "{shadows:?}");
+    assert_eq!(shadows.len(), 1, "{shadows:?}");
     assert!(shadows[0].contains("world.tl:4:"), "{}", shadows[0]);
     assert!(
         shadows[0].contains("shadows the module 'bestiary' required at line 1"),
         "{}",
         shadows[0]
     );
+    // The local `count` over the file-level `count`, on line 9, is reported once — by the
+    // compiler, whose message carries the origin's column as well as its line.
+    let plain: Vec<&String> = ci
+        .warnings
+        .iter()
+        .filter(|w| w.contains("world.tl:9:"))
+        .collect();
+    assert_eq!(plain.len(), 1, "{:?}", ci.warnings);
     assert!(
-        shadows[1].contains("shadows an outer local declared at line 7"),
-        "plain locals keep the old wording: {}",
-        shadows[1]
+        plain[0].contains("shadows previous declaration of 'count'"),
+        "{}",
+        plain[0]
     );
 }
 
