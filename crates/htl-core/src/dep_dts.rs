@@ -212,6 +212,12 @@ fn decls(meta: &serde_json::Value) -> Result<Vec<DepDecl>, String> {
 /// materialised. A crate naming a file it does not ship is a problem rather than a
 /// silence: the declaration is missing from the project either way, and the project cannot
 /// fix a manifest it does not own without being told which one is wrong.
+///
+/// The second list is this command's report on its own job — a declaration it was asked
+/// for and did not write — not a finding about the project's code. It carries no rule
+/// name: there is nothing to configure or silence, and none of it reaches the `Sink`, so
+/// `htl check` neither counts one nor reports one in `--format json`. `htl dts` prints
+/// them under `not written` and exits non-zero on them.
 pub fn materialise(root: &Path, decls: &[DepDecl]) -> (Vec<(PathBuf, bool)>, Vec<String>) {
     let mut written = Vec::new();
     let mut problems = Vec::new();
@@ -221,8 +227,7 @@ pub fn materialise(root: &Path, decls: &[DepDecl]) -> (Vec<(PathBuf, bool)>, Vec
         let target = d.target(root);
         if d.file.is_empty() || !crate::is_declaration(Path::new(&d.file)) {
             problems.push(format!(
-                "{} {} names {} in [package.metadata.htl] dts, which is not a `.d.tl` file \
-                 [htl shipped-declaration]",
+                "{} {} names {} in [package.metadata.htl] dts, which is not a `.d.tl` file",
                 d.package, d.version, d.declared
             ));
             continue;
@@ -230,7 +235,7 @@ pub fn materialise(root: &Path, decls: &[DepDecl]) -> (Vec<(PathBuf, bool)>, Vec
         if let Some(first) = taken.get(&target) {
             problems.push(format!(
                 "{} {} names both {} and {} in [package.metadata.htl] dts, which would be one \
-                 file under types/{}/ [htl shipped-declaration]",
+                 file under types/{}/",
                 d.package, d.version, first.declared, d.declared, d.package
             ));
             continue;
@@ -239,8 +244,7 @@ pub fn materialise(root: &Path, decls: &[DepDecl]) -> (Vec<(PathBuf, bool)>, Vec
             Ok(t) => t,
             Err(e) => {
                 problems.push(format!(
-                    "{} {} names {} in [package.metadata.htl] dts: reading {}: {e} \
-                     [htl shipped-declaration]",
+                    "{} {} names {} in [package.metadata.htl] dts: reading {}: {e}",
                     d.package,
                     d.version,
                     d.declared,
@@ -264,8 +268,7 @@ pub fn materialise(root: &Path, decls: &[DepDecl]) -> (Vec<(PathBuf, bool)>, Vec
                 written.push((target, w));
             }
             Err(e) => problems.push(format!(
-                "{} {} names {} in [package.metadata.htl] dts: writing {}: {e} \
-                 [htl shipped-declaration]",
+                "{} {} names {} in [package.metadata.htl] dts: writing {}: {e}",
                 d.package,
                 d.version,
                 d.declared,
@@ -279,7 +282,7 @@ pub fn materialise(root: &Path, decls: &[DepDecl]) -> (Vec<(PathBuf, bool)>, Vec
         let dir = root.join("types").join(pkg);
         if let Err(e) = crate::write_if_changed(&dir.join(crate::DEP_TYPES_NOTE), &note.text()) {
             problems.push(format!(
-                "writing {}: {e} [htl shipped-declaration]",
+                "writing {}: {e}",
                 dir.join(crate::DEP_TYPES_NOTE).display()
             ));
         }
@@ -294,6 +297,12 @@ pub fn materialise(root: &Path, decls: &[DepDecl]) -> (Vec<(PathBuf, bool)>, Vec
 /// scripts may still require the module, the dependency may be coming back on the next
 /// branch — and a command that regenerates declarations is the wrong thing to be removing
 /// committed files behind someone's back.
+///
+/// Like [`materialise`]'s problems these are `htl dts` saying what it did, not findings
+/// about the project's code: no rule name, nothing to configure or silence, and nothing
+/// that reaches the `Sink` to be counted or reported in `--format json`. `htl dts` prints
+/// them under `left in place` and fails nothing — the file it names is still there and
+/// still checked, exactly as before.
 pub fn orphans(root: &Path, decls: &[DepDecl]) -> Vec<String> {
     let types = root.join("types");
     let mut current: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
@@ -330,8 +339,7 @@ pub fn orphans(root: &Path, decls: &[DepDecl]) -> Vec<String> {
                 None => format!("{} is no longer a dependency", note.package),
             };
             out.push(format!(
-                "{}: {why}; left in place, delete it when nothing requires the module \
-                 [htl orphaned-declaration]",
+                "{}: {why}; delete it when nothing requires the module",
                 path.strip_prefix(root).unwrap_or(&path).display()
             ));
         }
