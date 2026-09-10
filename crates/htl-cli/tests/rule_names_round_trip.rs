@@ -224,7 +224,8 @@ fn an_allow_comment_cannot_be_written_on_a_marker_line() {
 
 /// The names are in `--list-lints` as well, which is where a reader looks for them without
 /// having to provoke one first. Sixteen was the count while the project layer's five were
-/// absent and `lint.lua`'s twelve were all there was.
+/// absent and `lint.lua`'s twelve were all there was; seventeen once they were registered,
+/// and twenty-four now that Teal's seven warning kinds are names too.
 #[test]
 fn the_listing_accounts_for_every_rule() {
     let dir = scratch("listing");
@@ -246,10 +247,12 @@ fn the_listing_accounts_for_every_rule() {
         "host-module-shadowed",
         "contract",
         "contract-unenforced",
+        "tl:hint",
+        "tl:redeclaration",
     ] {
         assert!(listed.iter().any(|l| l == rule), "{rule} not in {listed:?}");
     }
-    assert_eq!(listed.len(), 17, "{listed:?}");
+    assert_eq!(listed.len(), 24, "{listed:?}");
 }
 
 /// A name that is not a rule is still refused, and says which word it did not know.

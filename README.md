@@ -611,26 +611,62 @@ what they are handed.
 | `contract-unenforced` | on | a contract the host never builds resolvers for, so it is documentation rather than a run-time guarantee. Say where the enforcement lives with `[[contract]] enforced_by` when the scan cannot see it |
 | `require-cycle` | on | a loop in the require graph of the files `htl check <dir>` just checked, e.g. `a.tl -> b.tl -> a.tl`. Teal types the back edge as an opaque circular require, so without this the symptom is "cannot index" somewhere else |
 
-Every name in this table is a name you can write back: `--lint -contract`, `[lint] disable
-= ["require-cycle"]`, `HTL_LINTS=-duplicate-declaration`, and `htl check --list-lints`
-lists them all. The last five are found by the project layer rather than by reading one
-file, and nothing else about them is different — one registry holds the rules, whichever
-half of htl implements them.
+Teal's own warnings are named too, in a namespace of their own: see
+[Teal's own warnings](#teals-own-warnings-tl) below.
+
+Every name in either table is a name you can write back: `--lint -contract`, `[lint]
+disable = ["require-cycle"]`, `[lint] disable = ["tl:hint"]`, `HTL_LINTS=-tl:unused`, and
+`htl check --list-lints` lists them all. Where a finding comes from — one file's syntax
+tree, the project layer once the files are checked, or the vendored compiler — changes
+nothing about how it is named or configured; one registry holds the rules.
 
 Silence one occurrence with a trailing `-- htl: allow(nil-index)`, at the line the
 finding points at. That works for the project-level rules too — the require a cycle
 passes through, the require that resolved to a shadowed declaration, the module that
-misses its contract — with one exception: `contract-unenforced` points at the
-`---@contract` marker, and a marker owns the rest of its line, so a comment there is read
-as an argument to it. Turn that one off by name, or answer it with `enforced_by`.
+misses its contract — and for Teal's kinds: `-- htl: allow(tl:hint)`. There is one
+exception: `contract-unenforced` points at the `---@contract` marker, and a marker owns
+the rest of its line, so a comment there is read as an argument to it. Turn that one off
+by name, or answer it with `enforced_by`.
+
+A comment silences the names it lists and no others, which matters where two rules land on
+one line: `tl:redeclaration` and `shadow-local` report the same shadowing at the same
+position, so a line that wants both quiet says
+`-- htl: allow(tl:redeclaration, shadow-local)`.
 
 `include_tl!` treats lints as errors (`HTL_LINT=warn` downgrades,
-`HTL_LINTS=+no-any,-shadow-local` configures).
+`HTL_LINTS=+no-any,-shadow-local` configures). Teal's warnings it reports and builds
+anyway.
 
-A lint is a finding about your code, and everything `htl` prints with an `[htl <rule>]`
-name is one. `htl dts`'s `not written` and `left in place` lines are the command
-reporting on the declarations it was asked to write, not findings, and are not in this
-table: [What `htl dts` reports](#what-htl-dts-reports-and-what-it-exits-on).
+Everything `htl` prints with an `[htl <rule>]` name is a finding about your code — a lint
+of htl's own, or a warning the vendored compiler raised. `htl dts`'s `not written` and
+`left in place` lines are the command reporting on the declarations it was asked to write,
+not findings, and are in neither table: [What `htl dts`
+reports](#what-htl-dts-reports-and-what-it-exits-on).
+
+### Teal's own warnings (`tl:*`)
+
+htl vendors the Teal compiler, and Teal reports warnings of its own. Each carries a *kind*,
+and htl reports it under that kind's name in the `tl:` namespace — as
+`warning: src/a.tl:5:10: unused variable n: integer [htl tl:unused]`, and as
+`"rule": "tl:unused"` in `--format json`:
+
+| rule | default | catches |
+|---|---|---|
+| `tl:unused` | on | a local, parameter, label or loop variable nothing uses |
+| `tl:unread` | on | a variable written and never read after |
+| `tl:redeclaration` | on | a declaration over a name already declared — including two in the *same* scope, which `shadow-local` does not see |
+| `tl:unknown` | on | a variable the checker cannot resolve |
+| `tl:branch` | on | a test that can never hold, e.g. `x is B` where `x` has been narrowed out of `B` |
+| `tl:hint` | on | the compiler's suggestions: `.` where `:` was meant, `pairs` over an array, a `string.format` pattern that does not match its arguments, and more |
+| `tl:debug` | on | the checker reporting an ambiguity in what it inferred |
+
+The prefix is not decoration. `unused` already means something else here — `htl unused`
+reports modules nothing requires, not locals nothing reads — and these seven words are
+Teal's to rename, not htl's, so they keep a namespace that says where they came from.
+
+They are warnings rather than lints, so they fail `htl check` only under `[lint] strict`;
+what turning one off changes is whether it is reported at all, and a kind you turned off is
+not counted either.
 
 ### Records built whole (`---@struct`)
 

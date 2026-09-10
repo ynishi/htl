@@ -6,7 +6,7 @@
 //!
 //! [lint]
 //! enable  = ["class-record", "explicit-number"]
-//! disable = ["shadow-local"]
+//! disable = ["shadow-local", "tl:hint"]   # htl's own rules and Teal's warning kinds
 //! strict  = true            # warnings and lints fail htl check; lints fail include_tl!
 //!
 //! [fmt]
@@ -214,9 +214,17 @@ pub struct Contract {
 #[serde(deny_unknown_fields)]
 pub struct LintConfig {
     /// Rules to turn on in addition to the defaults.
+    ///
+    /// A name here is any entry of [`lint::RULES`](crate::lint::RULES) — one of htl's own
+    /// rules, or one of the vendored Teal compiler's warning kinds under its `tl:` prefix
+    /// (`tl:hint`, `tl:unused`, ...). `htl check --list-lints` prints them all. An unknown
+    /// name is refused rather than ignored: a typo that turned nothing on would read
+    /// exactly like a rule that found nothing.
     #[serde(default)]
     pub enable: Vec<String>,
-    /// Rules to turn off.
+    /// Rules to turn off, named as [`enable`](Self::enable) names them. A rule turned off
+    /// here is not reported and so is not counted, which is what keeps `strict` a verdict
+    /// on what the run said.
     #[serde(default)]
     pub disable: Vec<String>,
     /// `true`: Teal's warnings and htl's lints fail `htl check`, and lints fail

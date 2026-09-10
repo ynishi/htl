@@ -98,19 +98,29 @@ local function subject_key(n)
    return nil
 end
 
+-- The `-- htl: allow(a, b)` comments of a source, by line number.
+--
+-- A name may carry a `:` — that is how Teal's warning kinds are spelled (`tl:hint`) — so
+-- the colon is part of a name here and never a separator. The sibling in lint.rs, which
+-- answers the same question for the findings raised on the Rust side, splits on commas and
+-- whitespace and so accepts the same shapes.
 local function collect_allows(src)
    local allows = {}
    local y = 0
    for line in (src .. "\n"):gmatch("(.-)\n") do
       y = y + 1
-      local names = line:match("%-%-%s*htl:%s*allow%(([%w%-, ]+)%)")
+      local names = line:match("%-%-%s*htl:%s*allow%(([%w%-:, ]+)%)")
       if names then
          allows[y] = allows[y] or {}
-         for name in names:gmatch("[%w%-]+") do allows[y][name] = true end
+         for name in names:gmatch("[%w%-:]+") do allows[y][name] = true end
       end
    end
    return allows
 end
+
+-- Also read by the prelude, which answers the same question for the checker's own
+-- warnings: they are named now, so a line may allow one by name like any other finding.
+L.collect_allows = collect_allows
 
 ---------------------------------------------------------------- nil-index
 

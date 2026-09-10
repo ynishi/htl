@@ -198,6 +198,7 @@ Examples:
   htl check src --strict         lints and warnings fail the run too
   htl check src --lint +no-any,-shadow-local
                                  one rule on, one of the defaults off
+  htl check src --lint -tl:hint  a warning kind of the Teal compiler off
   htl check --list-lints         the rules and what each is for, then exit
 
 Caching: https://github.com/ynishi/htl#caching
@@ -207,7 +208,7 @@ Caching: https://github.com/ynishi/htl#caching
         /// Treat warnings and lints as errors
         #[arg(long)]
         strict: bool,
-        /// Lint rules on top of the defaults, e.g. `+no-any,-shadow-local`
+        /// Rules on top of the defaults, e.g. `+no-any,-shadow-local,-tl:hint`
         // A spec that turns a rule off starts with `-`, and without this clap reads
         // `--lint -contract` as a cluster of short flags and answers `unexpected argument
         // '-c'`: the documented way to turn one rule off never reached the spec parser.

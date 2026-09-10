@@ -30,8 +30,14 @@ end
 -- same set.
 H.lint_cfg = {}
 
-function H.set_lints(cfg)
+-- The same, for Teal's own warning kinds, keyed by the name htl reports them under
+-- (`tl:hint`, `tl:unused`, ...). They are produced by the checker rather than by lint.lua,
+-- so the selection is consulted where `result.warnings` is collected — see `warnings_of`.
+H.tl_cfg = {}
+
+function H.set_lints(cfg, tl_cfg)
    H.lint_cfg = cfg
+   H.tl_cfg = tl_cfg or {}
 end
 
 -- The rules lint.lua implements, for the test that holds this list to the registry.
@@ -424,6 +430,56 @@ H.env = new_env()
 
 local function fmt(filename, e)
    return string.format("%s:%d:%d: %s", e.filename or filename, e.y or 0, e.x or 0, e.msg or "?")
+end
+
+-- The warnings a check result carries, as text, each under the name of its kind.
+--
+-- Teal tags every warning it raises (`Errors:add_warning(tag, ...)` in the vendored
+-- compiler) with one of seven kinds, and htl used to drop the tag on the floor here: every
+-- Teal warning reached the user as an anonymous `warning:` line whose `rule` was null in
+-- `--format json`. It is written as the trailing ` [htl tl:<kind>]` htl's own lints already
+-- use, so one shape carries every name htl prints and `Diagnostic::parse` needs no second
+-- case for these.
+--
+-- Naming them makes them addressable, and this is where that is answered, because this is
+-- where they are collected: a kind the run turned off is dropped, and so is one whose line
+-- carries `-- htl: allow(tl:<kind>)`. Both before the caller counts them, so `[lint] strict`
+-- judges a run on what it said rather than on what it suppressed.
+--
+-- A kind the registry does not know is reported rather than dropped. htl vendors the
+-- compiler, so a Teal upgrade that adds an eighth kind should carry it through under its
+-- own name and be visible until htl catches up — not disappear because a table has no
+-- entry for it.
+local function warnings_of(filename, result, src)
+   local out = {}
+   local allows = {} -- file -> line -> allowed names, read at most once and only if asked
+   local function allowed(file, y, rule)
+      if not y or y == 0 then return false end
+      local a = allows[file]
+      if a == nil then
+         -- `src` is the text of `filename` and of no other file: a caller that already
+         -- read it (`H.gen_string`) hands it over so it is not read twice, and a warning
+         -- pointing anywhere else is answered from disk.
+         local text = (file == filename) and src or nil
+         if not text then
+            local fd = io.open(file, "rb")
+            if fd then text = fd:read("a"); fd:close() end
+         end
+         a = text and lint.collect_allows(text) or false
+         allows[file] = a
+      end
+      return a and a[y] and a[y][rule] == true
+   end
+   for _, w in ipairs(result.warnings or {}) do
+      local rule = w.tag and ("tl:" .. w.tag)
+      local file = w.filename or filename
+      if not rule then
+         out[#out + 1] = fmt(filename, w)
+      elseif H.tl_cfg[rule] ~= false and not allowed(file, w.y, rule) then
+         out[#out + 1] = fmt(filename, w) .. " [htl " .. rule .. "]"
+      end
+   end
+   return out
 end
 
 local function norm_path(p)
@@ -857,8 +913,7 @@ function H.check(filename, env, opts)
    end
    t0 = os.clock()
    local errors, error_fixes = collect_errors(filename, result)
-   local warnings = {}
-   for _, w in ipairs(result.warnings or {}) do warnings[#warnings + 1] = fmt(filename, w) end
+   local warnings = warnings_of(filename, result)
    local deps = {}
    for _, fname in pairs(result.dependencies or {}) do deps[#deps + 1] = fname end
    table.sort(deps)
@@ -935,8 +990,7 @@ end
 function H.gen_string(src, filename)
    local result = tl.check_string(src, H.env, filename)
    local errors = collect_errors(filename, result, src)
-   local warnings = {}
-   for _, w in ipairs(result.warnings or {}) do warnings[#warnings + 1] = fmt(filename, w) end
+   local warnings = warnings_of(filename, result, src)
    local c = { ok = #errors == 0, errors = errors, warnings = warnings, deps = {}, lints = {}, result = result }
    if not c.ok or not result.ast then
       return nil, c
