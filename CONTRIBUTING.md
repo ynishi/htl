@@ -4,9 +4,9 @@ Conventions for changes to this repository, for people and coding agents alike.
 The disclosure and public-artifact policy in
 [PUBLIC_DEVELOPMENT.md](PUBLIC_DEVELOPMENT.md) outranks this file.
 
-htl is small (four published crates and two examples in one workspace, one
-`cargo test --workspace` that runs in seconds), so the rules are few; the ones
-here exist because skipping them has cost something at least once.
+htl is small — four published crates and two examples in one workspace — so the
+rules are few; the ones here exist because skipping them has cost something at
+least once.
 
 ## Issues
 
@@ -46,33 +46,35 @@ that somebody who has never seen this machine can act on what you wrote.
 ## Branches
 
 Never work on `main`. One branch per issue, named `<type>/<slug>` with the
-prefix from the label table above. A worktree under the gitignored
-`.worktrees/` keeps `main` checked out for comparison:
-
-```bash
-git fetch origin
-git worktree add .worktrees/<slug> -b <type>/<slug> origin/main
-cargo shared-target --dest .worktrees/<slug>/target   # optional: seeds target/ from this checkout
-```
-
-Remove the worktree once the branch is merged.
+prefix from the label table above. How you keep `main` available while you work
+on it — a second clone, a worktree under the gitignored `.worktrees/`, stashing
+— is your own business, and so is cleaning it up afterwards.
 
 ## Verification
 
 The definition of green is the whole workspace, and it is cheap enough to run
-every time:
+every time. The recipes are named for the moment they guard:
 
 ```bash
-cargo test --workspace
-cargo clippy --workspace --all-targets
+just pre-commit   # cargo fmt --all, then the workspace's tests and clippy
+just pre-push     # the above, plus a full compile and every end-to-end case
 ```
 
-A change to the checker, the lints, the test runner or the bundle format is
-also run against a dogfood project before it ships: a `.tl` codebase of
-thousands of lines with its own test suite and a Rust host, with `htl check .`,
-`htl test .` and, for bundle changes, the host binary. Report what was run and
-on what; "not verified on a dogfood project" is a usable report, a green claim
-resting on a run nobody made is not.
+**Green is a precondition, not a verification.** A change to the checker, the
+lints, the test runner, the scaffold or the bundle format is run against a real
+project before the pull request is opened — and through the binary a user
+installs, not the one the worktree happens to have built:
+
+```bash
+cargo install --path crates/htl-cli
+htl new sample                       # --embed, --host ffi --lib: whichever the change touches
+cd sample && htl check . && htl test .
+```
+
+`target/debug/htl` is not that binary. If no `.tl` project is at hand, `htl new`
+writes one in a second, so not having one is not a reason to skip this: "not
+verified on a dogfood project" is not a report this repository accepts. Say what
+was run — the project, the command, the arguments — and what came out.
 
 `HTL_PROFILE=1` prints per-phase timings; a performance change quotes them,
 before and after, and says which build produced them.
@@ -125,9 +127,9 @@ Refs #<issue>
 
 ## Pull requests
 
-One issue per pull request, against `main`. Before opening it, run
-`cargo test --workspace` and `cargo clippy --workspace --all-targets` on the
-final tree, plus the dogfood run when the change calls for one.
+One issue per pull request, against `main`. Before opening it, run `just pre-push`
+on the final tree, plus the installed-binary run above when the change calls for
+one.
 
 The body records what changed, what was verified (the commands and their
 outcome, and on which project), and what it deliberately does not cover, and
