@@ -4,6 +4,13 @@
 //! scaffolded `htl.toml`, because nothing held them: `strict` promotes Teal's warnings and
 //! not only htl's lints, and it is read by `htl check` alone. The project below has one
 //! finding and it is a Teal warning, so a run's verdict is `strict` and nothing else.
+//!
+//! Both are still what the code does now that a rule has a level, and both assertions are
+//! unchanged by it: `strict` promoting every `warn` of the run to `deny` is what "warnings
+//! and lints fail the run" always was, and with no rule defaulting to `deny` a project
+//! that writes no `[lint.rules]` fails on exactly what it failed on before. What the level
+//! model adds — a finding fatal without `strict`, and one advisory beside it — is
+//! `lint_levels.rs`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

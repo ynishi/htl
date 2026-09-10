@@ -47,7 +47,7 @@ fn repo() -> Option<PathBuf> {
     git(&["config", "user.name", "t"], &root);
     write(
         &root.join("htl.toml"),
-        "[lint]\nenable = [\"explicit-number\"]\n",
+        "[lint.rules]\nexplicit-number = \"warn\"\n",
     );
     write(&root.join("src/num.tl"), NUM);
     git(&["add", "."], &root);
@@ -60,7 +60,7 @@ fn refuses_outside_a_repo_and_dirty_files() {
     let plain = scratch("plain");
     write(
         &plain.join("htl.toml"),
-        "[lint]\nenable = [\"explicit-number\"]\n",
+        "[lint.rules]\nexplicit-number = \"warn\"\n",
     );
     write(&plain.join("src/num.tl"), NUM);
     let (ok, _, err) = htl(&["fix", "src"], &plain);

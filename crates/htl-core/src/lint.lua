@@ -17,11 +17,12 @@
 --   shadow-local     a local (or loop / parameter name) reuses the name of a local in an
 --                    enclosing scope.
 --   no-global        `global` declarations (prefer locals + module return).
---   no-any           explicit `any` in annotations or `as any` casts.   [off by default]
+--   no-any           explicit `any` in annotations or `as any` casts.   [allow: not said
+--                    unless a project asks for it]
 --   explicit-number  unannotated local initialized with a numeric literal (`local n = 0`
---                    infers integer, `0.0` infers number); ask for the annotation. [off]
+--                    infers integer, `0.0` infers number); ask for the annotation. [allow]
 --   class-record     record declaring metamethods (a class): its metatable is not part of
---                    the value, so serialization and the Rust boundary drop it.     [off]
+--                    the value, so serialization and the Rust boundary drop it.   [allow]
 --
 -- Suppress per line with a trailing comment:  -- htl: allow(nil-index, shadow-local)
 
@@ -29,10 +30,12 @@ local tl = require("tl")
 local L = {}
 
 -- Which rules are on is not decided here. The registry — every rule name there is, its
--- default, and which half of htl implements it — is `lint::RULES` in lint.rs, because the
--- project layer reports under those names too and could not read a list kept in Lua. What
--- this file owns is the twelve implementations below (`RULES`), and `L.run` is handed the
--- selection to run them under. `struct-fields` and `sealed-record` are on and still say
+-- default level, and which half of htl implements it — is `lint::RULES` in lint.rs, because
+-- the project layer reports under those names too and could not read a list kept in Lua.
+-- What this file owns is the twelve implementations below (`RULES`), and `L.run` is handed
+-- the selection to run them under: a rule / on table, not a rule / level one. How much a
+-- finding matters is read where the run is judged, so a rule moving between `warn` and
+-- `deny` changes nothing about the work done here. `struct-fields` and `sealed-record` are on and still say
 -- nothing until a record carries `---@struct` / `---@sealed`, which someone had to write.
 
 local SKIP_KEYS = { if_parent = true, type = true, newtype = true, decltuple = true, expected = true }

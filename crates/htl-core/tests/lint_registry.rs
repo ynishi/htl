@@ -8,7 +8,7 @@
 //! as a lint that quietly stops firing.
 
 use htl_core::Htl;
-use htl_core::lint::{RULES, Side};
+use htl_core::lint::{Level, RULES, Side};
 
 #[test]
 fn lint_lua_implements_exactly_the_lua_side_of_the_registry() {
@@ -45,7 +45,11 @@ fn the_registry_knows_the_rules_the_project_layer_reports_under() {
             .find(|r| r.name == rule)
             .unwrap_or_else(|| panic!("{rule} is not in the registry"));
         assert_eq!(r.side, Side::Rust, "{rule}");
-        assert!(r.default_on, "{rule} is on unless a project says otherwise");
+        assert_eq!(
+            r.default,
+            Level::Warn,
+            "{rule} is reported, and advisory, unless a project says otherwise"
+        );
     }
 }
 
@@ -80,7 +84,12 @@ fn the_registry_carries_exactly_the_vendored_compilers_warning_kinds() {
         .map(|r| r.name.to_string())
         .collect();
     for r in RULES.iter().filter(|r| r.side == Side::Tl) {
-        assert!(r.default_on, "{} is on: Teal chose to say it", r.name);
+        assert_eq!(
+            r.default,
+            Level::Warn,
+            "{} is reported: Teal chose to say it, and as a warning",
+            r.name
+        );
     }
     kinds.sort();
     registered.sort();

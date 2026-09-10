@@ -38,7 +38,7 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 | command | what it does |
 |---|---|
 | `htl new <name>` / `htl init [dir]` | scaffold: `mlua-pkg.toml`, `src/<mod>/init.tl`, `src/main.tl`, `tests/`, README (`--lib` for no entry script; `--host <name>` for a Rust host, `--embed` being the shorthand for `--host rust`) |
-| `htl check [paths] [--strict] [--lint +rule,-rule] [--no-cache] [--cache-mode per-module\|whole-run] [--explain-cache]` | type-check; htl lints as `lint:` (advisory, `--strict` fails on them); a module reached through `require` (an installed dep, a `[check] paths` dir) is checked with the file and its type errors are errors too, once per run, with the file that required it; what has not changed is replayed from `.htl/` (see Caching) |
+| `htl check [paths] [--strict] [--lint rule=level] [--no-cache] [--cache-mode per-module\|whole-run] [--explain-cache]` | type-check; htl lints as `lint:`, advisory at their default level and fatal at `deny` (`--strict` promotes every `warn` to `deny`); a module reached through `require` (an installed dep, a `[check] paths` dir) is checked with the file and its type errors are errors too, once per run, with the file that required it; what has not changed is replayed from `.htl/` (see Caching) |
 | `htl run <file.tl \| app.hb> [args]` | check then execute; `require` of a `.tl` with type errors fails |
 | `htl test [paths] [--filter s] [--lib mod] [--coverage] [--lcov file] [--junit file] [--no-cache]` | `*_test.tl` and `tests/**/*.tl`, one isolated state per file; checking is replayed from `.htl/`, the run never is (see Caching) |
 | `htl fix [paths] [--rule a,b] [--unsafe] [--dry-run] [--diff] [--exit-non-zero-on-fix]` | apply the fixes diagnostics carry: the safe ones by default, `--unsafe` for the ones that may change what the program does (see Fixing) |
@@ -224,7 +224,9 @@ than a wrong answer; invalidation still refuses them.
 
 Flags are part of the key when they change what a module reports and not when they only
 change the verdict: `--lint` gets its own entries, `--strict` reuses them and differs in the
-exit code alone.
+exit code alone. A level is in the key because it is written in the same spec as which
+rules run — moving one rule between `warn` and `deny` changes no diagnostic, and re-checks
+anyway.
 
 `htl test` shares the store, for the half of its work that does not depend on the outcome:
 checking a test file and generating its Lua. **The run is never cached** — a test has to run
@@ -591,34 +593,65 @@ what they are handed.
 
 ## Lints (`htl check`, `include_tl!`)
 
+Every rule has a **level**, and the level is what a project sets: `allow` is not reported,
+`warn` is reported and does not fail the run, `deny` is reported and fails `htl check`. The
+three words are selene's and Cargo's `[lints]`. The `default` column below is each rule's
+level for a project that says nothing, and nothing defaults to `deny` — which is why
+adopting a rule gradually is a thing you can write:
+
+```toml
+[lint.rules]
+nil-index = "deny"        # this one stops the run
+no-any = "warn"           # allow by default; see it while you migrate, without failing CI
+"tl:hint" = "allow"       # quote a name with a `:` — TOML has no bare key for it
+```
+
 | rule | default | catches |
 |---|---|---|
-| `nil-index` | on | `t[k].x`, `t[k]:m()`, `t[k]()`, `t[k][j]` — Teal types a map/array lookup as `V`, not `V \| nil` |
-| `struct-fields` | on | a table built for a record marked `---@struct` that leaves out a field the record declares and `---@optional` does not exempt. Silent until a record carries the marker (see below). `htl fix` spells the missing fields at the site, as a suggestion it never applies |
-| `sealed-record` | on | a table built for a record marked `---@sealed`, or an `as` cast to one, outside the file that declares it — outside the functions the marker names, when it names any (`---@sealed(gate.judge)`). Silent until a record carries the marker (see below) |
-| `enum-exhaustive` | on | `if e == "a" ... elseif e == "b" ... end` over an enum with a value left unhandled and no `else`; enums nested in records and enums from required modules count |
-| `enum-cast` | on | `e as E` where `E` is an enum and the checker types `e` as `string`: `as` is erased, so the word enters the enum with nothing checking it. A string literal (`"open" as E`) and a value already typed as the enum are not reported (see below) |
-| `enum-table` | on | a table constructor whose declared type maps an enum (`{string: E}`, `{E: T}`) and that leaves a value of the enum out, or lists a word that is not one. An array of the enum (`{E}`) is a selection, not a mapping, and is not reported. `htl fix enum-table` fills a `{string: E}` one in |
-| `union-exhaustive` | on | `if x is A ... elseif x is B ... end` over a union with a variant never tested and no `else`. The variants come from the checker, so a chain that predates a variant is reported once the union gains it (see "Unions of records") |
-| `shadow-local` | on | a local / loop var / parameter reusing an enclosing local's name; when that outer local is a `require`d module the message says which module and where it was required |
-| `no-global` | on | `global` declarations |
-| `no-any` | off | explicit `any` annotations and `as any` casts |
-| `explicit-number` | off | `local n = 0` (inferred `integer`) that is later assigned a number expression (`n = n * 1.5`, `n = a / b`): names the declaration and the assignment; write `local n: number = 0`. Plain integer counters are not reported |
-| `class-record` | off | a record declaring metamethods (`metamethod __index: Actor` = a class): its metatable is attached by `setmetatable` at run time and is not part of the value, so serialization and the Rust boundary drop it; keep such records out of saved data and host signatures |
-| `duplicate-declaration` | on | two `.d.tl` for one module both reachable on the search path: position alone decides which is read, and nothing wrote that order down. Names the one read and the one that was not (see "Project config") |
-| `host-module-shadowed` | on | a `require` of a name a `#[host_module]` in the surrounding crate registers that resolved to a Teal file of that name: `package.preload` beats the path searcher at run time, so the file is what is checked and the host is what runs. Reported at the require, naming both (see "Rust host") |
-| `contract` | on | a module under a `[[contract]]` directory that does not satisfy the contract's type or its `---@required` fields, and a `---@contract` marker that cannot be turned into a contract or published (see "Data from outside the program") |
-| `contract-unenforced` | on | a contract the host never builds resolvers for, so it is documentation rather than a run-time guarantee. Say where the enforcement lives with `[[contract]] enforced_by` when the scan cannot see it |
-| `require-cycle` | on | a loop in the require graph of the files `htl check <dir>` just checked, e.g. `a.tl -> b.tl -> a.tl`. Teal types the back edge as an opaque circular require, so without this the symptom is "cannot index" somewhere else |
+| `nil-index` | warn | `t[k].x`, `t[k]:m()`, `t[k]()`, `t[k][j]` — Teal types a map/array lookup as `V`, not `V \| nil` |
+| `struct-fields` | warn | a table built for a record marked `---@struct` that leaves out a field the record declares and `---@optional` does not exempt. Silent until a record carries the marker (see below). `htl fix` spells the missing fields at the site, as a suggestion it never applies |
+| `sealed-record` | warn | a table built for a record marked `---@sealed`, or an `as` cast to one, outside the file that declares it — outside the functions the marker names, when it names any (`---@sealed(gate.judge)`). Silent until a record carries the marker (see below) |
+| `enum-exhaustive` | warn | `if e == "a" ... elseif e == "b" ... end` over an enum with a value left unhandled and no `else`; enums nested in records and enums from required modules count |
+| `enum-cast` | warn | `e as E` where `E` is an enum and the checker types `e` as `string`: `as` is erased, so the word enters the enum with nothing checking it. A string literal (`"open" as E`) and a value already typed as the enum are not reported (see below) |
+| `enum-table` | warn | a table constructor whose declared type maps an enum (`{string: E}`, `{E: T}`) and that leaves a value of the enum out, or lists a word that is not one. An array of the enum (`{E}`) is a selection, not a mapping, and is not reported. `htl fix enum-table` fills a `{string: E}` one in |
+| `union-exhaustive` | warn | `if x is A ... elseif x is B ... end` over a union with a variant never tested and no `else`. The variants come from the checker, so a chain that predates a variant is reported once the union gains it (see "Unions of records") |
+| `shadow-local` | warn | a local / loop var / parameter reusing an enclosing local's name; when that outer local is a `require`d module the message says which module and where it was required |
+| `no-global` | warn | `global` declarations |
+| `no-any` | allow | explicit `any` annotations and `as any` casts |
+| `explicit-number` | allow | `local n = 0` (inferred `integer`) that is later assigned a number expression (`n = n * 1.5`, `n = a / b`): names the declaration and the assignment; write `local n: number = 0`. Plain integer counters are not reported |
+| `class-record` | allow | a record declaring metamethods (`metamethod __index: Actor` = a class): its metatable is attached by `setmetatable` at run time and is not part of the value, so serialization and the Rust boundary drop it; keep such records out of saved data and host signatures |
+| `duplicate-declaration` | warn | two `.d.tl` for one module both reachable on the search path: position alone decides which is read, and nothing wrote that order down. Names the one read and the one that was not (see "Project config") |
+| `host-module-shadowed` | warn | a `require` of a name a `#[host_module]` in the surrounding crate registers that resolved to a Teal file of that name: `package.preload` beats the path searcher at run time, so the file is what is checked and the host is what runs. Reported at the require, naming both (see "Rust host") |
+| `contract` | warn | a module under a `[[contract]]` directory that does not satisfy the contract's type or its `---@required` fields, and a `---@contract` marker that cannot be turned into a contract or published (see "Data from outside the program") |
+| `contract-unenforced` | warn | a contract the host never builds resolvers for, so it is documentation rather than a run-time guarantee. Say where the enforcement lives with `[[contract]] enforced_by` when the scan cannot see it |
+| `require-cycle` | warn | a loop in the require graph of the files `htl check <dir>` just checked, e.g. `a.tl -> b.tl -> a.tl`. Teal types the back edge as an opaque circular require, so without this the symptom is "cannot index" somewhere else |
 
 Teal's own warnings are named too, in a namespace of their own: see
 [Teal's own warnings](#teals-own-warnings-tl) below.
 
-Every name in either table is a name you can write back: `--lint -contract`, `[lint]
-disable = ["require-cycle"]`, `[lint] disable = ["tl:hint"]`, `HTL_LINTS=-tl:unused`, and
-`htl check --list-lints` lists them all. Where a finding comes from — one file's syntax
-tree, the project layer once the files are checked, or the vendored compiler — changes
-nothing about how it is named or configured; one registry holds the rules.
+Every name in either table is a name you can write back, and every one takes a level:
+`--lint contract=deny`, `[lint.rules] require-cycle = "allow"`, `HTL_LINTS=tl:unused=allow`,
+and `htl check --list-lints` lists them all with their defaults. Where a finding comes
+from — one file's syntax tree, the project layer once the files are checked, or the
+vendored compiler — changes nothing about how it is named, configured or judged; one
+registry holds the rules.
+
+On the command line and in `HTL_LINTS`, `+rule` and `-rule` are the older spelling and say
+the same thing a level does: `+` is `=warn` (report it) and `-` is `=allow` (do not). The
+level form is what can also say `deny`. Later entries win, so a flag raises or lowers what
+`htl.toml` set:
+
+```
+htl check src --lint nil-index=deny,no-any=warn,-tl:hint
+```
+
+`[lint] strict` and `--strict` are the same statement made run-wide: **for this run, every
+`warn` counts as `deny`.** Nothing is advisory under it, because everything a run reports is
+at `warn` or `deny` — `allow` is not reported at all, so a rule you silenced does not come
+back under `strict`, and is not counted either. A run's summary says both: `0 error(s),
+2 warning(s), 1 lint(s), 1 at deny` is three findings said and one of them fatal. `htl check`
+is where levels are judged; `htl test`'s verdict is its tests (findings are reported there
+and not weighed).
 
 Silence one occurrence with a trailing `-- htl: allow(nil-index)`, at the line the
 finding points at. That works for the project-level rules too — the require a cycle
@@ -633,9 +666,11 @@ one line: `tl:redeclaration` and `shadow-local` report the same shadowing at the
 position, so a line that wants both quiet says
 `-- htl: allow(tl:redeclaration, shadow-local)`.
 
-`include_tl!` treats lints as errors (`HTL_LINT=warn` downgrades,
-`HTL_LINTS=+no-any,-shadow-local` configures). Teal's warnings it reports and builds
-anyway.
+`include_tl!` treats lints as errors (`HTL_LINT=warn` downgrades, `[lint] strict = false`
+downgrades, `HTL_LINTS=no-any=warn,-shadow-local` configures which rules run). Teal's
+warnings it reports and builds anyway. The macro reads which rules are on and not what
+level they are at: a rule at `deny` fails `htl check` and is a lint like any other inside
+the macro, whose own switch is `strict` / `HTL_LINT`.
 
 Everything `htl` prints with an `[htl <rule>]` name is a finding about your code — a lint
 of htl's own, or a warning the vendored compiler raised. `htl dts`'s `not written` and
@@ -652,21 +687,21 @@ and htl reports it under that kind's name in the `tl:` namespace — as
 
 | rule | default | catches |
 |---|---|---|
-| `tl:unused` | on | a local, parameter, label or loop variable nothing uses |
-| `tl:unread` | on | a variable written and never read after |
-| `tl:redeclaration` | on | a declaration over a name already declared — including two in the *same* scope, which `shadow-local` does not see |
-| `tl:unknown` | on | a variable the checker cannot resolve |
-| `tl:branch` | on | a test that can never hold, e.g. `x is B` where `x` has been narrowed out of `B` |
-| `tl:hint` | on | the compiler's suggestions: `.` where `:` was meant, `pairs` over an array, a `string.format` pattern that does not match its arguments, and more |
-| `tl:debug` | on | the checker reporting an ambiguity in what it inferred |
+| `tl:unused` | warn | a local, parameter, label or loop variable nothing uses |
+| `tl:unread` | warn | a variable written and never read after |
+| `tl:redeclaration` | warn | a declaration over a name already declared — including two in the *same* scope, which `shadow-local` does not see |
+| `tl:unknown` | warn | a variable the checker cannot resolve |
+| `tl:branch` | warn | a test that can never hold, e.g. `x is B` where `x` has been narrowed out of `B` |
+| `tl:hint` | warn | the compiler's suggestions: `.` where `:` was meant, `pairs` over an array, a `string.format` pattern that does not match its arguments, and more |
+| `tl:debug` | warn | the checker reporting an ambiguity in what it inferred |
 
 The prefix is not decoration. `unused` already means something else here — `htl unused`
 reports modules nothing requires, not locals nothing reads — and these seven words are
 Teal's to rename, not htl's, so they keep a namespace that says where they came from.
 
-They are warnings rather than lints, so they fail `htl check` only under `[lint] strict`;
-what turning one off changes is whether it is reported at all, and a kind you turned off is
-not counted either.
+They are warnings rather than lints, and their level is `warn`, so they fail `htl check`
+under `[lint] strict` or when the project sets one to `"deny"`. Setting one to `"allow"`
+changes whether it is reported at all, and a kind you silenced is not counted either.
 
 ### Records built whole (`---@struct`)
 
@@ -843,9 +878,14 @@ override it (`htl new` writes a commented one).
 htl = "0.3"               # the htl command this project expects; a mismatch is refused
 
 [lint]
-enable  = ["class-record", "explicit-number"]
-disable = ["shadow-local"]
-strict  = true            # lints fail check/test and include_tl!; false makes the macro advisory
+strict = true             # for this run, every warn counts as deny (htl check only);
+                          # lints also fail include_tl!, and false makes the macro advisory
+
+[lint.rules]              # allow = not reported, warn = reported, deny = fails the run
+nil-index = "deny"
+class-record = "warn"     # allow by default: seen without failing the run
+shadow-local = "allow"
+"tl:hint" = "allow"       # a warning kind of the Teal compiler; quote the `:`
 
 [fmt]
 indent = 3
@@ -861,8 +901,9 @@ dir = "mods"              # relative to htl.toml; "sites/*" = every subdirectory
 `[toolchain] htl` is a cargo requirement (`"0.3"` = 0.3.x) on the *command*, which
 `Cargo.toml` does not pin — it pins the crate a Rust host builds against. The command
 is what decides whether the project checks: three lints were added on one day and all
-three are on by default, so a project green under the release before them is red under
-the release after, on unchanged sources. Written down, that arrives as a version the
+three are reported by default, so a project quiet under the release before them says
+three new things under the release after — on unchanged sources, and fatally if it runs
+`--strict`. Written down, that arrives as a version the
 project moved to rather than as a difference between two machines. A command outside
 the requirement is refused before anything is read, naming both versions and this file;
 htl installs nothing, so the answer is `cargo install htl-cli`. Leave the key out and any
@@ -1319,8 +1360,10 @@ names are stable; fields may be added, not renamed.
 
 - `check`: `{ files, diagnostics: [{ severity: "error"|"warning"|"lint", file, line,
   col, rule?, message, required_by?, origin? }], summary: { errors, warnings, lints,
-  strict, ok } }`. `rule` is the lint rule (`nil-index`, `contract`, ...), split out of
-  the message. An error in a module the check reached through `require` has `file` set
+  denied, strict, ok } }`. `rule` is the lint rule (`nil-index`, `contract`, ...), split
+  out of the message. `denied` is how many of `warnings` + `lints` were said under a rule
+  at `deny` — a count of levels, so it overlaps those two rather than adding to them, and
+  `ok` is false whenever it is not zero. An error in a module the check reached through `require` has `file` set
   to that module and `required_by` to the file that required it; `origin` is
   `"dependency"` (installed under `.htl/modules`, or a vendored copy) or `"external"`
   (a `[check] paths` or contract directory), and absent for a file of the project's own.

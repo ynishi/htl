@@ -122,6 +122,11 @@ pub struct Sink<O: Output> {
     /// How many dependency errors reached the output — what the totals and the exit code
     /// count, as opposed to how many were handed over (the entries store every one).
     dependency_errors: usize,
+    /// The levels this run judges by, when its caller judges at all
+    /// ([`judge_by`](Self::judge_by)).
+    levels: Option<crate::lint::Selection>,
+    /// Findings that reached the output under a rule at `deny`.
+    denied: usize,
 }
 
 impl<O: Output> Sink<O> {
@@ -132,7 +137,25 @@ impl<O: Output> Sink<O> {
             walked: Default::default(),
             reported: Default::default(),
             dependency_errors: 0,
+            levels: None,
+            denied: 0,
         }
+    }
+
+    /// The levels a run judges its findings by: what makes `deny` mean something at the
+    /// exit code.
+    ///
+    /// Counted here because this is the one place a diagnostic becomes output, so a
+    /// finding replayed from the store is judged by the same reading as a fresh one, and a
+    /// dependency error said twice is counted once. A caller that does not judge — `htl
+    /// test`, whose verdict is its tests — leaves this unset and gets a `denied` of zero.
+    pub fn judge_by(&mut self, sel: &crate::lint::Selection) {
+        self.levels = Some(sel.clone());
+    }
+
+    /// Findings this run said under a rule at `deny`.
+    pub fn denied(&self) -> usize {
+        self.denied
     }
 
     /// The output this sink writes to, for a caller that has to read back what it collected.
@@ -247,6 +270,16 @@ impl<O: Output> Sink<O> {
             Some(_) => shown(text),
             None => Cow::Borrowed(text),
         };
+        // A type error fails the run whatever any level says — it is htl being unable to
+        // stand behind the code, not an opinion about it. Everything else carries the name
+        // of the rule that said it, and that name has a level.
+        if severity != Severity::Error
+            && let Some(levels) = &self.levels
+            && let Some(rule) = crate::diagnostic::rule_of(text.as_ref())
+            && levels.level_of(rule) == crate::lint::Level::Deny
+        {
+            self.denied += 1;
+        }
         self.out
             .diagnostic(severity, text.as_ref(), fix, dependency);
     }
@@ -808,6 +841,11 @@ pub struct Report {
     /// Lints, including the project-level ones: require cycles, contract problems, and a
     /// contract no host enforces.
     pub lints: usize,
+    /// How many of the warnings and lints above were said under a rule the project set to
+    /// `deny`. A count of levels rather than of kinds, which is why it overlaps the two
+    /// counts before it instead of adding to them: it is the part of what the run said
+    /// that the run fails on.
+    pub denied: usize,
     /// How many of `files` were replayed from the store rather than checked.
     pub replayed: usize,
     /// What each file required, as the checker resolved it: the require graph, in the
@@ -821,10 +859,17 @@ pub struct Report {
 }
 
 impl Report {
-    /// Whether the run counts as a failure: an error always, a warning or a lint under
-    /// `strict`.
+    /// Whether the run counts as a failure: **an error, or a finding at `deny` — and
+    /// under `strict` every finding the run reported counts as `deny`.**
+    ///
+    /// That is the whole of what a level means to an exit code, and `strict` is the
+    /// run-wide form of the same statement: everything a run reports is at `warn` or
+    /// `deny` (`allow` is not reported), so promoting `warn` leaves nothing advisory. It
+    /// is also what the predicate did before levels existed, said in the vocabulary that
+    /// now exists for it — with no rule defaulting to `deny`, a project that writes no
+    /// configuration fails on exactly what it failed on before.
     pub fn failed(&self, strict: bool) -> bool {
-        self.errors > 0 || (strict && (self.warnings > 0 || self.lints > 0))
+        self.errors > 0 || self.denied > 0 || (strict && (self.warnings > 0 || self.lints > 0))
     }
 
     /// Every module came from the store, so no checker was built.
@@ -889,6 +934,9 @@ pub fn check<O: Output>(
     // the rules `lint.lua` runs and the rules this layer asks are the same answer to the
     // same question — and an unknown name is refused here, before anything is checked.
     let lints = crate::lint::Lints::parse(&spec)?;
+    // The same resolution decides the verdict: a finding under a rule this project set to
+    // `deny` fails the run, and the sink counts those as it says them.
+    sink.judge_by(lints.selection());
 
     // The module names the host registers in `package.preload`, read from the crate's
     // Rust sources once for the run: `host-module-shadowed` asks the same question of
@@ -1038,6 +1086,7 @@ pub fn check<O: Output>(
         errors: n_err,
         warnings: n_warn,
         lints: n_lint,
+        denied: sink.denied(),
         replayed,
         requires,
     })

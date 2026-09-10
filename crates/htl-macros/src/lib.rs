@@ -1448,7 +1448,7 @@ mod tests {
         write(&root.join("src/main.tl"), "local x: any = 1\nprint(x)\n");
         resolve_include(&root, "src/main.tl", false).expect("no-any is off by default");
 
-        write(&root.join("htl.toml"), "[lint]\nenable = [\"no-any\"]\n");
+        write(&root.join("htl.toml"), "[lint.rules]\nno-any = \"warn\"\n");
         let err = resolve_include(&root, "src/main.tl", false).unwrap_err();
         assert!(
             err.contains("htl lint failed") && err.contains("no-any"),
@@ -1457,7 +1457,7 @@ mod tests {
 
         write(
             &root.join("htl.toml"),
-            "[lint]\nenable = [\"no-any\"]\nstrict = false\n",
+            "[lint]\nstrict = false\n\n[lint.rules]\nno-any = \"warn\"\n",
         );
         resolve_include(&root, "src/main.tl", false).expect("strict = false downgrades lints");
     }

@@ -14,11 +14,26 @@
 //! is the *implementation* of its twelve — `tests/lint_registry.rs` holds that list to this
 //! one, so a rule renamed on one side fails a test rather than going quietly silent.
 //!
-//! Whether a rule is on is one question; how loud it is when it fires is another, and this
-//! module answers only the first. `htl check --strict` still promotes everything at once.
+//! Whether a rule is on and how much it matters are one question here, answered by a
+//! [`Level`]: `allow` is not reported, `warn` is reported, `deny` is reported and fails the
+//! run. A rule's default is a level ([`Rule::default`]) and a project overrides it by name
+//! (`[lint.rules]`, `--lint`), which is what lets one rule be advice while another stops
+//! the run. `strict` is not a fourth thing: it promotes every `warn` of the run to `deny`.
+//!
+//! What this module does *not* decide is whether a name is a rule at all. Every entry of
+//! [`RULES`] is both a name htl prints and a name a run can turn off, and there are names
+//! in the first set that do not belong in the second: `forward-ref` and `error` are the
+//! classes `htl fix` gives to Teal errors that have no rule of their own, read by
+//! `htl fix --rule` and `[fix] disable` and consulted by nothing in a check. Registering
+//! them as `RULES` stands would put them in `--list-lints` and make `--lint -forward-ref`
+//! parse into an off switch nothing reads. The seam for that split is
+//! [`rule_defaults`]/[`rule_names`] (what the listing prints) against
+//! [`Selection::parse`] (what a spec accepts): one list feeds both today, and separating
+//! them is where a `Rule` gains a field saying which surfaces it appears on.
 
 use crate::{Diagnostic, Severity};
 use anyhow::{Result, bail};
+use serde::Deserialize;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -38,28 +53,84 @@ pub enum Side {
     Tl,
 }
 
-/// One rule: the name it is reported and configured under, whether a project that says
-/// nothing gets it, and which half implements it.
+/// How much a finding under a rule matters: whether it is said, and whether the run fails
+/// on it.
+///
+/// The three words are selene's `[lints]` and Cargo's, in that spelling, because a reader
+/// arriving from either already knows them. Nothing defaults to [`Deny`](Self::Deny) — the
+/// levels a project gets without writing anything are `warn` for every rule htl reports
+/// and `allow` for the three that are opinions — so `deny` is the thing a project asks
+/// for, and `strict` is asking for it run-wide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Level {
+    /// Not reported, and so not counted: a run is judged on what it said.
+    Allow,
+    /// Reported; the run does not fail on it. What every rule htl reported was, before
+    /// levels: `--strict` was the only way to make one matter.
+    Warn,
+    /// Reported, and the run fails. `htl check` exits 1 on a finding at this level with no
+    /// flag needed.
+    Deny,
+}
+
+impl Level {
+    /// The word a config and a spec write it as.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Warn => "warn",
+            Self::Deny => "deny",
+        }
+    }
+
+    /// A level from the word, or `None` for anything else.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "allow" => Some(Self::Allow),
+            "warn" => Some(Self::Warn),
+            "deny" => Some(Self::Deny),
+            _ => None,
+        }
+    }
+
+    /// Whether a finding at this level is reported at all.
+    pub fn is_on(self) -> bool {
+        self != Self::Allow
+    }
+}
+
+impl std::fmt::Display for Level {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One rule: the name it is reported and configured under, the level a project that says
+/// nothing about it gets, and which half implements it.
 #[derive(Debug, Clone, Copy)]
 pub struct Rule {
     pub name: &'static str,
-    pub default_on: bool,
+    pub default: Level,
     pub side: Side,
 }
 
 impl Rule {
-    const fn on(name: &'static str, side: Side) -> Self {
+    /// Reported, and advisory until a project says `deny` or the run says `strict`.
+    const fn warn(name: &'static str, side: Side) -> Self {
         Self {
             name,
-            default_on: true,
+            default: Level::Warn,
             side,
         }
     }
 
-    const fn off(name: &'static str, side: Side) -> Self {
+    /// Not reported until a project asks for it. An opinion htl has, rather than a state
+    /// a project is in by accident.
+    const fn allow(name: &'static str, side: Side) -> Self {
         Self {
             name,
-            default_on: false,
+            default: Level::Allow,
             side,
         }
     }
@@ -70,110 +141,143 @@ impl Rule {
 /// once the files have been checked, then the warning kinds the vendored Teal compiler
 /// reports for itself.
 pub const RULES: &[Rule] = &[
-    Rule::on("nil-index", Side::Lua),
-    Rule::on("struct-fields", Side::Lua),
-    Rule::on("sealed-record", Side::Lua),
-    Rule::on("enum-exhaustive", Side::Lua),
-    Rule::on("enum-cast", Side::Lua),
-    Rule::on("enum-table", Side::Lua),
-    Rule::on("union-exhaustive", Side::Lua),
-    Rule::on("shadow-local", Side::Lua),
-    Rule::on("no-global", Side::Lua),
-    Rule::off("no-any", Side::Lua),
-    Rule::off("explicit-number", Side::Lua),
-    Rule::off("class-record", Side::Lua),
-    // The project layer. All on by default: each describes a state a project is in by
-    // accident rather than on purpose, and a project that wants one off now has a way to
-    // say so where before it had none.
-    Rule::on("duplicate-declaration", Side::Rust),
-    Rule::on("host-module-shadowed", Side::Rust),
-    Rule::on("contract", Side::Rust),
-    Rule::on("contract-unenforced", Side::Rust),
-    Rule::on("require-cycle", Side::Rust),
+    Rule::warn("nil-index", Side::Lua),
+    Rule::warn("struct-fields", Side::Lua),
+    Rule::warn("sealed-record", Side::Lua),
+    Rule::warn("enum-exhaustive", Side::Lua),
+    Rule::warn("enum-cast", Side::Lua),
+    Rule::warn("enum-table", Side::Lua),
+    Rule::warn("union-exhaustive", Side::Lua),
+    Rule::warn("shadow-local", Side::Lua),
+    Rule::warn("no-global", Side::Lua),
+    Rule::allow("no-any", Side::Lua),
+    Rule::allow("explicit-number", Side::Lua),
+    Rule::allow("class-record", Side::Lua),
+    // The project layer. All `warn`: each describes a state a project is in by accident
+    // rather than on purpose, so it is worth saying, and none of them is worth failing a
+    // run over unless the project says so — which is what a level is for.
+    Rule::warn("duplicate-declaration", Side::Rust),
+    Rule::warn("host-module-shadowed", Side::Rust),
+    Rule::warn("contract", Side::Rust),
+    Rule::warn("contract-unenforced", Side::Rust),
+    Rule::warn("require-cycle", Side::Rust),
     // Teal's warning kinds, kept in the compiler's own vocabulary behind a `tl:` prefix.
     // The prefix is not decoration. `unused` already means something else here — `htl
     // unused` reports modules nothing requires, not locals nothing reads — and these seven
     // words are Teal's to rename, not htl's; keeping them in a namespace of their own says
     // where they came from and leaves htl's twelve free of them.
     //
-    // All on. They are what the compiler chose to say about the code, and htl forwarded
-    // them long before it could name them; what changes here is that a project which wants
-    // one quiet has a name to write instead of nothing.
-    Rule::on("tl:unknown", Side::Tl),
-    Rule::on("tl:unused", Side::Tl),
-    Rule::on("tl:unread", Side::Tl),
-    Rule::on("tl:redeclaration", Side::Tl),
-    Rule::on("tl:branch", Side::Tl),
-    Rule::on("tl:hint", Side::Tl),
-    Rule::on("tl:debug", Side::Tl),
+    // All `warn`, which is what they have always been: the compiler raises them as
+    // warnings and htl forwarded them as warnings long before it could name them. There is
+    // one severity to inherit, so the level says the same thing with nothing added — see
+    // the withdrawn fourth level in the umbrella issue.
+    Rule::warn("tl:unknown", Side::Tl),
+    Rule::warn("tl:unused", Side::Tl),
+    Rule::warn("tl:unread", Side::Tl),
+    Rule::warn("tl:redeclaration", Side::Tl),
+    Rule::warn("tl:branch", Side::Tl),
+    Rule::warn("tl:hint", Side::Tl),
+    Rule::warn("tl:debug", Side::Tl),
 ];
 
 fn index_of(name: &str) -> Option<usize> {
     RULES.iter().position(|r| r.name == name)
 }
 
-/// The name of every rule, in [`RULES`] order. What `htl check --list-lints` prints.
+/// The name of every rule, in [`RULES`] order.
 pub fn rule_names() -> Vec<&'static str> {
     RULES.iter().map(|r| r.name).collect()
 }
 
-/// Which rules a run has on: the defaults, with a `+rule,-rule` spec applied over them.
+/// Every rule with the level a project that says nothing gets, in [`RULES`] order. What
+/// `htl check --list-lints` prints, which is the one place a reader sees which rules are
+/// `allow` without having to fail to provoke one.
+pub fn rule_defaults() -> Vec<(&'static str, Level)> {
+    RULES.iter().map(|r| (r.name, r.default)).collect()
+}
+
+/// What level each rule has for a run: the defaults, with a spec applied over them.
 ///
-/// The spec is what `[lint] enable` / `disable` is turned into
+/// The spec is what `[lint.rules]` is turned into
 /// ([`HtlConfig::lint_spec`](crate::config::HtlConfig::lint_spec)), what `--lint` takes and
-/// what `HTL_LINTS` carries into `include_tl!`. Later entries win, so a flag can turn back
-/// on what the file turned off.
+/// what `HTL_LINTS` carries into `include_tl!`. Later entries win, so a flag can raise or
+/// lower what the file set.
 #[derive(Debug, Clone)]
 pub struct Selection {
     /// Parallel to [`RULES`].
-    on: Vec<bool>,
+    levels: Vec<Level>,
 }
 
 impl Default for Selection {
     fn default() -> Self {
         Self {
-            on: RULES.iter().map(|r| r.default_on).collect(),
+            levels: RULES.iter().map(|r| r.default).collect(),
         }
     }
 }
 
 impl Selection {
-    /// `"+no-any,-shadow-local"` over the defaults. An unknown name is an error rather
-    /// than a no-op: a typo in `htl.toml` that silently turned nothing on would read
-    /// exactly like a rule that found nothing.
+    /// `"no-any=warn,nil-index=deny"` over the defaults.
+    ///
+    /// `+rule` and `-rule` are the shorthand the flag has always taken, and they say the
+    /// same thing a level does: `+` is `=warn` (say it) and `-` is `=allow` (do not).
+    /// A bare name is `+name`.
+    ///
+    /// An unknown name is an error rather than a no-op: a typo in `htl.toml` that
+    /// silently turned nothing on would read exactly like a rule that found nothing. So
+    /// is an unknown level, for the same reason — a misspelt `deny` that meant "fail the
+    /// run" must not read as "everything passed".
     pub fn parse(spec: &str) -> Result<Self> {
         let mut sel = Self::default();
         for item in spec
             .split(|c: char| c == ',' || c.is_whitespace())
             .filter(|s| !s.is_empty())
         {
-            let (on, name) = match item.strip_prefix('-') {
-                Some(rest) => (false, rest),
-                None => (true, item.strip_prefix('+').unwrap_or(item)),
+            let (name, level) = match item.split_once('=') {
+                Some((name, word)) => {
+                    let Some(level) = Level::parse(word.trim()) else {
+                        bail!("unknown lint level: {item} (allow, warn or deny)");
+                    };
+                    (name.trim(), level)
+                }
+                None => match item.strip_prefix('-') {
+                    Some(rest) => (rest, Level::Allow),
+                    None => (item.strip_prefix('+').unwrap_or(item), Level::Warn),
+                },
             };
             let Some(i) = index_of(name) else {
                 bail!("unknown lint rule: {item}");
             };
-            sel.on[i] = on;
+            sel.levels[i] = level;
         }
         Ok(sel)
     }
 
-    /// Whether this run reports `name`. An unknown name is off: nothing produces one, and
-    /// a caller asking about a name that is not a rule is asking about nothing.
+    /// The level `name` has for this run. An unknown name is [`Level::Allow`]: nothing
+    /// produces one, and a caller asking about a name that is not a rule is asking about
+    /// nothing.
+    pub fn level_of(&self, name: &str) -> Level {
+        index_of(name).map_or(Level::Allow, |i| self.levels[i])
+    }
+
+    /// Whether this run reports `name` at all — `allow` is the only level that does not.
     pub fn is_on(&self, name: &str) -> bool {
-        index_of(name).is_some_and(|i| self.on[i])
+        self.level_of(name).is_on()
     }
 
     /// The rules of one side and whether each is on, for a consumer that has to be handed
     /// the selection rather than ask about it — `lint.lua`, which runs its twelve from a
     /// table.
+    ///
+    /// A producer is told whether to produce and not how much it matters: the level of
+    /// what it produced is read where the run is judged ([`Lints::level`]), so a rule
+    /// moving between `warn` and `deny` changes no producer's work.
     pub fn of_side(&self, side: Side) -> impl Iterator<Item = (&'static str, bool)> + '_ {
         RULES
             .iter()
             .enumerate()
             .filter(move |(_, r)| r.side == side)
-            .map(|(i, r)| (r.name, self.on[i]))
+            .map(|(i, r)| (r.name, self.levels[i].is_on()))
     }
 }
 
@@ -218,6 +322,12 @@ impl Lints {
     /// that turned them off should pay for neither.
     pub fn on(&self, rule: &str) -> bool {
         self.sel.is_on(rule)
+    }
+
+    /// The level `rule` has for this run: what decides whether a finding under it fails
+    /// the run, once it has been decided that the finding is said at all.
+    pub fn level(&self, rule: &str) -> Level {
+        self.sel.level_of(rule)
     }
 
     /// The findings of `lines` this run says: the rest are a rule the run has off, or a
@@ -306,6 +416,61 @@ mod tests {
         // Untouched rules keep their default.
         assert!(sel.is_on("shadow-local"));
         assert!(!sel.is_on("class-record"));
+    }
+
+    /// The defaults are the levels a project that writes nothing gets, and they are what
+    /// the run before levels behaved as: everything htl reported was advisory, and the
+    /// three opinions were not reported. Nothing is `deny`, so no project's verdict
+    /// changed when levels arrived.
+    #[test]
+    fn the_defaults_are_warn_except_the_three_opinions() {
+        for (name, level) in rule_defaults() {
+            let want = match name {
+                "no-any" | "explicit-number" | "class-record" => Level::Allow,
+                _ => Level::Warn,
+            };
+            assert_eq!(level, want, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_spec_sets_a_level_by_name() {
+        let sel = Selection::parse("nil-index=deny,tl:hint=allow,no-any=warn").unwrap();
+        assert_eq!(sel.level_of("nil-index"), Level::Deny);
+        assert_eq!(sel.level_of("tl:hint"), Level::Allow);
+        assert_eq!(sel.level_of("no-any"), Level::Warn);
+        // Untouched rules keep their default level.
+        assert_eq!(sel.level_of("shadow-local"), Level::Warn);
+        assert_eq!(sel.level_of("class-record"), Level::Allow);
+    }
+
+    /// `+`/`-` are the older spelling and say the same thing, so a `HTL_LINTS` already in
+    /// someone's CI keeps its meaning.
+    #[test]
+    fn the_plus_and_minus_spelling_is_the_same_as_a_level() {
+        let short = Selection::parse("+no-any,-nil-index").unwrap();
+        let long = Selection::parse("no-any=warn,nil-index=allow").unwrap();
+        for (name, _) in rule_defaults() {
+            assert_eq!(short.level_of(name), long.level_of(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn later_entries_win_so_a_flag_can_raise_what_a_file_set() {
+        let sel = Selection::parse("nil-index=allow,nil-index=deny").unwrap();
+        assert_eq!(sel.level_of("nil-index"), Level::Deny);
+    }
+
+    /// A misspelt level must not read as "nothing to report": it is refused as written,
+    /// the way an unknown name is.
+    #[test]
+    fn an_unknown_level_is_refused_as_written() {
+        let err = Selection::parse("nil-index=error").unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "unknown lint level: nil-index=error (allow, warn or deny)"
+        );
+        assert!(Selection::parse("no-such-rule=deny").is_err());
     }
 
     #[test]

@@ -57,7 +57,16 @@ error: include_tl!: .../htl.toml: parsing htl.toml: TOML parse error at line 8, 
 So each key crosses in two steps: it lands in `htl-core` and is published, and only the
 release *after* that may write it into a scaffold. `[toolchain]` is the key this was learned
 on (#153); it was written a release early and every project `htl new` wrote in between
-failed to build.
+failed to build. `[lint.rules]` is the second (#147), and it is out of the scaffolded
+`htl.toml` until a published htl parses it.
+
+A **commented** example counts as writing it. It is one user action away from being a key,
+and the user who uncomments it is building against the pinned release, so the failure is the
+same one arriving later. The rule cuts both ways when a key is replaced rather than added:
+`[lint.rules]` took over from `[lint] enable` / `disable`, and showing those instead would
+hand a fresh project a line the CLI that just made it rejects — breaking `htl check`, the
+first thing a user runs. A scaffold that cannot name either names neither, and points at a
+command instead (`htl check --list-lints`), which answers from whichever binary is in hand.
 
 `just e2e-scaffold-published` is what says so without a release: it scaffolds and builds
 with no `[patch.crates-io]`, against the crate the project actually pins, and the CI
@@ -68,7 +77,9 @@ checkout, where every key this branch added exists.
 
 - [ ] Did this release publish an `htl.toml` key the scaffold does not write yet? If so, the
       *next* release is where the scaffold starts writing it, and that is the release to
-      open with the change. **Owed now: `[toolchain]`, once a published htl parses it.**
+      open with the change. **Owed now: `[toolchain]`, and `[lint.rules]` (the level per
+      rule that replaced `[lint] enable` / `disable`) — each once a published htl parses
+      it.**
 - [ ] Did anything added to the scaffold's templates this cycle need an unpublished htl?
       Same answer, same list.
 

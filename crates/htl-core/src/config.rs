@@ -5,9 +5,14 @@
 //! htl = "0.4"               # the htl command this project expects; a mismatch is refused
 //!
 //! [lint]
-//! enable  = ["class-record", "explicit-number"]
-//! disable = ["shadow-local", "tl:hint"]   # htl's own rules and Teal's warning kinds
-//! strict  = true            # warnings and lints fail htl check; lints fail include_tl!
+//! strict = true             # for this run, every `warn` counts as `deny` (htl check
+//!                           # only); lints also fail include_tl!
+//!
+//! [lint.rules]              # a level per rule: allow (not reported) / warn (reported,
+//! nil-index = "deny"        # advisory) / deny (reported, fails htl check)
+//! class-record = "warn"
+//! shadow-local = "allow"
+//! "tl:hint" = "allow"       # Teal's warning kinds: quote the key, `:` is not a bare one
 //!
 //! [fmt]
 //! indent = 3
@@ -26,6 +31,7 @@
 //! Found by walking up from a file or directory, like `mlua-pkg.toml`. Command-line
 //! flags and the `HTL_LINTS` / `HTL_LINT` environment variables take precedence over it.
 
+use crate::lint;
 use anyhow::{Context, Result};
 use semver::{Version, VersionReq};
 use serde::Deserialize;
@@ -213,23 +219,29 @@ pub struct Contract {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LintConfig {
-    /// Rules to turn on in addition to the defaults.
+    /// `[lint.rules]` — the level of each rule this project has an opinion about.
     ///
-    /// A name here is any entry of [`lint::RULES`](crate::lint::RULES) — one of htl's own
-    /// rules, or one of the vendored Teal compiler's warning kinds under its `tl:` prefix
-    /// (`tl:hint`, `tl:unused`, ...). `htl check --list-lints` prints them all. An unknown
-    /// name is refused rather than ignored: a typo that turned nothing on would read
-    /// exactly like a rule that found nothing.
+    /// A key is any entry of [`lint::RULES`](crate::lint::RULES) — one of htl's own rules,
+    /// or one of the vendored Teal compiler's warning kinds under its `tl:` prefix
+    /// (`"tl:hint"`, `"tl:unused"`, ..., which have to be quoted because `:` is not a bare
+    /// TOML key). `htl check --list-lints` prints them all with their defaults. A value is
+    /// `"allow"`, `"warn"` or `"deny"`. An unknown name or level is refused rather than
+    /// ignored: a typo that turned nothing on would read exactly like a rule that found
+    /// nothing, and a misspelt `"deny"` would read like a run that passed.
+    ///
+    /// One place per rule says everything about that rule. The `enable` / `disable` lists
+    /// this replaced said it in two places that had to be read together, and neither could
+    /// say what a rule was worth. A rule this table does not name keeps its default level.
     #[serde(default)]
-    pub enable: Vec<String>,
-    /// Rules to turn off, named as [`enable`](Self::enable) names them. A rule turned off
-    /// here is not reported and so is not counted, which is what keeps `strict` a verdict
-    /// on what the run said.
-    #[serde(default)]
-    pub disable: Vec<String>,
-    /// `true`: Teal's warnings and htl's lints fail `htl check`, and lints fail
-    /// `include_tl!` (the macro reports Teal's warnings and builds anyway). `false`:
-    /// advisory everywhere (including the macro, whose built-in default is strict).
+    pub rules: std::collections::BTreeMap<String, lint::Level>,
+    /// `true`: every finding this run reports at `warn` counts as `deny`, so Teal's
+    /// warnings and htl's lints fail `htl check`; lints also fail `include_tl!` (the macro
+    /// reports Teal's warnings and builds anyway). `false`: advisory everywhere (including
+    /// the macro, whose built-in default is strict), except for a rule the project set to
+    /// `deny`, which fails `htl check` with or without this key.
+    ///
+    /// A run-wide promotion rather than a concept of its own: `strict` and a `[lint.rules]`
+    /// level are the same question asked at two grains.
     ///
     /// `htl test` does not read it, by design: a test run's verdict is its tests, plus
     /// the type errors that stop a file from running at all. Warnings and lints are
@@ -283,16 +295,21 @@ impl HtlConfig {
     /// Parse `htl.toml` text.
     pub fn parse(text: &str) -> Result<Self> {
         let cfg: Self = toml::from_str(text)
-            .map_err(|e| match moved_contract_key(text) {
-                // `type` / `require_fields` / `exclude` moved onto the record itself, and
-                // the serde message for an unknown key does not say where they went.
-                Some(k) => anyhow::anyhow!(
-                    "[[contract]] {k} moved onto the type: mark the record \
+            .map_err(
+                |e| match (moved_contract_key(text), removed_lint_lists(text)) {
+                    // `type` / `require_fields` / `exclude` moved onto the record itself, and
+                    // the serde message for an unknown key does not say where they went.
+                    (Some(k), _) => anyhow::anyhow!(
+                        "[[contract]] {k} moved onto the type: mark the record \
                      `---@contract` and its mandatory fields `---@required`, and leave \
                      `dir` (with `module` / `exclude` if you use them) here"
-                ),
-                None => anyhow::Error::from(e),
-            })
+                    ),
+                    // `enable` / `disable` became a level per rule. The message writes the
+                    // replacement out of this file's own names, so the fix is a paste.
+                    (_, Some(msg)) => anyhow::anyhow!("{msg}"),
+                    _ => anyhow::Error::from(e),
+                },
+            )
             .context("parsing htl.toml")?;
         // Here rather than at the comparison: a requirement that is not one is a fact
         // about the file, so it is reported when the file is read and by every reader of
@@ -326,17 +343,19 @@ impl HtlConfig {
         }
     }
 
-    /// The `[lint]` section as a `+rule,-rule` spec for [`Htl::configure_lints`](crate::Htl::configure_lints).
-    /// Append a command-line / env spec after it so later entries win.
+    /// The `[lint.rules]` table as a `rule=level` spec for
+    /// [`Htl::configure_lints`](crate::Htl::configure_lints). Append a command-line / env
+    /// spec after it so later entries win.
+    ///
+    /// The spec is also part of a cache key, so the rendering is ordered (the table is a
+    /// `BTreeMap`): two runs that say the same thing have to produce the same string.
     pub fn lint_spec(&self) -> String {
-        let mut parts: Vec<String> = Vec::new();
-        for r in &self.lint.enable {
-            parts.push(format!("+{r}"));
-        }
-        for r in &self.lint.disable {
-            parts.push(format!("-{r}"));
-        }
-        parts.join(",")
+        self.lint
+            .rules
+            .iter()
+            .map(|(rule, level)| format!("{rule}={level}"))
+            .collect::<Vec<_>>()
+            .join(",")
     }
 
     /// Directories the checker should search, in the order it consults them: `root`,
@@ -393,6 +412,76 @@ fn moved_contract_key(text: &str) -> Option<&'static str> {
         }
     }
     None
+}
+
+/// The message for a config that still writes `[lint] enable` / `disable`, or `None` when
+/// it does not.
+///
+/// The keys are gone rather than deprecated: `HtlConfig` is `deny_unknown_fields`, so a
+/// removed key fails loudly instead of being read as "no rules configured", which is the
+/// behaviour to want for a key that used to decide what a run reports. What serde says on
+/// its own — `unknown field \`enable\`` — is true and not actionable, so this writes the
+/// replacement table out of the file's own names: `enable` said "report it", which is
+/// `warn`, and `disable` said "do not", which is `allow`.
+fn removed_lint_lists(text: &str) -> Option<String> {
+    let table: toml::Table = toml::from_str(text).ok()?;
+    let lint = table.get("lint")?.as_table()?;
+    let names = |key: &str| -> Vec<String> {
+        lint.get(key)
+            .and_then(toml::Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let (enabled, disabled) = (names("enable"), names("disable"));
+    let present: Vec<&str> = ["enable", "disable"]
+        .into_iter()
+        .filter(|k| lint.contains_key(*k))
+        .collect();
+    if present.is_empty() {
+        return None;
+    }
+    let mut lines = vec![format!(
+        "[lint] {} replaced by a level per rule. Write instead:\n\n  [lint.rules]",
+        present.join(" and ")
+    )];
+    // The `#` in one column, so the block pastes as it reads.
+    let width = enabled
+        .iter()
+        .chain(&disabled)
+        .map(|r| r.len())
+        .max()
+        .unwrap_or(0);
+    for (rules, level, was) in [
+        (&enabled, lint::Level::Warn, "enable"),
+        (&disabled, lint::Level::Allow, "disable"),
+    ] {
+        for rule in rules {
+            // Every name is quoted: `tl:*` has to be, and one spelling reads better than
+            // two in the same block.
+            let assign = format!(
+                "\"{rule}\"{:pad$} = \"{level}\"",
+                "",
+                pad = width - rule.len()
+            );
+            // The longest assignment is the widest name at the longest level word
+            // (`"allow"`, seven characters with its quotes and three for the ` = `).
+            lines.push(format!("  {assign:<w$}  # was in {was}", w = width + 12));
+        }
+    }
+    if enabled.is_empty() && disabled.is_empty() {
+        lines.push("  \"nil-index\" = \"deny\"".to_string());
+    }
+    lines.push(String::new());
+    lines.push(
+        "allow = not reported, warn = reported and advisory, deny = reported and fails \
+         the run (htl check --list-lints lists every rule with its default)"
+            .to_string(),
+    );
+    Some(lines.join("\n"))
 }
 
 /// Combine specs in precedence order (later wins): `"+a,-b"` + `"+b"` -> `"+a,-b,+b"`.

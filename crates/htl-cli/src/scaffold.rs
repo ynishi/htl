@@ -551,14 +551,21 @@ fn t_types_readme() -> String {
 /// `cargo build` inside `include_tl!` rather than being ignored. `[toolchain]` is out for
 /// that reason and comes back in the release after the one that publishes it
 /// (`docs/releasing.md` § What the scaffold may write).
+///
+/// `[lint.rules]` is out for the same reason, and a commented example of it would be too:
+/// a comment is one user action away from being a key, and the user who uncomments it is
+/// building against the pinned release. Nor may the `enable` / `disable` it replaced be
+/// shown, since the CLI that just wrote the file refuses those. So the section names
+/// neither and sends the reader to `htl check --list-lints`, which answers from the binary
+/// they have.
 fn t_htl_toml() -> String {
     "# htl project settings (htl check / htl test / htl fmt / include_tl! all read this).\n\
      # Command-line flags and HTL_LINTS / HTL_LINT override it.\n\n\
      [lint]\n\
-     # enable  = [\"class-record\", \"explicit-number\"]   # opt-in rules (htl check --list-lints)\n\
-     # disable = [\"shadow-local\"]\n\
-     # strict  = true   # warnings and lints fail htl check (not htl test); lints fail\n\
-     #                    include_tl!; false makes the macro advisory\n\n\
+     # strict = true   # warnings and lints fail htl check (not htl test); lints fail\n\
+     #                   include_tl!; false makes the macro advisory\n\n\
+     # Per rule: htl check --list-lints names every rule with the level it has by\n\
+     # default, and the README's \"Lints\" section says how to change one.\n\n\
      [fmt]\n\
      indent = 3\n\n\
      [check]\n\

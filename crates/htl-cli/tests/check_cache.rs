@@ -195,7 +195,7 @@ fn changing_the_config_misses() {
     assert!(was_cached(&check(&root)));
     write(
         &root.join("htl.toml"),
-        "[lint]\ndisable = [\"nil-index\"]\n",
+        "[lint.rules]\nnil-index = \"allow\"\n",
     );
     assert!(
         !was_cached(&check(&root)),

@@ -1,6 +1,7 @@
 //! The lint selection through the binary: `htl check --list-lints` is the list of rules
-//! there are, and `--lint -<rule>` (the same spec `HTL_LINTS` carries into `include_tl!`)
-//! turns one off for a run.
+//! there are with the level each has by default, and `--lint -<rule>` (the same spec
+//! `HTL_LINTS` carries into `include_tl!`) silences one for a run. What a level does to a
+//! run's verdict is `lint_levels.rs`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -45,11 +46,19 @@ fn project(name: &str) -> PathBuf {
     dir
 }
 
+/// A line of the listing is the rule name, then the level it has by default.
+fn listed(stdout: &str) -> Vec<&str> {
+    stdout
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .collect()
+}
+
 #[test]
 fn list_lints_names_the_enum_boundary_rules() {
     let dir = scratch("list");
     let (stdout, _) = htl(&["check", "--list-lints"], &dir);
-    let rules: Vec<&str> = stdout.lines().map(str::trim).collect();
+    let rules = listed(&stdout);
     assert!(rules.contains(&"enum-cast"), "{stdout}");
     assert!(rules.contains(&"enum-table"), "{stdout}");
 }
@@ -58,8 +67,7 @@ fn list_lints_names_the_enum_boundary_rules() {
 fn list_lints_names_the_sealed_record_rule() {
     let dir = scratch("list-sealed");
     let (stdout, _) = htl(&["check", "--list-lints"], &dir);
-    let rules: Vec<&str> = stdout.lines().map(str::trim).collect();
-    assert!(rules.contains(&"sealed-record"), "{stdout}");
+    assert!(listed(&stdout).contains(&"sealed-record"), "{stdout}");
 }
 
 #[test]
