@@ -183,8 +183,8 @@ fn a_malformed_requirement_is_a_config_error() {
 /// pins the released `htl` crate, whose `HtlConfig` is `deny_unknown_fields`; a key this
 /// workspace has and no release carries yet is not ignored there but fatal, inside
 /// `include_tl!`, at the project's first `cargo build`. So the scaffold may only write
-/// configuration the version it pins can read, and a new key waits a release
-/// (`docs/releasing.md` § What the scaffold may write). `[toolchain]` itself keeps working
+/// configuration the version it pins can read, and a new key waits a release; the rule and
+/// the keys owed by it are on `scaffold::t_htl_toml`. `[toolchain]` itself keeps working
 /// for a project that writes it by hand against an htl that knows it — the tests above are
 /// that half.
 #[test]

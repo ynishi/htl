@@ -253,9 +253,9 @@ pub const RULES: &[Rule] = &[
 ///
 /// `error` was the class of every fixable Teal error that was not a forward reference,
 /// and it was a name a project could write into `--rule` and `[fix] disable`. Renaming it
-/// is a breaking change made on purpose (`docs/releasing.md`), so what it must not be is a
-/// *silent* one: the filters match by string, and an unrecognised name would simply match
-/// nothing and report that nothing was fixed.
+/// is a breaking change made on purpose, so what it must not be is a *silent* one: the
+/// filters match by string, and an unrecognised name would simply match nothing and
+/// report that nothing was fixed.
 pub const RENAMED: &[(&str, &str)] = &[("error", "tl:error")];
 
 /// The rules of the lint surface, with their position in a [`Selection`].
