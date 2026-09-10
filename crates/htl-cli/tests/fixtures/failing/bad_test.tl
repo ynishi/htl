@@ -1,4 +1,6 @@
--- Deliberately failing tests (runtime assertion failures), for `htl test examples/tl/failing`.
+-- Deliberately failing tests (runtime assertion failures). Driven from
+-- `tests/sample_project.rs`, which asserts that both failures are named and that the run
+-- exits non-zero.
 local t = require("htl.test")
 
 t.describe("arithmetic", function()
