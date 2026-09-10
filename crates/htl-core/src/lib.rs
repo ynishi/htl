@@ -38,6 +38,11 @@ pub mod pkg;
 // features that provide them; every consumer that has a project to check has both.
 #[cfg(all(feature = "pkg", feature = "dts"))]
 pub mod project;
+// What one module name resolves to, and what that hides. Reads the project the same way
+// the project layer does — the installed deps, the config's search paths, the notes `htl
+// dts` leaves under `types/<crate>/` — so it carries the same features.
+#[cfg(all(feature = "pkg", feature = "dts"))]
+pub mod resolve;
 pub mod teal;
 pub mod testing;
 // The complement of the require closure: what no entry reaches. On the project layer,
@@ -201,6 +206,51 @@ pub struct FunctionSpan {
 /// What one parse gives a coverage report: the statement ranges, and the functions
 /// those ranges sit in. See [`Htl::coverage_spans`].
 pub type CoverageSpans = (Vec<(usize, usize)>, Vec<FunctionSpan>);
+
+/// What a file on the search path is, for [`Htl::module_candidates`]. The three the
+/// searchers try, in the order they try them: a `.tl` source beats a `.d.tl` declaration
+/// wherever the two sit, and a plain `.lua` is what is left when neither is reachable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModuleKind {
+    Source,
+    Declaration,
+    Lua,
+}
+
+impl ModuleKind {
+    fn of(s: &str) -> Self {
+        match s {
+            "source" => Self::Source,
+            "declaration" => Self::Declaration,
+            _ => Self::Lua,
+        }
+    }
+
+    /// As a report says it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Declaration => "declaration",
+            Self::Lua => "lua",
+        }
+    }
+}
+
+impl std::fmt::Display for ModuleKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One file `require(name)` could have resolved to. See [`Htl::module_candidates`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleCandidate {
+    pub path: PathBuf,
+    pub kind: ModuleKind,
+    /// The search-path directory it was found under.
+    pub dir: PathBuf,
+}
 
 /// Result of a static contract check (see [`Htl::contract_check`]).
 #[derive(Debug, Clone, Default)]
@@ -1284,6 +1334,41 @@ impl Htl {
         let f: Function = self.h.get("resolve_module")?;
         let (found, lua): (Option<String>, Option<String>) = f.call(name)?;
         Ok((found.map(PathBuf::from), lua.map(PathBuf::from)))
+    }
+
+    /// Every file on the search path that could answer `require(name)`, in the order the
+    /// searchers consult them — so the first is the one [`resolve_module`](Self::resolve_module)
+    /// answers with, and the rest are what it hides.
+    ///
+    /// The same walk `declaration_sites` does for the `duplicate-declaration` lint, over
+    /// all three kinds rather than declarations alone: a searcher answers with the first
+    /// hit and says nothing about the others, and which of two files is read is decided by
+    /// a position nobody wrote down. [`resolve`] is what turns this into a report.
+    pub fn module_candidates(&self, name: &str) -> Result<Vec<ModuleCandidate>> {
+        let f: Function = self.h.get("module_candidates")?;
+        let t: Table = f.call(name)?;
+        let mut out = Vec::new();
+        for c in t.sequence_values::<Table>() {
+            let c = c?;
+            out.push(ModuleCandidate {
+                path: PathBuf::from(c.get::<String>("path")?),
+                kind: ModuleKind::of(&c.get::<String>("kind")?),
+                dir: PathBuf::from(c.get::<String>("dir")?),
+            });
+        }
+        Ok(out)
+    }
+
+    /// The directories the search path consults, in order. One entry per directory,
+    /// however many `package.path` templates it contributes.
+    pub fn search_path_dirs(&self) -> Result<Vec<PathBuf>> {
+        let f: Function = self.h.get("search_dirs")?;
+        let t: Table = f.call(())?;
+        Ok(t.sequence_values::<String>()
+            .collect::<mlua::Result<Vec<_>>>()?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect())
     }
 
     /// Install a searcher serving modules from a bundle.

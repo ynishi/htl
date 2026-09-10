@@ -47,6 +47,7 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 | `htl build <entry.tl> -o app.hb [--debug] [--source] [--extra a,b] [--host x,y] [--no-cache] [--explain-cache]` | link the entry's `require` closure into one bundle (see Bundles), replaying from the run cache what still holds (see Caching; the directory form is not cached) |
 | `htl bundle info <app.hb> [--format json]` | what a bundle records, without running it: format, the htl that built it, payload kind, the Lua its bytecode is for, entry, modules, host-provided names |
 | `htl unused [paths] [--format json] [--exit-non-zero-on-unused] [--no-cache]` | the complement of the same closure: modules no entry reaches, and `[deps]` no reached module requires (see Unused) |
+| `htl resolve <module> [path] [--format json]` | which file `require("<module>")` resolves to, and the whole chain in search order: what is read, what it shadows, and which crate or dependency each one came from (see `types/`); exits 1 when the name resolves to nothing |
 | `htl pkg install` | fetch every dependency `mlua-pkg.toml` declares into `.htl/modules/` and write `mlua-pkg.lock`; the deps' own `types/` are then copied into the project's (see `types/`) |
 | `htl pkg add <name> <git> [--tag t \| --rev r \| --branch b] [--entry dir] [--target-dir dir]` | write the dependency into the manifest (`install` fetches it); a `patch_dir` the entry already declared is kept |
 | `htl pkg update [name] [--dry-run] [--force]` | refresh dependencies and bump the pins that follow releases, then install |
@@ -886,6 +887,43 @@ one read. `duplicate-declaration` reports it — a project that keeps a hand-wri
 told which is in effect and which is not, rather than being left to work out why a type
 is not what the file in front of it says.
 
+### Which file a name resolves to (`htl resolve`)
+
+That lint fires only when there is more than one declaration, and only at a `require` the
+check happened to reach. The ordinary question — which of these files is in effect, and
+what does it hide — is asked far more often, and `htl resolve <module>` answers it without
+anything having to go wrong first:
+
+```console
+$ htl resolve mq
+htl resolve mq: src/mq.d.tl
+
+  order  file                  kind         status
+  1      src/mq.d.tl           declaration  read
+  2      types/mq.d.tl         declaration  shadowed by 1
+  3      types/htl-mq/mq.d.tl  declaration  shadowed by 1  (shipped by htl-mq 0.2.0)
+
+  searched, in order: ., src, types, types/htl-mq
+```
+
+Three answers in one view: what is read, what it hides, and why — the order is the reason,
+and printing it is what makes the answer self-explaining. An override on a search path is
+the mechanism working as intended, so nothing here is a defect and nothing fails.
+
+Every kind the searchers handle is a row: a `.tl` source, a `.d.tl` declaration, a plain
+`.lua`, a dependency installed under `.htl/modules`, a vendored or patched copy, and a
+declaration materialised under `types/<crate>/` — which names the crate and version its
+`.htl-dts` note records. The rows are in the order the searchers consult, which is by kind
+first and position second: a source beats a declaration wherever the two sit, so row 1 is
+not necessarily the earliest directory. A `.lua` under a declaration reads `runtime, typed
+by <n>` rather than `shadowed`: the check reads the declaration and the run loads that
+file, and neither hides the other.
+
+A name that resolves to nothing says so and exits non-zero, so a script can ask. `--format
+json` carries the same rows ("Machine-readable output"). `htl.test` is not on a project's
+search path — `htl test` preloads it into the state it runs — so it is not a name to ask
+about here.
+
 ### Data from outside the program (`---@contract`)
 
 `htl.toml` says *where* modules arrive; the record says *what* they must be. Marking the
@@ -1224,8 +1262,9 @@ and `--format json` carries the edits. `htl fix [paths]` applies them:
 `htl check --format json`, `htl test --format json` and `htl unused --format json` print
 one JSON document on
 stdout and nothing on stderr (the text form is stderr-only, so the two never mix).
-The exit code is the same as in text mode. Field names are stable; fields may be
-added, not renamed.
+`htl resolve` is a report rather than a run, so both of its forms go to stdout, as
+`cache status` and `bundle info` do. The exit code is the same as in text mode. Field
+names are stable; fields may be added, not renamed.
 
 - `check`: `{ files, diagnostics: [{ severity: "error"|"warning"|"lint", file, line,
   col, rule?, message, required_by?, origin? }], summary: { errors, warnings, lints,
@@ -1247,6 +1286,15 @@ added, not renamed.
   is the name a `require` would have to spell, absent when the search path gives the file
   none. `check_errors` is what the check behind the graph reported: a file that does not
   check contributes no edges, so a report from a run with any is a guess.
+- `resolve`: `{ module, read?, candidates: [{ order, path, dir, kind:
+  "source"|"declaration"|"lua", status: "read"|"shadowed"|"runtime", shadowed_by?,
+  origin?: { kind: "crate"|"dependency"|"vendored"|"patched", name, version? } }],
+  searched: [dir], summary: { candidates, shadowed, ok } }`. `order` is the position in
+  the search order, and `status` what became of that candidate: `read` is the file the
+  checker reads, `shadowed` names the `order` that is read instead (`shadowed_by`), and
+  `runtime` is the `.lua` a declaration types — loaded by the run, hidden by nothing.
+  `read` and `ok` are absent and false when the name resolves to nothing. Paths are
+  relative to the project root when they are inside it.
 
 GitHub Actions annotations from a check, for instance:
 
