@@ -328,6 +328,12 @@ Examples:
     /// Write the `.d.tl` files this project declares: those `#[host_module(dts = ..)]` /
     /// `#[teal(dts = ..)]` ask for in a Rust crate, without building it, and the module
     /// each `---@contract` type is declared in (check / run / test / build do both)
+    ///
+    /// Each declaration is reported as `wrote`, `unchanged`, or `not written`. The exit
+    /// code is about that last one and nothing else: non-zero when a declaration this
+    /// command was asked to write could not be written. A file already under `types/`
+    /// that no dependency ships any more is reported as `left in place` — nothing was
+    /// asked for, nothing is deleted, and the exit code does not move.
     Dts {
         /// Crate root or any path inside it (default: current directory)
         dir: Option<PathBuf>,
@@ -792,42 +798,74 @@ fn auto_dts(start: &Path) -> Result<()> {
     let results = htl::dts::generate_crate(&root).map_err(|e| anyhow::anyhow!("htl dts: {e}"))?;
     announce_dts(&results, &root);
     let types_root = project.unwrap_or_else(|| root.clone());
-    let (results, problems, notes) = dep_dts(&root, &types_root);
-    announce_dts(&results, &types_root);
-    for n in problems.iter().chain(&notes) {
-        eprintln!("dts: {n}");
-    }
+    let report = dep_dts(&root, &types_root);
+    announce_dts(&report.written, &types_root);
+    announce_dep_report(&report, "dts: ");
     Ok(())
 }
 
+/// What `htl dts` has to say about the declarations its dependencies ship. Three kinds,
+/// kept apart because they mean three different things to the reader and to the exit code
+/// — which is the distinction the single `[htl <rule>]` suffix they all used to carry was
+/// hiding. None of them is a lint: no rule name, nothing to configure or silence, and
+/// nothing that reaches the `Sink`, so `htl check` neither counts one nor carries one in
+/// `--format json` — it prints them, prefixed `dts:`, exactly as this command does.
+#[derive(Default)]
+struct DepReport {
+    /// `(target, written)` pairs, in the shape the rest of the report prints.
+    written: Vec<(PathBuf, bool)>,
+    /// Asked for and not written. This, and only this, is what `htl dts` exits non-zero on.
+    not_written: Vec<String>,
+    /// Under `types/` and no longer shipped by anything. Reported, never deleted, and it
+    /// fails nothing: what the file is for is the project's to say.
+    left_in_place: Vec<String>,
+    /// The crate graph would not resolve, so nothing was asked for. The machine rather
+    /// than the project: the committed declarations stand and the check that follows names
+    /// the module if one is missing.
+    unresolved: Option<String>,
+}
+
 /// Materialise the declarations this project's dependencies ship, under
-/// `<types_root>/types/<crate>/`. Returns what was written, what was asked for and could
-/// not be written, and what there is to say about the rest — a file left behind by a
-/// dependency that is gone, a graph that would not resolve.
-///
-/// The last two are separate because they mean different things to the exit code. A crate
-/// naming a declaration that is not in it is one this command was asked for and did not
-/// write, which is what `htl dts` fails on. A graph that would not resolve is the machine
-/// rather than the project: nothing was asked for because nothing could be read, so it is
-/// reported, the committed declarations stand, and the check that follows names the module
-/// if one is missing. An orphan is a file to decide about, and deciding is not this
-/// command's.
+/// `<types_root>/types/<crate>/`, and report on what happened to each.
 ///
 /// The graph comes from `cargo metadata`, so this costs a subprocess on every command that
 /// generates. Nothing is built, and nothing is downloaded for dependencies already fetched.
-fn dep_dts(
-    cargo_root: &Path,
-    types_root: &Path,
-) -> (Vec<(PathBuf, bool)>, Vec<String>, Vec<String>) {
+fn dep_dts(cargo_root: &Path, types_root: &Path) -> DepReport {
     let decls = match htl::dep_dts::resolve(cargo_root) {
         Ok(d) => d,
-        Err(e) => return (Vec::new(), Vec::new(), vec![e]),
+        Err(e) => {
+            return DepReport {
+                unresolved: Some(e),
+                ..DepReport::default()
+            };
+        }
     };
     // Orphans before materialising: the note beside a crate's declarations is what says
     // which crate they came from, and the write below rewrites it.
-    let orphans = htl::dep_dts::orphans(types_root, &decls);
-    let (results, problems) = htl::dep_dts::materialise(types_root, &decls);
-    (results, problems, orphans)
+    let left_in_place = htl::dep_dts::orphans(types_root, &decls);
+    let (written, not_written) = htl::dep_dts::materialise(types_root, &decls);
+    DepReport {
+        written,
+        not_written,
+        left_in_place,
+        unresolved: None,
+    }
+}
+
+/// The three report lists, each said as what it is. `wrote` / `unchanged` name what
+/// happened to a declaration, and so do these: a reader who has never heard the words
+/// `shipped-declaration` or `orphaned-declaration` can still tell which line failed the
+/// command and which one is a file sitting there to decide about.
+fn announce_dep_report(report: &DepReport, prefix: &str) {
+    for p in &report.not_written {
+        eprintln!("{prefix}not written: {p}");
+    }
+    for p in &report.left_in_place {
+        eprintln!("{prefix}left in place: {p}");
+    }
+    if let Some(e) = &report.unresolved {
+        eprintln!("{prefix}{e}");
+    }
 }
 
 fn announce_dts(results: &[(PathBuf, bool)], root: &Path) {
@@ -883,14 +921,12 @@ fn cmd_dts(dir: Option<&Path>) -> Result<ExitCode> {
     };
     results.extend(htl::dts::generate_crate(&root).map_err(|e| anyhow::anyhow!("{e}"))?);
     let types_root = project.unwrap_or_else(|| root.clone());
-    let (dep_results, problems, notes) = dep_dts(&root, &types_root);
-    for p in problems.iter().chain(&notes) {
-        eprintln!("  {p}");
-    }
+    let report = dep_dts(&root, &types_root);
+    announce_dep_report(&report, "  ");
     // An orphan, and a graph that would not resolve, are reports. A declaration asked for
     // and not written is a failure, the same as a contract that could not be published.
-    failed = failed || !problems.is_empty();
-    results.extend(dep_results);
+    failed = failed || !report.not_written.is_empty();
+    results.extend(report.written);
     report_dts(&results, &root);
     Ok(code(failed))
 }

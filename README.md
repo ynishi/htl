@@ -55,7 +55,7 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 | `htl pkg patch <dep> [--force]` | take that dependency's source into `patches/<dep>/`, where the project owns it and install resolves it from (see Patched dependencies) |
 | `htl types add <library> [--from dir] [--force]` | the declarations a library never shipped, from [teal-types](https://github.com/teal-language/teal-types), into `types/` with the commit they came from recorded beside each |
 | `htl cache status [path] [--entries]` / `htl cache clear [path]` | report what the store holds, or empty it (see Caching) |
-| `htl dts [dir]` | write the `.d.tl` files this project declares: from Rust source, the ones `#[host_module]` / `#[derive(TealRecord)]` ask for, no build needed; from Teal, the module each `---@contract` type is declared in; from the crate graph, the ones a dependency ships (`[package.metadata.htl] dts`) into `types/<crate>/`. `check` / `run` / `test` / `build` do this automatically; exits non-zero when something it was asked to write could not be |
+| `htl dts [dir]` | write the `.d.tl` files this project declares: from Rust source, the ones `#[host_module]` / `#[derive(TealRecord)]` ask for, no build needed; from Teal, the module each `---@contract` type is declared in; from the crate graph, the ones a dependency ships (`[package.metadata.htl] dts`) into `types/<crate>/`. `check` / `run` / `test` / `build` do this automatically; exits non-zero when something it was asked to write could not be, and never on a file it only [left in place](#what-htl-dts-reports-and-what-it-exits-on) |
 
 `mlua-pkg.toml` is detected by walking up from the file: installed deps become
 visible to the checker and to `run` / `test` / `build` automatically. They go under
@@ -405,6 +405,30 @@ dts` (and from `check` / `run` / `test`, which generate before they work). Keep 
 current the way this repository does — the macro rewrites them, CI diffs them — and commit
 them; they are what a consumer's checkout copies from, before anything of yours is built.
 
+#### What `htl dts` reports, and what it exits on
+
+`htl dts` says what happened to each declaration, one line each (`check` / `run` / `test`
+/ `build` print the same lines, prefixed `dts:`):
+
+| line | meaning |
+|---|---|
+| `wrote <file>` | written now |
+| `unchanged <file>` | already what it should be |
+| `not written: <why>` | asked for and not written: a crate names a file in `[package.metadata.htl] dts` that is not a `.d.tl`, or is not in the package, or names two that would be one file under `types/<crate>/`, or the file could not be written |
+| `left in place: <file>` | under `types/<crate>/` from an earlier run, and no longer shipped — the crate is gone from the graph, or still there and no longer naming the file |
+
+**The exit code is about `not written` and nothing else.** It is non-zero when a
+declaration this command was asked to write could not be written — so a CI step that
+regenerates declarations does not pass having written nothing. `left in place` fails
+nothing: the file is still there and still checked, and whether to delete it is the
+project's call, since a script may still `require` the module and the dependency may be
+back on the next branch. `htl dts` deletes nothing under `types/` on its own.
+
+Neither line is a lint. They are this command reporting on its own job, so they carry no
+`[htl <rule>]` name, they are not in `--list-lints` or `[lint]`, `-- htl: allow(...)`
+does not apply, and `htl check --format json` never carries one — a lint is a finding
+about your code, and these two are about files this command was asked to write.
+
 ### `async fn` (feature `async`)
 
 A method may be `async`, in the same `impl` as the sync ones and with no annotation
@@ -587,6 +611,11 @@ what they are handed.
 Silence one occurrence with a trailing `-- htl: allow(nil-index)`. `include_tl!`
 treats lints as errors (`HTL_LINT=warn` downgrades, `HTL_LINTS=+no-any,-shadow-local`
 configures).
+
+A lint is a finding about your code, and everything `htl` prints with an `[htl <rule>]`
+name is one. `htl dts`'s `not written` and `left in place` lines are the command
+reporting on the declarations it was asked to write, not findings, and are not in this
+table: [What `htl dts` reports](#what-htl-dts-reports-and-what-it-exits-on).
 
 ### Records built whole (`---@struct`)
 
