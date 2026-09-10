@@ -28,7 +28,7 @@ Run it once before deciding the number and once after writing it in. With the nu
 the same command answers
 
 ```
-Checking htl-core v0.2.0 -> v0.3.0 (major change)
+Checking htl-core v0.3.0 -> v0.4.0 (major change)
  Summary no semver update required
 ```
 
@@ -43,7 +43,7 @@ The same arithmetic, one release out of phase: **a project `htl new` writes may 
 configuration the htl it pins can read, so anything added to `htl.toml` reaches the scaffold
 one release after it reaches the library.**
 
-A host project depends on the *released* crate — `htl_dep_version()` derives `htl = "0.3"`
+A host project depends on the *released* crate — `htl_dep_version()` derives `htl = "0.4"`
 from the CLI's own version, deliberately, so a project follows the htl that produced it.
 `HtlConfig` is `#[serde(deny_unknown_fields)]`, so a key that exists only in this workspace
 is not ignored out there; it is fatal, inside `include_tl!`, at the project's first
@@ -68,20 +68,39 @@ hand a fresh project a line the CLI that just made it rejects — breaking `htl 
 first thing a user runs. A scaffold that cannot name either names neither, and points at a
 command instead (`htl check --list-lints`), which answers from whichever binary is in hand.
 
-`just e2e-scaffold-published` is what says so without a release: it scaffolds and builds
-with no `[patch.crates-io]`, against the crate the project actually pins, and the CI
-scaffold job runs it. `just e2e-scaffold` cannot — it points the three crates at this
-checkout, where every key this branch added exists.
+`just e2e-scaffold-published` is what says so during the cycle: it scaffolds and builds with
+no `[patch.crates-io]`, against the crate the project actually pins, and the CI scaffold job
+runs it. `just e2e-scaffold` cannot — it points the three crates at this checkout, where
+every key this branch added exists.
+
+It says so during the cycle and not at the end of one. The pin is derived from the CLI's own
+version, so on the release commit it names the version being released, and that version is
+not on crates.io until the chain puts it there. A build attempted then reports that
+`htl = "0.4"` selects nothing — a fact about the registry, not about the scaffold, and one
+that turns the CI scaffold job red for as long as the release takes. So the recipe asks the
+index which case it is in, and when the pin is unpublished it names the pin it could not
+resolve and defers rather than building. What it defers to is the chain below, which runs it
+after `htl` is published and before `htl-cli` is: the one moment the question both has an
+answer and can still change what goes out.
 
 ### At each release
 
 - [ ] Did this release publish an `htl.toml` key the scaffold does not write yet? If so, the
       *next* release is where the scaffold starts writing it, and that is the release to
-      open with the change. **Owed now: `[toolchain]`, and `[lint.rules]` (the level per
-      rule that replaced `[lint] enable` / `disable`) — each once a published htl parses
-      it.**
+      open with the change. **Owed now: `[toolchain]` and `[lint.rules]` (the level per rule
+      that replaced `[lint] enable` / `disable`) are both published by 0.4.0 — so the first
+      release after 0.4.0 is where the scaffold starts writing them, and that is the release
+      to open with the change. Until 0.4.0 is on crates.io they stay out.**
 - [ ] Did anything added to the scaffold's templates this cycle need an unpublished htl?
-      Same answer, same list.
+      Same answer, same list. This cycle the `ffi` host profile is the case to know about:
+      it pins `htl = { version = "0.4", features = ["ffi"] }`, and the `ffi` feature is
+      published by the same 0.4.0, so the two arrive together. Nothing here checks that —
+      `e2e-scaffold-published` scaffolds `--host rust --lib` only, so a feature a profile
+      names is never resolved against the registry.
+- [ ] Run `just e2e-scaffold-published` from inside the chain, not before it. On the release
+      commit the pin is the version being released, so the recipe defers and says so; that
+      deferral is not a pass and the step in the chain is where it stops being one. Do not
+      drop the step to make the chain shorter.
 
 ## The chain
 
@@ -92,9 +111,24 @@ visible in the index before it can be verified.
 cargo publish -p htl-core && sleep 30 && \
 cargo publish -p htl-macros && sleep 30 && \
 cargo publish -p htl && sleep 30 && \
+just e2e-scaffold-published && \
 cargo publish -p htl-cli && \
 git tag v<version> && git push origin main && git push origin v<version>
 ```
+
+The scaffold check sits between the third crate and the fourth because that is the only
+place it can be asked and still be worth asking. A generated project depends on `htl`
+alone, and `htl` is third; `htl-cli`, the binary that writes the scaffold and derives its
+pin, is fourth. In the gap between them crates.io holds exactly what a scaffold pins, and
+nobody can yet obtain the CLI that pins it — so a scaffold that does not build against the
+crates just published stops the chain before `htl-cli` goes out. The window in which a
+broken scaffold is installable is not narrowed; there is no window.
+
+Recovery from a failure there is cheaper than it sounds. Three crates are out and are
+right — what failed is what the CLI writes, not what the library is. Fix the scaffold and
+let `htl-cli` publish at the next patch: the pin it writes is minor-level (`0.4` whether the
+CLI says 0.4.0 or 0.4.1), so it still names the `htl` already on crates.io and still
+resolves. Nothing has to be yanked and no number has to move.
 
 The chain is `&&`-joined on purpose: if a step fails, nothing after it runs, so a
 failure leaves no half-tagged, half-pushed state. Before re-running, check which

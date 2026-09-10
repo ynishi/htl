@@ -125,6 +125,15 @@ e2e-scaffold:
 # mlua and the rest of the graph are compiled once and only the three htl crates are built
 # twice. Building is enough: the failure this exists to catch is an expansion-time one, and
 # `include_tl!` runs during the build.
+#
+# The gap being one release is a premise, not a law: the pin comes from the CLI's own
+# version, so on the release commit — where the number has moved and nothing is published
+# under it — the pin names a version crates.io does not have, and cargo says so at
+# resolution, about a crate that does not exist, instead of anything about the scaffold. So
+# the recipe asks the registry which case it is in rather than assuming, and when the answer
+# is "not published yet" it says which pin went unanswered and defers, because the release
+# chain (docs/releasing.md § The chain) runs this between publishing `htl` and publishing
+# `htl-cli` — where the same question has a published crate to be asked about.
 e2e-scaffold-published:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -138,8 +147,35 @@ e2e-scaffold-published:
       # redirects that pin at a checkout.
       grep -q '^htl = ' Cargo.toml
       ! grep -q 'patch.crates-io' Cargo.toml
-      cargo build --target-dir "${CARGO_TARGET_DIR:-$root/target}/e2e-scaffold"
     )
+    # Read back out of the manifest rather than recomputed here, so what is looked up below
+    # is the requirement the generated project will hand cargo, character for character.
+    pin="$(sed -n 's/^htl = "\([^"]*\)"$/\1/p' "$dir/published/Cargo.toml")"
+    test -n "$pin"
+    # crates.io's sparse index at its documented layout: a three-character name lives under
+    # 3/<first character>/<name>, one JSON object per line. `cargo info htl@<pin>` cannot
+    # answer this from in here — it resolves the name against the workspace first and reports
+    # the unpublished version as though it were a release.
+    curl -sS --fail --max-time 60 https://index.crates.io/3/h/htl -o "$dir/index"
+    # `htl_dep_version()` writes `0.<minor>` under 0.y.z and `<major>` above it, and for both
+    # of those the versions cargo's caret accepts are exactly the ones beginning `<pin>.`, so
+    # the prefix is the whole question. A yanked version answers no.
+    if grep "\"vers\":\"$pin\." "$dir/index" | grep -qv '"yanked":true'; then
+      (
+        cd "$dir/published"
+        cargo build --target-dir "${CARGO_TARGET_DIR:-$root/target}/e2e-scaffold"
+      )
+    else
+      # Deferred, and to be read as deferred: nothing was built and nothing was proved. The
+      # scaffold is correct or not either way, and the run that finds out is the one the
+      # chain makes, before the CLI that writes this pin is installable by anyone.
+      echo "e2e-scaffold-published: DEFERRED, nothing built."
+      echo "  The scaffold pins htl = \"$pin\" and crates.io has no release matching it, which"
+      echo "  is the release commit and no other: the version has moved and the publish has"
+      echo "  not happened. Whether a project pinning \"$pin\" builds is answered by the chain"
+      echo "  in docs/releasing.md, which runs this recipe between 'cargo publish -p htl' and"
+      echo "  'cargo publish -p htl-cli', and stops the chain there if the answer is no."
+    fi
 
 # Every benchmark: the figures in the README come from these. Ten samples each; a few minutes.
 bench:

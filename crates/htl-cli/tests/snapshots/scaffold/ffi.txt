@@ -27,7 +27,7 @@ edition = "2024"
 crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
-htl = { version = "0.3", features = ["ffi"] }
+htl = { version = "0.4", features = ["ffi"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 
