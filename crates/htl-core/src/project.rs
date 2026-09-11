@@ -361,7 +361,7 @@ pub fn display_path(p: &Path) -> String {
 
 /// Fold `.` and `..` without touching the filesystem.
 ///
-/// [`std::fs::canonicalize`] would resolve symlinks too, and `.htl/modules/vendored/<dep>`
+/// [`std::fs::canonicalize`] would resolve symlinks too, and `.htl/modules/entries/<dep>`
 /// is one: following it names mlua-pkg's cache directory rather than the dependency, which
 /// is the opposite of what a report wants to say.
 fn lexical(p: &Path) -> PathBuf {

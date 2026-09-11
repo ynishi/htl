@@ -63,7 +63,13 @@ visible to the checker and to `run` / `test` / `build` automatically. They go un
 is [mlua-pkg](https://github.com/ynishi/mlua-pkg)'s library rather than its binary, so
 there is no second process to agree with and nothing on `PATH` to install. `MLUA_PKG_DIR`
 and a `target/` in the working directory, which the `mlua-pkg` binary reads, are not
-consulted. *Vendored* is kept for the other
+consulted. Inside, `vendored/<name>` is mlua-pkg's link to each dependency's package root,
+and `entries/<name>` is htl's link to the directory below that root the dependency's
+`entry` names (`src/<name>` for a library `htl new --lib` wrote), which is where
+`require("<name>")` looks — a diagnostic in a dependency carries that path, and a
+dependency's `types/` is read from the root beside it. The links are written from
+`mlua-pkg.lock` by `htl pkg install` and repaired by any command that reads the path.
+*Vendored* is kept for the other
 thing: a copy of a dependency committed to the repo, which a `target_dir` entry in the
 manifest declares and nothing does by default. When a
 directory is given, `check` / `fmt` / `build` / `test` walk the project's own files only:
@@ -82,7 +88,7 @@ it, and a type error in it is reported as an error with the dependency's own pat
 the file that required it —
 
 ```text
-error: .htl/modules/vendored/mathx/init.tl:12:8: in local declaration: got string, expected number
+error: .htl/modules/entries/mathx/init.tl:12:8: in local declaration: got string, expected number
   (required by src/geometry.tl)
 ```
 

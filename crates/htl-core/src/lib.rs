@@ -1824,6 +1824,27 @@ pub fn patched_dirs(_root: &Path) -> Vec<PathBuf> {
     Vec::new()
 }
 
+/// The directories a `require` in the project at `root` resolves installed deps from: the
+/// entry links under `.htl/modules` and the parents of `target_dir` copies — what
+/// [`Htl::apply_project`] puts on the path, listed whether or not they exist yet, for the
+/// cache's probes ([`cache::search_dirs`]).
+#[cfg(feature = "pkg")]
+pub fn dependency_dirs(root: &Path) -> Vec<PathBuf> {
+    match pkg::Project::find(root) {
+        Some(p) => {
+            let mut out = vec![p.entries];
+            out.extend(p.target_dirs);
+            out
+        }
+        None => Vec::new(),
+    }
+}
+
+#[cfg(not(feature = "pkg"))]
+pub fn dependency_dirs(_root: &Path) -> Vec<PathBuf> {
+    Vec::new()
+}
+
 /// Collect `.tl` sources from files and directories (sorted, recursive). Directories in
 /// [`SKIP_DIRS`], dot-directories and the project's package dir are not entered unless
 /// given as a root themselves.
