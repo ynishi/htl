@@ -586,6 +586,12 @@ unloads a library compares before calling anything else).
 
 `htl dts` writes the header too, so it can be regenerated and diffed without a build.
 
+**Both ways of holding Teal are in this repository, built and run on every commit**:
+[`examples/`](examples/README.md) has `embed`, where `include_tl!`, `include_bundle!`,
+`#[derive(TealRecord)]` and `#[host_module]` all meet in one binary, and `resolver`, where
+nothing is embedded and `require` goes through mlua-pkg at run time. Its README says what
+each one prints and which line of the output is the point.
+
 **A project of this shape is `htl new --lib --host ffi <name>`** (see [The C ABI host](#the-c-abi-host---host-ffi)):
 the crate types, the feature, the `#[c_export]` block and — the part a reader of an ABI
 actually needs — a caller in C and a caller in Python that do the round trip and free
