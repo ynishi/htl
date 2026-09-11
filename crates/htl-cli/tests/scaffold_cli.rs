@@ -1,6 +1,7 @@
-//! `htl new --embed` / `--host <name>` through the real binary: what the Rust host it
-//! writes declares and does, how a host that does not exist or does not fit `--lib` is
-//! refused, and the `--format` help of the commands whose text form is a report.
+//! `htl new --embed` / `--target <name>` through the real binary: what the Rust host it
+//! writes declares and does, how a target that does not exist or does not fit `--lib` is
+//! refused, how the flag's old spelling is answered, and the `--format` help of the
+//! commands whose text form is a report.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -115,14 +116,14 @@ fn the_binary_reaches_the_host_through_the_library() {
     assert!(!main_rs.contains("#[host_module"), "{main_rs}");
 }
 
-/// `--embed` is spelled `--host rust` from #106 on, and the two write the same tree. The
+/// `--embed` is spelled `--target rust` from #189 on, and the two write the same tree. The
 /// snapshot tests pin the tree; this pins that the shorthand still reaches it.
 #[test]
-fn embed_and_host_rust_write_the_same_thing() {
+fn embed_and_target_rust_write_the_same_thing() {
     let root = scratch("same");
     let (ok, _, stderr) = htl(&["new", "by-flag", "--embed"], &root);
     assert!(ok, "{stderr}");
-    let (ok, _, stderr) = htl(&["new", "by-name", "--host", "rust"], &root);
+    let (ok, _, stderr) = htl(&["new", "by-name", "--target", "rust"], &root);
     assert!(ok, "{stderr}");
     for f in ["src/lib.rs", "src/main.rs", "src/main.tl"] {
         let a = std::fs::read_to_string(root.join("by-flag").join(f)).unwrap();
@@ -132,29 +133,29 @@ fn embed_and_host_rust_write_the_same_thing() {
     }
 }
 
-/// The C ABI host is a library and only a library: a `cdylib` has no entry point, so
-/// `--host ffi` without `--lib` is refused with the flag that fixes it, before the
+/// The C ABI target is a library and only a library: a `cdylib` has no entry point, so
+/// `--target ffi` without `--lib` is refused with the flag that fixes it, before the
 /// directory exists.
 #[test]
-fn the_ffi_host_needs_lib_and_says_so_before_writing_anything() {
+fn the_ffi_target_needs_lib_and_says_so_before_writing_anything() {
     let root = scratch("ffi-needs-lib");
-    let (ok, _, stderr) = htl(&["new", "sample", "--host", "ffi"], &root);
+    let (ok, _, stderr) = htl(&["new", "sample", "--target", "ffi"], &root);
     assert!(!ok, "{stderr}");
     assert!(
-        stderr.contains("the `ffi` host writes no entry script, so it needs --lib"),
+        stderr.contains("the `ffi` target writes no entry script, so it needs --lib"),
         "{stderr}"
     );
     assert!(!root.join("sample").exists(), "{stderr}");
 }
 
-/// What `--host ffi` writes that `--host rust` does not: the two extra crate types the
+/// What `--target ffi` writes that `--target rust` does not: the two extra crate types the
 /// C caller links against, the feature the generated wrappers need, and the attribute
 /// that writes the header. The snapshot pins every byte; this says what the bytes are
 /// *for*, so a reader of the test knows what would break.
 #[test]
 fn the_ffi_scaffold_is_a_c_library_with_the_export_attribute() {
     let root = scratch("ffi");
-    let (ok, _, stderr) = htl(&["new", "sample", "--lib", "--host", "ffi"], &root);
+    let (ok, _, stderr) = htl(&["new", "sample", "--lib", "--target", "ffi"], &root);
     assert!(ok, "{stderr}");
     let dir = root.join("sample");
 
@@ -191,11 +192,13 @@ fn the_ffi_scaffold_is_a_c_library_with_the_export_attribute() {
     assert!(py.contains("ctypes.cast(p, ctypes.c_char_p)"), "{py}");
 }
 
-/// `--host` is one line of `--help` and the registry fills it, so a host that exists is
-/// a host the flag offers.
+/// `--target` is one line of `--help` and the registry fills it, so a target that exists
+/// is a target the flag offers. The old spelling is on neither line: it is a hidden
+/// argument that exists only to be refused, and a hidden argument that showed up in
+/// `--help` would put the collision #189 removed back on the page.
 #[test]
-fn host_help_lists_every_registered_host() {
-    let root = scratch("host-help");
+fn target_help_lists_every_registered_target_and_never_the_old_flag() {
+    let root = scratch("target-help");
     for cmd in [&["new", "--help"][..], &["init", "--help"][..]] {
         let (ok, stdout, _) = htl(cmd, &root);
         assert!(ok);
@@ -203,31 +206,64 @@ fn host_help_lists_every_registered_host() {
             stdout.contains("[possible values: rust, ffi]"),
             "{cmd:?}:\n{stdout}"
         );
+        assert!(!stdout.contains("--host"), "{cmd:?}:\n{stdout}");
     }
 }
 
-/// A typo in `--host` is answered with the names that would have worked. On the command
+/// `--host` on `htl new` / `htl init` was 0.4.0's spelling of this flag and does not work
+/// any more, but the refusal names the flag that replaced it rather than leaving the
+/// reader to guess. It has to be said explicitly: clap's own suggester scores
+/// `jaro("host", "target")` at about 0.47 against a 0.7 threshold, so with the argument
+/// simply deleted it would offer nothing — and, because `htl new` takes a positional, it
+/// would offer `tip: to pass '--host' as a value, use '-- --host'` instead, which is
+/// advice for naming a project `--host`.
+#[test]
+fn the_old_host_flag_is_refused_and_points_at_target() {
+    let root = scratch("renamed");
+    for cmd in [
+        &["new", "sample", "--host", "rust"][..],
+        &["init", "--host", "ffi"][..],
+    ] {
+        let (ok, _, stderr) = htl(cmd, &root);
+        assert!(!ok, "{cmd:?}:\n{stderr}");
+        assert!(
+            stderr.contains("a similar argument exists: '--target'"),
+            "{cmd:?}:\n{stderr}"
+        );
+        // The other half of the word, so a reader is not left thinking `--host` is gone.
+        assert!(
+            stderr.contains("on `htl build`, `--host` still names the modules the host provides"),
+            "{cmd:?}:\n{stderr}"
+        );
+        // The tip clap would have printed in its place, and the reason for the argument.
+        assert!(!stderr.contains("-- --host"), "{cmd:?}:\n{stderr}");
+    }
+    assert!(!root.join("sample").exists());
+}
+
+/// A typo in `--target` is answered with the names that would have worked. On the command
 /// line clap answers it, from the same registry that fills `--help`; `scaffold.rs` keeps
-/// its own refusal for callers that do not come through clap. Either way the host is
+/// its own refusal for callers that do not come through clap. Either way the target is
 /// settled before the first write, so a typo leaves no half-written directory behind.
 #[test]
-fn an_unknown_host_is_refused_before_anything_is_written() {
+fn an_unknown_target_is_refused_before_anything_is_written() {
     let root = scratch("unknown");
-    let (ok, _, stderr) = htl(&["new", "sample", "--host", "nope"], &root);
+    let (ok, _, stderr) = htl(&["new", "sample", "--target", "nope"], &root);
     assert!(!ok, "{stderr}");
     assert!(stderr.contains("rust"), "the registered names:\n{stderr}");
+    assert!(stderr.contains("ffi"), "the registered names:\n{stderr}");
     assert!(!root.join("sample").exists(), "{stderr}");
 }
 
-/// `htl init --host rust` on a project that predates the host fills in the Rust side and
+/// `htl init --target rust` on a project that predates the Rust side fills it in and
 /// says which files it left alone, so nothing is skipped in silence.
 #[test]
-fn init_with_a_host_reports_what_it_kept() {
-    let root = scratch("init-host");
+fn init_with_a_target_reports_what_it_kept() {
+    let root = scratch("init-target");
     let (ok, _, stderr) = htl(&["new", "sample"], &root);
     assert!(ok, "{stderr}");
     let dir = root.join("sample");
-    let (ok, _, stderr) = htl(&["init", "--host", "rust"], &dir);
+    let (ok, _, stderr) = htl(&["init", "--target", "rust"], &dir);
     assert!(ok, "{stderr}");
     assert!(stderr.contains("created src/lib.rs"), "{stderr}");
     assert!(stderr.contains("created Cargo.toml"), "{stderr}");
@@ -238,10 +274,10 @@ fn init_with_a_host_reports_what_it_kept() {
     assert!(dir.join("src/lib.rs").exists());
 }
 
-/// Without a host named, `htl init` on a finished project stays the one-liner it was —
-/// the kept list is what asking for a host buys, not noise on every re-run.
+/// Without a target named, `htl init` on a finished project stays the one-liner it was —
+/// the kept list is what asking for a target buys, not noise on every re-run.
 #[test]
-fn init_without_a_host_still_says_nothing_to_do() {
+fn init_without_a_target_still_says_nothing_to_do() {
     let root = scratch("init-plain");
     let (ok, _, stderr) = htl(&["new", "sample"], &root);
     assert!(ok, "{stderr}");

@@ -157,12 +157,12 @@ fn new_embed_writes_the_rust_host() {
     assert_tree("embed", &root.join("sample"));
 }
 
-/// `--embed` is the shorthand for `--host rust`, and sharing the snapshot is what says
+/// `--embed` is the shorthand for `--target rust`, and sharing the snapshot is what says
 /// the two write the same tree rather than two trees that happen to look alike.
 #[test]
-fn new_host_rust_writes_what_embed_writes() {
-    let root = common::scratch("htl-cli-snapshot", "host-rust");
-    htl(&["new", "sample", "--host", "rust"], &root);
+fn new_target_rust_writes_what_embed_writes() {
+    let root = common::scratch("htl-cli-snapshot", "target-rust");
+    htl(&["new", "sample", "--target", "rust"], &root);
     assert_tree("embed", &root.join("sample"));
 }
 
@@ -173,14 +173,14 @@ fn new_lib_embed_writes_the_rust_host_without_a_binary() {
     assert_tree("lib-embed", &root.join("sample"));
 }
 
-/// The C ABI host: the library, the `#[c_export]` block, and the two reference callers
+/// The C ABI target: the library, the `#[c_export]` block, and the two reference callers
 /// under `examples/`. Every byte of them is pinned here — a caller in another language
 /// is the one part of a scaffold nobody compiles by accident, so a change to the Python
-/// host's `restype` or the C host's `free` shows up in this diff or nowhere.
+/// caller's `restype` or the C caller's `free` shows up in this diff or nowhere.
 #[test]
-fn new_lib_host_ffi_writes_the_c_abi_library_and_its_callers() {
+fn new_lib_target_ffi_writes_the_c_abi_library_and_its_callers() {
     let root = common::scratch("htl-cli-snapshot", "ffi");
-    htl(&["new", "sample", "--lib", "--host", "ffi"], &root);
+    htl(&["new", "sample", "--lib", "--target", "ffi"], &root);
     assert_tree("ffi", &root.join("sample"));
 }
 
@@ -204,16 +204,16 @@ fn init_embed_in_an_empty_directory_writes_what_new_would() {
     assert_tree("embed", &dir);
 }
 
-/// Adding a host to a project that already exists. It is deliberately *not* the `embed`
-/// tree: `README.md` and `src/main.tl` were written without a host and are kept, so the
+/// Adding a target to a project that already exists. It is deliberately *not* the `embed`
+/// tree: `README.md` and `src/main.tl` were written without a target and are kept, so the
 /// project ends up with the Rust side filled in and its own prose untouched. That
 /// difference is the reason this has a snapshot of its own — it is what a reader of
-/// `htl init --host` on a real project actually gets.
+/// `htl init --target` on a real project actually gets.
 #[test]
-fn init_host_fills_in_the_rust_side_of_a_plain_project() {
-    let root = common::scratch("htl-cli-snapshot", "init-host");
+fn init_target_fills_in_the_rust_side_of_a_plain_project() {
+    let root = common::scratch("htl-cli-snapshot", "init-target");
     let dir = root.join("sample");
     htl(&["new", "sample"], &root);
-    htl(&["init", "--host", "rust"], &dir);
+    htl(&["init", "--target", "rust"], &dir);
     assert_tree("init-host", &dir);
 }

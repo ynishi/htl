@@ -67,7 +67,7 @@ installs, not the one the worktree happens to have built:
 
 ```bash
 cargo install --path crates/htl-cli
-htl new sample                       # --embed, --host ffi --lib: whichever the change touches
+htl new sample                       # --embed, --target ffi --lib: whichever the change touches
 cd sample && htl check . && htl test .
 ```
 

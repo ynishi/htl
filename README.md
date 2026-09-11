@@ -37,7 +37,7 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 
 | command | what it does |
 |---|---|
-| `htl new <name>` / `htl init [dir]` | scaffold: `mlua-pkg.toml`, `src/<mod>/init.tl`, `src/main.tl`, `tests/`, README (`--lib` for no entry script; `--host <name>` for a Rust host, `--embed` being the shorthand for `--host rust`) |
+| `htl new <name>` / `htl init [dir]` | scaffold: `mlua-pkg.toml`, `src/<mod>/init.tl`, `src/main.tl`, `tests/`, README (`--lib` for no entry script; `--target <name>` for what will run the output, `--embed` being the shorthand for `--target rust`) |
 | `htl check [paths] [--strict] [--lint rule=level] [--no-cache] [--cache-mode per-module\|whole-run] [--explain-cache]` | type-check; htl lints as `lint:`, advisory at their default level and fatal at `deny` (`--strict` promotes every `warn` to `deny`); a module reached through `require` (an installed dep, a `[check] paths` dir) is checked with the file and its type errors are errors too, once per run, with the file that required it; what has not changed is replayed from `.htl/` (see Caching) |
 | `htl run <file.tl \| app.hb> [args]` | check then execute; `require` of a `.tl` with type errors fails |
 | `htl test [paths] [--filter s] [--lib mod] [--coverage] [--lcov file] [--junit file] [--no-cache]` | `*_test.tl` and `tests/**/*.tl`, one isolated state per file; checking is replayed from `.htl/`, the run never is (see Caching) |
@@ -117,7 +117,7 @@ carries the text unchanged in each file's `error` and `failures`.
 The exception is stripped bytecode, which is what a bundle holds by default and what
 `include_tl_bytes!` embeds. Stripping drops the line numbers and the chunk's own name
 together, so those frames say what raised and not where. A scaffolded Rust host
-(`htl new --host rust`), failing inside its embedded module:
+(`htl new --target rust`), failing inside its embedded module:
 
 ```text
 runtime error: ?:-1: attempt to index a nil value
@@ -592,7 +592,7 @@ unloads a library compares before calling anything else).
 nothing is embedded and `require` goes through mlua-pkg at run time. Its README says what
 each one prints and which line of the output is the point.
 
-**A project of this shape is `htl new --lib --host ffi <name>`** (see [The C ABI host](#the-c-abi-host---host-ffi)):
+**A project of this shape is `htl new --lib --target ffi <name>`** (see [The C ABI target](#the-c-abi-target---target-ffi)):
 the crate types, the feature, the `#[c_export]` block and — the part a reader of an ABI
 actually needs — a caller in C and a caller in Python that do the round trip and free
 what they are handed.
@@ -1625,9 +1625,35 @@ mlua-pkg's `entry` is a directory, so a consumer's `require("<name>")` looks for
 `<name>/init.tl`. A flat package can instead ship `<name>/<name>.tl` (e.g. `entry = "src"`
 with `src/<name>.tl`); htl resolves that form in the checker and in `TealResolver`.
 
-### The Rust host (`--host <name>`)
+### Targets (`--target <name>`)
 
-`--host rust`, and `--embed` which is its shorthand, add a Cargo package to that tree:
+**A target is what runs this project's output.** That is the axis `--target` names, and it
+is the only thing the entries in the registry differ about:
+
+| target | what runs the output | output | Rust in the project |
+|---|---|---|---|
+| none — plain `htl new`, then `htl build` | the `htl` binary, `htl run app.hb` | a `.hb` bundle | no |
+| `rust` | the OS, as a binary | a binary (library + a six-line `main.rs`) | the user's crate |
+| `ffi` | a C / Python / Unity caller | `cdylib` + `staticlib` + a header | the user's crate |
+
+*Host* is a different word and keeps its own meaning: the Rust side that embeds the Lua
+state. That is what `#[host_module]` writes, what `src/host.d.tl` declares, and what
+`[build] host` names the modules of. A project can have a host and no target (`htl build`
+alone, with the host that loads the bundle living in another crate), so the two are
+separate questions rather than two words for one. The definition lives next to the
+registry, in `TargetProfile`'s doc comment in
+[`crates/htl-cli/src/scaffold.rs`](crates/htl-cli/src/scaffold.rs); this table is the same
+thing said once for a reader who is not in the source.
+
+`--target` names an entry in that registry rather than adding a flag per kind: `rust` and
+`ffi` are the two today, and the flag reports the rest as they arrive. A name that is not
+registered is refused with the ones that are, before the directory is created, so a typo
+leaves nothing behind. `htl init --target rust` adds the Rust side to a project that
+predates it and lists the files it kept rather than skipping them in silence.
+
+#### The Rust target (`--target rust`)
+
+`--target rust`, and `--embed` which is its shorthand, add a Cargo package to that tree:
 
 ```text
 ├── Cargo.toml             htl + anyhow, and [profile.dev.build-override] opt-level = 3
@@ -1646,16 +1672,9 @@ another crate that embeds this one calls the same function. `--lib` means the pr
 no entry script, so there is nothing for the binary to run and it is not written at all —
 what is left is the library, which is the part someone else embeds.
 
-`--host` names an entry in a registry of host kinds rather than adding a flag per kind:
-`rust` and `ffi` are the two today, and the flag reports the rest as they arrive. A name
-that is not registered is refused with the ones that are, before the directory is
-created, so a typo leaves nothing behind. `htl init --host rust` adds the Rust side to a
-project that predates it and lists the files it kept rather than skipping them in
-silence.
+#### The C ABI target (`--target ffi`)
 
-### The C ABI host (`--host ffi`)
-
-`htl new --lib --host ffi <name>` is the same library with the C ABI on top, for a caller
+`htl new --lib --target ffi <name>` is the same library with the C ABI on top, for a caller
 that is not written in Rust:
 
 ```text
@@ -1674,7 +1693,7 @@ natural and is wrong — C never makes you think about the pointer at all, and P
 the scaffold ships a caller in each that does it correctly, and the CI job runs both
 against the library it just built.
 
-`--host ffi` requires `--lib` and is refused without it: a `cdylib` has no entry point of
+`--target ffi` requires `--lib` and is refused without it: a `cdylib` has no entry point of
 its own, so there is no `src/main.tl` for a binary to run. What the callers do have is a
 Lua `error()` and a Rust `Err` to handle — the generated `greet` refuses an empty name in
 Teal and `reset` refuses a no-op in Rust — so both error paths are in front of the reader

@@ -11,39 +11,41 @@
 //! ├── tests/<mod>_test.tl    htl.test sample
 //! ├── .gitignore
 //! ├── README.md
-//! └── Cargo.toml + src/lib.rs    Rust host (only with a host): #[host_module] exposing
+//! └── Cargo.toml + src/lib.rs    Rust host (only with a target): #[host_module] exposing
 //!     + src/main.rs               `host` to Teal (declaration -> src/host.d.tl), the
 //!                                 module embedded with include_tl_bytes!, and a thin
 //!                                 binary on top when there is an entry script
 //! ```
 //!
-//! A host may add to that: the `ffi` one writes `examples/c/` and `examples/python/`
+//! A target may add to that: the `ffi` one writes `examples/c/` and `examples/python/`
 //! beside the library, because a C ABI whose reference caller nobody wrote is a C ABI
 //! every caller gets wrong in the same three ways.
 //!
-//! # The Rust host is a profile, not a flag
+//! # The target is a profile, not a flag
 //!
 //! Everything above the `Cargo.toml` line is the same for every project. What varies is
-//! the Rust host, and that is one value rather than a growing set of booleans: a
-//! [`HostProfile`] says which crate shape it is (`[lib] crate-type`), what it depends on,
-//! whether it wants an entry script, which Rust files it writes, and which Teal sample it
-//! starts the project from. [`PROFILES`] is the registry, `--host <name>` picks an entry
-//! from it, and a new kind of host is one more entry rather than another flag threaded
-//! through every template.
+//! the target — what will run this project's output, and therefore what Rust it needs —
+//! and that is one value rather than a growing set of booleans: a [`TargetProfile`] says
+//! which crate shape it is (`[lib] crate-type`), what it depends on, whether it wants an
+//! entry script, which Rust files it writes, and which Teal sample it starts the project
+//! from. [`PROFILES`] is the registry, `--target <name>` picks an entry from it, and a new
+//! kind of target is one more entry rather than another flag threaded through every
+//! template.
 //!
-//! # A host is a library crate with a thin binary on top
+//! # Every target with Rust in it is a library crate with a thin binary on top
 //!
-//! Every host writes `src/lib.rs`: the `#[host_module]`, its records, the embedded Teal
-//! module, `preload` registering both, and a Rust test that goes through `preload`. When
-//! the project has an entry script the host also writes `src/main.rs`, a few lines that
-//! call `preload` and `exec` the script. So what a project grows — a second host module,
-//! a C ABI layer, a window loop — grows in the library, and the binary never holds logic.
-//! The `ffi` host is that taken to its end: a `#[c_export]` block in the same library and
-//! no binary at all, which is why it is the profile that answers [`Script::Forbids`].
+//! Each target that writes Rust writes `src/lib.rs`: the `#[host_module]`, its records,
+//! the embedded Teal module, `preload` registering both, and a Rust test that goes through
+//! `preload`. When the project has an entry script it also writes `src/main.rs`, a few
+//! lines that call `preload` and `exec` the script. So what a project grows — a second
+//! host module, a C ABI layer, a window loop — grows in the library, and the binary never
+//! holds logic. The `ffi` target is that taken to its end: a `#[c_export]` block in the
+//! same library and no binary at all, which is why it is the profile that answers
+//! [`Script::Forbids`].
 //!
 //! [`scaffold`] therefore does the same three things whatever it is asked for: pick the
-//! host, turn the profile into a list of paths and bodies, write the ones that do not
-//! exist yet. No template branches on `--embed`; the ones that differ between hosts are
+//! target, turn the profile into a list of paths and bodies, write the ones that do not
+//! exist yet. No template branches on `--embed`; the ones that differ between targets are
 //! separate templates, chosen by the profile.
 //!
 //! Bodies where doubling every brace for `format!` cost more than it was worth — the Rust
@@ -58,10 +60,10 @@ use std::path::{Path, PathBuf};
 
 pub struct Options {
     pub lib: bool,
-    /// The Rust host to write, already resolved against [`PROFILES`] by
-    /// [`resolve_host`], so nothing downstream can be asked for a host that does not
+    /// The target to write for, already resolved against [`PROFILES`] by
+    /// [`resolve_target`], so nothing downstream can be asked for a target that does not
     /// exist or does not fit `--lib`.
-    pub host: Option<&'static HostProfile>,
+    pub target: Option<&'static TargetProfile>,
 }
 
 /// What a template is filled with: the package name and its Teal identifier. The
@@ -73,12 +75,12 @@ pub struct Ctx<'a> {
     pub name: &'a str,
     pub module: &'a str,
     /// Is there a `src/main.tl` to run? The inverse of `--lib`, already reconciled with
-    /// the host by [`resolve_host`].
+    /// the target by [`resolve_target`].
     pub script: bool,
 }
 
-/// A dependency line in the host's `Cargo.toml`: what to require, and the features the
-/// host turns on.
+/// A dependency line in the project's `Cargo.toml`: what to require, and the features the
+/// target turns on.
 pub struct DepLine {
     pub name: &'static str,
     pub req: Dep,
@@ -106,17 +108,17 @@ pub enum Dep {
     Version(&'static str),
 }
 
-/// What a host has to say about `src/main.tl`. `--lib` is the user's side of the same
-/// question, and the two are reconciled once, in [`resolve_host`], before anything is
+/// What a target has to say about `src/main.tl`. `--lib` is the user's side of the same
+/// question, and the two are reconciled once, in [`resolve_target`], before anything is
 /// written.
-// `Requires` is the half no registered host has yet — #104's window loop is the one that
+// `Requires` is the half no registered target has yet — #104's window loop is the one that
 // will — so until then the code that reads it is exercised by this module's tests.
 #[allow(dead_code)]
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub enum Script {
-    /// The host runs an entry script and cannot be built without one (a window loop).
+    /// The target runs an entry script and cannot be built without one (a window loop).
     Requires,
-    /// The host is a library for someone else to call and has no entry point (a C ABI).
+    /// The target is a library for someone else to call and has no entry point (a C ABI).
     Forbids,
     /// Either shape works; `--lib` decides.
     Either,
@@ -132,16 +134,16 @@ impl Script {
     }
 }
 
-/// One file a host writes, relative to the project root. Mostly Rust — `src/lib.rs`,
-/// `src/main.rs` — but a host that ships reference callers writes their C, Python and
+/// One file a target writes, relative to the project root. Mostly Rust — `src/lib.rs`,
+/// `src/main.rs` — but a target that ships reference callers writes their C, Python and
 /// build glue the same way, as a path and a body.
 pub struct HostFile {
     pub path: &'static str,
     pub body: fn(&Ctx<'_>) -> String,
 }
 
-/// The Teal sample a project starts from. A host that dictates a different shape (a
-/// `Game` record for a window host, an entry script that requires `host`) points these at
+/// The Teal sample a project starts from. A target that dictates a different shape (a
+/// `Game` record for a window loop, an entry script that requires `host`) points these at
 /// its own templates; everything else uses [`DEFAULT_TEAL`].
 pub struct TealSample {
     pub module: fn(&Ctx<'_>) -> String,
@@ -150,38 +152,59 @@ pub struct TealSample {
     pub main: fn(&Ctx<'_>) -> String,
 }
 
-/// A kind of Rust host: everything that differs between them, as data.
-pub struct HostProfile {
-    /// How it is named in the registry and on the command line (`--host <name>`).
+/// **A target is what runs htl's output**, and a profile is everything that differs
+/// between two of them, as data.
+///
+/// The axis this names is not the Rust side of a project — it is who is on the far end of
+/// what htl produces:
+///
+/// | target | what runs the output | output | Rust in the project |
+/// | --- | --- | --- | --- |
+/// | none (plain `htl new`, then `htl build`) | the `htl` binary, `htl run app.hb` | a `.hb` bundle | no |
+/// | `rust` | the OS, as a binary | a binary (library + a six-line `main.rs`) | the user's crate |
+/// | `ffi` | a C / Python / Unity caller | `cdylib` + `staticlib` + a header | the user's crate |
+///
+/// The column that varies is the second one. The first two entries happen to be Rust
+/// crates, which is why this used to be called a host; an output nothing Rust runs — a
+/// `.love` bundle, say — is the entry that makes that word plainly wrong.
+///
+/// *Host* keeps its own meaning throughout htl and is not this: it is the Rust side that
+/// embeds the Lua state — `#[host_module]`, the `src/host.d.tl` generated from it, and
+/// `[build] host` / `htl build --host x,y`, which name the modules that side provides at
+/// run time. A project can have a host and no target (`htl build` alone), and two targets
+/// can share one host, so they are two axes rather than two words for one.
+pub struct TargetProfile {
+    /// How it is named in the registry and on the command line (`--target <name>`).
     pub name: &'static str,
     /// `[lib] crate-type = [...]` beyond the default `rlib`, which needs no section at
-    /// all: `["cdylib", "staticlib"]` for a C ABI host.
+    /// all: `["cdylib", "staticlib"]` for a C ABI target.
     pub lib_crate_types: &'static [&'static str],
     pub deps: &'static [DepLine],
-    /// Does this host run an entry script, refuse one, or leave it to `--lib`?
+    /// Does this target run an entry script, refuse one, or leave it to `--lib`?
     pub script: Script,
     /// `src/lib.rs`: the host module, the embedded Teal, `preload`. Always written.
     pub lib: HostFile,
     /// `src/main.rs`: the thin entry, written only when there is an entry script.
     pub main: Option<HostFile>,
-    /// Anything else the host ships: `examples/`, `include/`, a header.
+    /// Anything else the target ships: `examples/`, `include/`, a header.
     pub extra: &'static [HostFile],
-    /// What this host builds that is not worth committing, as `.gitignore` lines
+    /// What this target builds that is not worth committing, as `.gitignore` lines
     /// (filled like a template, so a path may name the module). What it *generates* and
     /// commits — `src/host.d.tl`, the C header — is deliberately not here.
     pub ignore: &'static [&'static str],
     pub teal: TealSample,
-    /// The lines this host adds to the README's command block, and the paragraphs that
-    /// follow it. The README is the one body every project has and every host has
+    /// The lines this target adds to the README's command block, and the paragraphs that
+    /// follow it. The README is the one body every project has and every target has
     /// something different to say in, so it is written here rather than branched on the
-    /// host's name where the file is assembled.
+    /// target's name where the file is assembled.
     pub readme_commands: fn(&Ctx<'_>) -> String,
     pub readme_prose: fn(&Ctx<'_>) -> String,
 }
 
-/// The default host: a library crate holding the host module and the embedded scripts,
-/// with a thin binary on top when the project has an entry script.
-const RUST: HostProfile = HostProfile {
+/// The default target: the OS runs the output as a binary. A library crate holding the
+/// host module and the embedded scripts, with a thin binary on top when the project has an
+/// entry script.
+const RUST: TargetProfile = TargetProfile {
     name: "rust",
     lib_crate_types: &[],
     deps: &[
@@ -209,14 +232,15 @@ const RUST: HostProfile = HostProfile {
     readme_prose: rust_readme_prose,
 };
 
-/// The C ABI host: the same library, plus `#[c_export]` and the two reference callers.
+/// The C ABI target: a caller that is not written in Rust runs the output. The same
+/// library, plus `#[c_export]` and the two reference callers.
 ///
 /// It is a library and nothing else — a `cdylib` has no entry point of its own, and the
-/// caller that loads it brings its own `main` — so [`Script::Forbids`] refuses `--host
+/// caller that loads it brings its own `main` — so [`Script::Forbids`] refuses `--target
 /// ffi` without `--lib` rather than writing a `src/main.rs` nothing would run. The
 /// `staticlib` alongside is what Unity on iOS links; it costs a second artefact and
 /// nothing else.
-const FFI: HostProfile = HostProfile {
+const FFI: TargetProfile = TargetProfile {
     name: "ffi",
     lib_crate_types: &["rlib", "cdylib", "staticlib"],
     deps: &[
@@ -262,8 +286,8 @@ const FFI: HostProfile = HostProfile {
         module: ffi_teal_module,
         test: ffi_teal_test,
         // Unreachable: `Script::Forbids` means there is never a `src/main.tl` to write.
-        // The field is not an `Option` because every other host has one, so this is the
-        // default sample, which is what `htl init --host ffi` on a project that already
+        // The field is not an `Option` because every other target has one, so this is the
+        // default sample, which is what `htl init --target ffi` on a project that already
         // has a script would keep anyway.
         main: teal_main,
     },
@@ -271,13 +295,13 @@ const FFI: HostProfile = HostProfile {
     readme_prose: ffi_readme_prose,
 };
 
-/// Every host kind there is. #104 (a macroquad window) is one more entry.
-pub static PROFILES: &[HostProfile] = &[RUST, FFI];
+/// Every target there is. #104 (a macroquad window) is one more entry.
+pub static PROFILES: &[TargetProfile] = &[RUST, FFI];
 
-/// The host `--embed` is shorthand for.
-pub const DEFAULT_HOST: &str = "rust";
+/// The target `--embed` is shorthand for.
+pub const DEFAULT_TARGET: &str = "rust";
 
-/// What a project without a Rust host starts from.
+/// What a project with no target of its own starts from.
 static DEFAULT_TEAL: TealSample = TealSample {
     module: teal_module,
     test: teal_test,
@@ -310,41 +334,41 @@ pub fn module_ident(name: &str) -> String {
     s
 }
 
-/// Every registered host name, in registry order: what `--host` accepts and what a typo
-/// is answered with.
-pub fn host_names() -> Vec<&'static str> {
+/// Every registered target name, in registry order: what `--target` accepts and what a
+/// typo is answered with.
+pub fn target_names() -> Vec<&'static str> {
     PROFILES.iter().map(|p| p.name).collect()
 }
 
-pub fn profile(name: &str) -> Option<&'static HostProfile> {
+pub fn profile(name: &str) -> Option<&'static TargetProfile> {
     PROFILES.iter().find(|p| p.name == name)
 }
 
-/// Turn `--host` / `--embed` / `--lib` into the host to write, or into the reason there
-/// is none to write. Called before the first file is created, so a refusal leaves the
-/// directory as it was.
+/// Turn `--target` / `--embed` / `--lib` into the target to write for, or into the reason
+/// there is none to write. Called before the first file is created, so a refusal leaves
+/// the directory as it was.
 ///
-/// `--embed` is the shorthand for `--host rust` and stays one: clap's value parser only
-/// applies to `--host`, so the two are reconciled here rather than pretended to be one
+/// `--embed` is the shorthand for `--target rust` and stays one: clap's value parser only
+/// applies to `--target`, so the two are reconciled here rather than pretended to be one
 /// flag. Giving both is fine when they agree.
-pub fn resolve_host(
-    host: Option<&str>,
+pub fn resolve_target(
+    target: Option<&str>,
     embed: bool,
     lib: bool,
-) -> Result<Option<&'static HostProfile>> {
-    let name = match (host, embed) {
+) -> Result<Option<&'static TargetProfile>> {
+    let name = match (target, embed) {
         (None, false) => return Ok(None),
-        (None, true) => DEFAULT_HOST,
+        (None, true) => DEFAULT_TARGET,
         (Some(n), false) => n,
-        (Some(n), true) if n == DEFAULT_HOST => n,
+        (Some(n), true) if n == DEFAULT_TARGET => n,
         (Some(n), true) => bail!(
-            "--embed is the shorthand for --host {DEFAULT_HOST}, so it cannot be given with --host {n}; drop one of them"
+            "--embed is the shorthand for --target {DEFAULT_TARGET}, so it cannot be given with --target {n}; drop one of them"
         ),
     };
     let Some(p) = profile(name) else {
         bail!(
-            "unknown host `{name}`; registered hosts: {}",
-            host_names().join(", ")
+            "unknown target `{name}`; registered targets: {}",
+            target_names().join(", ")
         );
     };
     if !p.script.accepts(lib) {
@@ -353,9 +377,9 @@ pub fn resolve_host(
     Ok(Some(p))
 }
 
-/// Why a host and `--lib` do not fit, and which hosts do. Its own function because the
+/// Why a target and `--lib` do not fit, and which targets do. Its own function because the
 /// message is the whole point of refusing here rather than at the first write.
-fn script_mismatch(p: &HostProfile, lib: bool) -> String {
+fn script_mismatch(p: &TargetProfile, lib: bool) -> String {
     let fits: Vec<&str> = PROFILES
         .iter()
         .filter(|c| c.script.accepts(lib))
@@ -368,12 +392,12 @@ fn script_mismatch(p: &HostProfile, lib: bool) -> String {
     };
     if lib {
         format!(
-            "the `{}` host runs an entry script, which --lib leaves out; hosts that work with --lib: {fits}",
+            "the `{}` target runs an entry script, which --lib leaves out; targets that work with --lib: {fits}",
             p.name
         )
     } else {
         format!(
-            "the `{}` host writes no entry script, so it needs --lib; hosts that write one: {fits}",
+            "the `{}` target writes no entry script, so it needs --lib; targets that write one: {fits}",
             p.name
         )
     }
@@ -387,8 +411,8 @@ fn plan(dir: &Path, name: &str, module: &str, opts: &Options) -> Vec<(PathBuf, S
         module,
         script: !opts.lib,
     };
-    let host = opts.host;
-    let teal = host.map_or(&DEFAULT_TEAL, |h| &h.teal);
+    let target = opts.target;
+    let teal = target.map_or(&DEFAULT_TEAL, |t| &t.teal);
 
     let mut files = vec![
         (dir.join("mlua-pkg.toml"), fill(T_MANIFEST, &ctx)),
@@ -402,25 +426,25 @@ fn plan(dir: &Path, name: &str, module: &str, opts: &Options) -> Vec<(PathBuf, S
             dir.join("tests").join(format!("{module}_test.tl")),
             (teal.test)(&ctx),
         ),
-        (dir.join(".gitignore"), t_gitignore(host, &ctx)),
-        (dir.join("README.md"), t_readme(&ctx, host)),
+        (dir.join(".gitignore"), t_gitignore(target, &ctx)),
+        (dir.join("README.md"), t_readme(&ctx, target)),
     ];
-    // `--lib` is what "no entry script" means, and a host that disagrees with it was
-    // already refused, so the question is answered here for hosted and plain alike.
+    // `--lib` is what "no entry script" means, and a target that disagrees with it was
+    // already refused, so the question is answered here for every project alike.
     if !opts.lib {
         files.push((dir.join("src").join("main.tl"), (teal.main)(&ctx)));
     }
-    if let Some(h) = host {
-        files.push((dir.join("Cargo.toml"), t_cargo(name, h)));
-        files.push((dir.join(h.lib.path), (h.lib.body)(&ctx)));
+    if let Some(t) = target {
+        files.push((dir.join("Cargo.toml"), t_cargo(name, t)));
+        files.push((dir.join(t.lib.path), (t.lib.body)(&ctx)));
         // The binary exists to run the entry script, so without one it is not written —
-        // and a host that has no binary to write says so with `main: None`.
+        // and a target that has no binary to write says so with `main: None`.
         if !opts.lib
-            && let Some(m) = &h.main
+            && let Some(m) = &t.main
         {
             files.push((dir.join(m.path), (m.body)(&ctx)));
         }
-        for f in h.extra {
+        for f in t.extra {
             files.push((dir.join(f.path), (f.body)(&ctx)));
         }
     }
@@ -428,8 +452,8 @@ fn plan(dir: &Path, name: &str, module: &str, opts: &Options) -> Vec<(PathBuf, S
 }
 
 /// What a scaffold run did: the files it created, and the ones it left alone because they
-/// were already there. `htl init` reports both, so asking an existing project for a host
-/// says which of that host's files it did not touch rather than silently skipping them.
+/// were already there. `htl init` reports both, so asking an existing project for a target
+/// says which of that target's files it did not touch rather than silently skipping them.
 pub struct Scaffolded {
     pub written: Vec<PathBuf>,
     pub kept: Vec<PathBuf>,
@@ -597,38 +621,38 @@ fn t_htl_toml() -> String {
         .to_string()
 }
 
-fn t_gitignore(host: Option<&'static HostProfile>, ctx: &Ctx<'_>) -> String {
+fn t_gitignore(target: Option<&'static TargetProfile>, ctx: &Ctx<'_>) -> String {
     // `.htl/` holds the run cache and the installed deps: generated, machine-local, and
     // keyed on absolute paths, so it is never worth sharing. One line covers both.
     let mut s = String::from(".htl/\n*.hb\n");
-    for line in host.into_iter().flat_map(|h| h.ignore) {
+    for line in target.into_iter().flat_map(|t| t.ignore) {
         s.push_str(&fill(line, ctx));
         s.push('\n');
     }
     s
 }
 
-/// The project README: the part every project has, with the host's own lines spliced
+/// The project README: the part every project has, with the target's own lines spliced
 /// into the command block and its own paragraphs after it.
-fn t_readme(ctx: &Ctx<'_>, host: Option<&'static HostProfile>) -> String {
+fn t_readme(ctx: &Ctx<'_>, target: Option<&'static TargetProfile>) -> String {
     let (name, m) = (ctx.name, ctx.module);
     let mut s = format!(
         "# {name}\n\nTeal project managed with [htl](https://github.com/ynishi/htl).\n\n```sh\nhtl check .            # type-check + lints\n"
     );
-    if ctx.script && host.is_none() {
+    if ctx.script && target.is_none() {
         s.push_str("htl run src/main.tl    # run the entry script\n");
     }
     s.push_str("htl test               # tests/*_test.tl via htl.test\nhtl fmt .              # whitespace formatter\nhtl pkg install        # fetch [deps] from mlua-pkg.toml\n");
-    if let Some(h) = host {
-        s.push_str(&(h.readme_commands)(ctx));
+    if let Some(t) = target {
+        s.push_str(&(t.readme_commands)(ctx));
     }
     s.push_str(&format!(
         "```\n\nModule: `src/{m}/init.tl` (`require(\"{m}\")` from `src/` and `tests/`).\n\n\
          `mlua-pkg.toml` `entry = \"src/{m}\"` only matters to *consumers* that depend on this\n\
          package through mlua-pkg: they get it as `require(\"{name}\")`. "
     ));
-    match host {
-        Some(h) => s.push_str(&(h.readme_prose)(ctx)),
+    match target {
+        Some(t) => s.push_str(&(t.readme_prose)(ctx)),
         None => s.push_str("Ignore it if nobody depends on this package.\n"),
     }
     s
@@ -664,7 +688,7 @@ fn rust_readme_prose(ctx: &Ctx<'_>) -> String {
     s
 }
 
-/// The generated-declaration paragraph, which every host that writes a `#[host_module]`
+/// The generated-declaration paragraph, which every target that writes a `#[host_module]`
 /// says the same way.
 const HOST_DTL: &str = "`src/host.d.tl` is generated from `#[host_module]` in `src/lib.rs`: `cargo build` writes it,\n\
      and so does `htl dts` / `htl check` without building, so the Teal side always sees the\n\
@@ -686,7 +710,7 @@ fn ffi_readme_prose(ctx: &Ctx<'_>) -> String {
         "This project is a library with two boundaries:\n\
          `src/lib.rs` holds the `#[host_module]` the *scripts* call and the `#[c_export]` block a\n\
          *caller that is not written in Rust* calls. There is no binary — a C ABI library has no\n\
-         entry point of its own, which is why `--host ffi` implies `--lib`.\n\n",
+         entry point of its own, which is why `--target ffi` implies `--lib`.\n\n",
     );
     s.push_str(HOST_DTL);
     s.push_str(&format!(
@@ -714,7 +738,7 @@ fn ffi_readme_prose(ctx: &Ctx<'_>) -> String {
     s
 }
 
-/// The `htl` requirement a scaffolded host declares: this CLI's own release, in the
+/// The `htl` requirement a scaffolded project declares: this CLI's own release, in the
 /// shortest form cargo's caret rule reads as "this line and its compatible updates" —
 /// `"0.2"` for 0.2.x (`>=0.2.0, <0.3.0`), `"1"` once there is a 1.x (`>=1.0.0, <2.0.0`).
 /// Derived, not written into the template, so the scaffold follows the release that
@@ -732,14 +756,14 @@ fn htl_dep_version_of(version: &str) -> String {
     format!("0.{}", parts.next().unwrap_or("0"))
 }
 
-/// The host's `Cargo.toml`, assembled from the profile: crate shape, then dependencies,
-/// then the one profile setting every host needs.
-fn t_cargo(name: &str, host: &HostProfile) -> String {
+/// The project's `Cargo.toml`, assembled from the profile: crate shape, then dependencies,
+/// then the one profile setting every target with Rust in it needs.
+fn t_cargo(name: &str, target: &TargetProfile) -> String {
     let mut s = format!(
         "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n# authors / license / repository: fill in yourself\n\n"
     );
-    if !host.lib_crate_types.is_empty() {
-        let types: Vec<String> = host
+    if !target.lib_crate_types.is_empty() {
+        let types: Vec<String> = target
             .lib_crate_types
             .iter()
             .map(|t| format!("\"{t}\""))
@@ -747,7 +771,7 @@ fn t_cargo(name: &str, host: &HostProfile) -> String {
         s.push_str(&format!("[lib]\ncrate-type = [{}]\n\n", types.join(", ")));
     }
     s.push_str("[dependencies]\n");
-    for d in host.deps {
+    for d in target.deps {
         let req = match d.req {
             Dep::Htl => htl_dep_version(),
             Dep::Version(v) => v.to_string(),
@@ -774,8 +798,8 @@ fn t_cargo(name: &str, host: &HostProfile) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Ctx, DEFAULT_HOST, Dep, DepLine, HostFile, HostProfile, Result, Script, TealSample,
-        host_names, htl_dep_version_of, profile, resolve_host, script_mismatch, t_cargo,
+        Ctx, DEFAULT_TARGET, Dep, DepLine, HostFile, Result, Script, TargetProfile, TealSample,
+        htl_dep_version_of, profile, resolve_target, script_mismatch, t_cargo, target_names,
     };
 
     #[test]
@@ -790,82 +814,85 @@ mod tests {
     /// `--embed` resolves through the registry, so a missing entry is a panic at the
     /// first scaffold rather than a file that quietly stops being written.
     #[test]
-    fn the_registry_holds_the_host_embed_asks_for() {
-        assert!(host_names().contains(&DEFAULT_HOST));
-        let rust = profile(DEFAULT_HOST).unwrap();
+    fn the_registry_holds_the_target_embed_asks_for() {
+        assert!(target_names().contains(&DEFAULT_TARGET));
+        let rust = profile(DEFAULT_TARGET).unwrap();
         assert_eq!(rust.lib.path, "src/lib.rs");
         assert_eq!(rust.main.as_ref().unwrap().path, "src/main.rs");
-        // The default host is the one shape that works either way.
+        // The default target is the one shape that works either way.
         assert!(rust.script.accepts(true) && rust.script.accepts(false));
     }
 
-    /// The refusal, as a string. A plain `unwrap_err()` would ask `&HostProfile` for
+    /// The refusal, as a string. A plain `unwrap_err()` would ask `&TargetProfile` for
     /// `Debug` — a derive on the whole registry to print a message no passing test sees.
     fn err<T>(r: Result<T>) -> String {
         r.err().expect("expected a refusal").to_string()
     }
 
     #[test]
-    fn embed_and_host_are_the_same_request() {
-        let by_flag = resolve_host(None, true, false).unwrap().unwrap();
-        let by_name = resolve_host(Some("rust"), false, false).unwrap().unwrap();
+    fn embed_and_target_rust_are_the_same_request() {
+        let by_flag = resolve_target(None, true, false).unwrap().unwrap();
+        let by_name = resolve_target(Some("rust"), false, false).unwrap().unwrap();
         assert_eq!(by_flag.name, by_name.name);
         // Both, agreeing, is not an error.
-        assert!(resolve_host(Some("rust"), true, false).is_ok());
+        assert!(resolve_target(Some("rust"), true, false).is_ok());
     }
 
     #[test]
-    fn an_unknown_host_is_refused_with_the_registered_names() {
-        // `.err().unwrap()`, not `unwrap_err()`: the Ok side is a `&HostProfile`, and
+    fn an_unknown_target_is_refused_with_the_registered_names() {
+        // `.err().unwrap()`, not `unwrap_err()`: the Ok side is a `&TargetProfile`, and
         // making the registry `Debug` for the sake of a test message is the wrong trade.
-        let e = err(resolve_host(Some("nope"), false, false));
-        assert!(e.contains("unknown host `nope`"), "{e}");
-        for n in host_names() {
+        let e = err(resolve_target(Some("nope"), false, false));
+        assert!(e.contains("unknown target `nope`"), "{e}");
+        for n in target_names() {
             assert!(e.contains(n), "{e}");
         }
     }
 
     #[test]
-    fn embed_disagreeing_with_host_is_refused() {
-        let e = err(resolve_host(Some("other"), true, false));
+    fn embed_disagreeing_with_target_is_refused() {
+        let e = err(resolve_target(Some("other"), true, false));
         assert!(
-            e.contains("--embed is the shorthand for --host rust"),
+            e.contains("--embed is the shorthand for --target rust"),
             "{e}"
         );
     }
 
     /// The two halves of the matrix hole, with the message that names a way out. The
-    /// `Forbids` half is the registered `ffi` host; the `Requires` half is #104's, so
+    /// `Forbids` half is the registered `ffi` target; the `Requires` half is #104's, so
     /// that one is still built here.
     #[test]
-    fn a_host_that_disagrees_with_lib_names_the_hosts_that_do_not() {
-        let needs = HostProfile {
+    fn a_target_that_disagrees_with_lib_names_the_targets_that_do_not() {
+        let needs = TargetProfile {
             name: "mq",
             script: Script::Requires,
             ..probe()
         };
         let msg = script_mismatch(&needs, true);
-        assert!(msg.contains("the `mq` host runs an entry script"), "{msg}");
         assert!(
-            msg.contains("hosts that work with --lib: rust, ffi"),
+            msg.contains("the `mq` target runs an entry script"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("targets that work with --lib: rust, ffi"),
             "{msg}"
         );
 
         let msg = script_mismatch(profile("ffi").unwrap(), false);
         assert!(
-            msg.contains("the `ffi` host writes no entry script"),
+            msg.contains("the `ffi` target writes no entry script"),
             "{msg}"
         );
-        assert!(msg.contains("hosts that write one: rust"), "{msg}");
+        assert!(msg.contains("targets that write one: rust"), "{msg}");
     }
 
     /// A C ABI library is not a project with an entry script, and the two are reconciled
     /// before anything is written rather than at the first file.
     #[test]
-    fn the_ffi_host_is_refused_without_lib_and_taken_with_it() {
-        let e = err(resolve_host(Some("ffi"), false, false));
+    fn the_ffi_target_is_refused_without_lib_and_taken_with_it() {
+        let e = err(resolve_target(Some("ffi"), false, false));
         assert!(e.contains("so it needs --lib"), "{e}");
-        let ffi = resolve_host(Some("ffi"), false, true).unwrap().unwrap();
+        let ffi = resolve_target(Some("ffi"), false, true).unwrap().unwrap();
         assert_eq!(ffi.name, "ffi");
         // No binary to write, and the reference callers travel with the profile.
         assert!(ffi.main.is_none());
@@ -903,17 +930,17 @@ mod tests {
         );
     }
 
-    /// What the reader is told to run follows the project rather than the host's name:
-    /// the C ABI host points at the two reference callers, and the default host at the
+    /// What the reader is told to run follows the project rather than the target's name:
+    /// the C ABI target points at the two reference callers, and the default target at the
     /// binary it writes only when there is a script to run.
     #[test]
-    fn the_readme_commands_come_from_the_host() {
+    fn the_readme_commands_come_from_the_target() {
         let ctx = |script| Ctx {
             name: "sample",
             module: "sample",
             script,
         };
-        let rust = profile(DEFAULT_HOST).unwrap();
+        let rust = profile(DEFAULT_TARGET).unwrap();
         assert!((rust.readme_commands)(&ctx(true)).contains("cargo run"));
         assert!(!(rust.readme_commands)(&ctx(false)).contains("cargo run"));
 
@@ -930,17 +957,17 @@ mod tests {
         assert!(Script::Either.accepts(true) && Script::Either.accepts(false));
     }
 
-    /// A crate whose only shape is the default `rlib` has no `[lib]` section; a library
-    /// host that needs more gets one from its profile, which is the whole of what
+    /// A crate whose only shape is the default `rlib` has no `[lib]` section; a target
+    /// that needs more gets one from its profile, which is the whole of what
     /// `Cargo.toml` has to know about the crate shape.
     #[test]
     fn cargo_toml_takes_the_crate_shape_from_the_profile() {
-        let rust = profile(DEFAULT_HOST).unwrap();
+        let rust = profile(DEFAULT_TARGET).unwrap();
         let toml = t_cargo("sample", rust);
         assert!(!toml.contains("[lib]"), "{toml}");
         assert!(toml.contains("anyhow = \"1\"\n"), "{toml}");
 
-        let libbed = HostProfile {
+        let libbed = TargetProfile {
             lib_crate_types: &["rlib", "cdylib"],
             ..probe()
         };
@@ -951,8 +978,8 @@ mod tests {
         );
     }
 
-    fn probe() -> HostProfile {
-        HostProfile {
+    fn probe() -> TargetProfile {
+        TargetProfile {
             name: "probe",
             lib_crate_types: &[],
             deps: &[DepLine {

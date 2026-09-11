@@ -1,6 +1,6 @@
-//! Every host `--host` offers, scaffolded into a temporary directory outside this
+//! Every target `--target` offers, scaffolded into a temporary directory outside this
 //! repository, pointed back at this checkout so it is *this* htl that is embedded, then
-//! built, tested and run — including, for the C ABI host, the reference callers in C and
+//! built, tested and run — including, for the C ABI target, the reference callers in C and
 //! Python that load the library it builds.
 //!
 //! The snapshot tests in `htl-cli` pin what the scaffold writes byte for byte; only this
@@ -11,8 +11,8 @@
 //! This was `_scaffold-hosts`, 87 lines of bash in the justfile, and it is the same work in
 //! the same order against the same assertions. Three things are different.
 //!
-//! The first is that a failure names a file and a line. The second is that the three hosts
-//! are three tests: the script stopped at the first one that broke, and a red run said
+//! The first is that a failure names a file and a line. The second is that the three
+//! targets are three tests: the script stopped at the first one that broke, and a red run said
 //! nothing about the other two. The third is the reason the move was worth making at all —
 //! that script carried a documented instance of a gate that silently passed. Its pin check
 //! was once spelled `! grep …`, and bash exempts a command whose status is inverted with
@@ -236,10 +236,10 @@ fn scaffold_args() -> Vec<String> {
 /// The three tests share one target directory, so only one of them can be compiling at a
 /// time whatever the harness does — cargo's own lock on that directory would serialise them
 /// anyway, printing "Blocking waiting for file lock" at whoever lost. Taking it here makes
-/// that explicit and keeps the output in one piece per host.
+/// that explicit and keeps the output in one piece per target.
 ///
-/// Giving each host a directory of its own is the alternative, and it costs a full build of
-/// mlua's vendored Lua per host to buy a parallelism the lock would not allow.
+/// Giving each target a directory of its own is the alternative, and it costs a full build
+/// of mlua's vendored Lua per target to buy a parallelism the lock would not allow.
 fn one_at_a_time() -> MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
     // A test that panicked while holding it has failed already; poisoning the rest on top
@@ -290,15 +290,15 @@ fn must_capture(cmd: &mut Command, what: &str) -> String {
 /// `htl new` in the scratch directory, which is where the generated project lands. The
 /// binary is invoked from there rather than from the checkout so that nothing above it in
 /// the filesystem belongs to this repository.
-fn htl_new(scratch: &Path, project: &str, host: &[&str]) -> PathBuf {
+fn htl_new(scratch: &Path, project: &str, target: &[&str]) -> PathBuf {
     let dir = scratch.join(project);
     must_run(
         Command::new(htl_bin())
             .arg("new")
             .arg(&dir)
-            .args(host)
+            .args(target)
             .current_dir(scratch),
-        &format!("htl new {project} {}", host.join(" ")),
+        &format!("htl new {project} {}", target.join(" ")),
     );
     dir
 }
@@ -343,8 +343,8 @@ fn assert_unpatched_pin(project: &Path) {
     }
 }
 
-/// A pin in the shape the `ffi` host writes, so that the two cases below are refusing
-/// something a passing manifest otherwise resembles. The two `rust` hosts write the same
+/// A pin in the shape the `ffi` target writes, so that the two cases below are refusing
+/// something a passing manifest otherwise resembles. The two `rust` cases write the same
 /// line without the features table (`htl = "0.4"`); what [`unpatched_pin`] reads is the
 /// `htl = ` that starts it, which both forms have.
 const PINNED: &str = "[dependencies]\nhtl = { version = \"0.4\", features = [\"ffi\"] }\n";
@@ -365,16 +365,16 @@ fn a_manifest_redirecting_its_own_pin_is_refused() {
 }
 
 // ---------------------------------------------------------------------------------------
-// The three hosts
+// The three targets
 // ---------------------------------------------------------------------------------------
 
-/// The default host: a binary, its Teal module, and a test suite, built and then run with
+/// The default target: a binary, its Teal module, and a test suite, built and then run with
 /// an argument.
 #[test]
-fn the_rust_host_builds_tests_and_greets() {
+fn the_rust_target_builds_tests_and_greets() {
     let _lock = one_at_a_time();
-    let scratch = scratch("hostsample");
-    let project = htl_new(&scratch, "hostsample", &["--host", "rust"]);
+    let scratch = scratch("rustsample");
+    let project = htl_new(&scratch, "rustsample", &["--target", "rust"]);
 
     assert_unpatched_pin(&project);
     must_run(&mut cargo_in(&project, &["test"]), "cargo test");
@@ -391,13 +391,13 @@ fn the_rust_host_builds_tests_and_greets() {
     fs::remove_dir_all(&scratch).ok();
 }
 
-/// The same host without a binary: the library still builds and its test still goes through
-/// preload, and there is no entry point for `cargo run` to find.
+/// The same target without a binary: the library still builds and its test still goes
+/// through preload, and there is no entry point for `cargo run` to find.
 #[test]
-fn the_rust_library_host_has_no_entry_point_and_still_tests() {
+fn the_rust_library_target_has_no_entry_point_and_still_tests() {
     let _lock = one_at_a_time();
     let scratch = scratch("libsample");
-    let project = htl_new(&scratch, "libsample", &["--host", "rust", "--lib"]);
+    let project = htl_new(&scratch, "libsample", &["--target", "rust", "--lib"]);
 
     assert_no_entry_point(&project);
     assert_unpatched_pin(&project);
@@ -406,15 +406,15 @@ fn the_rust_library_host_has_no_entry_point_and_still_tests() {
     fs::remove_dir_all(&scratch).ok();
 }
 
-/// The C ABI host, whose callers are the part nothing else here compiles: the library is
-/// built, the header the macro writes is checked, and the two reference hosts under
+/// The C ABI target, whose callers are the part nothing else here compiles: the library is
+/// built, the header the macro writes is checked, and the two reference callers under
 /// `examples/` are run against the artefact — the Python one wherever python3 is, the C one
 /// only where there is a compiler and a make.
 #[test]
-fn the_ffi_host_builds_a_library_its_c_and_python_callers_can_load() {
+fn the_ffi_target_builds_a_library_its_c_and_python_callers_can_load() {
     let _lock = one_at_a_time();
     let scratch = scratch("ffisample");
-    let project = htl_new(&scratch, "ffisample", &["--host", "ffi", "--lib"]);
+    let project = htl_new(&scratch, "ffisample", &["--target", "ffi", "--lib"]);
     let target = scaffold_target();
 
     assert_no_entry_point(&project);
