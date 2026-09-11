@@ -46,7 +46,7 @@ jobs:
       - uses: extractions/setup-just@v2
       # Every end-to-end case in one step because they are one recipe: the CLI on the
       # repository's own .tl, the embed example through both macro paths, the run cache
-      # cold and then warm, and `htl new` for each `--host` built, tested and run — the C
+      # cold and then warm, and `htl new` for each `--target` built, tested and run — the C
       # ABI project's library loaded by the reference callers it ships, with cc, make and
       # python3 all present on this runner (the recipe says so and skips either caller
       # where they are not). The cheap cases come first inside it, so a break in one of
