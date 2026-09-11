@@ -55,15 +55,174 @@
 //!
 //! Bodies where doubling every brace for `format!` cost more than it was worth — the Rust
 //! host, the Teal sample, a C caller — live under `crates/htl-cli/templates/` and are
-//! read with `include_str!`, filled by replacing `{{name}}` / `{{mod}}` / `{{MOD}}` /
-//! `{{htl}}`. They stay in this crate rather than being fetched, so `htl_dep_version()`
-//! keeps pinning a scaffold to the htl release that wrote it. Short TOML and Markdown
-//! stay inline.
+//! read with `include_str!`, filled by replacing `{{name}}` / `{{mod}}` / `{{MOD}}`. They
+//! stay in this crate rather than being fetched. Short TOML and Markdown stay inline.
+//!
+//! # What the output depends on is data, not this CLI's version
+//!
+//! The `htl` a scaffolded project pins was derived from this crate's `CARGO_PKG_VERSION`,
+//! which tied the artefact's dependency to the tool's release for no reason either of them
+//! asked for: installing a newer CLI silently changed what the next project would build
+//! against, and there was no way to write a project against anything else. It is an
+//! [`HtlPin`] now. [`SUPPORTED`] is the set of releases this scaffold is known to write a
+//! working project for, [`DEFAULT_HTL`] is the one it picks, and `--htl` takes any of them
+//! — or `main`, or a checkout — so dogfooding an unreleased htl is a flag rather than a
+//! `[patch.crates-io]` section added by hand afterwards.
 
 use anyhow::{Context, Result, anyhow, bail};
 use htl::BuildTarget;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+
+/// The htl a scaffolded project depends on. Not this CLI's version: what the *output*
+/// pins, chosen from the releases this scaffold supports. It moves when a release that
+/// knows every key the scaffold writes is on crates.io — not when the workspace bumps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HtlPin {
+    /// A published series, as cargo's caret requirement reads it: `"0.4"` is
+    /// `>=0.4.0, <0.5.0`.
+    Release(String),
+    /// The repository's `main` branch: `{ git = "<repository url>", branch = "main" }`.
+    Main,
+    /// A local checkout of this repository, by its root: `{ path = "<root>/crates/htl" }`.
+    Path(PathBuf),
+}
+
+/// Every htl release `--htl` accepts by number: the ones this scaffold is known to write a
+/// project for, newest last. A release is added here once a project written for it builds
+/// — which is what `just e2e-scaffold-unpatched` asks of [`DEFAULT_HTL`] on every commit —
+/// and an older one stays for as long as it keeps answering that question.
+pub const SUPPORTED: &[&str] = &["0.4"];
+
+/// The release a scaffold pins when `--htl` is not given: the newest in [`SUPPORTED`].
+///
+/// Raising it is a deliberate step *after* a publish, not part of one. Until the release is
+/// on crates.io there is nothing for a scaffolded project to resolve, so this number lags
+/// `CARGO_PKG_VERSION` between a bump and a publish and never leads it — which the tests
+/// below assert, because the failure mode of leading it is a scaffold nobody can build.
+pub const DEFAULT_HTL: &str = "0.4";
+
+/// This repository, for the `main` pin's git dependency. Taken from the package metadata,
+/// which inherits `[workspace.package] repository`, so the URL is not written twice.
+const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
+
+impl Default for HtlPin {
+    fn default() -> Self {
+        HtlPin::Release(DEFAULT_HTL.to_string())
+    }
+}
+
+impl HtlPin {
+    /// Read what `--htl` was given: a release in [`SUPPORTED`], `main`, or
+    /// `path:<checkout>`.
+    ///
+    /// A number outside [`SUPPORTED`] is refused rather than passed through. The scaffold
+    /// decides what it writes from the pin — which `htl.toml` keys, which templates — so a
+    /// release it has never been asked about is a project it cannot promise builds, and
+    /// saying so here costs nothing while saying it at the project's first `cargo build`
+    /// costs the reader the whole error.
+    pub fn parse(s: &str) -> Result<HtlPin> {
+        if s == "main" {
+            return Ok(HtlPin::Main);
+        }
+        if let Some(dir) = s.strip_prefix("path:") {
+            if dir.is_empty() {
+                bail!("`path:` names no checkout directory; {}", supported());
+            }
+            return Ok(HtlPin::Path(PathBuf::from(dir)));
+        }
+        if SUPPORTED.contains(&s) {
+            return Ok(HtlPin::Release(s.to_string()));
+        }
+        bail!("unsupported htl `{s}`; {}", supported());
+    }
+
+    /// The right-hand side of the `htl = ...` line a project's `Cargo.toml` gets, with no
+    /// features on it: `"0.4"`, or the git or path table. A target that needs features
+    /// merges them into the same table — see [`dep_value`], which is where both forms are
+    /// written.
+    ///
+    /// `allow(dead_code)` because every scaffolded manifest goes through [`t_cargo`], which
+    /// has the target's features in hand and so calls [`dep_value`] directly. This is the
+    /// featureless form the tests and the README quote, and it is the one a caller outside
+    /// this module would want.
+    #[allow(dead_code)]
+    pub fn requirement(&self) -> String {
+        dep_value(&self.keys(), &[])
+    }
+
+    /// The pin as a cargo dependency table's key/value pairs, in the order they are
+    /// written. Features are deliberately absent: they belong to the target that asked for
+    /// them ([`DepLine`]), and keeping the two apart until [`dep_value`] is what stops the
+    /// `cdylib` line from being right under one pin kind and wrong under the others.
+    fn keys(&self) -> Vec<(&'static str, String)> {
+        match self {
+            HtlPin::Release(v) => vec![("version", v.clone())],
+            HtlPin::Main => vec![
+                ("git", REPOSITORY.to_string()),
+                ("branch", "main".to_string()),
+            ],
+            // Forward slashes and no trailing one, because this goes into TOML: a Windows
+            // path written verbatim would be a string with invalid escapes in it, and cargo
+            // reads `/` on every platform.
+            HtlPin::Path(root) => vec![(
+                "path",
+                format!(
+                    "{}/crates/htl",
+                    root.display()
+                        .to_string()
+                        .replace('\\', "/")
+                        .trim_end_matches('/')
+                ),
+            )],
+        }
+    }
+
+    /// Whether the pinned htl reads `[build] target` from `htl.toml`.
+    ///
+    /// Nothing calls it yet. It is what decides whether [`t_htl_toml`] writes that key: the
+    /// key landed in `htl-core` in #197 and no release carries it, so writing it today
+    /// fails the project's first `cargo build` inside `include_tl!` — which is exactly what
+    /// happened to `[toolchain]` one release early. Writing it under `main` and a checkout,
+    /// where the key does exist, is the other half and is PR-2's.
+    ///
+    /// `allow(dead_code)` for exactly that gap: the question is answered and tested here,
+    /// and the caller that asks it arrives with the key it gates.
+    #[allow(dead_code)]
+    pub fn knows_build_target(&self) -> bool {
+        self.at_least(0, 5)
+    }
+
+    /// `major.minor` against a release, for the `knows_*` questions above. No semver crate:
+    /// what is compared is what [`SUPPORTED`] holds — `0.<minor>`, and a bare `<major>`
+    /// once there is a 1.x — and a two-number compare is shorter than the dependency would
+    /// be. A pin that is not a release is every key this workspace has.
+    fn at_least(&self, major: u64, minor: u64) -> bool {
+        match self {
+            HtlPin::Main | HtlPin::Path(_) => true,
+            HtlPin::Release(v) => version_parts(v) >= (major, minor),
+        }
+    }
+}
+
+/// `"0.4"` / `"0.4.1"` / `"1"` as the two numbers the comparisons above are about. A part
+/// that is missing or not a number is 0, which orders a nonsense requirement below every
+/// real one rather than panicking on it — and nothing reaches here that [`HtlPin::parse`]
+/// did not already check against [`SUPPORTED`].
+fn version_parts(v: &str) -> (u64, u64) {
+    let mut it = v.split('.');
+    let n = |s: Option<&str>| s.and_then(|s| s.parse().ok()).unwrap_or(0);
+    (n(it.next()), n(it.next()))
+}
+
+/// What `--htl` accepts, for the two refusals in [`HtlPin::parse`]. Built from
+/// [`SUPPORTED`] so that adding a release does not leave a message naming the old set.
+fn supported() -> String {
+    format!(
+        "this scaffold supports: {} (or `main`, or `path:<checkout>`)",
+        SUPPORTED.join(", ")
+    )
+}
 
 pub struct Options {
     pub lib: bool,
@@ -71,6 +230,9 @@ pub struct Options {
     /// [`resolve_target`], so nothing downstream can be asked for a target that does not
     /// exist or does not fit `--lib`.
     pub target: Option<&'static TargetProfile>,
+    /// The htl the scaffolded project depends on, already read from `--htl` by
+    /// [`HtlPin::parse`] — so, like the target, a refusal happens before the first file.
+    pub htl: HtlPin,
 }
 
 /// What a template is filled with: the package name and its Teal identifier. The
@@ -108,8 +270,7 @@ impl DepLine {
 
 /// What a dependency line requires.
 pub enum Dep {
-    /// This CLI's own release, derived at run time (see [`htl_dep_version`]) so a scaffold
-    /// follows the htl that produced it.
+    /// The htl the pin names (see [`HtlPin`]).
     Htl,
     /// A literal requirement.
     Version(&'static str),
@@ -401,7 +562,7 @@ fn plan(dir: &Path, name: &str, module: &str, opts: &Options) -> Vec<(PathBuf, S
         files.push((dir.join("src").join("main.tl"), (teal.main)(&ctx)));
     }
     if let Some(t) = target {
-        files.push((dir.join("Cargo.toml"), t_cargo(name, t)));
+        files.push((dir.join("Cargo.toml"), t_cargo(name, t, &opts.htl)));
         files.push((dir.join(t.lib.path), (t.lib.body)(&ctx)));
         // The binary exists to run the entry script, so without one it is not written —
         // and a target that has no binary to write says so with `main: None`.
@@ -454,16 +615,20 @@ pub fn scaffold(dir: &Path, name: &str, opts: &Options, must_be_new: bool) -> Re
     Ok(out)
 }
 
-/// The four placeholders a template file may use. Plain `str::replace`: the bodies are
+/// The three placeholders a template file may use. Plain `str::replace`: the bodies are
 /// ours, so there is nothing to escape and no engine to depend on. `{{MOD}}` is the
 /// module identifier upper-cased, which is how a generated C header spells its own
 /// constants (`{{MOD}}_OK`), and therefore how a caller written in C has to spell them.
+///
+/// There was a fourth, `{{htl}}`, and no template ever contained it — the `htl`
+/// requirement is assembled in [`t_cargo`], which is the only file that names one. What
+/// does spell `{{htl}}` is the snapshot tests' *normalisation*, which is the opposite
+/// direction and needs nothing here.
 fn fill(template: &str, ctx: &Ctx<'_>) -> String {
     template
         .replace("{{name}}", ctx.name)
         .replace("{{mod}}", ctx.module)
         .replace("{{MOD}}", &ctx.module.to_uppercase())
-        .replace("{{htl}}", &htl_dep_version())
 }
 
 fn teal_module(ctx: &Ctx<'_>) -> String {
@@ -535,14 +700,15 @@ fn t_types_readme() -> String {
 
 /// The project's `htl.toml`.
 ///
-/// It may only name keys the htl this scaffold *pins* can read. A host project depends on
-/// the released crate ([`htl_dep_version`]), and `HtlConfig` is `deny_unknown_fields`, so a
-/// key this workspace added but no release carries yet fails the project's first
-/// `cargo build` inside `include_tl!` rather than being ignored. So a key crosses in two
-/// steps: it lands in `htl-core` and is published, and only the release *after* that may
-/// write it into a scaffold. `[toolchain]` is out for that reason, and it is the key this
-/// was learned on — it was written a release early, and every project `htl new` wrote in
-/// between failed to build.
+/// It may only name keys the htl the *pin* names can read. `HtlConfig` is
+/// `deny_unknown_fields` and `include_tl!` parses this file with the pinned crate, so a key
+/// that crate does not carry is not ignored there but fatal, at the project's first
+/// `cargo build`. What is written here is therefore decided per pin — the
+/// [`HtlPin::knows_build_target`] family — and `just e2e-scaffold-unpatched` is the gate
+/// that asks the question for real: it builds a [`DEFAULT_HTL`] scaffold against crates.io,
+/// with nothing patched, and goes red when this file says something the pinned release does
+/// not understand. `[toolchain]` is the key it was learned on, written a release early, and
+/// every project `htl new` wrote in between failed to build.
 ///
 /// `[lint.rules]` is out for the same reason, and a commented example of it would be too:
 /// a comment is one user action away from being a key, and the user who uncomments it is
@@ -550,11 +716,6 @@ fn t_types_readme() -> String {
 /// shown, since the CLI that just wrote the file refuses those. So the section names
 /// neither and sends the reader to `htl check --list-lints`, which answers from the binary
 /// they have.
-///
-/// `[build] target` landed in `htl-core` in this change and is read by every command that
-/// loads this file, but it is not written here for exactly the reason above: the scaffold
-/// pins the released `htl`, which does not know the key. Writing it is the release after
-/// the one that publishes it.
 fn t_htl_toml() -> String {
     "# htl project settings (htl check / htl test / htl fmt / include_tl! all read this).\n\
      # Command-line flags and HTL_LINTS / HTL_LINT override it.\n\n\
@@ -709,27 +870,32 @@ fn ffi_readme_prose(ctx: &Ctx<'_>) -> String {
     s
 }
 
-/// The `htl` requirement a scaffolded project declares: this CLI's own release, in the
-/// shortest form cargo's caret rule reads as "this line and its compatible updates" —
-/// `"0.2"` for 0.2.x (`>=0.2.0, <0.3.0`), `"1"` once there is a 1.x (`>=1.0.0, <2.0.0`).
-/// Derived, not written into the template, so the scaffold follows the release that
-/// produced it and nobody has to remember the template at bump time.
-pub fn htl_dep_version() -> String {
-    htl_dep_version_of(env!("CARGO_PKG_VERSION"))
-}
-
-fn htl_dep_version_of(version: &str) -> String {
-    let mut parts = version.split('.');
-    let major = parts.next().unwrap_or("0");
-    if major != "0" {
-        return major.to_string();
+/// One dependency's right-hand side: the short `"req"` form where cargo accepts it, the
+/// table where it does not.
+///
+/// A bare version with no features is the only thing the short form can say, so a git or a
+/// path pin, or anything with features on it, is the table — and the features are appended
+/// *here*, once, rather than beside each way of spelling the requirement. That is the whole
+/// reason [`HtlPin::keys`] hands back pairs instead of a finished line: the `cdylib`
+/// target's `features = ["ffi"]` has to survive all three pin kinds, and the way to be sure
+/// it does is for there to be one place it is written.
+fn dep_value(keys: &[(&str, String)], features: &[&str]) -> String {
+    if features.is_empty()
+        && let [("version", v)] = keys
+    {
+        return format!("\"{v}\"");
     }
-    format!("0.{}", parts.next().unwrap_or("0"))
+    let mut parts: Vec<String> = keys.iter().map(|(k, v)| format!("{k} = \"{v}\"")).collect();
+    if !features.is_empty() {
+        let feats: Vec<String> = features.iter().map(|f| format!("\"{f}\"")).collect();
+        parts.push(format!("features = [{}]", feats.join(", ")));
+    }
+    format!("{{ {} }}", parts.join(", "))
 }
 
 /// The project's `Cargo.toml`, assembled from the profile: crate shape, then dependencies,
 /// then the one profile setting every target with Rust in it needs.
-fn t_cargo(name: &str, target: &TargetProfile) -> String {
+fn t_cargo(name: &str, target: &TargetProfile, htl: &HtlPin) -> String {
     let mut s = format!(
         "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n# authors / license / repository: fill in yourself\n\n"
     );
@@ -744,20 +910,11 @@ fn t_cargo(name: &str, target: &TargetProfile) -> String {
     }
     s.push_str("[dependencies]\n");
     for d in target.deps {
-        let req = match d.req {
-            Dep::Htl => htl_dep_version(),
-            Dep::Version(v) => v.to_string(),
+        let keys = match d.req {
+            Dep::Htl => htl.keys(),
+            Dep::Version(v) => vec![("version", v.to_string())],
         };
-        let name = d.name;
-        if d.features.is_empty() {
-            s.push_str(&format!("{name} = \"{req}\"\n"));
-        } else {
-            let feats: Vec<String> = d.features.iter().map(|f| format!("\"{f}\"")).collect();
-            s.push_str(&format!(
-                "{name} = {{ version = \"{req}\", features = [{}] }}\n",
-                feats.join(", ")
-            ));
-        }
+        s.push_str(&format!("{} = {}\n", d.name, dep_value(&keys, d.features)));
     }
     s.push_str(
         "\n# The Teal checker runs inside htl's proc macros; the dev profile would build it\n\
@@ -770,18 +927,102 @@ fn t_cargo(name: &str, target: &TargetProfile) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        BuildTarget, Ctx, DEFAULT_TARGET, Result, htl_dep_version_of, profile, resolve_target,
-        script_mismatch, t_cargo, target_names,
+        BuildTarget, Ctx, DEFAULT_HTL, DEFAULT_TARGET, HtlPin, PathBuf, REPOSITORY, Result,
+        SUPPORTED, dep_value, profile, resolve_target, script_mismatch, t_cargo, target_names,
+        version_parts,
     };
     use htl::build_target::Script;
 
+    /// The default has to be a release `--htl` would accept by name, or the flag's default
+    /// is a value the flag itself refuses.
     #[test]
-    fn dep_version_is_the_shortest_compatible_requirement() {
-        assert_eq!(htl_dep_version_of("0.2.0"), "0.2");
-        assert_eq!(htl_dep_version_of("0.2.7"), "0.2");
-        assert_eq!(htl_dep_version_of("0.10.1"), "0.10");
-        assert_eq!(htl_dep_version_of("1.0.0"), "1");
-        assert_eq!(htl_dep_version_of("2.3.4"), "2");
+    fn the_default_pin_is_one_of_the_supported_releases() {
+        assert!(SUPPORTED.contains(&DEFAULT_HTL), "{SUPPORTED:?}");
+        assert_eq!(HtlPin::default(), HtlPin::Release(DEFAULT_HTL.to_string()));
+    }
+
+    /// A scaffold pins a release that is *on crates.io*, and this crate's version is the
+    /// one being prepared — equal between a publish and the next bump, and ahead of it in
+    /// between. Ahead in the other direction is the failure this catches: a `DEFAULT_HTL`
+    /// above the workspace version names something nobody has published, and every project
+    /// `htl new` writes then fails to resolve.
+    #[test]
+    fn the_default_pin_never_leads_this_crates_version() {
+        let pinned = version_parts(DEFAULT_HTL);
+        let building = version_parts(env!("CARGO_PKG_VERSION"));
+        assert!(
+            pinned <= building,
+            "DEFAULT_HTL {DEFAULT_HTL} is ahead of the workspace's {}",
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+
+    #[test]
+    fn a_pin_is_a_release_main_or_a_checkout() {
+        assert_eq!(HtlPin::parse("0.4").unwrap(), HtlPin::Release("0.4".into()));
+        assert_eq!(HtlPin::parse("main").unwrap(), HtlPin::Main);
+        assert_eq!(
+            HtlPin::parse("path:x").unwrap(),
+            HtlPin::Path(PathBuf::from("x"))
+        );
+    }
+
+    /// Three refusals, each naming what would have worked. A release this scaffold has
+    /// never written for is refused the same way a typo is: the pin decides what goes into
+    /// `htl.toml`, so "probably fine" is not an answer it can give.
+    #[test]
+    fn a_pin_outside_the_supported_set_is_refused_with_the_set() {
+        for bad in ["0.3", "nope", "path:"] {
+            let e = err(HtlPin::parse(bad));
+            assert!(e.contains("0.4"), "{bad}: {e}");
+            assert!(e.contains("`main`"), "{bad}: {e}");
+        }
+        assert!(err(HtlPin::parse("0.3")).contains("unsupported htl `0.3`"));
+        assert!(err(HtlPin::parse("path:")).contains("names no checkout directory"));
+    }
+
+    /// What each pin puts on the right of `htl = `, with and without the features a target
+    /// asks for. The exact text, because this is the line a user's `cargo build` reads.
+    #[test]
+    fn each_pin_writes_its_own_dependency_line() {
+        let release = HtlPin::Release("0.4".into());
+        let path = HtlPin::Path(PathBuf::from("../co"));
+        assert_eq!(release.requirement(), "\"0.4\"");
+        assert_eq!(
+            HtlPin::Main.requirement(),
+            format!("{{ git = \"{REPOSITORY}\", branch = \"main\" }}")
+        );
+        assert_eq!(path.requirement(), "{ path = \"../co/crates/htl\" }");
+
+        // The repository URL comes from the package metadata, so an inherit that stopped
+        // reaching this crate would write `git = ""` rather than fail to compile.
+        assert!(REPOSITORY.contains("://"), "{REPOSITORY}");
+
+        // With features, every kind is the table form and the features go last.
+        let ffi = ["ffi"];
+        assert_eq!(
+            dep_value(&release.keys(), &ffi),
+            "{ version = \"0.4\", features = [\"ffi\"] }"
+        );
+        assert_eq!(
+            dep_value(&HtlPin::Main.keys(), &ffi),
+            format!("{{ git = \"{REPOSITORY}\", branch = \"main\", features = [\"ffi\"] }}")
+        );
+        assert_eq!(
+            dep_value(&path.keys(), &ffi),
+            "{ path = \"../co/crates/htl\", features = [\"ffi\"] }"
+        );
+    }
+
+    /// The question PR-2 will ask before writing `[build] target` into `htl.toml`: the key
+    /// is in `htl-core` and in no release, so 0.4 does not know it, 0.5 will, and a pin at
+    /// the repository knows everything this workspace does.
+    #[test]
+    fn only_an_unreleased_htl_knows_the_build_target_key() {
+        assert!(!HtlPin::Release("0.4".into()).knows_build_target());
+        assert!(HtlPin::Release("0.5".into()).knows_build_target());
+        assert!(HtlPin::Main.knows_build_target());
+        assert!(HtlPin::Path(PathBuf::from("../co")).knows_build_target());
     }
 
     /// `--embed` resolves through the registry, so a missing entry is a panic at the
@@ -893,20 +1134,43 @@ mod tests {
     /// is the table form rather than a bare requirement.
     #[test]
     fn the_cdylib_cargo_toml_is_a_c_library_with_the_ffi_feature() {
-        let toml = t_cargo("sample", profile(BuildTarget::Cdylib).unwrap());
+        let toml = t_cargo(
+            "sample",
+            profile(BuildTarget::Cdylib).unwrap(),
+            &HtlPin::default(),
+        );
         assert!(
             toml.contains("[lib]\ncrate-type = [\"rlib\", \"cdylib\", \"staticlib\"]\n"),
             "{toml}"
         );
         assert!(
             toml.contains(&format!(
-                "htl = {{ version = \"{}\", features = [\"ffi\"] }}\n",
-                super::htl_dep_version()
+                "htl = {{ version = \"{DEFAULT_HTL}\", features = [\"ffi\"] }}\n"
             )),
             "{toml}"
         );
         assert!(
             toml.contains("serde = { version = \"1\", features = [\"derive\"] }\n"),
+            "{toml}"
+        );
+    }
+
+    /// The same manifest under the other two pins. The assertions are whole lines, which is
+    /// how they also say that neither pin left a `version` key behind for cargo to
+    /// reconcile with a branch or a directory.
+    #[test]
+    fn the_cdylib_feature_survives_every_pin_kind() {
+        let ffi = profile(BuildTarget::Cdylib).unwrap();
+        let toml = t_cargo("sample", ffi, &HtlPin::Main);
+        assert!(
+            toml.contains(&format!(
+                "\nhtl = {{ git = \"{REPOSITORY}\", branch = \"main\", features = [\"ffi\"] }}\n"
+            )),
+            "{toml}"
+        );
+        let toml = t_cargo("sample", ffi, &HtlPin::Path(PathBuf::from("../co")));
+        assert!(
+            toml.contains("\nhtl = { path = \"../co/crates/htl\", features = [\"ffi\"] }\n"),
             "{toml}"
         );
     }
@@ -936,11 +1200,25 @@ mod tests {
     /// what `Cargo.toml` has to know about the crate shape.
     #[test]
     fn cargo_toml_takes_the_crate_shape_from_the_target() {
-        let toml = t_cargo("sample", profile(DEFAULT_TARGET).unwrap());
+        let toml = t_cargo(
+            "sample",
+            profile(DEFAULT_TARGET).unwrap(),
+            &HtlPin::default(),
+        );
         assert!(!toml.contains("[lib]"), "{toml}");
         assert!(toml.contains("anyhow = \"1\"\n"), "{toml}");
+        // The default pin is a plain requirement, so it takes the short form and the
+        // `anyhow` beside it is unchanged by the pin being a table in the other tests.
+        assert!(
+            toml.contains(&format!("htl = \"{DEFAULT_HTL}\"\n")),
+            "{toml}"
+        );
 
-        let toml = t_cargo("sample", profile(BuildTarget::Cdylib).unwrap());
+        let toml = t_cargo(
+            "sample",
+            profile(BuildTarget::Cdylib).unwrap(),
+            &HtlPin::default(),
+        );
         assert!(
             toml.contains("[lib]\ncrate-type = [\"rlib\", \"cdylib\", \"staticlib\"]\n"),
             "{toml}"

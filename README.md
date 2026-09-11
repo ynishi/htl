@@ -37,7 +37,7 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 
 | command | what it does |
 |---|---|
-| `htl new <name>` / `htl init [dir]` | scaffold: `mlua-pkg.toml`, `src/<mod>/init.tl`, `src/main.tl`, `tests/`, README (`--lib` for no entry script; `--target <name>` for what will run the output, `--embed` being the shorthand for `--target bin`) |
+| `htl new <name>` / `htl init [dir]` | scaffold: `mlua-pkg.toml`, `src/<mod>/init.tl`, `src/main.tl`, `tests/`, README (`--lib` for no entry script; `--target <name>` for what will run the output, `--embed` being the shorthand for `--target bin`; `--htl <req>` for which htl the project depends on) |
 | `htl check [paths] [--strict] [--lint rule=level] [--no-cache] [--cache-mode per-module\|whole-run] [--explain-cache]` | type-check; htl lints as `lint:`, advisory at their default level and fatal at `deny` (`--strict` promotes every `warn` to `deny`); a module reached through `require` (an installed dep, a `[check] paths` dir) is checked with the file and its type errors are errors too, once per run, with the file that required it; what has not changed is replayed from `.htl/` (see Caching) |
 | `htl run <file.tl \| app.hb> [args]` | check then execute; `require` of a `.tl` with type errors fails |
 | `htl test [paths] [--filter s] [--lib mod] [--coverage] [--lcov file] [--junit file] [--no-cache]` | `*_test.tl` and `tests/**/*.tl`, one isolated state per file; checking is replayed from `.htl/`, the run never is (see Caching) |
@@ -1654,6 +1654,28 @@ them in silence.
 
 `[build] target` in `htl.toml` is the key that records what runs the output, read by every
 command that loads the file (absent means `hb`); `htl new` does not write it yet.
+
+#### Which htl the project depends on (`--htl <req | main | path:<checkout>>`)
+
+A target that writes Rust writes a `Cargo.toml`, and `--htl` is what that manifest pins.
+Without it a project pins the newest release the scaffold supports — `0.4` today — which is
+data in the scaffold rather than the version of the `htl` you happen to have installed:
+the two move at different moments, and this one moves when a release that understands
+everything the scaffold writes is on crates.io. A release the scaffold has not been asked
+about is refused, with the ones it has, before the directory is created.
+
+`--htl main` pins the repository's `main` branch and `--htl path:<checkout>` a clone of it
+(the checkout's *root* — the dependency written is the `crates/htl` inside it). Both exist
+for dogfooding an unreleased htl, and they replace adding a `[patch.crates-io]` section by
+hand afterwards; the C ABI target's `features = ["ffi"]` travels onto whichever form the
+pin takes.
+
+**A scaffold writes only what the htl it pins can read.** `htl.toml` is parsed inside
+`include_tl!` by the pinned crate, and unknown keys there are an error rather than
+something ignored — so a key this repository has added and no release carries yet is not
+written into a project pinned at a release that lacks it; under `main` or a checkout it
+can be. `just e2e-scaffold-unpatched` is that rule as a gate: it scaffolds with the default
+pin and builds against crates.io with nothing patched.
 
 #### The bin target (`--target bin`)
 

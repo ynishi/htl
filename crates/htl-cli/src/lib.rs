@@ -354,6 +354,10 @@ Examples:
   htl new hello --embed            the same, plus a Rust host (--target bin)
   htl new hello --target cdylib --lib
                                    a library behind a C ABI, for a caller that is not Rust
+  htl new hello --embed --htl main
+                                   built against the unreleased htl (a git pin on main)
+  htl new hello --embed --htl path:../htl
+                                   built against a local checkout of this repository
 
 Build targets: https://github.com/ynishi/htl#build-targets---target-name
 The cdylib target: https://github.com/ynishi/htl#the-cdylib-target---target-cdylib
@@ -371,6 +375,10 @@ The cdylib target: https://github.com/ynishi/htl#the-cdylib-target---target-cdyl
         /// script, a thin src/main.rs
         #[arg(long, value_name = "NAME", value_parser = clap::builder::PossibleValuesParser::new(scaffold::target_names()))]
         target: Option<String>,
+        /// The htl the project depends on: a supported release (0.4), `main`, or
+        /// `path:<checkout>`
+        #[arg(long, value_name = "REQ", default_value = scaffold::DEFAULT_HTL)]
+        htl: String,
     },
     /// Fill in the scaffold files that are missing in an existing directory
     Init {
@@ -383,6 +391,10 @@ The cdylib target: https://github.com/ynishi/htl#the-cdylib-target---target-cdyl
         /// Fill in this target's files, and report the ones that were already there
         #[arg(long, value_name = "NAME", value_parser = clap::builder::PossibleValuesParser::new(scaffold::target_names()))]
         target: Option<String>,
+        /// The htl the project depends on: a supported release (0.4), `main`, or
+        /// `path:<checkout>`
+        #[arg(long, value_name = "REQ", default_value = scaffold::DEFAULT_HTL)]
+        htl: String,
     },
     /// Package management at the nearest `mlua-pkg.toml` project root: install / add /
     /// update / clean / patch, through mlua-pkg's library rather than its binary
@@ -682,13 +694,15 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
             lib,
             embed,
             target,
-        } => cmd_new(&name, lib, embed, target.as_deref()),
+            htl,
+        } => cmd_new(&name, lib, embed, target.as_deref(), &htl),
         Cmd::Init {
             dir,
             lib,
             embed,
             target,
-        } => cmd_init(dir.as_deref(), lib, embed, target.as_deref()),
+            htl,
+        } => cmd_init(dir.as_deref(), lib, embed, target.as_deref(), &htl),
         Cmd::Gen { file, out } => cmd_gen(&file, out.as_deref()),
         Cmd::Run { file, args } => cmd_run(&file, &args),
         Cmd::Fix {
@@ -991,7 +1005,13 @@ fn report_scaffold(dir: &Path, written: &[PathBuf], kept: &[PathBuf]) {
     }
 }
 
-fn cmd_new(name: &str, lib: bool, embed: bool, target: Option<&str>) -> Result<ExitCode> {
+fn cmd_new(
+    name: &str,
+    lib: bool,
+    embed: bool,
+    target: Option<&str>,
+    htl: &str,
+) -> Result<ExitCode> {
     let dir = PathBuf::from(name);
     let pkg_name = dir
         .file_name()
@@ -999,15 +1019,28 @@ fn cmd_new(name: &str, lib: bool, embed: bool, target: Option<&str>) -> Result<E
         .ok_or_else(|| anyhow::anyhow!("invalid project name: {name}"))?
         .to_string();
     // Before the directory is touched: an unknown target, or one that disagrees with
-    // --lib, fails here and leaves nothing behind.
+    // --lib, fails here and leaves nothing behind. So does an htl this scaffold does not
+    // write for — the pin decides what goes into the files, so it is settled first too.
     let target = scaffold::resolve_target(target, embed, lib)?;
-    let done = scaffold::scaffold(&dir, &pkg_name, &scaffold::Options { lib, target }, true)?;
+    let htl = scaffold::HtlPin::parse(htl)?;
+    let done = scaffold::scaffold(
+        &dir,
+        &pkg_name,
+        &scaffold::Options { lib, target, htl },
+        true,
+    )?;
     report_scaffold(&dir, &done.written, &[]);
     eprintln!("next: cd {} && htl test", dir.display());
     Ok(ExitCode::SUCCESS)
 }
 
-fn cmd_init(dir: Option<&Path>, lib: bool, embed: bool, target: Option<&str>) -> Result<ExitCode> {
+fn cmd_init(
+    dir: Option<&Path>,
+    lib: bool,
+    embed: bool,
+    target: Option<&str>,
+    htl: &str,
+) -> Result<ExitCode> {
     let dir = match dir {
         Some(d) => d.to_path_buf(),
         None => std::env::current_dir()?,
@@ -1020,7 +1053,8 @@ fn cmd_init(dir: Option<&Path>, lib: bool, embed: bool, target: Option<&str>) ->
         .to_string();
     let asked_for_a_target = target.is_some() || embed;
     let target = scaffold::resolve_target(target, embed, lib)?;
-    let done = scaffold::scaffold(&dir, &name, &scaffold::Options { lib, target }, false)?;
+    let htl = scaffold::HtlPin::parse(htl)?;
+    let done = scaffold::scaffold(&dir, &name, &scaffold::Options { lib, target, htl }, false)?;
     // A target was named: say what it would have written and found already there. Without
     // one the old one-liner stands, so a plain re-run does not list the whole tree.
     let kept: &[PathBuf] = if asked_for_a_target { &done.kept } else { &[] };

@@ -6,7 +6,7 @@
 # public, a publish is yanked and never replaced — and a name that says *when* is the one
 # thing a person can act on without reading the recipe. The parts they are assembled from
 # stay runnable on their own for when you already know which answer you want: `fmt`,
-# `check`, `build`, `e2e`, `e2e-scaffold-packaged`, `bench`.
+# `check`, `build`, `e2e`, `e2e-scaffold-packaged`, `e2e-scaffold-unpatched`, `bench`.
 #
 # These wrap what CONTRIBUTING.md already asks for, so that "did I run everything?" has one
 # answer instead of four commands to remember in the right order.
@@ -40,8 +40,8 @@ pre-push: check build e2e
 # or doc does not stop it, because neither would have reached a tarball either way. Running
 # it after everything cheaper means its minute is spent on a tree that has already answered
 # every question answerable without packaging.
-# Everything before a publish: `pre-push`, then the release gate on the four tarballs.
-pre-publish: pre-push e2e-scaffold-packaged
+# Everything before a publish: `pre-push`, the release gate on the four tarballs, then the scaffold built against the published htl.
+pre-publish: pre-push e2e-scaffold-packaged e2e-scaffold-unpatched
 
 # Format in place.
 fmt:
@@ -202,6 +202,69 @@ e2e-scaffold-packaged:
     HTL_PATCH_CORE="$dir/htl-core-$ver" \
     HTL_PATCH_MACROS="$dir/htl-macros-$ver" \
       cargo test -p htl-cli -p e2e
+
+# What every other gate here cannot see: a scaffold built against the htl that is *on
+# crates.io*. `e2e` patches each project's pin at `crates/htl`, and `e2e-scaffold-packaged`
+# patches it at the extracted tarballs — both deliberately, because each is asking about
+# code that is not published yet. The consequence is that neither of them has ever compiled
+# the manifest a user gets, and the difference between the two is the whole of what a user
+# meets first: `htl new`, then `cargo build`, with nothing redirected.
+#
+# It goes red for two reasons, and both are worth a minute.
+#
+# The scaffold wrote something the pinned release does not understand. `htl.toml` is parsed
+# inside `include_tl!` by the pinned crate, whose `HtlConfig` is `deny_unknown_fields`, so a
+# key this workspace has and no release carries is fatal there and invisible everywhere
+# else. #197 is the instance: `[build] target` landed in `htl-core` and the scaffold could
+# have started writing it a release early, exactly as `[toolchain]` once did — every project
+# `htl new` wrote in between failed at its first `cargo build`, and nothing in this
+# repository said so. This is the gate that would have.
+#
+# Or `scaffold::DEFAULT_HTL` was not raised after a release, and projects are still pinning
+# an htl older than the keys the scaffold now writes. That is the same failure read from the
+# other end, and raising the constant is what fixes it.
+#
+# It needs the network: three projects resolve and download `htl` from crates.io. That is
+# why it is not in `pre-push`, which is otherwise offline, and why CI runs it in the e2e job
+# beside the other two that reach out.
+# A default-pin scaffold, built against the published htl with nothing patched.
+e2e-scaffold-unpatched:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="$(pwd)"
+    # The same shape as the other scaffold gates use, and a directory of its own: these
+    # projects resolve `htl` from the registry, so their graph is not the one `e2e-scaffold`
+    # holds and sharing it would rebuild both halves on every switch. mlua is compiled once
+    # for the three below.
+    target="${CARGO_TARGET_DIR:-$root/target}/e2e-scaffold-unpatched"
+    dir="$(mktemp -d)"
+    trap 'rm -rf "$dir"' EXIT
+    # `cargo run` rather than a path assembled out of `target/debug`: cargo knows where it
+    # just put the binary, and a guess here is wrong under a `[build] target-dir` in
+    # .cargo/config.toml and under any `--target` — it would name a file that is missing,
+    # or worse, a stale one from an earlier layout.
+    cargo run -q -p htl-cli --bin htl -- new "$dir/bin-sample" --target bin
+    cargo run -q -p htl-cli --bin htl -- new "$dir/lib-sample" --target bin --lib
+    cargo run -q -p htl-cli --bin htl -- new "$dir/cdylib-sample" --target cdylib --lib
+    for project in bin-sample lib-sample cdylib-sample; do
+      manifest="$(<"$dir/$project/Cargo.toml")"
+      # The `unpatched_pin` invariant from e2e/tests/scaffold_targets.rs, in the shell: a
+      # released htl to build against, and nothing redirecting it. Two `if`s over bash's own
+      # string matching rather than `! grep …`, because `set -e` exempts a `!`-inverted
+      # command — which is how the gate this pair descends from reported nothing however the
+      # manifest looked, and it would have failed in the direction that looks like success.
+      if [[ "$manifest" != *$'\nhtl = '* ]]; then
+        echo "$dir/$project/Cargo.toml: names no htl to build against" >&2
+        exit 1
+      fi
+      if [[ "$manifest" == *patch.crates-io* ]]; then
+        echo "$dir/$project/Cargo.toml: redirects its own pin, so this is not the manifest a user gets" >&2
+        exit 1
+      fi
+      # No `--config patch.crates-io…`, which is the entire point: what resolves here is
+      # what crates.io has.
+      (cd "$dir/$project" && cargo build --target-dir "$target")
+    done
 
 # Every benchmark: the figures in the README come from these. Ten samples each; a few minutes.
 bench:
