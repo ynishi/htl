@@ -719,8 +719,10 @@ fn t_types_readme() -> String {
 /// `[build] target` is the first key that goes through that decision: it is written under
 /// `main`, under a checkout, and under any release from 0.5 on, and not under `0.4`, which
 /// is why the default-pin snapshots do not carry it. `htl init --target <name>` on a project
-/// that already has an `htl.toml` keeps that file and therefore does not add the key; saying
-/// so is `htl init --check`'s job (#194), not the scaffold's.
+/// that already has an `htl.toml` keeps that file and therefore does not add the key; a
+/// project that predates the key adds the `[build]` section by hand, as the README's
+/// `htl.toml` sample shows it. (#194 had sketched an `htl init --check` that would have said
+/// so; #201 closed #194 without it, so nothing in the CLI reports the key as missing.)
 fn t_htl_toml(target: Option<BuildTarget>, htl: &HtlPin) -> String {
     let mut s = String::from(
         "# htl project settings (htl check / htl test / htl fmt / include_tl! all read this).\n\
