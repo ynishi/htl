@@ -150,6 +150,7 @@ impl From<CacheModeArg> for cache::Mode {
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use htl::BuildTarget;
 use htl::Htl;
 use htl::bundle::Bundle;
 // The project layer: which files a check walks, what it replays from the run cache and
@@ -437,6 +438,9 @@ The cdylib target: https://github.com/ynishi/htl#the-cdylib-target---target-cdyl
         args: Vec<String>,
     },
     /// Compile a directory of .tl into a stripped-bytecode bundle
+    ///
+    /// A bundle is the `hb` target, so this refuses a project whose `[build] target` is
+    /// another one — a `bin` or a `cdylib` is built with `cargo build`.
     ///
     /// README, "Bundles": https://github.com/ynishi/htl#bundles-htl-build
     #[command(after_long_help = "\
@@ -2486,6 +2490,19 @@ fn cmd_build(
         h.apply_config(root, cfg)?;
         opts.extra.extend(cfg.build.extra.iter().cloned());
         opts.host.extend(cfg.build.host.iter().cloned());
+        // The one thing `[build] target` changes: this command produces the `hb` target and
+        // nothing else, so a project that records another is told which command does build
+        // it rather than handed a bundle nothing in it was going to load. Here rather than
+        // further down because both forms of `htl build` pass through — the directory form
+        // returns a few lines below — and because nothing has been written yet.
+        if let Some(t) = cfg.build.target.filter(|t| *t != BuildTarget::Hb) {
+            eprintln!(
+                "htl build: this project's target is `{}` — what runs its output is {} — and `htl build` writes a `.hb` bundle, which is the `hb` target. Build it with `cargo build`; to bundle its scripts anyway, drop `[build] target` from htl.toml.",
+                t.name(),
+                t.runs_it()
+            );
+            return Ok(ExitCode::FAILURE);
+        }
     }
     if entry.is_dir() {
         if cache_flags.explain {

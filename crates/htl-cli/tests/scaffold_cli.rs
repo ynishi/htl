@@ -1,7 +1,8 @@
 //! `htl new --embed` / `--target <name>` / `--htl <req>` through the real binary: what the
 //! Rust host it writes declares and does, what each pin puts in the manifest, how a target
 //! or a release that does not exist — or a target that does not fit `--lib` — is refused,
-//! and the `--format` help of the commands whose text form is a report.
+//! what `htl build` does with the `[build] target` the scaffold recorded, and the
+//! `--format` help of the commands whose text form is a report.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -152,6 +153,68 @@ fn new_records_the_target_when_the_pin_reads_it() {
     // This binary's own config reads the key it just wrote.
     let (ok, _, stderr) = htl(&["check", "."], &root.join("b"));
     assert!(ok, "htl check on the project with the key:\n{stderr}");
+}
+
+/// The other end of the key the test above writes: `htl build` reads it. A `.hb` bundle is
+/// the `hb` target, so a project that recorded another one is told which target it is and
+/// which command builds it, and no bundle is written — the record is a decision rather
+/// than a note the project keeps about itself.
+#[test]
+fn build_refuses_a_project_whose_target_is_not_hb() {
+    let root = scratch("build-not-hb");
+    // Only a pin that reads the key makes the scaffold write it, so the refusal below is
+    // reached through what `htl new` produced rather than through a hand-written file.
+    let (ok, _, stderr) = htl(&["new", "b", "--target", "bin", "--htl", "main"], &root);
+    assert!(ok, "{stderr}");
+    let dir = root.join("b");
+    let config = std::fs::read_to_string(dir.join("htl.toml")).unwrap();
+    assert!(config.contains("target = \"bin\""), "{config}");
+
+    let (ok, _, stderr) = htl(&["build", "src/main.tl", "-o", "app.hb"], &dir);
+    assert!(!ok, "{stderr}");
+    assert!(stderr.contains("target is `bin`"), "{stderr}");
+    assert!(
+        stderr.contains("the OS, as a binary"),
+        "who runs that output:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("cargo build"),
+        "and what builds it:\n{stderr}"
+    );
+    assert!(!dir.join("app.hb").exists(), "{stderr}");
+}
+
+/// The default project is the `hb` target, whether it says so or not: `htl new` records no
+/// key, and a project that records `hb` by hand gets the same bundle. Both halves matter —
+/// the refusal above must not be what every build does.
+#[test]
+fn build_bundles_an_hb_project() {
+    let root = scratch("build-hb");
+    let (ok, _, stderr) = htl(&["new", "a"], &root);
+    assert!(ok, "{stderr}");
+    let dir = root.join("a");
+    assert!(
+        !std::fs::read_to_string(dir.join("htl.toml"))
+            .unwrap()
+            .contains("target ="),
+        "the default project records nothing"
+    );
+
+    let (ok, _, stderr) = htl(&["build", "src/main.tl", "-o", "app.hb"], &dir);
+    assert!(ok, "{stderr}");
+    assert!(dir.join("app.hb").exists(), "{stderr}");
+
+    // The same project, now saying what it already was.
+    std::fs::remove_file(dir.join("app.hb")).unwrap();
+    let config = std::fs::read_to_string(dir.join("htl.toml")).unwrap();
+    std::fs::write(
+        dir.join("htl.toml"),
+        format!("{config}\n[build]\ntarget = \"hb\"\n"),
+    )
+    .unwrap();
+    let (ok, _, stderr) = htl(&["build", "src/main.tl", "-o", "app.hb"], &dir);
+    assert!(ok, "an explicit `hb` builds too:\n{stderr}");
+    assert!(dir.join("app.hb").exists(), "{stderr}");
 }
 
 /// The checker runs inside the proc macros, which the dev profile would otherwise build

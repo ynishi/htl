@@ -282,6 +282,7 @@ pub struct BuildConfig {
     /// plain `htl build` produces and what every project without Rust in it is. Written by
     /// `htl new --target <name>` when the project's htl pin reads this key (see
     /// `HtlPin::knows_build_target` in `htl-cli`), read by every command that loads the file.
+    /// `htl build` refuses a project whose target is not `hb`.
     #[serde(default)]
     pub target: Option<BuildTarget>,
 }
