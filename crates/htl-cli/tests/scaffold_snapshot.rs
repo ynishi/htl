@@ -215,5 +215,5 @@ fn init_target_fills_in_the_rust_side_of_a_plain_project() {
     let dir = root.join("sample");
     htl(&["new", "sample"], &root);
     htl(&["init", "--target", "rust"], &dir);
-    assert_tree("init-host", &dir);
+    assert_tree("init-target", &dir);
 }

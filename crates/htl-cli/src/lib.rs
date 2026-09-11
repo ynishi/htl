@@ -370,9 +370,6 @@ The C ABI target: https://github.com/ynishi/htl#the-c-abi-target---target-ffi
         /// script, a thin src/main.rs
         #[arg(long, value_name = "NAME", value_parser = clap::builder::PossibleValuesParser::new(scaffold::target_names()))]
         target: Option<String>,
-        /// Renamed to --target in 0.5.0-dev; see `renamed_host` below.
-        #[arg(long = "host", value_name = "NAME", hide = true, value_parser = renamed_host_parser())]
-        renamed_host: Option<String>,
     },
     /// Fill in the scaffold files that are missing in an existing directory
     Init {
@@ -385,9 +382,6 @@ The C ABI target: https://github.com/ynishi/htl#the-c-abi-target---target-ffi
         /// Fill in this target's files, and report the ones that were already there
         #[arg(long, value_name = "NAME", value_parser = clap::builder::PossibleValuesParser::new(scaffold::target_names()))]
         target: Option<String>,
-        /// Renamed to --target; see `renamed_host` on `New`.
-        #[arg(long = "host", value_name = "NAME", hide = true, value_parser = renamed_host_parser())]
-        renamed_host: Option<String>,
     },
     /// Package management at the nearest `mlua-pkg.toml` project root: install / add /
     /// update / clean / patch, through mlua-pkg's library rather than its binary
@@ -539,28 +533,6 @@ runs, and the declarations behind it come from the binary rather than the projec
     },
 }
 
-/// The parser behind the hidden `--host` that `htl new` / `htl init` used to take.
-///
-/// **Remove this, and the two `renamed_host` fields it is attached to, in 0.5.0.** It is
-/// `hide = true`, so until then it costs nothing in `--help`; what it buys is the one
-/// release of muscle memory that 0.4.0 shipped `--host` for.
-///
-/// The flag does not work — that is the point, since the whole of #189 is that *host* on
-/// `htl new` meant the wrong thing. What it buys is the diagnostic. Deleting the argument
-/// outright is not neutral: clap's suggester keeps candidates at `strsim::jaro > 0.7` and
-/// `jaro("host", "target")` is about 0.47, so it would offer nothing, and because
-/// `htl new` has a positional it would print `tip: to pass '--host' as a value, use
-/// '-- --host'` — advice for naming a project `--host`. `UnknownArgumentValueParser` is
-/// clap's own mechanism for exactly this (cargo uses it for its removed flags): the parse
-/// still fails, the tip names `--target`, and the `--` tip is suppressed.
-///
-/// The second line is the part a rename alone would not say: `--host` is still a real flag
-/// on `htl build`, where it keeps its own meaning.
-fn renamed_host_parser() -> clap::builder::UnknownArgumentValueParser {
-    clap::builder::UnknownArgumentValueParser::suggest_arg("--target")
-        .and_suggest("on `htl build`, `--host` still names the modules the host provides")
-}
-
 /// The command line as clap holds it, before any argument is parsed.
 ///
 /// The help is documentation, and the tests that keep it from rotting read it from here
@@ -704,21 +676,17 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
             } => cmd_cache_status(path.as_deref(), format == Format::Json, entries),
         },
         Cmd::Dts { dir } => cmd_dts(dir.as_deref()),
-        // `renamed_host` never carries a value: its parser fails the parse before this
-        // point (see `renamed_host_parser`). It exists so that clap knows the flag.
         Cmd::New {
             name,
             lib,
             embed,
             target,
-            renamed_host: _,
         } => cmd_new(&name, lib, embed, target.as_deref()),
         Cmd::Init {
             dir,
             lib,
             embed,
             target,
-            renamed_host: _,
         } => cmd_init(dir.as_deref(), lib, embed, target.as_deref()),
         Cmd::Gen { file, out } => cmd_gen(&file, out.as_deref()),
         Cmd::Run { file, args } => cmd_run(&file, &args),

@@ -1636,14 +1636,10 @@ is the only thing the entries in the registry differ about:
 | `rust` | the OS, as a binary | a binary (library + a six-line `main.rs`) | the user's crate |
 | `ffi` | a C / Python / Unity caller | `cdylib` + `staticlib` + a header | the user's crate |
 
-*Host* is a different word and keeps its own meaning: the Rust side that embeds the Lua
-state. That is what `#[host_module]` writes, what `src/host.d.tl` declares, and what
-`[build] host` names the modules of. A project can have a host and no target (`htl build`
-alone, with the host that loads the bundle living in another crate), so the two are
-separate questions rather than two words for one. The definition lives next to the
-registry, in `TargetProfile`'s doc comment in
-[`crates/htl-cli/src/scaffold.rs`](crates/htl-cli/src/scaffold.rs); this table is the same
-thing said once for a reader who is not in the source.
+*Host* is the other axis: the Rust side that embeds the Lua state, what `[build] host` and
+`htl build --host` name the modules of. Both words are defined next to the registry, in
+`TargetProfile`'s doc comment in
+[`crates/htl-cli/src/scaffold.rs`](crates/htl-cli/src/scaffold.rs).
 
 `--target` names an entry in that registry rather than adding a flag per kind: `rust` and
 `ffi` are the two today, and the flag reports the rest as they arrive. A name that is not

@@ -1,7 +1,6 @@
 //! `htl new --embed` / `--target <name>` through the real binary: what the Rust host it
 //! writes declares and does, how a target that does not exist or does not fit `--lib` is
-//! refused, how the flag's old spelling is answered, and the `--format` help of the
-//! commands whose text form is a report.
+//! refused, and the `--format` help of the commands whose text form is a report.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -193,9 +192,9 @@ fn the_ffi_scaffold_is_a_c_library_with_the_export_attribute() {
 }
 
 /// `--target` is one line of `--help` and the registry fills it, so a target that exists
-/// is a target the flag offers. The old spelling is on neither line: it is a hidden
-/// argument that exists only to be refused, and a hidden argument that showed up in
-/// `--help` would put the collision #189 removed back on the page.
+/// is a target the flag offers. `--host` is on neither page: it is `htl build`'s flag, where
+/// it names the modules the host provides — the other meaning of the word. The two senses
+/// do not share a help page, which is the collision #189 removed.
 #[test]
 fn target_help_lists_every_registered_target_and_never_the_old_flag() {
     let root = scratch("target-help");
@@ -208,37 +207,6 @@ fn target_help_lists_every_registered_target_and_never_the_old_flag() {
         );
         assert!(!stdout.contains("--host"), "{cmd:?}:\n{stdout}");
     }
-}
-
-/// `--host` on `htl new` / `htl init` was 0.4.0's spelling of this flag and does not work
-/// any more, but the refusal names the flag that replaced it rather than leaving the
-/// reader to guess. It has to be said explicitly: clap's own suggester scores
-/// `jaro("host", "target")` at about 0.47 against a 0.7 threshold, so with the argument
-/// simply deleted it would offer nothing — and, because `htl new` takes a positional, it
-/// would offer `tip: to pass '--host' as a value, use '-- --host'` instead, which is
-/// advice for naming a project `--host`.
-#[test]
-fn the_old_host_flag_is_refused_and_points_at_target() {
-    let root = scratch("renamed");
-    for cmd in [
-        &["new", "sample", "--host", "rust"][..],
-        &["init", "--host", "ffi"][..],
-    ] {
-        let (ok, _, stderr) = htl(cmd, &root);
-        assert!(!ok, "{cmd:?}:\n{stderr}");
-        assert!(
-            stderr.contains("a similar argument exists: '--target'"),
-            "{cmd:?}:\n{stderr}"
-        );
-        // The other half of the word, so a reader is not left thinking `--host` is gone.
-        assert!(
-            stderr.contains("on `htl build`, `--host` still names the modules the host provides"),
-            "{cmd:?}:\n{stderr}"
-        );
-        // The tip clap would have printed in its place, and the reason for the argument.
-        assert!(!stderr.contains("-- --host"), "{cmd:?}:\n{stderr}");
-    }
-    assert!(!root.join("sample").exists());
 }
 
 /// A typo in `--target` is answered with the names that would have worked. On the command
