@@ -52,6 +52,12 @@ jobs:
       # where they are not). The cheap cases come first inside it, so a break in one of
       # them still fails within a minute of the job starting.
       - run: just e2e
+      # The same scaffolds, built against the htl that is on crates.io instead of against
+      # this checkout. Every pin the step above compiles is patched at `crates/htl`, so a
+      # scaffold that writes a key only this workspace knows is green there and broken for
+      # the user who runs `htl new` and then `cargo build` — which has happened. It reaches
+      # the network, which this job already does.
+      - run: just e2e-scaffold-unpatched
       # The release gate, run on every commit rather than only at a release. It needs two
       # things this job already has: a clean worktree, because `cargo package` is told by
       # git which files reach the tarball and refuses to guess, and the compiled graph the

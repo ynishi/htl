@@ -12,11 +12,11 @@
 //! `HTL_UPDATE_SNAPSHOTS=1 cargo test -p htl-cli --test scaffold_snapshot` rewrites them;
 //! the rewritten files are the thing under review, so read the diff before committing it.
 //!
-//! Two lines are derived from this crate's version — the `htl` dependency in `Cargo.toml`
-//! and `[toolchain] htl` in `htl.toml`, which are the same derivation — so both are
-//! normalised to `htl = "{{htl}}"` here and the derivation keeps its own tests in
-//! `scaffold_cli.rs` and `toolchain_pin.rs`. Otherwise every release would rewrite these
-//! files.
+//! One line moves on its own schedule: the `htl` dependency in `Cargo.toml`, which is what
+//! `--htl` picks and what `scaffold::DEFAULT_HTL` picks when it is not given. It is
+//! normalised to `htl = "{{htl}}"` here so that raising the default release rewrites one
+//! constant rather than six snapshots; what the line actually says, under each pin, is
+//! `scaffold_cli.rs`'s. Every other byte of these trees is pinned exactly.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

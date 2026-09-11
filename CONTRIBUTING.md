@@ -76,6 +76,11 @@ writes one in a second, so not having one is not a reason to skip this: "not
 verified on a dogfood project" is not a report this repository accepts. Say what
 was run — the project, the command, the arguments — and what came out.
 
+A change that has to be built against, and not only run by, an unreleased htl is
+`htl new … --htl path:<checkout>`, which pins the scaffold at this working copy;
+`just e2e-scaffold-unpatched` is the other end of that, scaffolding with the
+default pin and building it against the published release.
+
 `HTL_PROFILE=1` prints per-phase timings; a performance change quotes them,
 before and after, and says which build produced them.
 

@@ -1,6 +1,7 @@
-//! `htl new --embed` / `--target <name>` through the real binary: what the Rust host it
-//! writes declares and does, how a target that does not exist or does not fit `--lib` is
-//! refused, and the `--format` help of the commands whose text form is a report.
+//! `htl new --embed` / `--target <name>` / `--htl <req>` through the real binary: what the
+//! Rust host it writes declares and does, what each pin puts in the manifest, how a target
+//! or a release that does not exist — or a target that does not fit `--lib` — is refused,
+//! and the `--format` help of the commands whose text form is a report.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -24,28 +25,86 @@ fn htl(args: &[&str], cwd: &Path) -> (bool, String, String) {
     )
 }
 
-/// `"0.2"` for a 0.2.x htl, `"1"` for 1.x: what cargo's caret rule reads as the
-/// running release and its compatible updates. Computed here a second time so the
-/// template cannot drift from the crate version without this failing.
-fn expected_dep() -> String {
-    let v = env!("CARGO_PKG_VERSION");
-    let mut it = v.split('.');
-    let major = it.next().unwrap();
-    if major == "0" {
-        format!("0.{}", it.next().unwrap())
-    } else {
-        major.to_string()
-    }
+/// The `htl` line of a project's manifest, so that a failure prints the line rather than
+/// the file.
+fn htl_line(manifest: &Path) -> String {
+    let cargo = std::fs::read_to_string(manifest).unwrap();
+    cargo
+        .lines()
+        .find(|l| l.starts_with("htl = "))
+        .unwrap_or_else(|| panic!("no htl dependency in:\n{cargo}"))
+        .to_string()
 }
 
+/// With no `--htl`, a project pins the release the scaffold defaults to — a number written
+/// down in `scaffold.rs`, not this crate's version. The two are equal today and the reason
+/// they are separate is that they move at different moments: this one moves when a release
+/// that understands what the scaffold writes is on crates.io.
 #[test]
-fn embed_scaffold_depends_on_the_htl_that_wrote_it() {
+fn new_pins_the_default_release() {
     let root = scratch("dep");
-    let (ok, _, stderr) = htl(&["new", "sample", "--embed"], &root);
+    let (ok, _, stderr) = htl(&["new", "a", "--target", "bin"], &root);
     assert!(ok, "{stderr}");
-    let cargo = std::fs::read_to_string(root.join("sample/Cargo.toml")).unwrap();
-    let want = format!("htl = \"{}\"", expected_dep());
-    assert!(cargo.contains(&want), "want {want} in:\n{cargo}");
+    assert_eq!(htl_line(&root.join("a/Cargo.toml")), "htl = \"0.4\"");
+}
+
+/// `--htl main` is the dogfood pin: the project builds against the repository rather than
+/// against anything published, and there is no version key left for cargo to reconcile
+/// with the branch.
+#[test]
+fn new_htl_main_writes_a_git_pin() {
+    let root = scratch("main-pin");
+    let (ok, _, stderr) = htl(&["new", "b", "--target", "bin", "--htl", "main"], &root);
+    assert!(ok, "{stderr}");
+    let line = htl_line(&root.join("b/Cargo.toml"));
+    assert!(line.contains("git = "), "{line}");
+    assert!(line.contains("branch = \"main\""), "{line}");
+    assert!(!line.contains("version ="), "{line}");
+}
+
+/// `--htl path:<dir>` names the checkout's *root*, and the dependency it writes is the
+/// `crates/htl` inside it — so what the user types is the directory they cloned, not a
+/// path into its layout.
+#[test]
+fn new_htl_path_writes_a_path_pin() {
+    let root = scratch("path-pin");
+    let (ok, _, stderr) = htl(
+        &["new", "c", "--target", "bin", "--htl", "path:../co"],
+        &root,
+    );
+    assert!(ok, "{stderr}");
+    assert_eq!(
+        htl_line(&root.join("c/Cargo.toml")),
+        "htl = { path = \"../co/crates/htl\" }"
+    );
+}
+
+/// A release the scaffold has no opinion about is refused with the ones it has, and — like
+/// an unknown target — before the directory exists, so a typo leaves nothing behind.
+#[test]
+fn an_unsupported_htl_is_refused_before_writing() {
+    let root = scratch("bad-pin");
+    let (ok, _, stderr) = htl(&["new", "d", "--htl", "0.3"], &root);
+    assert!(!ok, "{stderr}");
+    assert!(stderr.contains("unsupported htl `0.3`"), "{stderr}");
+    assert!(stderr.contains("0.4"), "the supported set:\n{stderr}");
+    assert!(!root.join("d").exists(), "{stderr}");
+}
+
+/// The C ABI target needs `features = ["ffi"]` on its `htl`, and the pin decides the rest
+/// of that line — so the two are assembled in one place rather than once per pin kind.
+/// This is the case that would break first if they were not.
+#[test]
+fn the_cdylib_pin_keeps_its_features_under_every_pin_kind() {
+    let root = scratch("cdylib-pin");
+    let (ok, _, stderr) = htl(
+        &["new", "e", "--lib", "--target", "cdylib", "--htl", "main"],
+        &root,
+    );
+    assert!(ok, "{stderr}");
+    let line = htl_line(&root.join("e/Cargo.toml"));
+    assert!(line.contains("branch = \"main\""), "{line}");
+    assert!(line.contains("features = [\"ffi\"]"), "{line}");
 }
 
 /// The checker runs inside the proc macros, which the dev profile would otherwise build
