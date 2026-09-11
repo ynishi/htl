@@ -248,8 +248,8 @@ enum Payload {
 }
 
 /// Check + generate `rel` (relative to `manifest_dir`). Search paths match the CLI:
-/// the file's own directory, the nearest `mlua-pkg.toml` project's vendored deps
-/// (and `target_dir` copies), and the bundled `htl.test` declarations.
+/// the file's own directory, the nearest `mlua-pkg.toml` project's installed deps at
+/// their entries (and `target_dir` copies), and the bundled `htl.test` declarations.
 /// A checker set up the way the CLI would be for `path`: `htl.toml` lints, the file's
 /// own dir, the crate's `src/`, the mlua-pkg project, `[check] paths`, the test lib.
 /// Never the process cwd (cargo's), which has nothing to do with the script.
@@ -1333,8 +1333,9 @@ mod tests {
         std::fs::write(path, text).unwrap();
     }
 
-    /// The macro must see the same tree as the CLI: a module vendored by mlua-pkg
-    /// (`.htl/modules/vendored/<name>/init.tl`) resolves from a script under the project.
+    /// The macro must see the same tree as the CLI: an installed dependency, reached at its
+    /// entry (`.htl/modules/entries/<name>/init.tl`), resolves from a script under the
+    /// project.
     #[test]
     fn include_resolves_vendored_dep_from_mlua_pkg_project() {
         let root = scratch("vendored");
@@ -1343,7 +1344,7 @@ mod tests {
             "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[deps]\n",
         );
         write(
-            &root.join(".htl/modules/vendored/mathx/init.tl"),
+            &root.join(".htl/modules/entries/mathx/init.tl"),
             "local record mathx\nend\nfunction mathx.twice(n: number): number\n   return n * 2\nend\nreturn mathx\n",
         );
         write(
@@ -1357,7 +1358,7 @@ mod tests {
         assert!(
             inc.deps
                 .iter()
-                .any(|d| d.ends_with("vendored/mathx/init.tl")),
+                .any(|d| d.ends_with("entries/mathx/init.tl")),
             "dep must be tracked for rebuilds: {:?}",
             inc.deps
         );
@@ -1402,7 +1403,7 @@ mod tests {
             "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[deps]\n",
         );
         write(
-            &root.join(".htl/modules/vendored/mathx/mathx.tl"),
+            &root.join(".htl/modules/entries/mathx/mathx.tl"),
             "local record mathx\nend\nfunction mathx.twice(n: number): number\n   return n * 2\nend\nreturn mathx\n",
         );
         write(
@@ -1633,7 +1634,7 @@ mod tests {
             "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[deps]\n",
         );
         write(
-            &root.join(".htl/modules/vendored/mathx/init.tl"),
+            &root.join(".htl/modules/entries/mathx/init.tl"),
             "local record mathx\nend\nfunction mathx.twice(n: number): number\n   local s: number = \"no\"\n   return n * 2 + s\nend\nreturn mathx\n",
         );
         write(
@@ -1653,7 +1654,7 @@ mod tests {
     fn include_without_project_does_not_see_vendored_dir() {
         let root = scratch("noproject");
         write(
-            &root.join(".htl/modules/vendored/mathx/init.tl"),
+            &root.join(".htl/modules/entries/mathx/init.tl"),
             "return {}\n",
         );
         write(

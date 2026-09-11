@@ -52,7 +52,7 @@ fn project(name: &str) -> PathBuf {
         "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[deps]\n",
     );
     write(
-        &root.join(".htl/modules/vendored/mathx/init.tl"),
+        &root.join(".htl/modules/entries/mathx/init.tl"),
         BROKEN_MATHX,
     );
     write(
@@ -143,7 +143,7 @@ fn a_replay_carries_the_dependency_error_and_an_edit_to_the_dependency_changes_i
 
     // Move the error: the requirers' entries list the dependency by hash, so they miss.
     write(
-        &root.join(".htl/modules/vendored/mathx/init.tl"),
+        &root.join(".htl/modules/entries/mathx/init.tl"),
         "local record mathx\nend\nfunction mathx.twice(n: number): number\n   return n * 2\nend\n\
          local bad: string = 1\nprint(bad)\nreturn mathx\n",
     );
@@ -159,7 +159,7 @@ fn a_replay_carries_the_dependency_error_and_an_edit_to_the_dependency_changes_i
 
     // Repaired: clean, and stays clean from the store.
     write(
-        &root.join(".htl/modules/vendored/mathx/init.tl"),
+        &root.join(".htl/modules/entries/mathx/init.tl"),
         FIXED_MATHX,
     );
     let (ok, _, stderr) = htl(&["check", "src"], &root);
@@ -228,7 +228,7 @@ fn a_project_file_outside_the_walk_is_reported_once_either_way() {
 #[test]
 fn htl_fix_reports_the_dependency_and_leaves_it_alone() {
     let root = project("fix");
-    let dep = root.join(".htl/modules/vendored/mathx/init.tl");
+    let dep = root.join(".htl/modules/entries/mathx/init.tl");
     let before = std::fs::read_to_string(&dep).unwrap();
     let (ok, _, stderr) = htl(&["fix", "src", "--allow-no-vcs"], &root);
     assert!(!ok, "a dependency's error remains: {stderr}");
@@ -255,7 +255,7 @@ fn a_dependencys_path_reads_against_the_directory_the_command_ran_in() {
     let (ok, _, stderr) = htl(&["check", "src"], &root);
     assert!(!ok, "{stderr}");
     assert!(
-        stderr.contains("error: .htl/modules/vendored/mathx/init.tl:4:"),
+        stderr.contains("error: .htl/modules/entries/mathx/init.tl:4:"),
         "the dependency reads from the project, as the README writes it: {stderr}"
     );
     assert!(
@@ -271,7 +271,7 @@ fn a_dependencys_path_reads_against_the_directory_the_command_ran_in() {
         .find(|d| d.get("required_by").is_some())
         .expect("the dependency's error");
     assert_eq!(
-        d["file"], ".htl/modules/vendored/mathx/init.tl",
+        d["file"], ".htl/modules/entries/mathx/init.tl",
         "json says the same as the text: {d}"
     );
     assert!(
@@ -283,7 +283,7 @@ fn a_dependencys_path_reads_against_the_directory_the_command_ran_in() {
     // time, because it is written against the directory rather than against the argument.
     let (_, _, stderr) = htl(&["check", "."], &root);
     assert!(
-        stderr.contains("error: .htl/modules/vendored/mathx/init.tl:4:"),
+        stderr.contains("error: .htl/modules/entries/mathx/init.tl:4:"),
         "{stderr}"
     );
 }

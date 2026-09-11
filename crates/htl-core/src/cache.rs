@@ -468,6 +468,11 @@ impl Module {
 ///
 /// `cfg` is the project's `htl.toml` with the directory it was found in, for the extra
 /// `[check] paths` it names.
+///
+/// In an `mlua-pkg.toml` project the directories its installed deps resolve from are
+/// listed too — the same ones `Htl::apply_project` puts on the path — so that `htl pkg
+/// install` bringing a dependency in, after an entry recorded that the name resolved
+/// nowhere, is seen as the change it is rather than replayed as `module not found`.
 pub fn search_dirs(
     file: &Path,
     root: &Path,
@@ -481,6 +486,7 @@ pub fn search_dirs(
     if let Some((r, c)) = cfg {
         out.extend(c.search_paths(r));
     }
+    out.extend(crate::dependency_dirs(root));
     out
 }
 

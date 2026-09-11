@@ -137,12 +137,12 @@ fn a_module_installed_under_htl_modules_names_the_dependency() {
         &root.join("mlua-pkg.toml"),
         "[package]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src\"\n",
     );
-    write(&root.join(".htl/modules/vendored/mq/init.d.tl"), DECL);
+    write(&root.join(".htl/modules/entries/mq/init.d.tl"), DECL);
     let (ok, out, err) = htl(&["resolve", "mq"], &root);
     assert!(ok, "{err}");
     assert_eq!(
-        row(&out, ".htl/modules/vendored/mq/init.d.tl"),
-        "1 .htl/modules/vendored/mq/init.d.tl declaration read (installed from mq)"
+        row(&out, ".htl/modules/entries/mq/init.d.tl"),
+        "1 .htl/modules/entries/mq/init.d.tl declaration read (installed from mq)"
     );
 }
 

@@ -386,11 +386,21 @@ pub struct Project {
     pub manifest: PathBuf,
     pub lockfile: PathBuf,
     pub pkgs_dir: PathBuf,
-    /// `pkgs_dir/vendored`: one entry per installed dep, pointing at what mlua-pkg
-    /// fetched. The name is mlua-pkg's own and describes its layout, not htl's — what is
-    /// in there is installed and regenerated, while a copy that is committed to the repo
-    /// is a `target_dir` dep below.
+    /// `pkgs_dir/vendored`: one link per installed dep, pointing at the **package root**
+    /// mlua-pkg fetched (or at the patched copy standing in for it). The name is
+    /// mlua-pkg's own and describes its layout, not htl's — what is in there is installed
+    /// and regenerated, while a copy that is committed to the repo is a `target_dir` dep
+    /// below. This is the root a dep publishes beside its code from (`types/`), and not
+    /// where `require` looks: that is [`entries`](Self::entries).
     pub vendored: PathBuf,
+    /// `pkgs_dir/entries`: one link per installed dep, pointing at the dep's `entry`
+    /// directory below the root — `../vendored/<name>/<entry>` — so `require("<name>.x")`
+    /// finds `<entry>/x.tl` under it. htl writes these from the lockfile
+    /// ([`Project::link_entries`]); mlua-pkg places the root and records the entry, and
+    /// applies it by rewriting the module name in its own `.lua` resolver, which a checker
+    /// resolving through `package.path` cannot do. A directory of links is the same fact in
+    /// the form a path can express, and the one directory the `.tl` side searches.
+    pub entries: PathBuf,
     /// Parent directories of `target_dir` deps (physically vendored copies declared in
     /// the manifest, e.g. `target_dir = "lua/lshape"` -> `<root>/lua`), so
     /// `require("lshape")` resolves to `<root>/lua/lshape/init.*` like a vendored dep.
@@ -469,10 +479,14 @@ pub const PATCHES_DIR: &str = "patches";
 ///
 /// What goes on *inside* is mlua-pkg's: [`mlua_pkg::PkgDir`] derives `cache/` and
 /// `vendored/` from the base, and this returns one so htl does not spell that layout out a
-/// second time.
+/// second time. The one directory htl adds beside them is [`ENTRIES_DIR`].
 pub fn pkgs_dir(root: &Path) -> mlua_pkg::PkgDir {
     mlua_pkg::PkgDir::new(root.join(".htl").join("modules"))
 }
+
+/// The directory under [`pkgs_dir`] that holds one link per installed dep at that dep's
+/// `entry` — where `require` looks. See [`Project::entries`].
+pub const ENTRIES_DIR: &str = "entries";
 
 impl Project {
     /// Walk up from `start` (a file or directory) looking for `mlua-pkg.toml`.
@@ -534,6 +548,7 @@ impl Project {
             manifest,
             lockfile: inner.lock_path().to_path_buf(),
             vendored: inner.pkg_dir().vendored(),
+            entries: inner.pkg_dir().base().join(ENTRIES_DIR),
             pkgs_dir: inner.pkg_dir().base().to_path_buf(),
             target_dirs,
             vendored_copies,
@@ -551,11 +566,72 @@ impl Project {
         self.lockfile.is_file()
     }
 
-    /// Resolver for `.tl` / `.d.tl` inside vendored deps (symlink-aware, like
-    /// `VendoredResolver`). Creates the vendored dir if it does not exist yet.
+    /// Resolver for `.tl` / `.d.tl` inside installed deps (symlink-aware, like
+    /// `VendoredResolver`), rooted at [`entries`](Self::entries) so a dep's `entry` is
+    /// applied. Writes any link the lockfile calls for that is not there yet, and creates
+    /// the directory if it does not exist.
     pub fn teal_resolver(&self) -> Result<TealResolver, InitError> {
-        let _ = std::fs::create_dir_all(&self.vendored);
-        TealResolver::new_symlink_aware(&self.vendored)
+        let _ = self.link_entries();
+        let _ = std::fs::create_dir_all(&self.entries);
+        TealResolver::new_symlink_aware(&self.entries)
+    }
+
+    /// Write `entries/<name>` → `../vendored/<name>/<entry>` for every package the lockfile
+    /// records, and remove a link there the lockfile no longer names.
+    ///
+    /// Idempotent and cheap: a link that already points where it should is left alone. It
+    /// runs after every install, and again from [`teal_resolver`](Self::teal_resolver) and
+    /// [`crate::Htl::apply_project`], so a project installed by an htl that did not write
+    /// these works after upgrading without a reinstall. Returns the names linked, in
+    /// lockfile order; no lockfile is no packages, not an error.
+    ///
+    /// The link is relative so that it follows `vendored/<name>` wherever install points
+    /// that — at the cache, or at a `patch_dir` copy — rather than pinning a revision of
+    /// its own. An entry of `"."` gets a link too, to the root: one layout, not two.
+    pub fn link_entries(&self) -> anyhow::Result<Vec<String>> {
+        if !self.installed() {
+            return Ok(Vec::new());
+        }
+        let lock = mlua_pkg::lockfile::Lockfile::read(&self.lockfile)?;
+        std::fs::create_dir_all(&self.entries)
+            .with_context(|| format!("creating {}", self.entries.display()))?;
+        let mut names = Vec::new();
+        for p in &lock.pkg {
+            let mut target = PathBuf::from("..").join("vendored").join(&p.name);
+            if !(p.entry.as_os_str().is_empty() || p.entry == Path::new(".")) {
+                target.push(&p.entry);
+            }
+            let link = self.entries.join(&p.name);
+            match std::fs::symlink_metadata(&link) {
+                Ok(m) if m.file_type().is_symlink() => {
+                    if std::fs::read_link(&link).ok().as_deref() == Some(target.as_path()) {
+                        names.push(p.name.clone());
+                        continue;
+                    }
+                    remove_link(&link)?;
+                }
+                Ok(_) => anyhow::bail!(
+                    "{} is not a link: htl writes that directory from the lockfile, and \
+                     something else put a file there",
+                    link.display()
+                ),
+                Err(_) => {}
+            }
+            make_link(&target, &link)?;
+            names.push(p.name.clone());
+        }
+        // A dependency dropped from the manifest leaves its link behind otherwise, and a
+        // `require` of it would then keep working until the cache was cleaned.
+        if let Ok(rd) = std::fs::read_dir(&self.entries) {
+            for e in rd.flatten() {
+                let is_link = e.file_type().map(|t| t.is_symlink()).unwrap_or(false);
+                let name = e.file_name().to_string_lossy().into_owned();
+                if is_link && !names.contains(&name) {
+                    remove_link(&e.path())?;
+                }
+            }
+        }
+        Ok(names)
     }
 
     /// mlua-pkg's own resolver for plain `.lua` inside vendored deps.
@@ -589,9 +665,9 @@ impl Project {
     /// Bring the declarations a dep publishes into the project's own `types/`.
     ///
     /// A dep that follows htl's own convention keeps its `.d.tl` under `types/` at its
-    /// package root, and that is outside the entry directory `vendored/<name>` points at —
-    /// so the checker never sees it, and the depending project writes the declaration
-    /// again by hand. Copying rather than widening the search path is what makes the
+    /// package root, and that is outside the entry directory `require` looks in
+    /// (`entries/<name>`) — so the checker never sees it, and the depending project writes
+    /// the declaration again by hand. Copying rather than widening the search path is what makes the
     /// result survive a fresh clone: [`pkgs_dir`] is machine-local and empty until someone
     /// installs, while `types/` is committed.
     ///
@@ -697,7 +773,10 @@ impl Project {
     /// dependency publishes are a separate step ([`Project::sync_types`]) because they are
     /// copied into the project rather than installed.
     pub fn install(&self) -> anyhow::Result<mlua_pkg::ops::InstallReport> {
-        Ok(mlua_pkg::ops::install(&self.config())?)
+        let report = mlua_pkg::ops::install(&self.config())?;
+        // The roots are placed and the lockfile written: now the links `require` reads.
+        self.link_entries()?;
+        Ok(report)
     }
 
     /// Write a dependency into the manifest. `install` is what fetches it.
@@ -745,6 +824,7 @@ impl Project {
         opts: mlua_pkg::ops::UpdateOpts,
     ) -> anyhow::Result<mlua_pkg::ops::UpdateReport> {
         let mut report = mlua_pkg::ops::update(&self.config(), opts)?;
+        self.link_entries()?;
         // mlua-pkg walks a map, so the same project reports its dependencies in a
         // different order on every run. A report that is read by a person, and diffed
         // against the last one, is sorted.
@@ -865,6 +945,24 @@ impl Project {
     fn package_root(&self, p: &mlua_pkg::lockfile::LockedPkg) -> Option<PathBuf> {
         std::fs::canonicalize(self.vendored.join(&p.name)).ok()
     }
+}
+
+/// A directory link at `link` pointing at `target`, as written (relative stays relative).
+fn make_link(target: &Path, link: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    let r = std::os::unix::fs::symlink(target, link);
+    #[cfg(windows)]
+    let r = std::os::windows::fs::symlink_dir(target, link);
+    r.with_context(|| format!("linking {} -> {}", link.display(), target.display()))
+}
+
+/// Remove a link, and only a link: the caller has checked what is there.
+fn remove_link(link: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    let r = std::fs::remove_file(link);
+    #[cfg(windows)]
+    let r = std::fs::remove_dir(link).or_else(|_| std::fs::remove_file(link));
+    r.with_context(|| format!("removing the link {}", link.display()))
 }
 
 /// Write one key onto `[deps.<name>]`, leaving the rest of the file as it was.
@@ -1110,11 +1208,15 @@ pub fn contract_resolvers(
 }
 
 impl crate::Htl {
-    /// Make the project's vendored deps visible to the Teal checker and to the
+    /// Make the project's installed deps visible to the Teal checker and to the
     /// prelude's strict searcher (`htl run` / `htl test` without a Registry).
+    ///
+    /// The directory on the path is [`Project::entries`], where each dep is reached at its
+    /// `entry`; the links are written first if the lockfile calls for any that are missing.
     pub fn apply_project(&self, p: &Project) -> anyhow::Result<()> {
-        let _ = std::fs::create_dir_all(&p.vendored);
-        self.add_path(&p.vendored)?;
+        p.link_entries()?;
+        let _ = std::fs::create_dir_all(&p.entries);
+        self.add_path(&p.entries)?;
         for d in &p.target_dirs {
             self.add_path(d)?;
         }

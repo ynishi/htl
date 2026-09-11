@@ -95,6 +95,80 @@ fn install_runs_without_mlua_pkg_on_path_and_says_what_it_did() {
     );
 }
 
+/// The dependency's module is at `src/mathx.tl`, so its entry is `src/` and the root
+/// `vendored/mathx` points at holds no `mathx.tl`. What `require("mathx")` reads is
+/// `entries/mathx`, the link at the entry — from the checker, the runner and the test
+/// runner alike. Before the link existed (htl 0.4.0) every one of them said `module not
+/// found`.
+#[test]
+fn an_installed_dependency_is_required_at_its_entry() {
+    let root = project("entry");
+    write(
+        &root.join("src/main.tl"),
+        "local mathx = require(\"mathx\")\nprint(mathx.twice(21))\n",
+    );
+    write(
+        &root.join("tests/mathx_test.tl"),
+        "local t = require(\"htl.test\")\nlocal mathx = require(\"mathx\")\n\
+         t.it(\"doubles\", function() t.expect(mathx.twice(2)):to_equal(4) end)\n",
+    );
+    let (ok, _, err) = htl(&["pkg", "install"], &root);
+    assert!(ok, "{err}");
+    let link = root.join(".htl/modules/entries/mathx");
+    assert_eq!(
+        std::fs::read_link(&link).unwrap(),
+        Path::new("../vendored/mathx/src"),
+        "relative, through the root link, at the entry"
+    );
+
+    let (ok, _, err) = htl(&["check", "."], &root);
+    assert!(ok, "{err}");
+    assert!(err.contains("0 error(s)"), "{err}");
+    let (ok, out, err) = htl(&["run", "src/main.tl"], &root);
+    assert!(ok, "{err}");
+    assert_eq!(out.trim(), "42");
+    let (ok, _, err) = htl(&["test"], &root);
+    assert!(ok, "{err}");
+    assert!(err.contains("1 passed, 0 failed"), "{err}");
+}
+
+/// A check before the install records that `mathx` resolved nowhere; the install has to be
+/// seen as the change it is, not replayed. The directory the dependency arrives in is one
+/// of the entry's probes for that reason.
+#[test]
+fn a_check_cached_before_the_install_is_not_replayed_after_it() {
+    let root = project("entry-cache");
+    write(
+        &root.join("src/main.tl"),
+        "local mathx = require(\"mathx\")\nprint(mathx.twice(21))\n",
+    );
+    let (ok, _, err) = htl(&["check", "."], &root);
+    assert!(!ok, "{err}");
+    assert!(err.contains("module not found: 'mathx'"), "{err}");
+    let (ok, _, err) = htl(&["pkg", "install"], &root);
+    assert!(ok, "{err}");
+    let (ok, _, err) = htl(&["check", "."], &root);
+    assert!(ok, "{err}");
+    assert!(err.contains("0 error(s)"), "{err}");
+}
+
+/// The links are htl's, written from the lockfile, so a project installed by an htl that
+/// did not write them gets them from the first command that reads the path — no reinstall.
+#[test]
+fn a_project_installed_without_entry_links_gets_them_on_the_next_check() {
+    let root = project("entry-upgrade");
+    write(
+        &root.join("src/main.tl"),
+        "local mathx = require(\"mathx\")\nprint(mathx.twice(21))\n",
+    );
+    let (ok, _, err) = htl(&["pkg", "install"], &root);
+    assert!(ok, "{err}");
+    std::fs::remove_dir_all(root.join(".htl/modules/entries")).unwrap();
+    let (ok, _, err) = htl(&["check", "."], &root);
+    assert!(ok, "{err}");
+    assert!(root.join(".htl/modules/entries/mathx").exists(), "{err}");
+}
+
 #[test]
 fn clean_reports_the_cache_it_swept() {
     let root = project("clean");

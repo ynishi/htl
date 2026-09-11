@@ -247,7 +247,9 @@ fn origin_of(path: &Path, dir: &Path, project: Option<&crate::pkg::Project>) -> 
     // A hand-laid `types/<lib>/` carries no note, and the path below `types/` is then the
     // module name rather than a package: nothing to attribute it to.
     let p = project?;
-    if let Some(name) = under(path, &p.vendored) {
+    // `entries/` is where `require` reads a dep; `vendored/` is the root beside it, and a
+    // path through either names the dependency the same way.
+    if let Some(name) = under(path, &p.entries).or_else(|| under(path, &p.vendored)) {
         return Some(Origin {
             kind: OriginKind::Dependency,
             name,
