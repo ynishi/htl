@@ -57,7 +57,7 @@ Module: `src/sample/init.tl` (`require("sample")` from `src/` and `tests/`).
 package through mlua-pkg: they get it as `require("sample")`. This project is a library with two boundaries:
 `src/lib.rs` holds the `#[host_module]` the *scripts* call and the `#[c_export]` block a
 *caller that is not written in Rust* calls. There is no binary — a C ABI library has no
-entry point of its own, which is why `--host ffi` implies `--lib`.
+entry point of its own, which is why `--target ffi` implies `--lib`.
 
 `src/host.d.tl` is generated from `#[host_module]` in `src/lib.rs`: `cargo build` writes it,
 and so does `htl dts` / `htl check` without building, so the Teal side always sees the
@@ -386,7 +386,7 @@ entry = "src/sample"
 //!   Python REPL. It writes one `extern "C"` wrapper per method and `include/sample.h`,
 //!   from the same breakdown, so a rename here moves the header with it.
 //!
-//! There is no binary: `--host ffi` is a library, and what a host loads is
+//! There is no binary: `--target ffi` is a library, and what a host loads is
 //! `target/debug/libsample.{so,dylib,dll}` (or `libsample.a` to link statically).
 //! `examples/c/` and `examples/python/` are two such hosts, each written the way its
 //! language has to be written to not leak or corrupt the strings it is handed.

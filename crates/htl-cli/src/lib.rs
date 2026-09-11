@@ -349,38 +349,45 @@ Examples:
     /// README, "Layout of a project": https://github.com/ynishi/htl#layout-of-a-project-htl-new
     #[command(after_long_help = "\
 Examples:
-  htl new hello                  src/main.tl, a module, tests/, mlua-pkg.toml
-  htl new hello --lib            a library: no entry script
-  htl new hello --embed          the same, plus a Rust host (--host rust)
-  htl new hello --host ffi --lib a library behind a C ABI, for a caller that is not Rust
+  htl new hello                    src/main.tl, a module, tests/, mlua-pkg.toml
+  htl new hello --lib              a library: no entry script
+  htl new hello --embed            the same, plus a Rust host (--target rust)
+  htl new hello --target ffi --lib a library behind a C ABI, for a caller that is not Rust
 
-The Rust host: https://github.com/ynishi/htl#the-rust-host---host-name
-The C ABI host: https://github.com/ynishi/htl#the-c-abi-host---host-ffi
+Targets: https://github.com/ynishi/htl#targets---target-name
+The C ABI target: https://github.com/ynishi/htl#the-c-abi-target---target-ffi
 ")]
     New {
         name: String,
         /// Library only (no src/main.tl)
         #[arg(long)]
         lib: bool,
-        /// Also emit a Rust host: shorthand for --host rust
+        /// Also emit a Rust host: shorthand for --target rust
         #[arg(long)]
         embed: bool,
-        /// Which Rust host to write: Cargo.toml + src/lib.rs (the #[host_module], the
-        /// embedded module, preload) and, when there is an entry script, a thin src/main.rs
-        #[arg(long, value_name = "NAME", value_parser = clap::builder::PossibleValuesParser::new(scaffold::host_names()))]
-        host: Option<String>,
+        /// What will run this project's output: a target writes Cargo.toml + src/lib.rs
+        /// (the #[host_module], the embedded module, preload) and, when there is an entry
+        /// script, a thin src/main.rs
+        #[arg(long, value_name = "NAME", value_parser = clap::builder::PossibleValuesParser::new(scaffold::target_names()))]
+        target: Option<String>,
+        /// Renamed to --target in 0.5.0-dev; see `renamed_host` below.
+        #[arg(long = "host", value_name = "NAME", hide = true, value_parser = renamed_host_parser())]
+        renamed_host: Option<String>,
     },
     /// Fill in the scaffold files that are missing in an existing directory
     Init {
         dir: Option<PathBuf>,
         #[arg(long)]
         lib: bool,
-        /// Shorthand for --host rust
+        /// Shorthand for --target rust
         #[arg(long)]
         embed: bool,
-        /// Fill in this host's files, and report the ones that were already there
-        #[arg(long, value_name = "NAME", value_parser = clap::builder::PossibleValuesParser::new(scaffold::host_names()))]
-        host: Option<String>,
+        /// Fill in this target's files, and report the ones that were already there
+        #[arg(long, value_name = "NAME", value_parser = clap::builder::PossibleValuesParser::new(scaffold::target_names()))]
+        target: Option<String>,
+        /// Renamed to --target; see `renamed_host` on `New`.
+        #[arg(long = "host", value_name = "NAME", hide = true, value_parser = renamed_host_parser())]
+        renamed_host: Option<String>,
     },
     /// Package management at the nearest `mlua-pkg.toml` project root: install / add /
     /// update / clean / patch, through mlua-pkg's library rather than its binary
@@ -532,6 +539,28 @@ runs, and the declarations behind it come from the binary rather than the projec
     },
 }
 
+/// The parser behind the hidden `--host` that `htl new` / `htl init` used to take.
+///
+/// **Remove this, and the two `renamed_host` fields it is attached to, in 0.5.0.** It is
+/// `hide = true`, so until then it costs nothing in `--help`; what it buys is the one
+/// release of muscle memory that 0.4.0 shipped `--host` for.
+///
+/// The flag does not work — that is the point, since the whole of #189 is that *host* on
+/// `htl new` meant the wrong thing. What it buys is the diagnostic. Deleting the argument
+/// outright is not neutral: clap's suggester keeps candidates at `strsim::jaro > 0.7` and
+/// `jaro("host", "target")` is about 0.47, so it would offer nothing, and because
+/// `htl new` has a positional it would print `tip: to pass '--host' as a value, use
+/// '-- --host'` — advice for naming a project `--host`. `UnknownArgumentValueParser` is
+/// clap's own mechanism for exactly this (cargo uses it for its removed flags): the parse
+/// still fails, the tip names `--target`, and the `--` tip is suppressed.
+///
+/// The second line is the part a rename alone would not say: `--host` is still a real flag
+/// on `htl build`, where it keeps its own meaning.
+fn renamed_host_parser() -> clap::builder::UnknownArgumentValueParser {
+    clap::builder::UnknownArgumentValueParser::suggest_arg("--target")
+        .and_suggest("on `htl build`, `--host` still names the modules the host provides")
+}
+
 /// The command line as clap holds it, before any argument is parsed.
 ///
 /// The help is documentation, and the tests that keep it from rotting read it from here
@@ -675,18 +704,22 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
             } => cmd_cache_status(path.as_deref(), format == Format::Json, entries),
         },
         Cmd::Dts { dir } => cmd_dts(dir.as_deref()),
+        // `renamed_host` never carries a value: its parser fails the parse before this
+        // point (see `renamed_host_parser`). It exists so that clap knows the flag.
         Cmd::New {
             name,
             lib,
             embed,
-            host,
-        } => cmd_new(&name, lib, embed, host.as_deref()),
+            target,
+            renamed_host: _,
+        } => cmd_new(&name, lib, embed, target.as_deref()),
         Cmd::Init {
             dir,
             lib,
             embed,
-            host,
-        } => cmd_init(dir.as_deref(), lib, embed, host.as_deref()),
+            target,
+            renamed_host: _,
+        } => cmd_init(dir.as_deref(), lib, embed, target.as_deref()),
         Cmd::Gen { file, out } => cmd_gen(&file, out.as_deref()),
         Cmd::Run { file, args } => cmd_run(&file, &args),
         Cmd::Fix {
@@ -962,9 +995,9 @@ fn apply_project(h: &Htl, start: &Path) -> Result<Option<htl::pkg::Project>> {
     Ok(Some(p))
 }
 
-/// What the run wrote, and — when a host was asked for by name — what it left alone. The
-/// kept list is what makes `htl init --host rust` on an older project say which of that
-/// host's files were already there instead of skipping them in silence.
+/// What the run wrote, and — when a target was asked for by name — what it left alone. The
+/// kept list is what makes `htl init --target rust` on an older project say which of that
+/// target's files were already there instead of skipping them in silence.
 fn report_scaffold(dir: &Path, written: &[PathBuf], kept: &[PathBuf]) {
     let rel = |p: &PathBuf| p.strip_prefix(dir).unwrap_or(p).display().to_string();
     for p in written {
@@ -989,23 +1022,23 @@ fn report_scaffold(dir: &Path, written: &[PathBuf], kept: &[PathBuf]) {
     }
 }
 
-fn cmd_new(name: &str, lib: bool, embed: bool, host: Option<&str>) -> Result<ExitCode> {
+fn cmd_new(name: &str, lib: bool, embed: bool, target: Option<&str>) -> Result<ExitCode> {
     let dir = PathBuf::from(name);
     let pkg_name = dir
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| anyhow::anyhow!("invalid project name: {name}"))?
         .to_string();
-    // Before the directory is touched: an unknown host, or one that disagrees with --lib,
-    // fails here and leaves nothing behind.
-    let host = scaffold::resolve_host(host, embed, lib)?;
-    let done = scaffold::scaffold(&dir, &pkg_name, &scaffold::Options { lib, host }, true)?;
+    // Before the directory is touched: an unknown target, or one that disagrees with
+    // --lib, fails here and leaves nothing behind.
+    let target = scaffold::resolve_target(target, embed, lib)?;
+    let done = scaffold::scaffold(&dir, &pkg_name, &scaffold::Options { lib, target }, true)?;
     report_scaffold(&dir, &done.written, &[]);
     eprintln!("next: cd {} && htl test", dir.display());
     Ok(ExitCode::SUCCESS)
 }
 
-fn cmd_init(dir: Option<&Path>, lib: bool, embed: bool, host: Option<&str>) -> Result<ExitCode> {
+fn cmd_init(dir: Option<&Path>, lib: bool, embed: bool, target: Option<&str>) -> Result<ExitCode> {
     let dir = match dir {
         Some(d) => d.to_path_buf(),
         None => std::env::current_dir()?,
@@ -1016,12 +1049,12 @@ fn cmd_init(dir: Option<&Path>, lib: bool, embed: bool, host: Option<&str>) -> R
         .and_then(|s| s.to_str())
         .ok_or_else(|| anyhow::anyhow!("cannot derive a project name from {}", abs.display()))?
         .to_string();
-    let asked_for_a_host = host.is_some() || embed;
-    let host = scaffold::resolve_host(host, embed, lib)?;
-    let done = scaffold::scaffold(&dir, &name, &scaffold::Options { lib, host }, false)?;
-    // A host was named: say what it would have written and found already there. Without
+    let asked_for_a_target = target.is_some() || embed;
+    let target = scaffold::resolve_target(target, embed, lib)?;
+    let done = scaffold::scaffold(&dir, &name, &scaffold::Options { lib, target }, false)?;
+    // A target was named: say what it would have written and found already there. Without
     // one the old one-liner stands, so a plain re-run does not list the whole tree.
-    let kept: &[PathBuf] = if asked_for_a_host { &done.kept } else { &[] };
+    let kept: &[PathBuf] = if asked_for_a_target { &done.kept } else { &[] };
     if done.written.is_empty() && kept.is_empty() {
         eprintln!("htl init: nothing to do, all scaffold files already exist");
     } else {

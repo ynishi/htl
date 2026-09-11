@@ -1,5 +1,5 @@
 # The end-to-end cases that are about a *generated* project rather than about this
-# workspace: `htl new` for each host `--host` offers, then cargo asked to build, test and
+# workspace: `htl new` for each target `--target` offers, then cargo asked to build, test and
 # run what it wrote.
 #
 # It is a workspace member so that `cargo build --workspace --all-targets` compiles it and
@@ -29,5 +29,5 @@ publish = false
 serde_json = "1"
 
 [[test]]
-name = "scaffold_hosts"
-path = "tests/scaffold_hosts.rs"
+name = "scaffold_targets"
+path = "tests/scaffold_targets.rs"

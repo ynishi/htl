@@ -11,7 +11,7 @@
 //!   Python REPL. It writes one `extern "C"` wrapper per method and `include/{{mod}}.h`,
 //!   from the same breakdown, so a rename here moves the header with it.
 //!
-//! There is no binary: `--host ffi` is a library, and what a host loads is
+//! There is no binary: `--target ffi` is a library, and what a host loads is
 //! `target/debug/lib{{mod}}.{so,dylib,dll}` (or `lib{{mod}}.a` to link statically).
 //! `examples/c/` and `examples/python/` are two such hosts, each written the way its
 //! language has to be written to not leak or corrupt the strings it is handed.
