@@ -75,9 +75,23 @@ build:
 e2e:
     #!/usr/bin/env bash
     set -euo pipefail
-    # The embed example through both the include_tl! and the include_bundle! path.
+    # The embed example through both the include_tl! and the include_bundle! path, and the
+    # resolver example, which resolves its `.tl` at run time instead of embedding any. Both
+    # were workspace members that every `--workspace` command compiled; only `embed` was
+    # ever run.
     cargo run -q -p embed
     cargo run -q -p embed -- --bundle
+    cargo run -q -p resolver
+    # `embed`'s `bad` feature adds an `include_tl!` of a module that does not type check,
+    # and its manifest says so — "demonstrates a Teal type error failing the Rust build".
+    # Nothing had ever run it, so the demonstration was a claim. Spelled `if …; then exit 1`
+    # rather than `! cargo build`, because bash exempts a `!`-inverted command from `set -e`:
+    # that is the form that let a gate in this file report nothing however the manifest
+    # looked, and it would fail here in the direction that looks like success.
+    if cargo build -q -p embed --features bad 2>/dev/null; then
+      echo 'embed --features bad compiled: a Teal type error did not fail the Rust build' >&2
+      exit 1
+    fi
     # Every host `--host` offers, scaffolded outside this repository and built against this
     # checkout. That was 87 lines of bash here; it is now three tests in the `e2e` member
     # crate, which `default-members` keeps out of `cargo test` and this line asks for by
