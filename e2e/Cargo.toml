@@ -1,0 +1,33 @@
+# The end-to-end cases that are about a *generated* project rather than about this
+# workspace: `htl new` for each host `--host` offers, then cargo asked to build, test and
+# run what it wrote.
+#
+# It is a workspace member so that `cargo build --workspace --all-targets` compiles it and
+# `cargo clippy --workspace --all-targets` lints it — that is what stops it rotting — and it
+# is kept out of `default-members` so that a bare `cargo test` does not spend minutes
+# compiling three Cargo projects from scratch. `just e2e` and `just e2e-scaffold-packaged`
+# are what run it, by name: `cargo test -p e2e`.
+#
+# There is no library and no binary here, only the test target. Nothing else would have a
+# caller.
+[package]
+name = "e2e"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+# Nothing in here is of any use outside this repository, and three of its assertions are
+# about paths in it.
+publish = false
+
+# One dependency, for one field: `cargo build --message-format=json` is how the binary
+# under test is located when nothing points at one, and `executable` is the only key read
+# out of it. serde_json is already compiled twice in this workspace (htl-core, htl-cli), so
+# this adds a line to a manifest and nothing to a build.
+[dev-dependencies]
+serde_json = "1"
+
+[[test]]
+name = "scaffold_hosts"
+path = "tests/scaffold_hosts.rs"

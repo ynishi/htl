@@ -7,6 +7,23 @@ members = [
     "crates/htl-cli",
     "examples/embed",
     "examples/resolver",
+    "e2e",
+]
+# Everything above except `e2e`, which is a member so that `--workspace` compiles and lints
+# it and it cannot rot, and not a default member so that `cargo test` does not run it. Its
+# three tests scaffold a Cargo project each and build it from nothing, which is minutes —
+# the wrong price for the command run before every commit, and the right one for `just e2e`,
+# which asks for it by name.
+#
+# The cost of this line is that `cargo test` and `cargo test --workspace` now differ by
+# minutes and nothing in either one's output says so.
+default-members = [
+    "crates/htl-core",
+    "crates/htl-macros",
+    "crates/htl",
+    "crates/htl-cli",
+    "examples/embed",
+    "examples/resolver",
 ]
 
 [workspace.package]
