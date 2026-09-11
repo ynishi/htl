@@ -107,6 +107,53 @@ fn the_cdylib_pin_keeps_its_features_under_every_pin_kind() {
     assert!(line.contains("features = [\"ffi\"]"), "{line}");
 }
 
+/// `[build] target` is written only when the pinned htl can read it. Under the default
+/// release the key does not exist yet, so the project that has a target gets the same
+/// `htl.toml` as one that has none; under `main` or a checkout it is recorded. The `main`
+/// case also runs `htl check` on the project it wrote, which is the assertion that matters:
+/// the file this scaffold produced is one an htl that carries the key accepts.
+#[test]
+fn new_records_the_target_when_the_pin_reads_it() {
+    let root = scratch("build-target");
+    let config = |name: &str| std::fs::read_to_string(root.join(name).join("htl.toml")).unwrap();
+
+    let (ok, _, stderr) = htl(&["new", "a", "--target", "bin"], &root);
+    assert!(ok, "{stderr}");
+    assert!(!config("a").contains("target ="), "{}", config("a"));
+
+    let (ok, _, stderr) = htl(&["new", "b", "--target", "bin", "--htl", "main"], &root);
+    assert!(ok, "{stderr}");
+    assert!(config("b").contains("target = \"bin\""), "{}", config("b"));
+
+    let (ok, _, stderr) = htl(
+        &[
+            "new",
+            "c",
+            "--lib",
+            "--target",
+            "cdylib",
+            "--htl",
+            "path:../co",
+        ],
+        &root,
+    );
+    assert!(ok, "{stderr}");
+    assert!(
+        config("c").contains("target = \"cdylib\""),
+        "{}",
+        config("c")
+    );
+
+    // No target, so nothing to record however new the pin is.
+    let (ok, _, stderr) = htl(&["new", "d", "--htl", "main"], &root);
+    assert!(ok, "{stderr}");
+    assert!(!config("d").contains("target ="), "{}", config("d"));
+
+    // This binary's own config reads the key it just wrote.
+    let (ok, _, stderr) = htl(&["check", "."], &root.join("b"));
+    assert!(ok, "htl check on the project with the key:\n{stderr}");
+}
+
 /// The checker runs inside the proc macros, which the dev profile would otherwise build
 /// at `opt-level = 0`: the scaffold says so and sets the override.
 #[test]

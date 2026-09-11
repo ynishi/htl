@@ -279,8 +279,9 @@ pub struct BuildConfig {
     #[serde(default)]
     pub host: Vec<String>,
     /// What runs this project's output; absent means [`BuildTarget::Hb`], which is what
-    /// plain `htl build` produces and what every project without Rust in it is. Read from
-    /// the file; the scaffold does not write it yet (see `t_htl_toml` in `htl-cli` for why).
+    /// plain `htl build` produces and what every project without Rust in it is. Written by
+    /// `htl new --target <name>` when the project's htl pin reads this key (see
+    /// `HtlPin::knows_build_target` in `htl-cli`), read by every command that loads the file.
     #[serde(default)]
     pub target: Option<BuildTarget>,
 }

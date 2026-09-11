@@ -180,15 +180,11 @@ impl HtlPin {
 
     /// Whether the pinned htl reads `[build] target` from `htl.toml`.
     ///
-    /// Nothing calls it yet. It is what decides whether [`t_htl_toml`] writes that key: the
-    /// key landed in `htl-core` in #197 and no release carries it, so writing it today
-    /// fails the project's first `cargo build` inside `include_tl!` — which is exactly what
-    /// happened to `[toolchain]` one release early. Writing it under `main` and a checkout,
-    /// where the key does exist, is the other half and is PR-2's.
-    ///
-    /// `allow(dead_code)` for exactly that gap: the question is answered and tested here,
-    /// and the caller that asks it arrives with the key it gates.
-    #[allow(dead_code)]
+    /// It is what decides whether [`t_htl_toml`] writes that key: the key landed in
+    /// `htl-core` in #197 and no release carries it, so writing it under `0.4` would fail
+    /// the project's first `cargo build` inside `include_tl!` — which is exactly what
+    /// happened to `[toolchain]` one release early. Under `main`, a checkout, and every
+    /// release from 0.5 on the key does exist, and there the scaffold writes it.
     pub fn knows_build_target(&self) -> bool {
         self.at_least(0, 5)
     }
@@ -543,7 +539,10 @@ fn plan(dir: &Path, name: &str, module: &str, opts: &Options) -> Vec<(PathBuf, S
 
     let mut files = vec![
         (dir.join("mlua-pkg.toml"), fill(T_MANIFEST, &ctx)),
-        (dir.join("htl.toml"), t_htl_toml()),
+        (
+            dir.join("htl.toml"),
+            t_htl_toml(target.map(|t| t.target), &opts.htl),
+        ),
         (dir.join("types").join("README.md"), t_types_readme()),
         (
             dir.join("src").join(module).join("init.tl"),
@@ -716,8 +715,15 @@ fn t_types_readme() -> String {
 /// shown, since the CLI that just wrote the file refuses those. So the section names
 /// neither and sends the reader to `htl check --list-lints`, which answers from the binary
 /// they have.
-fn t_htl_toml() -> String {
-    "# htl project settings (htl check / htl test / htl fmt / include_tl! all read this).\n\
+///
+/// `[build] target` is the first key that goes through that decision: it is written under
+/// `main`, under a checkout, and under any release from 0.5 on, and not under `0.4`, which
+/// is why the default-pin snapshots do not carry it. `htl init --target <name>` on a project
+/// that already has an `htl.toml` keeps that file and therefore does not add the key; saying
+/// so is `htl init --check`'s job (#194), not the scaffold's.
+fn t_htl_toml(target: Option<BuildTarget>, htl: &HtlPin) -> String {
+    let mut s = String::from(
+        "# htl project settings (htl check / htl test / htl fmt / include_tl! all read this).\n\
      # Command-line flags and HTL_LINTS / HTL_LINT override it.\n\n\
      [lint]\n\
      # strict = true   # warnings and lints fail htl check (not htl test); lints fail\n\
@@ -749,8 +755,17 @@ fn t_htl_toml() -> String {
      # `htl check` reports `contract-unenforced` when that call is not in the Rust sources.\n\
      # enforced_by = \"mods/_validate.lua\"   # ...or name where it is enforced instead,\n\
      #                          # for a Lua-side validator, a sibling crate, generated\n\
-     #                          # code. The file has to exist; a missing one is reported.\n"
-        .to_string()
+     #                          # code. The file has to exist; a missing one is reported.\n",
+    );
+    if let Some(t) = target.filter(|_| htl.knows_build_target()) {
+        s.push_str(&format!(
+            "\n[build]\n\
+             # What runs this project's output: hb (the htl binary, the default when absent), bin,\n\
+             # cdylib. Written by htl new --target; see README \"Build targets\".\n\
+             target = \"{t}\"\n"
+        ));
+    }
+    s
 }
 
 fn t_gitignore(target: Option<&'static TargetProfile>, ctx: &Ctx<'_>) -> String {
@@ -928,8 +943,8 @@ fn t_cargo(name: &str, target: &TargetProfile, htl: &HtlPin) -> String {
 mod tests {
     use super::{
         BuildTarget, Ctx, DEFAULT_HTL, DEFAULT_TARGET, HtlPin, PathBuf, REPOSITORY, Result,
-        SUPPORTED, dep_value, profile, resolve_target, script_mismatch, t_cargo, target_names,
-        version_parts,
+        SUPPORTED, dep_value, profile, resolve_target, script_mismatch, t_cargo, t_htl_toml,
+        target_names, version_parts,
     };
     use htl::build_target::Script;
 
@@ -1014,15 +1029,46 @@ mod tests {
         );
     }
 
-    /// The question PR-2 will ask before writing `[build] target` into `htl.toml`: the key
-    /// is in `htl-core` and in no release, so 0.4 does not know it, 0.5 will, and a pin at
-    /// the repository knows everything this workspace does.
+    /// The question asked before writing `[build] target` into `htl.toml`: the key is in
+    /// `htl-core` and in no release, so 0.4 does not know it, 0.5 will, and a pin at the
+    /// repository knows everything this workspace does.
     #[test]
     fn only_an_unreleased_htl_knows_the_build_target_key() {
         assert!(!HtlPin::Release("0.4".into()).knows_build_target());
         assert!(HtlPin::Release("0.5".into()).knows_build_target());
         assert!(HtlPin::Main.knows_build_target());
         assert!(HtlPin::Path(PathBuf::from("../co")).knows_build_target());
+    }
+
+    /// The answer to that question, as bytes. Both halves matter: under a release that does
+    /// not carry the key the file is the one every project has had, and under a pin that
+    /// does, the section is appended verbatim — comment lines included, because they are
+    /// what the next reader of the file learns the key from.
+    #[test]
+    fn the_config_records_the_target_only_when_the_pin_reads_it() {
+        let block = |name: &str| {
+            format!(
+                "\n[build]\n\
+                 # What runs this project's output: hb (the htl binary, the default when absent), bin,\n\
+                 # cdylib. Written by htl new --target; see README \"Build targets\".\n\
+                 target = \"{name}\"\n"
+            )
+        };
+        let plain = t_htl_toml(None, &HtlPin::Main);
+        assert!(!plain.contains("[build]"), "{plain}");
+        // A release that does not carry the key gets that same file even though the
+        // project has a target — which is the case the snapshots are written from.
+        let old = HtlPin::Release("0.4".into());
+        assert_eq!(t_htl_toml(Some(BuildTarget::Bin), &old), plain);
+
+        let main = t_htl_toml(Some(BuildTarget::Bin), &HtlPin::Main);
+        assert_eq!(main, format!("{plain}{}", block("bin")));
+
+        let checkout = t_htl_toml(
+            Some(BuildTarget::Cdylib),
+            &HtlPin::Path(PathBuf::from("../co")),
+        );
+        assert_eq!(checkout, format!("{plain}{}", block("cdylib")));
     }
 
     /// `--embed` resolves through the registry, so a missing entry is a panic at the

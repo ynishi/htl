@@ -1653,7 +1653,9 @@ Rust side to a project that predates it and lists the files it kept rather than 
 them in silence.
 
 `[build] target` in `htl.toml` is the key that records what runs the output, read by every
-command that loads the file (absent means `hb`); `htl new` does not write it yet.
+command that loads the file (absent means `hb`). `htl new --target <name>` writes it
+whenever the htl the project pins reads it — `main`, a checkout, a release from 0.5 on —
+and not under `0.4`, whose `include_tl!` would refuse the whole file over the unknown key.
 
 #### Which htl the project depends on (`--htl <req | main | path:<checkout>>`)
 
