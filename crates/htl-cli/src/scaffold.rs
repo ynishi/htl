@@ -134,10 +134,10 @@ impl Script {
     }
 }
 
-/// One file a target writes, relative to the project root. Mostly Rust — `src/lib.rs`,
-/// `src/main.rs` — but a target that ships reference callers writes their C, Python and
-/// build glue the same way, as a path and a body.
-pub struct HostFile {
+/// One file a target's scaffold writes, relative to the project root. Mostly Rust —
+/// `src/lib.rs`, `src/main.rs` — but a target that ships reference callers writes their C,
+/// Python and build glue the same way, as a path and a body.
+pub struct ScaffoldFile {
     pub path: &'static str,
     pub body: fn(&Ctx<'_>) -> String,
 }
@@ -156,17 +156,12 @@ pub struct TealSample {
 /// between two of them, as data.
 ///
 /// The axis this names is not the Rust side of a project — it is who is on the far end of
-/// what htl produces:
+/// what htl produces. README § Targets has the table of what is registered and what each
+/// one produces.
 ///
-/// | target | what runs the output | output | Rust in the project |
-/// | --- | --- | --- | --- |
-/// | none (plain `htl new`, then `htl build`) | the `htl` binary, `htl run app.hb` | a `.hb` bundle | no |
-/// | `rust` | the OS, as a binary | a binary (library + a six-line `main.rs`) | the user's crate |
-/// | `ffi` | a C / Python / Unity caller | `cdylib` + `staticlib` + a header | the user's crate |
-///
-/// The column that varies is the second one. The first two entries happen to be Rust
-/// crates, which is why this used to be called a host; an output nothing Rust runs — a
-/// `.love` bundle, say — is the entry that makes that word plainly wrong.
+/// The entries registered today happen to be Rust crates, which is why this used to be
+/// called a host; an output nothing Rust runs — a `.love` bundle, say — is the entry that
+/// makes that word plainly wrong.
 ///
 /// *Host* keeps its own meaning throughout htl and is not this: it is the Rust side that
 /// embeds the Lua state — `#[host_module]`, the `src/host.d.tl` generated from it, and
@@ -183,11 +178,11 @@ pub struct TargetProfile {
     /// Does this target run an entry script, refuse one, or leave it to `--lib`?
     pub script: Script,
     /// `src/lib.rs`: the host module, the embedded Teal, `preload`. Always written.
-    pub lib: HostFile,
+    pub lib: ScaffoldFile,
     /// `src/main.rs`: the thin entry, written only when there is an entry script.
-    pub main: Option<HostFile>,
+    pub main: Option<ScaffoldFile>,
     /// Anything else the target ships: `examples/`, `include/`, a header.
-    pub extra: &'static [HostFile],
+    pub extra: &'static [ScaffoldFile],
     /// What this target builds that is not worth committing, as `.gitignore` lines
     /// (filled like a template, so a path may name the module). What it *generates* and
     /// commits — `src/host.d.tl`, the C header — is deliberately not here.
@@ -212,11 +207,11 @@ const RUST: TargetProfile = TargetProfile {
         DepLine::plain("anyhow", Dep::Version("1")),
     ],
     script: Script::Either,
-    lib: HostFile {
+    lib: ScaffoldFile {
         path: "src/lib.rs",
         body: rust_lib_rs,
     },
-    main: Some(HostFile {
+    main: Some(ScaffoldFile {
         path: "src/main.rs",
         body: rust_main_rs,
     }),
@@ -259,21 +254,21 @@ const FFI: TargetProfile = TargetProfile {
         },
     ],
     script: Script::Forbids,
-    lib: HostFile {
+    lib: ScaffoldFile {
         path: "src/lib.rs",
         body: ffi_lib_rs,
     },
     main: None,
     extra: &[
-        HostFile {
+        ScaffoldFile {
             path: "examples/c/main.c",
             body: ffi_example_c,
         },
-        HostFile {
+        ScaffoldFile {
             path: "examples/c/Makefile",
             body: ffi_example_makefile,
         },
-        HostFile {
+        ScaffoldFile {
             path: "examples/python/run.py",
             body: ffi_example_py,
         },
@@ -798,7 +793,7 @@ fn t_cargo(name: &str, target: &TargetProfile) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Ctx, DEFAULT_TARGET, Dep, DepLine, HostFile, Result, Script, TargetProfile, TealSample,
+        Ctx, DEFAULT_TARGET, Dep, DepLine, Result, ScaffoldFile, Script, TargetProfile, TealSample,
         htl_dep_version_of, profile, resolve_target, script_mismatch, t_cargo, target_names,
     };
 
@@ -988,7 +983,7 @@ mod tests {
                 features: &[],
             }],
             script: Script::Either,
-            lib: HostFile {
+            lib: ScaffoldFile {
                 path: "src/lib.rs",
                 body: super::rust_lib_rs,
             },
