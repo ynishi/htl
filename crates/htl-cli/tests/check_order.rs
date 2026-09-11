@@ -21,7 +21,7 @@ fn write(path: &Path, text: &str) {
 }
 
 fn diagnostics(args: &[&str], cwd: &Path) -> Vec<String> {
-    let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+    let out = Command::new(common::htl_bin())
         .arg("check")
         .args(args)
         .arg("--format")

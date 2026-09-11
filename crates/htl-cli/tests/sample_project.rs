@@ -47,7 +47,7 @@ fn sample() -> Vec<String> {
 /// the order a terminal would have shown, because they are collected separately; what the
 /// assertions below ask is which words appeared, never which stream carried them.
 fn run(args: &[&str], cwd: &Path) -> (bool, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+    let out = Command::new(common::htl_bin())
         .args(args)
         .current_dir(cwd)
         .output()

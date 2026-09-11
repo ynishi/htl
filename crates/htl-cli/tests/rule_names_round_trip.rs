@@ -27,7 +27,7 @@ fn write(path: &Path, text: &str) {
 
 /// The diagnostics of `htl check <target>` run in `root`, as (rule, file, line).
 fn diagnostics(root: &Path, target: &str, args: &[&str]) -> Vec<(String, String, u64)> {
-    let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+    let out = Command::new(common::htl_bin())
         .args(["check", target, "--format", "json", "--no-cache"])
         .args(args)
         .current_dir(root)
@@ -212,7 +212,7 @@ fn an_allow_comment_cannot_be_written_on_a_marker_line() {
             "---@contract  -- htl: allow(contract-unenforced)",
         ),
     );
-    let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+    let out = Command::new(common::htl_bin())
         .args(["check", "src/defs.tl", "--no-cache"])
         .current_dir(&root)
         .output()
@@ -236,7 +236,7 @@ fn an_allow_comment_cannot_be_written_on_a_marker_line() {
 #[test]
 fn the_listing_accounts_for_every_rule() {
     let dir = scratch("listing");
-    let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+    let out = Command::new(common::htl_bin())
         .args(["check", "--list-lints"])
         .current_dir(&dir)
         .output()
@@ -289,7 +289,7 @@ fn the_listing_accounts_for_every_rule() {
 fn the_listing_does_not_name_what_only_a_fix_takes() {
     let dir = scratch("surfaces");
     write(&dir.join("src/a.tl"), "return {}\n");
-    let listing = Command::new(env!("CARGO_BIN_EXE_htl"))
+    let listing = Command::new(common::htl_bin())
         .args(["check", "--list-lints"])
         .current_dir(&dir)
         .output()
@@ -299,7 +299,7 @@ fn the_listing_does_not_name_what_only_a_fix_takes() {
     assert!(!listed.contains("tl:error"), "{listed}");
 
     for rule in ["forward-ref", "tl:error"] {
-        let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+        let out = Command::new(common::htl_bin())
             .args(["check", "src", "--no-cache", "--lint", &format!("-{rule}")])
             .current_dir(&dir)
             .output()
@@ -318,7 +318,7 @@ fn the_listing_does_not_name_what_only_a_fix_takes() {
 fn an_unknown_name_is_still_an_error() {
     let dir = scratch("unknown");
     write(&dir.join("src/a.tl"), "return {}\n");
-    let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+    let out = Command::new(common::htl_bin())
         .args(["check", "src", "--no-cache", "--lint", "-contrct"])
         .current_dir(&dir)
         .output()

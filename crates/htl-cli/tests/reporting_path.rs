@@ -24,7 +24,7 @@ fn write(path: &Path, text: &str) {
 /// stderr and the exit code. Every one of these commands puts its text report on stderr
 /// and keeps stdout for what it produces (generated Lua, the program's own output).
 fn htl(args: &[&str], cwd: &Path) -> (String, i32) {
-    let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+    let out = Command::new(common::htl_bin())
         .args(args)
         .current_dir(cwd)
         .output()

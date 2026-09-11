@@ -21,7 +21,7 @@ fn write(path: &Path, text: &str) {
 fn test_run(root: &Path, args: &[&str]) -> serde_json::Value {
     let mut a = vec!["test", ".", "--format", "json"];
     a.extend_from_slice(args);
-    let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+    let out = Command::new(common::htl_bin())
         .args(&a)
         .current_dir(root)
         .output()

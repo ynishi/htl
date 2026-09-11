@@ -24,7 +24,7 @@ fn write(path: &Path, text: &str) {
 /// `<rule or kind>: <message>` — the rule is its own field in the JSON, split out of the
 /// message, so the message alone never names it.
 fn messages(root: &Path, target: &str) -> Vec<String> {
-    let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+    let out = Command::new(common::htl_bin())
         .arg("check")
         .arg(target)
         .arg("--format")

@@ -22,7 +22,7 @@ fn write(path: &Path, text: &str) {
 }
 
 fn htl(root: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_htl"))
+    Command::new(common::htl_bin())
         .args(args)
         .current_dir(root)
         .output()

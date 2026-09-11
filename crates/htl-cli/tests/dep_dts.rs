@@ -17,7 +17,7 @@ const DECL: &str =
     "local record dep\n   greet: function(self: dep, name: string): string\nend\n\nreturn dep\n";
 
 fn htl(root: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_htl"))
+    Command::new(common::htl_bin())
         .args(args)
         .current_dir(root)
         .output()

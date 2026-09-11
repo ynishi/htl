@@ -15,7 +15,7 @@ fn write(path: &Path, text: &str) {
 }
 
 fn htl(args: &[&str], cwd: &Path) -> (bool, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+    let out = Command::new(common::htl_bin())
         .args(args)
         .current_dir(cwd)
         .output()

@@ -42,7 +42,7 @@ fn snapshot_path(case: &str) -> PathBuf {
 /// Run the binary in `cwd` and return whether it succeeded together with everything it
 /// wrote. `htl fmt` reports to stderr, as everything the CLI prints for a person does.
 fn htl(args: &[&str], cwd: &Path) -> (bool, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+    let out = Command::new(common::htl_bin())
         .args(args)
         .current_dir(cwd)
         .output()

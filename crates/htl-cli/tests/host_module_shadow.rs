@@ -23,7 +23,7 @@ fn write(path: &Path, text: &str) {
 
 /// Every diagnostic `htl check <target>` printed, run from `root`, as its JSON object.
 fn diagnostics(root: &Path, target: &str) -> Vec<serde_json::Value> {
-    let out = Command::new(env!("CARGO_BIN_EXE_htl"))
+    let out = Command::new(common::htl_bin())
         .arg("check")
         .arg(target)
         .arg("--format")
