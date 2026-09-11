@@ -17,20 +17,25 @@
 //!                                 binary on top when there is an entry script
 //! ```
 //!
-//! A target may add to that: the `ffi` one writes `examples/c/` and `examples/python/`
+//! A target may add to that: the `cdylib` one writes `examples/c/` and `examples/python/`
 //! beside the library, because a C ABI whose reference caller nobody wrote is a C ABI
 //! every caller gets wrong in the same three ways.
 //!
-//! # The target is a profile, not a flag
+//! # The target is a [`BuildTarget`]; the profile is what the scaffold writes for it
 //!
 //! Everything above the `Cargo.toml` line is the same for every project. What varies is
 //! the target — what will run this project's output, and therefore what Rust it needs —
-//! and that is one value rather than a growing set of booleans: a [`TargetProfile`] says
-//! which crate shape it is (`[lib] crate-type`), what it depends on, whether it wants an
-//! entry script, which Rust files it writes, and which Teal sample it starts the project
-//! from. [`PROFILES`] is the registry, `--target <name>` picks an entry from it, and a new
-//! kind of target is one more entry rather than another flag threaded through every
-//! template.
+//! and that is one value rather than a growing set of booleans. The value is
+//! [`BuildTarget`], which lives in `htl-core` because `htl.toml` records it as
+//! `[build] target`; what it means for the *crate* — its `[lib] crate-type`, whether it
+//! takes an entry script — is derived there, from the target, rather than restated here.
+//!
+//! What is left for this module is the scaffold's own half: a [`TargetProfile`] says what
+//! the target depends on, which Rust files it writes, which Teal sample it starts the
+//! project from, and what its README has to say. [`PROFILES`] is the registry of the
+//! targets that scaffold, `--target <name>` picks an entry from it, and a new kind of
+//! target is one more [`BuildTarget`] arm and one more entry rather than another flag
+//! threaded through every template.
 //!
 //! # Every target with Rust in it is a library crate with a thin binary on top
 //!
@@ -39,9 +44,9 @@
 //! `preload`. When the project has an entry script it also writes `src/main.rs`, a few
 //! lines that call `preload` and `exec` the script. So what a project grows — a second
 //! host module, a C ABI layer, a window loop — grows in the library, and the binary never
-//! holds logic. The `ffi` target is that taken to its end: a `#[c_export]` block in the
-//! same library and no binary at all, which is why it is the profile that answers
-//! [`Script::Forbids`].
+//! holds logic. The `cdylib` target is that taken to its end: a `#[c_export]` block in the
+//! same library and no binary at all, which is why it is the target that answers
+//! [`Script::Forbids`](htl::build_target::Script::Forbids).
 //!
 //! [`scaffold`] therefore does the same three things whatever it is asked for: pick the
 //! target, turn the profile into a list of paths and bodies, write the ones that do not
@@ -55,8 +60,10 @@
 //! keeps pinning a scaffold to the htl release that wrote it. Short TOML and Markdown
 //! stay inline.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use htl::BuildTarget;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 pub struct Options {
     pub lib: bool,
@@ -108,32 +115,6 @@ pub enum Dep {
     Version(&'static str),
 }
 
-/// What a target has to say about `src/main.tl`. `--lib` is the user's side of the same
-/// question, and the two are reconciled once, in [`resolve_target`], before anything is
-/// written.
-// `Requires` is the half no registered target has yet — #104's window loop is the one that
-// will — so until then the code that reads it is exercised by this module's tests.
-#[allow(dead_code)]
-#[derive(PartialEq, Eq, Clone, Copy)]
-pub enum Script {
-    /// The target runs an entry script and cannot be built without one (a window loop).
-    Requires,
-    /// The target is a library for someone else to call and has no entry point (a C ABI).
-    Forbids,
-    /// Either shape works; `--lib` decides.
-    Either,
-}
-
-impl Script {
-    fn accepts(self, lib: bool) -> bool {
-        match self {
-            Script::Requires => !lib,
-            Script::Forbids => lib,
-            Script::Either => true,
-        }
-    }
-}
-
 /// One file a target's scaffold writes, relative to the project root. Mostly Rust —
 /// `src/lib.rs`, `src/main.rs` — but a target that ships reference callers writes their C,
 /// Python and build glue the same way, as a path and a body.
@@ -152,31 +133,17 @@ pub struct TealSample {
     pub main: fn(&Ctx<'_>) -> String,
 }
 
-/// **A target is what runs htl's output**, and a profile is everything that differs
-/// between two of them, as data.
+/// The per-target scaffold data: what the scaffold writes for one [`BuildTarget`].
 ///
-/// The axis this names is not the Rust side of a project — it is who is on the far end of
-/// what htl produces. README § Targets has the table of what is registered and what each
-/// one produces.
-///
-/// The entries registered today happen to be Rust crates, which is why this used to be
-/// called a host; an output nothing Rust runs — a `.love` bundle, say — is the entry that
-/// makes that word plainly wrong.
-///
-/// *Host* keeps its own meaning throughout htl and is not this: it is the Rust side that
-/// embeds the Lua state — `#[host_module]`, the `src/host.d.tl` generated from it, and
-/// `[build] host` / `htl build --host x,y`, which name the modules that side provides at
-/// run time. A project can have a host and no target (`htl build` alone), and two targets
-/// can share one host, so they are two axes rather than two words for one.
+/// What a build target *is* — and what follows from it, the crate types and the
+/// entry-script rule — is defined on [`BuildTarget`], not here. This is the other half:
+/// the files, the dependencies and the prose that only `htl new` has an opinion about.
 pub struct TargetProfile {
-    /// How it is named in the registry and on the command line (`--target <name>`).
-    pub name: &'static str,
-    /// `[lib] crate-type = [...]` beyond the default `rlib`, which needs no section at
-    /// all: `["cdylib", "staticlib"]` for a C ABI target.
-    pub lib_crate_types: &'static [&'static str],
+    /// Which build target this scaffolds for. Its name is the name in the registry and on
+    /// the command line (`--target <name>`), and its `crate_types` / `entry` are what the
+    /// `Cargo.toml` and the `--lib` reconciliation below read.
+    pub target: BuildTarget,
     pub deps: &'static [DepLine],
-    /// Does this target run an entry script, refuse one, or leave it to `--lib`?
-    pub script: Script,
     /// `src/lib.rs`: the host module, the embedded Teal, `preload`. Always written.
     pub lib: ScaffoldFile,
     /// `src/main.rs`: the thin entry, written only when there is an entry script.
@@ -199,14 +166,12 @@ pub struct TargetProfile {
 /// The default target: the OS runs the output as a binary. A library crate holding the
 /// host module and the embedded scripts, with a thin binary on top when the project has an
 /// entry script.
-const RUST: TargetProfile = TargetProfile {
-    name: "rust",
-    lib_crate_types: &[],
+const BIN: TargetProfile = TargetProfile {
+    target: BuildTarget::Bin,
     deps: &[
         DepLine::plain("htl", Dep::Htl),
         DepLine::plain("anyhow", Dep::Version("1")),
     ],
-    script: Script::Either,
     lib: ScaffoldFile {
         path: "src/lib.rs",
         body: rust_lib_rs,
@@ -231,13 +196,13 @@ const RUST: TargetProfile = TargetProfile {
 /// library, plus `#[c_export]` and the two reference callers.
 ///
 /// It is a library and nothing else — a `cdylib` has no entry point of its own, and the
-/// caller that loads it brings its own `main` — so [`Script::Forbids`] refuses `--target
-/// ffi` without `--lib` rather than writing a `src/main.rs` nothing would run. The
-/// `staticlib` alongside is what Unity on iOS links; it costs a second artefact and
-/// nothing else.
-const FFI: TargetProfile = TargetProfile {
-    name: "ffi",
-    lib_crate_types: &["rlib", "cdylib", "staticlib"],
+/// caller that loads it brings its own `main` — so the
+/// [`Script::Forbids`](htl::build_target::Script::Forbids) that
+/// [`BuildTarget::Cdylib`] answers refuses `--target cdylib` without `--lib` rather than
+/// writing a `src/main.rs` nothing would run. The `staticlib` alongside is what Unity on
+/// iOS links; it costs a second artefact and nothing else.
+const CDYLIB: TargetProfile = TargetProfile {
+    target: BuildTarget::Cdylib,
     deps: &[
         DepLine {
             name: "htl",
@@ -253,7 +218,6 @@ const FFI: TargetProfile = TargetProfile {
             features: &["derive"],
         },
     ],
-    script: Script::Forbids,
     lib: ScaffoldFile {
         path: "src/lib.rs",
         body: ffi_lib_rs,
@@ -282,19 +246,21 @@ const FFI: TargetProfile = TargetProfile {
         test: ffi_teal_test,
         // Unreachable: `Script::Forbids` means there is never a `src/main.tl` to write.
         // The field is not an `Option` because every other target has one, so this is the
-        // default sample, which is what `htl init --target ffi` on a project that already
-        // has a script would keep anyway.
+        // default sample, which is what `htl init --target cdylib` on a project that
+        // already has a script would keep anyway.
         main: teal_main,
     },
     readme_commands: ffi_readme_commands,
     readme_prose: ffi_readme_prose,
 };
 
-/// Every target there is. #104 (a macroquad window) is one more entry.
-pub static PROFILES: &[TargetProfile] = &[RUST, FFI];
+/// Every target the scaffold writes Rust for. [`BuildTarget::Hb`] is not among them: it is
+/// what plain `htl new` writes, which is the tree without a `Cargo.toml` at all. #104 (a
+/// macroquad window) is one more entry.
+pub static PROFILES: &[TargetProfile] = &[BIN, CDYLIB];
 
 /// The target `--embed` is shorthand for.
-pub const DEFAULT_TARGET: &str = "rust";
+pub const DEFAULT_TARGET: BuildTarget = BuildTarget::Bin;
 
 /// What a project with no target of its own starts from.
 static DEFAULT_TEAL: TealSample = TealSample {
@@ -329,44 +295,47 @@ pub fn module_ident(name: &str) -> String {
     s
 }
 
-/// Every registered target name, in registry order: what `--target` accepts and what a
-/// typo is answered with.
+/// Every target the scaffold has a profile for, in registry order: what `--target`
+/// accepts and what a typo is answered with. `hb` is deliberately absent — it is the tree
+/// plain `htl new` writes, so naming it as a scaffold would be offering a flag for the
+/// default.
 pub fn target_names() -> Vec<&'static str> {
-    PROFILES.iter().map(|p| p.name).collect()
+    PROFILES.iter().map(|p| p.target.name()).collect()
 }
 
-pub fn profile(name: &str) -> Option<&'static TargetProfile> {
-    PROFILES.iter().find(|p| p.name == name)
+pub fn profile(t: BuildTarget) -> Option<&'static TargetProfile> {
+    PROFILES.iter().find(|p| p.target == t)
 }
 
 /// Turn `--target` / `--embed` / `--lib` into the target to write for, or into the reason
 /// there is none to write. Called before the first file is created, so a refusal leaves
 /// the directory as it was.
 ///
-/// `--embed` is the shorthand for `--target rust` and stays one: clap's value parser only
+/// `--embed` is the shorthand for `--target bin` and stays one: clap's value parser only
 /// applies to `--target`, so the two are reconciled here rather than pretended to be one
-/// flag. Giving both is fine when they agree.
+/// flag. Giving both is fine when they agree — which is decided on the *name* the user
+/// wrote, before it is parsed, so that `--embed --target typo` says which flag to drop
+/// rather than which targets exist.
 pub fn resolve_target(
     target: Option<&str>,
     embed: bool,
     lib: bool,
 ) -> Result<Option<&'static TargetProfile>> {
-    let name = match (target, embed) {
+    let t = match (target, embed) {
         (None, false) => return Ok(None),
         (None, true) => DEFAULT_TARGET,
-        (Some(n), false) => n,
-        (Some(n), true) if n == DEFAULT_TARGET => n,
-        (Some(n), true) => bail!(
+        (Some(n), true) if n != DEFAULT_TARGET.name() => bail!(
             "--embed is the shorthand for --target {DEFAULT_TARGET}, so it cannot be given with --target {n}; drop one of them"
         ),
+        (Some(n), _) => BuildTarget::from_str(n).map_err(|e| anyhow!("{e}"))?,
     };
-    let Some(p) = profile(name) else {
+    let Some(p) = profile(t) else {
         bail!(
-            "unknown target `{name}`; registered targets: {}",
+            "the `{t}` target is what plain `htl new` writes, so there is no scaffold to ask for; targets that scaffold: {}",
             target_names().join(", ")
         );
     };
-    if !p.script.accepts(lib) {
+    if !p.target.entry().accepts(lib) {
         bail!("{}", script_mismatch(p, lib));
     }
     Ok(Some(p))
@@ -377,8 +346,8 @@ pub fn resolve_target(
 fn script_mismatch(p: &TargetProfile, lib: bool) -> String {
     let fits: Vec<&str> = PROFILES
         .iter()
-        .filter(|c| c.script.accepts(lib))
-        .map(|c| c.name)
+        .filter(|c| c.target.entry().accepts(lib))
+        .map(|c| c.target.name())
         .collect();
     let fits = if fits.is_empty() {
         "none".to_string()
@@ -386,14 +355,16 @@ fn script_mismatch(p: &TargetProfile, lib: bool) -> String {
         fits.join(", ")
     };
     if lib {
+        // No target answers `Script::Requires` yet — #104's window loop is the one that
+        // will — so `resolve_target` cannot reach this half today.
         format!(
             "the `{}` target runs an entry script, which --lib leaves out; targets that work with --lib: {fits}",
-            p.name
+            p.target
         )
     } else {
         format!(
             "the `{}` target writes no entry script, so it needs --lib; targets that write one: {fits}",
-            p.name
+            p.target
         )
     }
 }
@@ -579,6 +550,11 @@ fn t_types_readme() -> String {
 /// shown, since the CLI that just wrote the file refuses those. So the section names
 /// neither and sends the reader to `htl check --list-lints`, which answers from the binary
 /// they have.
+///
+/// `[build] target` landed in `htl-core` in this change and is read by every command that
+/// loads this file, but it is not written here for exactly the reason above: the scaffold
+/// pins the released `htl`, which does not know the key. Writing it is the release after
+/// the one that publishes it.
 fn t_htl_toml() -> String {
     "# htl project settings (htl check / htl test / htl fmt / include_tl! all read this).\n\
      # Command-line flags and HTL_LINTS / HTL_LINT override it.\n\n\
@@ -705,7 +681,7 @@ fn ffi_readme_prose(ctx: &Ctx<'_>) -> String {
         "This project is a library with two boundaries:\n\
          `src/lib.rs` holds the `#[host_module]` the *scripts* call and the `#[c_export]` block a\n\
          *caller that is not written in Rust* calls. There is no binary — a C ABI library has no\n\
-         entry point of its own, which is why `--target ffi` implies `--lib`.\n\n",
+         entry point of its own, which is why `--target cdylib` implies `--lib`.\n\n",
     );
     s.push_str(HOST_DTL);
     s.push_str(&format!(
@@ -757,9 +733,10 @@ fn t_cargo(name: &str, target: &TargetProfile) -> String {
     let mut s = format!(
         "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n# authors / license / repository: fill in yourself\n\n"
     );
-    if !target.lib_crate_types.is_empty() {
+    if !target.target.crate_types().is_empty() {
         let types: Vec<String> = target
-            .lib_crate_types
+            .target
+            .crate_types()
             .iter()
             .map(|t| format!("\"{t}\""))
             .collect();
@@ -793,9 +770,10 @@ fn t_cargo(name: &str, target: &TargetProfile) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Ctx, DEFAULT_TARGET, Dep, DepLine, Result, ScaffoldFile, Script, TargetProfile, TealSample,
-        htl_dep_version_of, profile, resolve_target, script_mismatch, t_cargo, target_names,
+        BuildTarget, Ctx, DEFAULT_TARGET, Result, htl_dep_version_of, profile, resolve_target,
+        script_mismatch, t_cargo, target_names,
     };
+    use htl::build_target::Script;
 
     #[test]
     fn dep_version_is_the_shortest_compatible_requirement() {
@@ -810,12 +788,26 @@ mod tests {
     /// first scaffold rather than a file that quietly stops being written.
     #[test]
     fn the_registry_holds_the_target_embed_asks_for() {
-        assert!(target_names().contains(&DEFAULT_TARGET));
-        let rust = profile(DEFAULT_TARGET).unwrap();
-        assert_eq!(rust.lib.path, "src/lib.rs");
-        assert_eq!(rust.main.as_ref().unwrap().path, "src/main.rs");
+        assert!(target_names().contains(&DEFAULT_TARGET.name()));
+        let bin = profile(DEFAULT_TARGET).unwrap();
+        assert_eq!(bin.lib.path, "src/lib.rs");
+        assert_eq!(bin.main.as_ref().unwrap().path, "src/main.rs");
         // The default target is the one shape that works either way.
-        assert!(rust.script.accepts(true) && rust.script.accepts(false));
+        assert!(bin.target.entry().accepts(true) && bin.target.entry().accepts(false));
+    }
+
+    /// `hb` is a build target and not a scaffold: it is the tree `htl new` writes with no
+    /// Rust in it, so the registry has no entry for it and the flag does not offer it.
+    #[test]
+    fn the_default_build_target_has_no_profile_and_is_not_offered() {
+        assert!(profile(BuildTarget::Hb).is_none());
+        assert!(!target_names().contains(&"hb"));
+        let e = err(resolve_target(Some("hb"), false, false));
+        assert!(
+            e.contains("the `hb` target is what plain `htl new` writes"),
+            "{e}"
+        );
+        assert!(e.contains("targets that scaffold: bin, cdylib"), "{e}");
     }
 
     /// The refusal, as a string. A plain `unwrap_err()` would ask `&TargetProfile` for
@@ -825,12 +817,12 @@ mod tests {
     }
 
     #[test]
-    fn embed_and_target_rust_are_the_same_request() {
+    fn embed_and_target_bin_are_the_same_request() {
         let by_flag = resolve_target(None, true, false).unwrap().unwrap();
-        let by_name = resolve_target(Some("rust"), false, false).unwrap().unwrap();
-        assert_eq!(by_flag.name, by_name.name);
+        let by_name = resolve_target(Some("bin"), false, false).unwrap().unwrap();
+        assert_eq!(by_flag.target, by_name.target);
         // Both, agreeing, is not an error.
-        assert!(resolve_target(Some("rust"), true, false).is_ok());
+        assert!(resolve_target(Some("bin"), true, false).is_ok());
     }
 
     #[test]
@@ -848,47 +840,41 @@ mod tests {
     fn embed_disagreeing_with_target_is_refused() {
         let e = err(resolve_target(Some("other"), true, false));
         assert!(
-            e.contains("--embed is the shorthand for --target rust"),
+            e.contains("--embed is the shorthand for --target bin"),
             "{e}"
         );
     }
 
-    /// The two halves of the matrix hole, with the message that names a way out. The
-    /// `Forbids` half is the registered `ffi` target; the `Requires` half is #104's, so
-    /// that one is still built here.
+    /// The half of the matrix hole a registered target reaches, with the message that
+    /// names a way out: `cdylib` answers [`Script::Forbids`], so `--lib` is what it needs.
+    ///
+    /// The other half — a target that *requires* a script, which #104's window loop will
+    /// be — has no arm of [`BuildTarget`] to answer it now that the rule is derived from
+    /// the target rather than stored beside it, so it cannot be built out of a probe
+    /// profile any more. What is left to assert about it is [`Script::accepts`] itself,
+    /// which `htl-core` tests, and this line.
     #[test]
     fn a_target_that_disagrees_with_lib_names_the_targets_that_do_not() {
-        let needs = TargetProfile {
-            name: "mq",
-            script: Script::Requires,
-            ..probe()
-        };
-        let msg = script_mismatch(&needs, true);
-        assert!(
-            msg.contains("the `mq` target runs an entry script"),
-            "{msg}"
-        );
-        assert!(
-            msg.contains("targets that work with --lib: rust, ffi"),
-            "{msg}"
-        );
+        assert!(Script::Requires.accepts(false) && !Script::Requires.accepts(true));
 
-        let msg = script_mismatch(profile("ffi").unwrap(), false);
+        let msg = script_mismatch(profile(BuildTarget::Cdylib).unwrap(), false);
         assert!(
-            msg.contains("the `ffi` target writes no entry script"),
+            msg.contains("the `cdylib` target writes no entry script"),
             "{msg}"
         );
-        assert!(msg.contains("targets that write one: rust"), "{msg}");
+        assert!(msg.contains("targets that write one: bin"), "{msg}");
     }
 
     /// A C ABI library is not a project with an entry script, and the two are reconciled
     /// before anything is written rather than at the first file.
     #[test]
-    fn the_ffi_target_is_refused_without_lib_and_taken_with_it() {
-        let e = err(resolve_target(Some("ffi"), false, false));
+    fn the_cdylib_target_is_refused_without_lib_and_taken_with_it() {
+        let e = err(resolve_target(Some("cdylib"), false, false));
         assert!(e.contains("so it needs --lib"), "{e}");
-        let ffi = resolve_target(Some("ffi"), false, true).unwrap().unwrap();
-        assert_eq!(ffi.name, "ffi");
+        let ffi = resolve_target(Some("cdylib"), false, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ffi.target, BuildTarget::Cdylib);
         // No binary to write, and the reference callers travel with the profile.
         assert!(ffi.main.is_none());
         let paths: Vec<&str> = ffi.extra.iter().map(|f| f.path).collect();
@@ -906,8 +892,8 @@ mod tests {
     /// runtime the generated wrappers call is behind a feature, so the dependency line
     /// is the table form rather than a bare requirement.
     #[test]
-    fn the_ffi_cargo_toml_is_a_c_library_with_the_ffi_feature() {
-        let toml = t_cargo("sample", profile("ffi").unwrap());
+    fn the_cdylib_cargo_toml_is_a_c_library_with_the_ffi_feature() {
+        let toml = t_cargo("sample", profile(BuildTarget::Cdylib).unwrap());
         assert!(
             toml.contains("[lib]\ncrate-type = [\"rlib\", \"cdylib\", \"staticlib\"]\n"),
             "{toml}"
@@ -935,68 +921,29 @@ mod tests {
             module: "sample",
             script,
         };
-        let rust = profile(DEFAULT_TARGET).unwrap();
-        assert!((rust.readme_commands)(&ctx(true)).contains("cargo run"));
-        assert!(!(rust.readme_commands)(&ctx(false)).contains("cargo run"));
+        let bin = profile(DEFAULT_TARGET).unwrap();
+        assert!((bin.readme_commands)(&ctx(true)).contains("cargo run"));
+        assert!(!(bin.readme_commands)(&ctx(false)).contains("cargo run"));
 
-        let ffi = (profile("ffi").unwrap().readme_commands)(&ctx(false));
+        let ffi = (profile(BuildTarget::Cdylib).unwrap().readme_commands)(&ctx(false));
         assert!(ffi.contains("make -C examples/c run"), "{ffi}");
         assert!(ffi.contains("python3 examples/python/run.py"), "{ffi}");
         assert!(ffi.contains("include/sample.h"), "{ffi}");
     }
 
-    #[test]
-    fn script_requirements_are_read_from_the_profile() {
-        assert!(Script::Requires.accepts(false) && !Script::Requires.accepts(true));
-        assert!(Script::Forbids.accepts(true) && !Script::Forbids.accepts(false));
-        assert!(Script::Either.accepts(true) && Script::Either.accepts(false));
-    }
-
     /// A crate whose only shape is the default `rlib` has no `[lib]` section; a target
-    /// that needs more gets one from its profile, which is the whole of what
-    /// `Cargo.toml` has to know about the crate shape.
+    /// that needs more gets one from [`BuildTarget::crate_types`], which is the whole of
+    /// what `Cargo.toml` has to know about the crate shape.
     #[test]
-    fn cargo_toml_takes_the_crate_shape_from_the_profile() {
-        let rust = profile(DEFAULT_TARGET).unwrap();
-        let toml = t_cargo("sample", rust);
+    fn cargo_toml_takes_the_crate_shape_from_the_target() {
+        let toml = t_cargo("sample", profile(DEFAULT_TARGET).unwrap());
         assert!(!toml.contains("[lib]"), "{toml}");
         assert!(toml.contains("anyhow = \"1\"\n"), "{toml}");
 
-        let libbed = TargetProfile {
-            lib_crate_types: &["rlib", "cdylib"],
-            ..probe()
-        };
-        let toml = t_cargo("sample", &libbed);
+        let toml = t_cargo("sample", profile(BuildTarget::Cdylib).unwrap());
         assert!(
-            toml.contains("[lib]\ncrate-type = [\"rlib\", \"cdylib\"]\n"),
+            toml.contains("[lib]\ncrate-type = [\"rlib\", \"cdylib\", \"staticlib\"]\n"),
             "{toml}"
         );
-    }
-
-    fn probe() -> TargetProfile {
-        TargetProfile {
-            name: "probe",
-            lib_crate_types: &[],
-            deps: &[DepLine {
-                name: "htl",
-                req: Dep::Htl,
-                features: &[],
-            }],
-            script: Script::Either,
-            lib: ScaffoldFile {
-                path: "src/lib.rs",
-                body: super::rust_lib_rs,
-            },
-            main: None,
-            extra: &[],
-            ignore: &["/target"],
-            teal: TealSample {
-                module: super::teal_module,
-                test: super::teal_test,
-                main: super::teal_main,
-            },
-            readme_commands: super::rust_readme_commands,
-            readme_prose: super::rust_readme_prose,
-        }
     }
 }

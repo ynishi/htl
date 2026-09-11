@@ -4,7 +4,7 @@
 //! A C compiler is not needed for any of this: an `extern "C"` function is callable from
 //! Rust, and calling it here is the same call a `dlopen`ed host makes — the same
 //! decoding, the same panic guard, the same thread check. What a C program would add is
-//! the linker, and that is covered by the C caller `htl new --target ffi --lib` writes
+//! the linker, and that is covered by the C caller `htl new --target cdylib --lib` writes
 //! (`crates/htl-cli/templates/ffi/main.c`), compiled and run by `just e2e`.
 
 #![cfg(feature = "ffi")]

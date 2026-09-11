@@ -176,7 +176,7 @@ fn htl_bin() -> &'static Path {
 /// Cargo is asked where its target directory is rather than told, for the same reason the
 /// binary above is located rather than assembled: `CARGO_TARGET_DIR` is only one of the
 /// ways it gets set, and `[build] target-dir` is another.
-fn scaffold_target() -> &'static Path {
+fn cargo_target_dir() -> &'static Path {
     static TARGET: OnceLock<PathBuf> = OnceLock::new();
     TARGET.get_or_init(|| {
         if let Some(given) = std::env::var_os("HTL_E2E_TARGET") {
@@ -225,7 +225,7 @@ fn scaffold_args() -> Vec<String> {
             patch_path("HTL_PATCH_MACROS", "crates/htl-macros"),
         ),
         "--target-dir".into(),
-        scaffold_target().display().to_string(),
+        cargo_target_dir().display().to_string(),
     ]
 }
 
@@ -343,8 +343,8 @@ fn assert_unpatched_pin(project: &Path) {
     }
 }
 
-/// A pin in the shape the `ffi` target writes, so that the two cases below are refusing
-/// something a passing manifest otherwise resembles. The two `rust` cases write the same
+/// A pin in the shape the `cdylib` target writes, so that the two cases below are refusing
+/// something a passing manifest otherwise resembles. The two `bin` cases write the same
 /// line without the features table (`htl = "0.4"`); what [`unpatched_pin`] reads is the
 /// `htl = ` that starts it, which both forms have.
 const PINNED: &str = "[dependencies]\nhtl = { version = \"0.4\", features = [\"ffi\"] }\n";
@@ -371,10 +371,10 @@ fn a_manifest_redirecting_its_own_pin_is_refused() {
 /// The default target: a binary, its Teal module, and a test suite, built and then run with
 /// an argument.
 #[test]
-fn the_rust_target_builds_tests_and_greets() {
+fn the_bin_target_builds_tests_and_greets() {
     let _lock = one_at_a_time();
     let scratch = scratch("rustsample");
-    let project = htl_new(&scratch, "rustsample", &["--target", "rust"]);
+    let project = htl_new(&scratch, "rustsample", &["--target", "bin"]);
 
     assert_unpatched_pin(&project);
     must_run(&mut cargo_in(&project, &["test"]), "cargo test");
@@ -394,10 +394,10 @@ fn the_rust_target_builds_tests_and_greets() {
 /// The same target without a binary: the library still builds and its test still goes
 /// through preload, and there is no entry point for `cargo run` to find.
 #[test]
-fn the_rust_library_target_has_no_entry_point_and_still_tests() {
+fn the_bin_library_target_has_no_entry_point_and_still_tests() {
     let _lock = one_at_a_time();
     let scratch = scratch("libsample");
-    let project = htl_new(&scratch, "libsample", &["--target", "rust", "--lib"]);
+    let project = htl_new(&scratch, "libsample", &["--target", "bin", "--lib"]);
 
     assert_no_entry_point(&project);
     assert_unpatched_pin(&project);
@@ -411,11 +411,11 @@ fn the_rust_library_target_has_no_entry_point_and_still_tests() {
 /// `examples/` are run against the artefact — the Python one wherever python3 is, the C one
 /// only where there is a compiler and a make.
 #[test]
-fn the_ffi_target_builds_a_library_its_c_and_python_callers_can_load() {
+fn the_cdylib_target_builds_a_library_its_c_and_python_callers_can_load() {
     let _lock = one_at_a_time();
     let scratch = scratch("ffisample");
-    let project = htl_new(&scratch, "ffisample", &["--target", "ffi", "--lib"]);
-    let target = scaffold_target();
+    let project = htl_new(&scratch, "ffisample", &["--target", "cdylib", "--lib"]);
+    let target_dir = cargo_target_dir();
 
     assert_no_entry_point(&project);
     // The same pin, with the feature the profile needs on it — `htl = { version = "0.4",
@@ -434,7 +434,7 @@ fn the_ffi_target_builds_a_library_its_c_and_python_callers_can_load() {
         declared.contains("ffisample_handle *ffisample_open(const char *options_json);"),
         "the header declares the entry point the callers open:\n{declared}"
     );
-    let archive = target.join("debug/libffisample.a");
+    let archive = target_dir.join("debug/libffisample.a");
     assert!(
         archive.is_file(),
         "the static library is where cargo was told to put it: {}",
@@ -447,7 +447,7 @@ fn the_ffi_target_builds_a_library_its_c_and_python_callers_can_load() {
         let out = must_capture(
             Command::new("python3")
                 .arg("examples/python/run.py")
-                .env("CARGO_TARGET_DIR", target)
+                .env("CARGO_TARGET_DIR", target_dir)
                 .current_dir(&project),
             "python3 examples/python/run.py",
         );
@@ -469,7 +469,7 @@ fn the_ffi_target_builds_a_library_its_c_and_python_callers_can_load() {
         let out = must_capture(
             Command::new("make")
                 .args(["-s", "-C", "examples/c", "run"])
-                .arg(format!("LIBDIR={}", target.join("debug").display()))
+                .arg(format!("LIBDIR={}", target_dir.join("debug").display()))
                 .current_dir(&project),
             "make -C examples/c run",
         );
