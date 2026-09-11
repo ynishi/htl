@@ -15,6 +15,7 @@ use mlua::chunk::ChunkMode;
 use mlua::{Function, Lua, Table, Value, Variadic};
 use std::path::{Path, PathBuf};
 
+pub mod build_target;
 pub mod bundle;
 pub mod cache;
 #[cfg(feature = "dts")]
@@ -53,6 +54,7 @@ pub mod testing;
 #[cfg(all(feature = "pkg", feature = "dts"))]
 pub mod unused;
 
+pub use build_target::BuildTarget;
 pub use diagnostic::{Diagnostic, Severity};
 
 /// Registry key under which the prelude table is stored (lets `pkg::TealResolver`

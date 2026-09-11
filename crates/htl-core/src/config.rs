@@ -31,6 +31,7 @@
 //! Found by walking up from a file or directory, like `mlua-pkg.toml`. Command-line
 //! flags and the `HTL_LINTS` / `HTL_LINT` environment variables take precedence over it.
 
+use crate::BuildTarget;
 use crate::lint;
 use anyhow::{Context, Result};
 use semver::{Version, VersionReq};
@@ -277,6 +278,11 @@ pub struct BuildConfig {
     /// Modules the host provides at run time, besides those declared only by a `.d.tl`.
     #[serde(default)]
     pub host: Vec<String>,
+    /// What runs this project's output; absent means [`BuildTarget::Hb`], which is what
+    /// plain `htl build` produces and what every project without Rust in it is. Read from
+    /// the file; the scaffold does not write it yet (see `t_htl_toml` in `htl-cli` for why).
+    #[serde(default)]
+    pub target: Option<BuildTarget>,
 }
 
 /// `[fix]`: per-rule control over what `htl fix` applies.

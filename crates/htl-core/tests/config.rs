@@ -3,7 +3,7 @@
 
 use htl_core::config::{HtlConfig, check_toolchain, join_specs};
 use htl_core::pkg::TealResolver as Resolver;
-use htl_core::{Htl, contract_enforcement_lints, contract_lints};
+use htl_core::{BuildTarget, Htl, contract_enforcement_lints, contract_lints};
 use std::path::{Path, PathBuf};
 
 mod common;
@@ -250,6 +250,31 @@ fn toolchain_requirement_is_matched_by_cargos_rules() {
         HtlConfig::parse("[toolchain]\nhtl = \"0.4\"\nrustc = \"1.88\"\n").is_err(),
         "unknown keys under [toolchain] are errors, as they are everywhere else"
     );
+}
+
+/// `[build] target` is the build target as a string, and the string is the only spelling:
+/// a name that is not one is refused where it is written, with the three that are. Absent
+/// is the `hb` project every scaffold without a target writes, so it stays `None` rather
+/// than being defaulted into something the file does not say.
+#[test]
+fn a_build_target_is_named_and_a_name_that_is_not_one_is_refused() {
+    let cfg = HtlConfig::parse("[build]\ntarget = \"cdylib\"\n").unwrap();
+    assert_eq!(cfg.build.target, Some(BuildTarget::Cdylib));
+    assert!(
+        HtlConfig::parse("[fmt]\nindent = 3\n")
+            .unwrap()
+            .build
+            .target
+            .is_none()
+    );
+
+    let err = format!(
+        "{:#}",
+        HtlConfig::parse("[build]\ntarget = \"nope\"\n")
+            .expect_err("a target that is not one should not parse")
+    );
+    assert!(err.contains("unknown target `nope`"), "{err}");
+    assert!(err.contains("hb, bin, cdylib"), "{err}");
 }
 
 #[test]

@@ -351,18 +351,19 @@ Examples:
 Examples:
   htl new hello                    src/main.tl, a module, tests/, mlua-pkg.toml
   htl new hello --lib              a library: no entry script
-  htl new hello --embed            the same, plus a Rust host (--target rust)
-  htl new hello --target ffi --lib a library behind a C ABI, for a caller that is not Rust
+  htl new hello --embed            the same, plus a Rust host (--target bin)
+  htl new hello --target cdylib --lib
+                                   a library behind a C ABI, for a caller that is not Rust
 
-Targets: https://github.com/ynishi/htl#targets---target-name
-The C ABI target: https://github.com/ynishi/htl#the-c-abi-target---target-ffi
+Build targets: https://github.com/ynishi/htl#build-targets---target-name
+The cdylib target: https://github.com/ynishi/htl#the-cdylib-target---target-cdylib
 ")]
     New {
         name: String,
         /// Library only (no src/main.tl)
         #[arg(long)]
         lib: bool,
-        /// Also emit a Rust host: shorthand for --target rust
+        /// Also emit a Rust host: shorthand for --target bin
         #[arg(long)]
         embed: bool,
         /// What will run this project's output: a target writes Cargo.toml + src/lib.rs
@@ -376,7 +377,7 @@ The C ABI target: https://github.com/ynishi/htl#the-c-abi-target---target-ffi
         dir: Option<PathBuf>,
         #[arg(long)]
         lib: bool,
-        /// Shorthand for --target rust
+        /// Shorthand for --target bin
         #[arg(long)]
         embed: bool,
         /// Fill in this target's files, and report the ones that were already there
@@ -964,7 +965,7 @@ fn apply_project(h: &Htl, start: &Path) -> Result<Option<htl::pkg::Project>> {
 }
 
 /// What the run wrote, and — when a target was asked for by name — what it left alone. The
-/// kept list is what makes `htl init --target rust` on an older project say which of that
+/// kept list is what makes `htl init --target bin` on an older project say which of that
 /// target's files were already there instead of skipping them in silence.
 fn report_scaffold(dir: &Path, written: &[PathBuf], kept: &[PathBuf]) {
     let rel = |p: &PathBuf| p.strip_prefix(dir).unwrap_or(p).display().to_string();

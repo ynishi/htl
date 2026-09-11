@@ -157,12 +157,12 @@ fn new_embed_writes_the_rust_host() {
     assert_tree("embed", &root.join("sample"));
 }
 
-/// `--embed` is the shorthand for `--target rust`, and sharing the snapshot is what says
+/// `--embed` is the shorthand for `--target bin`, and sharing the snapshot is what says
 /// the two write the same tree rather than two trees that happen to look alike.
 #[test]
-fn new_target_rust_writes_what_embed_writes() {
-    let root = common::scratch("htl-cli-snapshot", "target-rust");
-    htl(&["new", "sample", "--target", "rust"], &root);
+fn new_target_bin_writes_what_embed_writes() {
+    let root = common::scratch("htl-cli-snapshot", "target-bin");
+    htl(&["new", "sample", "--target", "bin"], &root);
     assert_tree("embed", &root.join("sample"));
 }
 
@@ -178,10 +178,10 @@ fn new_lib_embed_writes_the_rust_host_without_a_binary() {
 /// is the one part of a scaffold nobody compiles by accident, so a change to the Python
 /// caller's `restype` or the C caller's `free` shows up in this diff or nowhere.
 #[test]
-fn new_lib_target_ffi_writes_the_c_abi_library_and_its_callers() {
-    let root = common::scratch("htl-cli-snapshot", "ffi");
-    htl(&["new", "sample", "--lib", "--target", "ffi"], &root);
-    assert_tree("ffi", &root.join("sample"));
+fn new_lib_target_cdylib_writes_the_c_abi_library_and_its_callers() {
+    let root = common::scratch("htl-cli-snapshot", "cdylib");
+    htl(&["new", "sample", "--lib", "--target", "cdylib"], &root);
+    assert_tree("cdylib", &root.join("sample"));
 }
 
 /// `htl init` in an empty directory is `htl new` — the same plan, only the name comes
@@ -214,6 +214,6 @@ fn init_target_fills_in_the_rust_side_of_a_plain_project() {
     let root = common::scratch("htl-cli-snapshot", "init-target");
     let dir = root.join("sample");
     htl(&["new", "sample"], &root);
-    htl(&["init", "--target", "rust"], &dir);
+    htl(&["init", "--target", "bin"], &dir);
     assert_tree("init-target", &dir);
 }

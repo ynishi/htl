@@ -115,14 +115,14 @@ fn the_binary_reaches_the_host_through_the_library() {
     assert!(!main_rs.contains("#[host_module"), "{main_rs}");
 }
 
-/// `--embed` is spelled `--target rust` from #189 on, and the two write the same tree. The
+/// `--embed` is spelled `--target bin` from #195 on, and the two write the same tree. The
 /// snapshot tests pin the tree; this pins that the shorthand still reaches it.
 #[test]
-fn embed_and_target_rust_write_the_same_thing() {
+fn embed_and_target_bin_write_the_same_thing() {
     let root = scratch("same");
     let (ok, _, stderr) = htl(&["new", "by-flag", "--embed"], &root);
     assert!(ok, "{stderr}");
-    let (ok, _, stderr) = htl(&["new", "by-name", "--target", "rust"], &root);
+    let (ok, _, stderr) = htl(&["new", "by-name", "--target", "bin"], &root);
     assert!(ok, "{stderr}");
     for f in ["src/lib.rs", "src/main.rs", "src/main.tl"] {
         let a = std::fs::read_to_string(root.join("by-flag").join(f)).unwrap();
@@ -133,28 +133,28 @@ fn embed_and_target_rust_write_the_same_thing() {
 }
 
 /// The C ABI target is a library and only a library: a `cdylib` has no entry point, so
-/// `--target ffi` without `--lib` is refused with the flag that fixes it, before the
+/// `--target cdylib` without `--lib` is refused with the flag that fixes it, before the
 /// directory exists.
 #[test]
-fn the_ffi_target_needs_lib_and_says_so_before_writing_anything() {
-    let root = scratch("ffi-needs-lib");
-    let (ok, _, stderr) = htl(&["new", "sample", "--target", "ffi"], &root);
+fn the_cdylib_target_needs_lib_and_says_so_before_writing_anything() {
+    let root = scratch("cdylib-needs-lib");
+    let (ok, _, stderr) = htl(&["new", "sample", "--target", "cdylib"], &root);
     assert!(!ok, "{stderr}");
     assert!(
-        stderr.contains("the `ffi` target writes no entry script, so it needs --lib"),
+        stderr.contains("the `cdylib` target writes no entry script, so it needs --lib"),
         "{stderr}"
     );
     assert!(!root.join("sample").exists(), "{stderr}");
 }
 
-/// What `--target ffi` writes that `--target rust` does not: the two extra crate types the
-/// C caller links against, the feature the generated wrappers need, and the attribute
+/// What `--target cdylib` writes that `--target bin` does not: the two extra crate types
+/// the C caller links against, the feature the generated wrappers need, and the attribute
 /// that writes the header. The snapshot pins every byte; this says what the bytes are
 /// *for*, so a reader of the test knows what would break.
 #[test]
-fn the_ffi_scaffold_is_a_c_library_with_the_export_attribute() {
-    let root = scratch("ffi");
-    let (ok, _, stderr) = htl(&["new", "sample", "--lib", "--target", "ffi"], &root);
+fn the_cdylib_scaffold_is_a_c_library_with_the_export_attribute() {
+    let root = scratch("cdylib");
+    let (ok, _, stderr) = htl(&["new", "sample", "--lib", "--target", "cdylib"], &root);
     assert!(ok, "{stderr}");
     let dir = root.join("sample");
 
@@ -202,7 +202,7 @@ fn target_help_lists_every_registered_target_and_never_the_old_flag() {
         let (ok, stdout, _) = htl(cmd, &root);
         assert!(ok);
         assert!(
-            stdout.contains("[possible values: rust, ffi]"),
+            stdout.contains("[possible values: bin, cdylib]"),
             "{cmd:?}:\n{stdout}"
         );
         assert!(!stdout.contains("--host"), "{cmd:?}:\n{stdout}");
@@ -218,12 +218,27 @@ fn an_unknown_target_is_refused_before_anything_is_written() {
     let root = scratch("unknown");
     let (ok, _, stderr) = htl(&["new", "sample", "--target", "nope"], &root);
     assert!(!ok, "{stderr}");
-    assert!(stderr.contains("rust"), "the registered names:\n{stderr}");
-    assert!(stderr.contains("ffi"), "the registered names:\n{stderr}");
+    assert!(stderr.contains("bin"), "the registered names:\n{stderr}");
+    assert!(stderr.contains("cdylib"), "the registered names:\n{stderr}");
     assert!(!root.join("sample").exists(), "{stderr}");
 }
 
-/// `htl init --target rust` on a project that predates the Rust side fills it in and
+/// The old spellings are gone rather than aliased: a target is named for the artefact it
+/// produces from #195 on, and someone whose fingers still write the pre-release names is
+/// answered with the ones that replaced them rather than with a half-written directory.
+#[test]
+fn an_old_target_name_is_refused_with_the_new_ones() {
+    let root = scratch("old-names");
+    for old in ["rust", "ffi"] {
+        let (ok, _, stderr) = htl(&["new", "x", "--target", old], &root);
+        assert!(!ok, "`{old}` should not be a target:\n{stderr}");
+        assert!(stderr.contains("bin"), "{old}:\n{stderr}");
+        assert!(stderr.contains("cdylib"), "{old}:\n{stderr}");
+        assert!(!root.join("x").exists(), "{old}:\n{stderr}");
+    }
+}
+
+/// `htl init --target bin` on a project that predates the Rust side fills it in and
 /// says which files it left alone, so nothing is skipped in silence.
 #[test]
 fn init_with_a_target_reports_what_it_kept() {
@@ -231,7 +246,7 @@ fn init_with_a_target_reports_what_it_kept() {
     let (ok, _, stderr) = htl(&["new", "sample"], &root);
     assert!(ok, "{stderr}");
     let dir = root.join("sample");
-    let (ok, _, stderr) = htl(&["init", "--target", "rust"], &dir);
+    let (ok, _, stderr) = htl(&["init", "--target", "bin"], &dir);
     assert!(ok, "{stderr}");
     assert!(stderr.contains("created src/lib.rs"), "{stderr}");
     assert!(stderr.contains("created Cargo.toml"), "{stderr}");
