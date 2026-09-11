@@ -44,7 +44,7 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 | `htl fix [paths] [--rule a,b] [--unsafe] [--dry-run] [--diff] [--exit-non-zero-on-fix]` | apply the fixes diagnostics carry: the safe ones by default, `--unsafe` for the ones that may change what the program does (see Fixing) |
 | `htl fmt [paths] [--check] [--indent N]` | whitespace formatter (indentation from the syntax tree, blank lines, trailing space) |
 | `htl gen <file.tl> [-o out.lua]` | readable Lua, the escape hatch out of htl |
-| `htl build <entry.tl> -o app.hb [--debug] [--source] [--extra a,b] [--host x,y] [--no-cache] [--explain-cache]` | link the entry's `require` closure into one bundle (see Bundles), replaying from the run cache what still holds (see Caching; the directory form is not cached) |
+| `htl build <entry.tl> -o app.hb [--debug] [--source] [--extra a,b] [--host x,y] [--no-cache] [--explain-cache]` | link the entry's `require` closure into one bundle (see Bundles), replaying from the run cache what still holds (see Caching; the directory form is not cached); a bundle is the `hb` target, so a project whose `[build] target` is `bin` or `cdylib` is refused (see Build targets) |
 | `htl bundle info <app.hb> [--format json]` | what a bundle records, without running it: format, the htl that built it, payload kind, the Lua its bytecode is for, entry, modules, host-provided names |
 | `htl unused [paths] [--format json] [--exit-non-zero-on-unused] [--no-cache]` | the complement of the same closure: modules no entry reaches, and `[deps]` no reached module requires (see Unused) |
 | `htl resolve <module> [path] [--format json]` | which file `require("<module>")` resolves to, and the whole chain in search order: what is read, what it shadows, and which crate or dependency each one came from (see `types/`); exits 1 when the name resolves to nothing |
@@ -1656,6 +1656,12 @@ them in silence.
 command that loads the file (absent means `hb`). `htl new --target <name>` writes it
 whenever the htl the project pins reads it — `main`, a checkout, a release from 0.5 on —
 and not under `0.4`, whose `include_tl!` would refuse the whole file over the unknown key.
+
+`htl build` is the first command that acts on what the key records. A bundle is the `hb`
+target, so in a `bin` or a `cdylib` project the build says which target the project is, who
+runs that output and which command builds it — `cargo build` — and writes nothing. The
+record is a decision the project made rather than a note about itself; dropping
+`[build] target` from `htl.toml` is how a project with Rust in it asks for a bundle anyway.
 
 #### Which htl the project depends on (`--htl <req | main | path:<checkout>>`)
 
