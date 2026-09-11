@@ -68,10 +68,10 @@ build:
 # htl, and three Cargo projects scaffolded from nothing and built. Neither is a claim about
 # this workspace, and both are minutes. The CLI's own behaviour on files — check, test, the
 # run cache, `cache status`, and the two suites meant to fail — moved to
-# `crates/htl-cli/tests/sample_project.rs`, and the three host projects to `e2e/`, where a
-# failure names a file, a line and what it saw instead of reporting that a `grep` exited 1.
-# `just check` runs the first of those; this runs the second, by package name.
-# The embedding example and every host `--host` offers, end to end.
+# `crates/htl-cli/tests/sample_project.rs`, and the three scaffolded projects to `e2e/`,
+# where a failure names a file, a line and what it saw instead of reporting that a `grep`
+# exited 1. `just check` runs the first of those; this runs the second, by package name.
+# The embedding example and every target `--target` offers, end to end.
 e2e:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -92,7 +92,7 @@ e2e:
       echo 'embed --features bad compiled: a Teal type error did not fail the Rust build' >&2
       exit 1
     fi
-    # Every host `--host` offers, scaffolded outside this repository and built against this
+    # Every target `--target` offers, scaffolded outside this repository and built against this
     # checkout. That was 87 lines of bash here; it is now three tests in the `e2e` member
     # crate, which `default-members` keeps out of `cargo test` and this line asks for by
     # name. The crate finds the binary and the target directory itself and defaults every
