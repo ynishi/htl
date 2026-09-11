@@ -47,140 +47,44 @@ pre-publish: pre-push e2e-scaffold-packaged
 fmt:
     cargo fmt --all
 
+# `cargo test` and not `cargo test --workspace`, and the two are no longer the same thing:
+# `e2e` is a workspace member that `default-members` leaves out, so the bare form runs every
+# test in the repository except the three that scaffold a Cargo project and build it from
+# nothing. Those are minutes, they are what `just e2e` is for, and putting them here would
+# put them in front of every commit and in both toolchains of the check job.
+#
+# clippy keeps `--workspace --all-targets`, which is what stops `e2e` rotting: it is
+# compiled and linted by this recipe and by CI, and only ever run by `e2e` below.
 # Green: the whole workspace, tests and lints. What CI runs.
 check:
-    cargo test --workspace
+    cargo test
     cargo clippy --workspace --all-targets
 
 # Compile everything, including tests and benches, without running any of it.
 build:
     cargo build --workspace --all-targets
 
-# What is left here is what a Rust test cannot ask: whether a binary crate embedding htl
-# builds and runs, and whether the three scaffolded hosts do. The CLI's own behaviour on
-# files — check, test, the run cache, `cache status`, and the two suites meant to fail —
-# moved to `crates/htl-cli/tests/sample_project.rs`, where a failure names a file, a line
-# and what it saw instead of reporting that a `grep` exited 1. `just check` runs those.
+# What is left here is what `cargo test` will not run on its own: a binary crate embedding
+# htl, and three Cargo projects scaffolded from nothing and built. Neither is a claim about
+# this workspace, and both are minutes. The CLI's own behaviour on files — check, test, the
+# run cache, `cache status`, and the two suites meant to fail — moved to
+# `crates/htl-cli/tests/sample_project.rs`, and the three host projects to `e2e/`, where a
+# failure names a file, a line and what it saw instead of reporting that a `grep` exited 1.
+# `just check` runs the first of those; this runs the second, by package name.
 # The embedding example and every host `--host` offers, end to end.
 e2e:
     #!/usr/bin/env bash
     set -euo pipefail
-    root="$(pwd)"
-    # Built once and then invoked by path, rather than through `cargo run`: the scaffold case
-    # below runs from a directory outside this workspace, where `cargo run` has no manifest
-    # to find.
-    cargo build -q -p htl-cli --bin htl
-    htl="${CARGO_TARGET_DIR:-$root/target}/debug/htl"
     # The embed example through both the include_tl! and the include_bundle! path.
     cargo run -q -p embed
     cargo run -q -p embed -- --bundle
-    # Every host `--host` offers: scaffolded into a temporary directory outside this
-    # repository, pointed back at this checkout so it is *this* htl that is embedded, then
-    # built, tested and run — including, for the C ABI host, the reference callers in C and
-    # Python that load the library it builds. The snapshot tests pin what the scaffold writes
-    # byte for byte; only this says the bytes compile and work. The artefacts land beside the
-    # workspace's under a directory of their own, because the scaffold sets
-    # `[profile.dev.build-override]` and sharing one target directory would rebuild the proc
-    # macro dependencies on every switch.
-    {{just_executable()}} _scaffold-hosts "$htl" \
-      "${CARGO_TARGET_DIR:-$root/target}/e2e-scaffold" \
-      "$root/crates/htl" "$root/crates/htl-core" "$root/crates/htl-macros"
-
-# The three host projects, and everything asked of them, in one place: the scaffold case of
-# `e2e` above and `e2e-scaffold-packaged` below differ in exactly two things — which htl
-# writes the projects ({{htl}}) and which trees they are built against ({{htl_path}},
-# {{core_path}}, {{macros_path}}) — and in nothing else. That is the point of the split: a
-# release gate that checked less than the loop that runs on every commit would be the wrong
-# way round.
-_scaffold-hosts htl target htl_path core_path macros_path:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    # Scaffolding inside the repository would leave a Cargo package in the checkout and
-    # run the CLI against the repository's own htl.toml, so the project goes elsewhere
-    # entirely and only its build artefacts come back.
-    dir="$(mktemp -d)"
-    trap 'rm -rf "$dir"' EXIT
-    target="{{target}}"
-    sample=(--config "patch.crates-io.htl.path='{{htl_path}}'"
-            --config "patch.crates-io.htl-core.path='{{core_path}}'"
-            --config "patch.crates-io.htl-macros.path='{{macros_path}}'"
-            --target-dir "$target")
-    # What each of these projects holds, and what they must keep holding whoever built them:
-    # a pin on the released htl, with nothing in the manifest redirecting it. The patch above
-    # is handed to cargo through --config, off to one side, so that a generated Cargo.toml
-    # stays byte for byte the one a user gets. Both halves are spelled `if …; then exit 1`
-    # rather than `! grep …`, because that second form cannot fail a recipe: bash exempts a
-    # command whose status is inverted with `!` from `set -e`, so it reported nothing however
-    # the manifest looked.
-    assert_unpatched_pin() {
-      if ! grep -q '^htl = ' Cargo.toml; then
-        echo "$PWD/Cargo.toml: names no htl to build against" >&2
-        exit 1
-      fi
-      if grep -q 'patch.crates-io' Cargo.toml; then
-        echo "$PWD/Cargo.toml: redirects its own pin, so this is not the manifest a user gets" >&2
-        exit 1
-      fi
-    }
-    # Each project is built in a subshell: the scaffolding command above has to be back in
-    # this workspace, not in the one that was just scaffolded.
-    {{htl}} new "$dir/hostsample" --host rust
-    (
-      cd "$dir/hostsample"
-      assert_unpatched_pin
-      cargo test "${sample[@]}"
-      out="$(cargo run -q "${sample[@]}" -- Ada)"
-      printf '%s\n' "$out"
-      printf '%s\n' "$out" | grep -qx 'hello from Rust, Ada'
-    )
-    # --lib is the same host without a binary: the library still builds and its test still
-    # goes through preload, and there is no entry point for cargo run to find.
-    {{htl}} new "$dir/libsample" --host rust --lib
-    (
-      cd "$dir/libsample"
-      test ! -e src/main.rs
-      test ! -e src/main.tl
-      assert_unpatched_pin
-      cargo test "${sample[@]}"
-    )
-    # The C ABI host, whose callers are the part nothing else here compiles: the library
-    # is built, the header the macro writes is checked, and the two reference hosts under
-    # examples/ are run against the artefact — the Python one wherever python3 is, the C
-    # one only where there is a compiler and a make.
-    {{htl}} new "$dir/ffisample" --host ffi --lib
-    (
-      cd "$dir/ffisample"
-      test ! -e src/main.rs
-      test ! -e src/main.tl
-      # The same pin, with the feature the profile needs on it — `htl = { version = "0.4",
-      # features = ["ffi"] }` is still one `htl =` line naming the release, and still
-      # nothing patches it here.
-      assert_unpatched_pin
-      cargo test "${sample[@]}"
-      cargo build "${sample[@]}"
-      # Written by #[c_export] at build time, not by the scaffold: it is not there until
-      # the library is built, and then it declares what the callers below call.
-      grep -q 'ffisample_handle \*ffisample_open(const char \*options_json);' include/ffisample.h
-      test -f "$target/debug/libffisample.a"
-      if command -v python3 >/dev/null; then
-        out="$(CARGO_TARGET_DIR="$target" python3 examples/python/run.py)"
-        printf '%s\n' "$out"
-        printf '%s\n' "$out" | grep -q 'greet          -> the Python host: hello, Ada'
-        printf '%s\n' "$out" | grep -q 'schema v1'
-        # The Lua error the Teal module raises, as a status rather than as a crash.
-        printf '%s\n' "$out" | grep -q 'greet("")      -> NULL, status 4'
-      else
-        echo 'no python3: skipping examples/python'
-      fi
-      if command -v cc >/dev/null && command -v make >/dev/null; then
-        out="$(make -s -C examples/c run LIBDIR="$target/debug")"
-        printf '%s\n' "$out"
-        printf '%s\n' "$out" | grep -q '{"greeted":1,"greeter":"the C host","v":1}'
-        printf '%s\n' "$out" | grep -q 'reset again    -> status 1'
-      else
-        echo 'no C compiler: skipping examples/c'
-      fi
-    )
+    # Every host `--host` offers, scaffolded outside this repository and built against this
+    # checkout. That was 87 lines of bash here; it is now three tests in the `e2e` member
+    # crate, which `default-members` keeps out of `cargo test` and this line asks for by
+    # name. The crate finds the binary and the target directory itself and defaults every
+    # path to this checkout, so there is nothing to pass — `e2e-scaffold-packaged` below
+    # sets the five variables that point the same three tests somewhere else.
+    cargo test -p e2e
 
 # The release gate: the same three host projects, built against the four `.crate` files
 # `cargo publish` would upload rather than against this checkout. Everything the scaffold
@@ -251,8 +155,20 @@ e2e-scaffold-packaged:
       --config "patch.crates-io.htl.path='$dir/htl-$ver'" \
       --config "patch.crates-io.htl-core.path='$dir/htl-core-$ver'" \
       --config "patch.crates-io.htl-macros.path='$dir/htl-macros-$ver'"
-    {{just_executable()}} _scaffold-hosts "$dir/cli/bin/htl" "$target" \
-      "$dir/htl-$ver" "$dir/htl-core-$ver" "$dir/htl-macros-$ver"
+    # The same three tests `e2e` runs, pointed at the CLI just installed and at the three
+    # extracted trees instead of at this checkout. Five variables are the whole of the
+    # difference between the two gates, as five positional arguments were when this was a
+    # shared bash recipe — a release gate that checked less than the loop running on every
+    # commit would be the wrong way round, and one implementation is how that stays true.
+    #
+    # The variables are set on the command rather than exported: `HTL_TEST_BIN` left in a
+    # shell is a suite reporting on a binary that stopped matching the source.
+    HTL_TEST_BIN="$dir/cli/bin/htl" \
+    HTL_E2E_TARGET="$target" \
+    HTL_PATCH_HTL="$dir/htl-$ver" \
+    HTL_PATCH_CORE="$dir/htl-core-$ver" \
+    HTL_PATCH_MACROS="$dir/htl-macros-$ver" \
+      cargo test -p e2e
 
 # Every benchmark: the figures in the README come from these. Ten samples each; a few minutes.
 bench:
