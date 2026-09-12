@@ -38,8 +38,16 @@ use semver::{Version, VersionReq};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
+/// The file name walked up for, and written by `htl new`. One name in one place, so that
+/// the search, the scaffold and the error that names it cannot disagree.
 pub const CONFIG_NAME: &str = "htl.toml";
 
+/// A project's `htl.toml`, parsed.
+///
+/// Every section defaults, so a project may write only the one it has an opinion about and
+/// a project with no file at all is this struct's [`Default`]. `deny_unknown_fields`
+/// throughout: a key nobody reads is a key the writer believed in, and reporting it is the
+/// only way they find out it did nothing.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HtlConfig {
@@ -47,16 +55,23 @@ pub struct HtlConfig {
     /// before the command reads anything else.
     #[serde(default)]
     pub toolchain: ToolchainConfig,
+    /// `[lint]` — which rules this project has an opinion about, and whether what they
+    /// report stops a run.
     #[serde(default)]
     pub lint: LintConfig,
+    /// `[fmt]` — what `htl fmt` writes where the formatter has a choice.
     #[serde(default)]
     pub fmt: FmtConfig,
+    /// `[check]` — where `require` may resolve from besides the project's own tree.
     #[serde(default)]
     pub check: CheckConfig,
+    /// `[build]` — what `htl build` cannot learn from the sources alone.
     #[serde(default)]
     pub build: BuildConfig,
+    /// `[fix]` — per-rule control over what `htl fix` applies.
     #[serde(default)]
     pub fix: FixConfig,
+    /// `[cache]` — how `htl check` reuses what it already worked out.
     #[serde(default)]
     pub cache: CacheConfig,
     /// Static counterpart of `TealResolver::expect_type` / `require_fields`: files
@@ -217,6 +232,10 @@ pub struct Contract {
     pub enforced_by: Option<String>,
 }
 
+/// `[lint]` — which rules run at what level, and whether what they report stops the run.
+///
+/// The two keys are the same question at two grains: [`rules`](Self::rules) names one rule,
+/// [`strict`](Self::strict) promotes every `warn` of a run at once.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LintConfig {
@@ -250,12 +269,18 @@ pub struct LintConfig {
     pub strict: Option<bool>,
 }
 
+/// `[fmt]` — what `htl fmt` writes where the formatter has a choice.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FmtConfig {
+    /// Spaces per level of indentation. `None` leaves the formatter's own default, which
+    /// is 3 — what `tl` itself writes, and what the scaffold puts in a new project's
+    /// `htl.toml` so that the number is visible rather than assumed. `--indent` overrides
+    /// it for one run.
     pub indent: Option<usize>,
 }
 
+/// `[check]` — where `require` may resolve from besides the project's own tree.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckConfig {

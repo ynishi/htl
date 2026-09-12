@@ -13,6 +13,13 @@ documentation = "https://docs.rs/htl"
 keywords = ["lua", "teal", "mlua", "typed", "scripting"]
 categories = ["development-tools", "game-development"]
 
+# docs.rs builds with default features unless told otherwise, and two of the paragraphs
+# above `pub use` link to items that only exist under `ffi` — they would render as broken
+# links on the page a reader arrives at. Everything here is additive, so building them all
+# is both the honest surface and the one where every intra-doc link resolves.
+[package.metadata.docs.rs]
+all-features = true
+
 [features]
 default = ["macros", "pkg", "std"]
 # include_tl! / include_tl_bytes! / TealRecord / host_module

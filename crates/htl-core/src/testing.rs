@@ -50,12 +50,21 @@ impl Htl {
 /// Outcome of one test file.
 #[derive(Debug, Default, Clone)]
 pub struct FileReport {
+    /// The test file this is about, as it was discovered or named on the command line.
     pub path: PathBuf,
+    /// What checking it found. A file that does not type-check still gets a report —
+    /// with this carrying the errors and no tests below it — rather than being dropped,
+    /// so a run says which files it could not get to.
     pub check: CheckInfo,
     /// Runtime error outside any test (e.g. the file itself raised).
     pub error: Option<String>,
+    /// Tests the library reported as passing.
     pub passed: usize,
+    /// Tests it reported as failing. `ok` is false while this is non-zero, and the run's
+    /// exit code is the sum of it over every file.
     pub failed: usize,
+    /// One message per failure, already formatted by the library — the runner owns no
+    /// assertion and so has nothing of its own to say about why one failed.
     pub failures: Vec<String>,
     /// `true` when no test library was used and the verdict is file-level.
     pub file_level: bool,
@@ -74,8 +83,14 @@ pub struct FileReport {
 /// One test's outcome, as reported by the assertion library.
 #[derive(Debug, Clone, Default)]
 pub struct TestResult {
+    /// The name the library reported. `htl.test` joins its `describe` and `it` text with
+    /// ` > `, and that whole string is what `--filter` matches against.
     pub name: String,
+    /// Whether it passed. A file's [`failures`](FileReport::failures) carry why the false
+    /// ones did; this is the per-test verdict a reporter lists.
     pub ok: bool,
+    /// Wall time for this test alone, against
+    /// [`FileReport::duration_ms`](FileReport::duration_ms) for the file around it.
     pub ms: f64,
 }
 
@@ -122,6 +137,9 @@ pub fn snapshot_dir(test_file: &Path) -> PathBuf {
 }
 
 impl FileReport {
+    /// Whether this file is a pass: it checked, it did not raise outside a test, and no
+    /// test failed. The three are separate fields because a reporter says which of them
+    /// went wrong, and one answer is what an exit code needs.
     pub fn ok(&self) -> bool {
         self.check.ok() && self.error.is_none() && self.failed == 0
     }
@@ -331,6 +349,10 @@ pub struct TestSession {
 }
 
 impl TestSession {
+    /// Build the one checker a run shares. `lint_spec` is the same `--lint` string the
+    /// CLI takes and is applied once here; `lib` is the module a test file requires for
+    /// its assertions ([`DEFAULT_LIB`] unless the caller has its own); `filter` and
+    /// `opts` are handed to that library's `run` for every file.
     pub fn new(
         lint_spec: Option<&str>,
         lib: &str,
