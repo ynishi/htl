@@ -165,6 +165,8 @@ pub enum Applicability {
 }
 
 impl Applicability {
+    /// The lowercase word this is stored and printed as — the one spelling that crosses
+    /// between a run, `--format json`, and the cached fix a later run reads back.
     pub fn as_str(self) -> &'static str {
         match self {
             Applicability::Safe => "safe",
@@ -178,10 +180,17 @@ impl Applicability {
 /// an insertion has `end == start`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Edit {
+    /// First line of the range to replace, counted from 1.
     pub line: usize,
+    /// First byte-column, counted from 1. Bytes rather than characters, because that is
+    /// what the checker reports and what an applier slices with.
     pub col: usize,
+    /// Line the range ends on. Equal to [`line`](Self::line) for an edit within one line.
     pub end_line: usize,
+    /// Byte-column the range ends at, exclusive — so the character at `end_col` survives.
+    /// Equal to [`col`](Self::col) for an insertion, which replaces nothing.
     pub end_col: usize,
+    /// What goes in the range's place. Empty deletes it.
     pub text: String,
 }
 
@@ -191,17 +200,24 @@ pub struct Edit {
 /// store reads back what `--format json` prints.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Fix {
+    /// Whether `htl fix` may apply this without being asked twice.
     pub applicability: Applicability,
+    /// The rewrite, as one or more replacements. A fix is all of them or none: they are
+    /// applied together, because a rewrite that lands half-way is worse than one that did
+    /// not land.
     pub edits: Vec<Edit>,
 }
 
 /// One literal `require` call in a checked file.
 #[derive(Debug, Clone)]
 pub struct RequireSite {
+    /// The name as the call spells it, before any separator or entry mapping.
     pub module: String,
     /// Resolved file, `None` when the checker could not find it.
     pub path: Option<PathBuf>,
+    /// Line of the `require` call, counted from 1.
     pub line: usize,
+    /// Byte-column of the call, counted from 1.
     pub col: usize,
 }
 
@@ -232,8 +248,14 @@ pub type CoverageSpans = (Vec<(usize, usize)>, Vec<FunctionSpan>);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModuleKind {
+    /// A `.tl` the checker compiles and the program runs — the only kind that is both.
     Source,
+    /// A `.d.tl`: types with no implementation. Requiring one at run time gets an empty
+    /// table, which is why a module that resolves to a declaration and nothing else
+    /// type-checks and then fails.
     Declaration,
+    /// A plain `.lua`, which the checker has nothing to say about. What is left when
+    /// neither of the other two is reachable.
     Lua,
 }
 
@@ -265,7 +287,10 @@ impl std::fmt::Display for ModuleKind {
 /// One file `require(name)` could have resolved to. See [`Htl::module_candidates`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleCandidate {
+    /// The file itself.
     pub path: PathBuf,
+    /// Which of the three it is, which is what decides whether it wins over the ones
+    /// found after it.
     pub kind: ModuleKind,
     /// The search-path directory it was found under.
     pub dir: PathBuf,
@@ -279,6 +304,9 @@ pub struct ContractResult {
     /// Declared fields absent from the module's returned table literal; `None` when the
     /// return value is not a literal (not decidable statically).
     pub missing: Option<Vec<String>>,
+    /// Line and column of the returned table literal, for the report about
+    /// [`missing`](Self::missing) to point at. `(1, 1)` when the checker gave no position,
+    /// so a message always has somewhere to point rather than none.
     pub missing_at: (usize, usize),
     /// Names `require_fields` asked for that the contract type does not declare. The
     /// config is wrong about the type, which is a different finding from a module that
@@ -726,6 +754,9 @@ pub fn require_cycles(infos: &[(PathBuf, CheckInfo)]) -> Vec<String> {
 }
 
 impl CheckInfo {
+    /// `true` when nothing failed the check — errors only. Warnings and lints are the
+    /// caller's to promote ([`clean`](Self::clean) is the stricter question), so this is
+    /// what decides whether generated code may be run.
     pub fn ok(&self) -> bool {
         self.errors.is_empty()
     }
@@ -1083,6 +1114,12 @@ impl Htl {
         Ok(this)
     }
 
+    /// The Lua state this `Htl` runs programs in.
+    ///
+    /// Not always the one the checker is in: [`with_checker`](Self::with_checker) makes a
+    /// fresh state for the program and leaves the prelude in the checker's. So a value
+    /// built from this state must not be handed to a function that came from the other —
+    /// that is `Lua instance passed Value created from a different main Lua state`.
     pub fn lua(&self) -> &Lua {
         &self.lua
     }

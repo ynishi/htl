@@ -16,6 +16,11 @@ use std::path::{Path, PathBuf};
 /// Passes per file before giving up (cargo fix uses 4).
 pub const MAX_PASSES: usize = 4;
 
+/// What a run of [`fix_file`] is allowed to do: which fixes count as applicable, which
+/// rules are in scope, and whether anything is written.
+///
+/// The default is the conservative one — safe fixes of every rule, written — so a caller
+/// that sets nothing gets what `htl fix` with no flags does.
 #[derive(Debug, Clone, Default)]
 pub struct FixOptions {
     /// Apply `unsafe` fixes too.
@@ -48,28 +53,52 @@ impl FixOptions {
 }
 
 /// One fix that was (or would be) applied.
+///
+/// Reported even on a dry run, and even when a later pass reverted the file: what was
+/// applied is what the run did, and a reader who is told only what remains cannot tell a
+/// quiet run from a busy one that undid itself.
 #[derive(Debug, Clone)]
 pub struct Applied {
+    /// The file as the caller named it — not the scratch path a dry run writes to.
     pub file: PathBuf,
+    /// The line the diagnostic was on, before this pass's edits moved anything.
     pub line: usize,
+    /// The rule the fix was filed under, which is what `--rule` and `[fix]` match on.
     pub rule: String,
+    /// The class it was applied under. `Unsafe` here means the run was asked for it,
+    /// through `--unsafe` or `[fix] unsafe`.
     pub applicability: Applicability,
+    /// Which pass applied it, counted from 1. More than one means an edit could not land
+    /// until an overlapping one had been applied and the file re-checked.
     pub pass: usize,
 }
 
 /// One fix that was not applied, and why.
 #[derive(Debug, Clone)]
 pub struct Skipped {
+    /// The file the diagnostic was in.
     pub file: PathBuf,
+    /// The line it was on.
     pub line: usize,
+    /// The rule it was filed under.
     pub rule: String,
+    /// Why it was passed over — a class the run was not asked for, a rule `--rule` or
+    /// `[fix] disable` excluded, a `suggest` that is never applied. A sentence rather
+    /// than a code, because it is printed as one.
     pub reason: String,
 }
 
+/// Everything one file's run of [`fix_file`] did, and everything it declined to do.
+///
+/// A run that changed nothing still fills this in: the skips are the answer to "why did
+/// `htl fix` do nothing", and without them a filtered run and a clean file look alike.
 #[derive(Debug, Default)]
 pub struct FileOutcome {
+    /// The file this is about.
     pub file: PathBuf,
+    /// Fixes that landed, in the order the passes applied them.
     pub applied: Vec<Applied>,
+    /// Fixes that did not, each with its reason.
     pub skipped: Vec<Skipped>,
     /// Edits deferred because they overlapped an applied one and the pass cap hit.
     pub deferred: usize,
