@@ -31,6 +31,11 @@ use anyhow::{Context, Result};
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
+/// What a link is asked for beyond the entry file: how modules are stored, and which ones
+/// the walk would otherwise miss or must not take.
+///
+/// Owned and `Default`, and it crosses the proc-macro boundary as a value — the borrowed
+/// half of a link's inputs is [`LinkStore`].
 #[derive(Debug, Clone, Default)]
 pub struct LinkOptions {
     /// Keep debug info (line numbers, local names) in bytecode. Off = stripped.
@@ -51,6 +56,8 @@ pub struct LinkOptions {
 /// macro expansion, the options may not.
 #[derive(Clone, Copy)]
 pub struct LinkStore<'a> {
+    /// The store itself: where a typed module's generated Lua and its check are looked up
+    /// before the checker is asked, and written back after.
     pub cache: &'a Cache,
     /// The lint selection in force, as [`cache::gen_key`] takes it: an entry generated
     /// under different lints reports different lints, and must not be reused.
@@ -84,21 +91,40 @@ impl LinkStore<'_> {
 /// One linked module: where it came from and how it was stored.
 #[derive(Debug, Clone)]
 pub struct LinkedModule {
+    /// The module name a `require` reaches it by, which is the name it takes in the
+    /// bundle — not its path.
     pub name: String,
+    /// The file it was read from, for a report that wants to name something openable.
     pub path: PathBuf,
+    /// `true` for a `.tl` that was checked and generated, `false` for a `.lua` taken as
+    /// it was. Only the typed ones have a store entry, so this is what
+    /// [`Linked::cached`] counts against.
     pub typed: bool,
 }
 
+/// The result of a link: the bundle, and everything a reporter wants to say about how it
+/// was arrived at.
+///
+/// The bundle is private because an incomplete one must not escape — see
+/// [`errors`](Self::errors) and [`bundle`](Self::bundle).
 #[derive(Debug, Default)]
 pub struct Linked {
     bundle: Bundle,
+    /// Every module the walk took, in the order it took them.
     pub modules: Vec<LinkedModule>,
+    /// Names the host is expected to provide at run time, so the bundle records them as
+    /// its own requirements rather than carrying code for them.
     pub host_modules: Vec<String>,
     /// Type errors and unresolved requires. A module with a type error is *absent* from
     /// the bundle, so the bundle is only handed out ([`bundle`](Self::bundle)) when this
     /// is empty: a program missing a module dies at its first `require`, far from here.
     pub errors: Vec<String>,
+    /// Lints from every module, which do not stop a bundle: whether they stop the *run*
+    /// is the caller's, and the caller is what knows about `strict`.
     pub lints: Vec<String>,
+    /// The full check of each module, for a reader that wants more than the flattened
+    /// [`errors`](Self::errors) and [`lints`](Self::lints) — the requires, the
+    /// dependencies, the per-file verdict.
     pub checks: Vec<(PathBuf, CheckInfo)>,
     /// How many typed modules came from the store rather than the checker. Zero without
     /// a store. The total to say it against is the typed count of [`modules`](Self::modules).
@@ -120,6 +146,8 @@ impl Linked {
         }
     }
 
+    /// The bundle by value, on the same condition as [`bundle`](Self::bundle): for a
+    /// caller that writes it out and is done with the report around it.
     pub fn into_bundle(self) -> Result<Bundle> {
         if self.errors.is_empty() {
             Ok(self.bundle)
@@ -270,6 +298,9 @@ pub fn link_with(
 pub struct Generated {
     /// The Lua; `None` when checking produced errors (see [`CheckInfo`]).
     pub code: Option<String>,
+    /// What checking said — carried whether or not there is code, and the half a replay
+    /// needs as much as the Lua: the lints, the requires and the dependencies come out of
+    /// here.
     pub check: CheckInfo,
     /// Whether it came from the store rather than the checker.
     pub cached: bool,

@@ -19,12 +19,22 @@ use serde::Serialize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
+    /// The file did not type-check. From the Teal checker, and the only severity that
+    /// fails a run on its own.
     Error,
+    /// A kind the Teal compiler reports for itself — an unused local, a redeclaration —
+    /// which htl surfaces under the rule name of its kind (`tl:unused`, ...) rather than
+    /// inventing one.
     Warning,
+    /// A finding of one of htl's own rules. The only severity whose diagnostics carry a
+    /// [`rule`](Diagnostic::rule), because a rule is what a project sets a level for.
     Lint,
 }
 
 impl Severity {
+    /// The lowercase word this severity is written as: in the `<severity>:` a report
+    /// prints, in `--format json`, and in the run cache. [`parse`](Self::parse) reads it
+    /// back, so the two are the one spelling that crosses between a run and a replay of it.
     pub fn as_str(self) -> &'static str {
         match self {
             Severity::Error => "error",
@@ -58,15 +68,25 @@ impl std::fmt::Display for Severity {
 /// new fields may be added, existing ones are not renamed.
 #[derive(Serialize, Debug, Clone)]
 pub struct Diagnostic {
+    /// Which of the three this is, and so whether a run that reported it fails — the
+    /// caller's to decide for a `warning` or a `lint`, settled for an `error`.
     pub severity: Severity,
     /// The file the diagnostic is in, as the report spells it. Empty when the text
     /// carried no position (a failure that is about a file rather than a place in one).
     pub file: String,
+    /// The line, counted from 1 as the checker counts it. `0` alongside an empty
+    /// [`file`](Self::file): the text carried no position, rather than pointing at a
+    /// first line.
     pub line: usize,
+    /// The column, counted from 1, and `0` under the same condition as
+    /// [`line`](Self::line).
     pub col: usize,
     /// The lint rule (`nil-index`, `contract`, ...) for `lint` diagnostics.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rule: Option<String>,
+    /// What the finding says, with the position prefix and the ` [htl <rule>]` suffix
+    /// taken off — the sentence alone, so a reader that formats its own line does not
+    /// have to unpick one.
     pub message: String,
     /// A mechanical rewrite `htl fix` may apply, when the diagnostic has one.
     #[serde(skip_serializing_if = "Option::is_none")]
