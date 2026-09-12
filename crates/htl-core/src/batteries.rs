@@ -37,24 +37,36 @@ pub const PREFIX: &str = "std";
 /// path twice, under a prefix nothing preloads.
 pub const CRATE: &str = "mlua-batteries";
 
-/// The directory the `std` declarations are written to: `<lib_dir>/std/`.
-fn std_dir() -> PathBuf {
-    lib_dir().join(PREFIX)
+/// What this library writes under [`lib_dir`]: `std/<module>.d.tl` for every module the
+/// build carries, as the crate ships it, and the generated `std/init.d.tl`. Each with the
+/// path it takes below that directory.
+///
+/// [`crate::lib_dir`] hashes this list into the directory's name, so the set of modules a
+/// build carries — which is its feature set, and which the crate's own version moves too —
+/// is what decides where they are written. A build with one module more than another
+/// cannot read the other's files, which is the whole point: they are not the same
+/// declarations.
+pub(crate) fn declarations() -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = mlua_batteries::dts::entries()
+        .into_iter()
+        .map(|e| (format!("{PREFIX}/{}.d.tl", e.name), e.source.to_string()))
+        .collect();
+    out.push((
+        format!("{PREFIX}/init.d.tl"),
+        mlua_batteries::dts::init_source(PREFIX),
+    ));
+    out
 }
 
-/// Write `std/<module>.d.tl` for every module the build carries, and `std/init.d.tl`,
-/// under [`lib_dir`]. Returns the directory the checker should search.
+/// Write every declaration in [`declarations`] under [`lib_dir`]. Returns the directory
+/// the checker should search.
 fn write_declarations() -> Result<PathBuf> {
-    let dir = std_dir();
-    let write = |name: &str, text: &str| {
-        write_if_changed(&dir.join(format!("{name}.d.tl")), text)
-            .with_context(|| format!("writing bundled declarations under {}", dir.display()))
-    };
-    for e in mlua_batteries::dts::entries() {
-        write(e.name, e.source)?;
+    let dir = lib_dir();
+    for (path, source) in declarations() {
+        write_if_changed(&dir.join(path), &source)
+            .with_context(|| format!("writing bundled declarations under {}", dir.display()))?;
     }
-    write("init", &mlua_batteries::dts::init_source(PREFIX))?;
-    Ok(lib_dir())
+    Ok(dir)
 }
 
 /// Re-wrap each `std.<module>` loader so that a failing call raises a plain string.
@@ -148,14 +160,20 @@ mod tests {
         Ok(())
     }
 
+    /// Every declaration this library says it writes is where it says, and says it under
+    /// the prefix the preload uses. The list is walked rather than two names spelled here,
+    /// because the same list names the directory ([`crate::lib_dir`]): a file missing from
+    /// disk would be one the key counted and nothing wrote.
     #[test]
     fn the_declarations_are_on_the_path_and_the_namespace_is_typed() -> Result<()> {
         let h = Htl::new()?;
         h.install_std()?;
-        let dir = std_dir();
-        assert!(dir.join("json.d.tl").is_file(), "{}", dir.display());
-        assert!(dir.join("init.d.tl").is_file(), "{}", dir.display());
-        let init = std::fs::read_to_string(dir.join("init.d.tl"))?;
+        let dir = lib_dir();
+        for (path, _) in declarations() {
+            assert!(path.starts_with(&format!("{PREFIX}/")), "{path}");
+            assert!(dir.join(&path).is_file(), "{}", dir.join(&path).display());
+        }
+        let init = std::fs::read_to_string(dir.join(PREFIX).join("init.d.tl"))?;
         assert!(init.contains("local record std\n"), "{init}");
         assert!(init.contains("require(\"std.json\")"), "{init}");
         Ok(())
