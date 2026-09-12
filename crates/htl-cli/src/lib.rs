@@ -1774,6 +1774,7 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
         h.apply_config(root, c)?;
     }
     h.install_test_lib()?;
+    h.install_std()?;
     let opts = FixOptions {
         unsafe_fixes: flags.unsafe_fixes,
         promoted: cfg
@@ -2157,6 +2158,9 @@ fn cmd_resolve(module: &str, path: Option<&Path>, json: bool) -> Result<ExitCode
     // describe a project nobody checks.
     auto_dts(start)?;
     let h = Htl::new()?;
+    // First, so that the project's own directories go in front of it as they do under
+    // `htl run`: `add_path` prepends, and the report prints the order it searched.
+    h.install_std()?;
     let project = apply_project(&h, start)?;
     if let Some((root, _, c)) = &cfg {
         h.apply_config(root, c)?;
@@ -2412,6 +2416,7 @@ fn cmd_gen(file: &Path, out: Option<&Path>) -> Result<ExitCode> {
     h.add_layout_paths(file)?;
     auto_dts(file)?;
     apply_project(&h, file)?;
+    h.install_std()?;
     let (code, c) = h.gen_lua(file)?;
     text_sink().checkinfo(&c);
     let Some(mut code) = code else {
@@ -2433,6 +2438,7 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
     auto_dts(file)?;
     apply_project(&h, file)?;
     h.install_test_lib()?;
+    h.install_std()?;
     if Bundle::is_bundle(&bytes) {
         let b = Bundle::decode(&bytes)?;
         return Ok(match h.run_bundle(&b, args) {
@@ -2485,6 +2491,10 @@ fn cmd_build(
     let h = Htl::new()?;
     auto_dts(entry)?;
     apply_project(&h, entry)?;
+    // `std.*` resolves to its declaration and nothing else, so the linker files it under
+    // the host's modules — which is what it is: the binary that runs the bundle preloads
+    // it, as `htl run` does before `run_bundle`.
+    h.install_std()?;
     let cfg = load_config(entry)?;
     if let Some((root, _, cfg)) = &cfg {
         h.apply_config(root, cfg)?;

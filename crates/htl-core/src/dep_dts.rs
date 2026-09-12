@@ -13,6 +13,12 @@
 //! dts = ["dts/mq.d.tl"]
 //! ```
 //!
+//! or, for a crate whose declarations are one per module in one directory, a `*` in the
+//! file name — `dts = ["types/mlua_batteries/*.d.tl"]` — which is read here against the
+//! crate's own tree, so the manifest does not repeat a list the crate's sources already
+//! are. Only the file name may hold a `*`; the directory is spelled out. A pattern that
+//! matches nothing is reported under the pattern's own name, like a file that is not there.
+//!
 //! and every project depending on it materialises those files under
 //! `types/<crate>/<file>`, written with [`write_if_changed`](crate::write_if_changed) and
 //! committed like the declarations the project generates itself.
@@ -173,6 +179,14 @@ fn decls(meta: &serde_json::Value) -> Result<Vec<DepDecl>, String> {
         ) else {
             continue;
         };
+        // The crate behind `std.*` is in every graph that has the feature on, and its
+        // declarations are already under `lib_dir()` with the prefix the preload uses.
+        // A copy under `types/mlua-batteries/` would be the same modules a second time
+        // under a name nothing answers `require` for.
+        #[cfg(feature = "std")]
+        if name == crate::batteries::CRATE {
+            continue;
+        }
         let dts = &pkg["metadata"]["htl"]["dts"];
         if dts.is_null() {
             continue;
@@ -189,20 +203,79 @@ fn decls(meta: &serde_json::Value) -> Result<Vec<DepDecl>, String> {
                     "{name} {version}: [package.metadata.htl] dts holds a value that is not a path"
                 ));
             };
-            out.push(DepDecl {
-                package: name.to_string(),
-                version: version.to_string(),
-                declared: rel.to_string(),
-                source: dir.join(rel),
-                file: Path::new(rel)
-                    .file_name()
-                    .map(|f| f.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-            });
+            for rel in expand(&dir, rel) {
+                out.push(DepDecl {
+                    package: name.to_string(),
+                    version: version.to_string(),
+                    source: dir.join(&rel),
+                    file: Path::new(&rel)
+                        .file_name()
+                        .map(|f| f.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    declared: rel,
+                });
+            }
         }
     }
     out.sort_by(|a, b| (&a.package, &a.file).cmp(&(&b.package, &b.file)));
     Ok(out)
+}
+
+/// One manifest entry as the paths it stands for, relative to the crate's directory.
+///
+/// A plain path is itself, untouched — no directory is read for it, so a graph whose
+/// declarations are named one by one costs nothing here. A file name with a `*` in it is
+/// matched against the names in its directory, in name order. When the directory cannot be
+/// read or nothing in it matches, the pattern comes back as written: [`materialise`] then
+/// reports it the way it reports a named file that is not there, and the message carries
+/// the pattern, which is the line in the manifest the reader has to fix.
+fn expand(dir: &Path, rel: &str) -> Vec<String> {
+    let path = Path::new(rel);
+    let Some(pattern) = path.file_name().and_then(|f| f.to_str()) else {
+        return vec![rel.to_string()];
+    };
+    if !pattern.contains('*') {
+        return vec![rel.to_string()];
+    }
+    let parent = path.parent().unwrap_or(Path::new(""));
+    let Ok(read) = std::fs::read_dir(dir.join(parent)) else {
+        return vec![rel.to_string()];
+    };
+    let mut names: Vec<String> = read
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| wildcard(pattern, n))
+        .collect();
+    if names.is_empty() {
+        return vec![rel.to_string()];
+    }
+    names.sort();
+    names
+        .into_iter()
+        .map(|n| parent.join(n).to_string_lossy().into_owned())
+        .collect()
+}
+
+/// `*` for any run of characters, everything else itself. The whole of what a file name in
+/// `dts` may ask for: `*.d.tl`, `mq_*.d.tl`. No `?`, no classes, no `**` — a declaration
+/// list is not a search, and a pattern that needs more than this is a list.
+fn wildcard(pattern: &str, name: &str) -> bool {
+    let mut parts = pattern.split('*');
+    let first = parts.next().unwrap_or("");
+    let Some(mut rest) = name.strip_prefix(first) else {
+        return false;
+    };
+    let parts: Vec<&str> = parts.collect();
+    let Some((last, middle)) = parts.split_last() else {
+        return rest.is_empty();
+    };
+    for part in middle {
+        let Some(i) = rest.find(part) else {
+            return false;
+        };
+        rest = &rest[i + part.len()..];
+    }
+    rest.ends_with(last)
 }
 
 /// Write every shipped declaration under `root/types/<crate>/`, and a note beside each
@@ -436,6 +509,68 @@ mod tests {
         .unwrap_err();
         assert!(e.contains("dep 0.1.0"), "{e}");
         assert!(e.contains("not a list of paths"), "{e}");
+    }
+
+    /// A `*` in the file name is the files in that directory that match it, in name order,
+    /// each with its own `declared` — so a problem with one of them names that one file. A
+    /// plain path beside it is untouched, and no directory is read for it.
+    #[test]
+    fn a_star_in_the_file_name_is_every_matching_file_in_that_directory() {
+        let dir = std::env::temp_dir().join(format!("htl-dep-dts-glob-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("types/b")).unwrap();
+        for f in ["json.d.tl", "env.d.tl", "README.md", "init.tl"] {
+            std::fs::write(dir.join("types/b").join(f), "").unwrap();
+        }
+        let manifest = dir.join("Cargo.toml").display().to_string();
+        let d = decls(&meta(&format!(
+            r#"{{
+              "packages": [
+                {{"id": "root", "name": "app", "version": "0.1.0", "manifest_path": "/w/app/Cargo.toml"}},
+                {{"id": "dep", "name": "b", "version": "0.7.0", "manifest_path": "{manifest}",
+                 "metadata": {{"htl": {{"dts": ["types/b/*.d.tl", "extra/one.d.tl"]}}}}}}
+              ],
+              "resolve": {{"root": "root", "nodes": [
+                {{"id": "root", "dependencies": ["dep"]}}, {{"id": "dep", "dependencies": []}}]}}
+            }}"#
+        )))
+        .unwrap();
+        let declared: Vec<&str> = d.iter().map(|d| d.declared.as_str()).collect();
+        assert_eq!(
+            declared,
+            ["types/b/env.d.tl", "types/b/json.d.tl", "extra/one.d.tl"],
+            "{d:?}"
+        );
+        assert_eq!(d[0].source, dir.join("types/b/env.d.tl"));
+        assert_eq!(d[0].file, "env.d.tl");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A pattern nothing matches is passed on as written, so the report names the pattern
+    /// — the manifest line to fix — rather than nothing at all.
+    #[test]
+    fn a_star_that_matches_nothing_is_reported_as_the_pattern() {
+        let dir = std::env::temp_dir().join(format!("htl-dep-dts-noglob-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("dts")).unwrap();
+        std::fs::write(dir.join("dts/notes.txt"), "").unwrap();
+        assert_eq!(expand(&dir, "dts/*.d.tl"), ["dts/*.d.tl"]);
+        assert_eq!(expand(&dir, "missing/*.d.tl"), ["missing/*.d.tl"]);
+        assert_eq!(expand(&dir, "dts/plain.d.tl"), ["dts/plain.d.tl"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_star_matches_a_run_of_anything_and_nothing_else_is_special() {
+        assert!(wildcard("*.d.tl", "json.d.tl"));
+        assert!(wildcard("*.d.tl", ".d.tl"));
+        assert!(!wildcard("*.d.tl", "json.tl"));
+        assert!(wildcard("mq_*.d.tl", "mq_a.d.tl"));
+        assert!(!wildcard("mq_*.d.tl", "a_mq_a.d.tl"));
+        assert!(wildcard("a*b*c", "abc"));
+        assert!(wildcard("a*b*c", "axxbyyc"));
+        assert!(!wildcard("a*bc*c", "abc"));
+        assert!(!wildcard("?.d.tl", "a.d.tl"));
     }
 
     #[test]

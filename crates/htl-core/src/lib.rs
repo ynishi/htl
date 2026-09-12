@@ -7,6 +7,12 @@
 //! - [`Htl::install_searcher`]: strict `require` for `.tl` (type errors abort the require)
 //! - [`Htl::preload`]: register generated Lua (e.g. from `include_tl!`) under a module name
 //! - [`bundle`]: stripped-bytecode bundles produced by `htl build`
+//!
+//! Two libraries ship inside the binary rather than on a project's search path, and both
+//! are installed the same way — a `package.preload` entry for the run, a `.d.tl` under
+//! [`lib_dir`] for the checker: `htl.test` ([`Htl::install_test_lib`], `describe` / `it` /
+//! `expect`) and, with the `std` feature, `std.*` ([`Htl::install_std`], mlua-batteries'
+//! modules under the namespace that crate leaves to its host).
 
 pub use mlua;
 
@@ -47,6 +53,13 @@ pub mod project;
 // dts` leaves under `types/<crate>/` — so it carries the same features.
 #[cfg(all(feature = "pkg", feature = "dts"))]
 pub mod resolve;
+// `std.*`: mlua-batteries, preloaded and declared the way `htl.test` is. Its own module
+// rather than a corner of `testing.rs` because the two libraries are unrelated apart from
+// how they are installed, and that part they share through `lib_dir`. Named for the crate
+// and not for the namespace: a module called `std` at the crate root would shadow `::std`
+// in every path this file writes.
+#[cfg(feature = "std")]
+pub mod batteries;
 pub mod teal;
 pub mod testing;
 // The complement of the require closure: what no entry reaches. On the project layer,
@@ -1601,6 +1614,15 @@ pub fn write_if_changed(path: &Path, text: &str) -> std::io::Result<bool> {
     }
     std::fs::write(path, text)?;
     Ok(true)
+}
+
+/// Where the libraries that ship inside the binary put their `.d.tl` so the checker can see
+/// them: `<tmp>/htl-lib-<version>/`, with `htl/test.d.tl` and, under the `std` feature,
+/// `std/*.d.tl` below it. Keyed by this crate's version so two htl builds on one machine
+/// never read each other's declarations; the files are written on demand by the library
+/// that owns them, only when their content changes.
+pub fn lib_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("htl-lib-{}", env!("CARGO_PKG_VERSION")))
 }
 
 /// Parent directory of a file, `.` when the path has none.

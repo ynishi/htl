@@ -31,10 +31,18 @@ ffi = []
 # mlua's async support, for `async fn` in a `#[host_module]` impl. Off by default: it
 # changes how mlua is built, and a host with no async method needs none of it.
 async = ["mlua/async"]
+# `Htl::install_std`: mlua-batteries' modules as `require("std.json")`, `std.string` and so
+# on, with their declarations in front of the checker. The crate ships them under its own
+# name and leaves `std` for the host to assemble; this is htl assembling it. Its default
+# features only (json / env / path / time / string / validate / pretty / argparse), which
+# add serde_json to the graph and nothing else — the modules that pull a runtime or a
+# network stack (fs / http / llm / task) are the host's to turn on, not the toolchain's.
+std = ["dep:mlua-batteries"]
 
 [dependencies]
 mlua = { workspace = true }
 mlua-pkg = { workspace = true, optional = true }
+mlua-batteries = { version = "0.7.0", optional = true }
 anyhow = { workspace = true }
 walkdir = { workspace = true }
 # `[toolchain] htl` in htl.toml — a requirement read and matched by cargo's own rules.

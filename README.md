@@ -408,6 +408,12 @@ the files your macros write, in your manifest:
 dts = ["dts/mq.d.tl"]      # written by this crate's own #[host_module(dts = "dts/mq.d.tl")]
 ```
 
+A crate with one declaration per module in one directory names the directory and a `*`
+instead of the list: `dts = ["types/mine/*.d.tl"]`. The `*` stands for any run of
+characters in the file name and nothing else — no `?`, no `**` — and the directory is
+spelled out. A pattern that matches nothing is reported like a listed file that is not
+there, under the pattern's own name.
+
 Every project that depends on the crate then gets them under `types/<crate>/` from `htl
 dts` (and from `check` / `run` / `test`, which generate before they work). Keep the files
 current the way this repository does — the macro rewrites them, CI diffs them — and commit
@@ -1257,6 +1263,48 @@ so carrying the project's own change forward onto it is a merge git performs —
 why a directory with uncommitted changes is refused, naming them, and why `--force` (which
 discards them) is a flag rather than the default. Outside a repository the question cannot
 be asked at all, and that is said rather than guessed at.
+
+## The native modules (`std.*`)
+
+```lua
+local json = require("std.json")         -- typed via std/json.d.tl, inside the binary
+local str = require("std.string")
+local pretty = require("std.pretty")
+
+local rows: {Row} = json.decode(text)    -- decode is generic: annotate the result
+print(pretty.dump({ name = str.trim(name), rows = #rows }))
+```
+
+`std.*` is [mlua-batteries](https://github.com/ynishi/mlua-batteries) — Rust modules
+reached from Teal — under the namespace that crate leaves to its host to assemble. htl is
+that host: the `htl` binary carries the crate's default set, `json`, `env`, `path`, `time`,
+`string`, `validate`, `pretty` and `argparse`, preloads each as `std.<name>` (and the
+namespace table as `require("std")`) before any command runs a script, and puts the
+declarations in front of the checker, so `htl check`, `htl test` and `include_tl!` type
+them without the project holding a copy. Each declaration is the crate's own; what a
+function does and what it raises is documented there. Every one raises on failure rather
+than returning `nil, err`, so a result-style call is `pcall`, or a host module under
+`errors = "return"`.
+
+The set is the crate's *default* and not `full`: a module that reaches the file system,
+the network or an async runtime (`fs`, `http`, `llm`, `task`) is a decision about what a
+script may do, and a toolchain does not make it for every project it runs. A Rust host
+that wants those depends on the crate itself, under its own prefix, beside `std`.
+
+What version of the modules a script sees follows where the script runs. Under `htl run`
+/ `htl test` it is the binary's, pinned like everything else the binary does by
+`[toolchain] htl` in `htl.toml`. Under a Rust host it is the `htl` crate's, pinned by the
+host's `Cargo.toml`: the `std` feature (on by default, off with `default-features =
+false`) brings the crate in, and `h.install_std()?` in the host's `preload` — which
+`htl new --target` writes — installs it. A host that leaves the call out has its scripts
+typed against `std.*` and failing at the first `require`, which is the same standing
+`htl.test` has always had in a host.
+
+In a bundle, `std.*` is a host module: `htl build` files it with the modules the running
+binary provides rather than trying to bundle Rust, and `htl run x.hb` preloads it before
+the bundle starts. A dependency that ships its own declarations for the crate
+(`[package.metadata.htl] dts`) is not materialised under `types/`: the modules are already
+on the path under the prefix that answers `require`.
 
 ## Tests
 

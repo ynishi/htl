@@ -17,10 +17,10 @@ const TEST_DTL: &str = include_str!("../lua/test.d.tl");
 /// Module name of the bundled assertion library.
 pub const DEFAULT_LIB: &str = "htl.test";
 
-/// Directory holding the bundled `.d.tl` files so the checker can see them
-/// (`<tmp>/htl-lib-<version>/`). Written on demand, only when content changes.
+/// [`crate::lib_dir`] with this library's declaration in it: `htl/test.d.tl`, written on
+/// demand, only when its content changes.
 pub fn lib_dir() -> Result<PathBuf> {
-    let dir = std::env::temp_dir().join(format!("htl-lib-{}", env!("CARGO_PKG_VERSION")));
+    let dir = crate::lib_dir();
     write_if_changed(&dir.join("htl").join("test.d.tl"), TEST_DTL)
         .with_context(|| format!("writing bundled declarations under {}", dir.display()))?;
     Ok(dir)
@@ -433,6 +433,8 @@ fn run_in(h: &Htl, path: &Path, r: RunIn<'_>, out_code: &mut Option<String>) -> 
     };
     phase("state", &mut t0);
     h.install_test_lib()?;
+    #[cfg(feature = "std")]
+    h.install_std()?;
     let dir = parent_dir(path);
     h.add_path(&dir)?;
     #[cfg(feature = "pkg")]

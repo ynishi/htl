@@ -17,8 +17,10 @@ categories = ["development-tools", "command-line-utilities"]
 # See src/bin/.
 
 [dependencies]
-# The CLI needs the engine only, not the proc macros.
-htl = { workspace = true, features = ["pkg", "dts"] }
+# The CLI needs the engine only, not the proc macros. `std` is what makes `require("std.json")`
+# answer under `htl run` / `test` / `check`: a project with no Rust host of its own has no other
+# way to a native module than the binary that runs it.
+htl = { workspace = true, features = ["pkg", "dts", "std"] }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde = { version = "1", features = ["derive"] }

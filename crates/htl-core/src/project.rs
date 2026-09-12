@@ -515,6 +515,9 @@ pub fn checker(cfg: &Config, paths: &[PathBuf], sel: &crate::lint::Selection) ->
     }
     // `*_test.tl` under the checked tree require("htl.test"): make its types visible.
     h.install_test_lib()?;
+    // And any file may require("std.json"): the same, for the modules the binary carries.
+    #[cfg(feature = "std")]
+    h.install_std()?;
     Ok(h)
 }
 

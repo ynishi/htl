@@ -36,6 +36,7 @@ const MODULE: &[u8] = htl::include_tl_bytes!("src/{{mod}}/init.tl");
 /// Teal module as `require("{{mod}}")`.
 pub fn preload(h: &Htl) -> anyhow::Result<()> {
     Host.htl_preload(h)?;
+{{std}}
     // Stripped bytecode: small, and with neither line numbers nor a chunk name, so a
     // failure inside this module reads `?: in function '{{mod}}.greet'`. `htl run
     // src/{{mod}}/init.tl` and `htl test` run the Teal itself and name file and line.
