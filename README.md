@@ -644,6 +644,7 @@ no-any = "warn"           # allow by default; see it while you migrate, without 
 | `nil-index` | warn | `t[k].x`, `t[k]:m()`, `t[k]()`, `t[k][j]` — Teal types a map/array lookup as `V`, not `V \| nil` |
 | `nil-return` | warn | the same four shapes over a call — `f(x).y`, `f(x):m()`, `f(x)()`, `f(x)[k]` — where `f` is declared `---@nilable`. Silent until a declaration carries the marker (see below) |
 | `nil-return-unchecked` | allow | the local such a call was bound to, used as the base of a chain before any statement looks at it — `local d = f(x)` then `d:upper()`. One report per local, at the first use. Off by default: it is a flow question, and the shapes it gets wrong are the ones where something did check (see below) |
+| `htlx-available` | allow | a `for i = 1, #t do` loop whose whole body is a function [htl-x](https://github.com/ynishi/htl-x) already has — `list.map`, `list.to_set`, `list.filter` — in a project that depends on htl-x. Silent in a project that does not. Off by default: what it reports is right, and the call it names is a library's (see below) |
 | `struct-fields` | warn | a table built for a record marked `---@struct` that leaves out a field the record declares and `---@optional` does not exempt. Silent until a record carries the marker (see below). `htl fix` spells the missing fields at the site, as a suggestion it never applies |
 | `sealed-record` | warn | a table built for a record marked `---@sealed`, or an `as` cast to one, outside the file that declares it — outside the functions the marker names, when it names any (`---@sealed(gate.judge)`). Silent until a record carries the marker (see below) |
 | `enum-exhaustive` | warn | `if e == "a" ... elseif e == "b" ... end` over an enum with a value left unhandled and no `else`; enums nested in records and enums from required modules count |
@@ -997,6 +998,47 @@ nil-return-unchecked = "warn"   # or "deny" to fail the run on it
 `[lint] strict = true` does not turn it on — strict promotes what a run *reports* to a
 failure, and an `allow` rule reports nothing — so the level is where it is asked for.
 One occurrence is silenced with a trailing `-- htl: allow(nil-return-unchecked)`.
+
+### A loop a dependency already has (`htlx-available`, off by default)
+
+[htl-x](https://github.com/ynishi/htl-x) is the collections library `htl new` writes into a
+project's `[deps]`, and a project that has it still writes the loops it has. This rule
+reports three of them, each the body of a `for i = 1, #t do` with nothing else in it:
+
+| loop | call |
+|---|---|
+| `out[i] = f(t[i])`, or `out[#out + 1] = f(t[i])` | `list.map(t, f)` |
+| `out[t[i]] = true` | `list.to_set(t)` |
+| `if p(t[i]) then out[#out + 1] = t[i] end` | `list.filter(t, p)` |
+
+```
+lint: src/find.tl:16:4: this loop is list.map(rows, row_summary): htlx is a dependency of this project, and `require("htlx.list")` has it [htl htlx-available]
+```
+
+`sum`, `contains`, `tablex.keys` and `sorted_pairs` are the same idea over other shapes and
+are not written yet.
+
+**It is silent in a project that does not depend on htl-x** — the names come from the
+lockfile the project installed from, so telling a project to use a library is never telling
+it to take one on. Three more conditions keep a loop from being read as a call it is not:
+the index is used only to subscript (`t[i]`, and `out[i]` on the left), the loop starts at
+1 with no `step`, and the accumulator is declared empty on the line directly above. The
+last is what makes the call *equal* to the loop rather than similar — `list.map` returns a
+new array, and a loop over an `out` that already held something does not.
+
+Off by default all the same, and for a different reason from the two rules above: what it
+reports is right. A loop whose `f` has a side effect the author wants in that order is code
+the project would argue about, and a rule that argues about working code does not belong on
+in every project.
+
+```toml
+[lint.rules]
+htlx-available = "warn"
+```
+
+The finding carries the rewrite as a `htl fix` suggestion — the loop replaced by
+`out = list.map(rows, row_summary)` — which `htl fix --diff` shows and `htl fix` never
+applies: merging that into the declaration above it is the edit a person makes.
 
 ### The string boundary of an enum (`enum-cast`, `enum-table`)
 

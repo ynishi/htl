@@ -1153,6 +1153,25 @@ impl Htl {
         Ok(())
     }
 
+    /// Tell the checker which dependencies the project installed, by name.
+    ///
+    /// Read by the rules that are about a library the project has rather than about its own
+    /// code — `htlx-available`, which is silent in a project without htl-x — and by nothing
+    /// else. Called by [`Htl::apply_project`](crate::pkg::Project) with what the lockfile
+    /// linked; a state nobody calls it on has none, which is the answer a run outside a
+    /// project should get.
+    /// The names cross as a sequence and the set is built on the other side, rather than
+    /// as a table built here. `h` is not always in `self.lua` — a split state
+    /// ([`with_checker`](Self::with_checker)) keeps the prelude in the checker's — and a
+    /// table made in one state and passed to a function in another is
+    /// `Lua instance passed Value created from a different main Lua state`. A `Vec` is
+    /// converted by the call itself, in the state the function belongs to.
+    pub fn set_deps(&self, names: &[String]) -> Result<()> {
+        let f: Function = self.h.get("set_deps")?;
+        f.call::<()>(names.to_vec())?;
+        Ok(())
+    }
+
     /// Names of all lint rules (enabled or not), the project layer's among them.
     pub fn lint_rules(&self) -> Result<Vec<String>> {
         Ok(lint::rule_names().into_iter().map(str::to_string).collect())

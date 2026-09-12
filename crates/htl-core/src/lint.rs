@@ -1,7 +1,7 @@
 //! The rules a finding can be reported under, and which of them a run has on.
 //!
 //! Every rule name htl prints — the ` [htl <rule>]` suffix a finding's message ends with,
-//! and the `rule` field of `--format json` — is one entry of [`RULES`]. Fourteen of them are
+//! and the `rule` field of `--format json` — is one entry of [`RULES`]. Fifteen of them are
 //! implemented in `lint.lua`, five in the project layer and seven by the vendored Teal
 //! compiler, and that difference used to decide what a project could say about them: the
 //! registry was `L.DEFAULT` in `lint.lua`, so `--lint` and `[lint]` knew the thirteen and
@@ -11,7 +11,7 @@
 //! could read it there. The Lua side keeps no defaults of its own any more: it is handed
 //! the resolved selection ([`Htl::select_lints`](crate::Htl::select_lints)), so the names a
 //! project may write and the names that run cannot drift apart. What `lint.lua` still owns
-//! is the *implementation* of its fourteen — `tests/lint_registry.rs` holds that list to this
+//! is the *implementation* of its fifteen — `tests/lint_registry.rs` holds that list to this
 //! one, so a rule renamed on one side fails a test rather than going quietly silent.
 //!
 //! Whether a rule is on and how much it matters are one question here, answered by a
@@ -67,8 +67,8 @@ pub enum Side {
 /// The three words are selene's `[lints]` and Cargo's, in that spelling, because a reader
 /// arriving from either already knows them. Nothing defaults to [`Deny`](Self::Deny) — the
 /// levels a project gets without writing anything are `warn` for every rule htl reports
-/// and `allow` for the three that are opinions and the one that is a flow question — so
-/// `deny` is the thing a project asks
+/// and `allow` for the three that are opinions, the one that is a flow question and the
+/// one about code that is already right — so `deny` is the thing a project asks
 /// for, and `strict` is asking for it run-wide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -192,7 +192,7 @@ impl Rule {
     }
 }
 
-/// Every rule there is. The first twenty-five are the lint surface, in the order
+/// Every rule there is. The first twenty-six are the lint surface, in the order
 /// `htl check --list-lints` prints them: the file-level rules first, in the order
 /// `lint.lua` runs them, then the ones the project layer asks once the files have been
 /// checked, then the warning kinds the vendored Teal compiler reports for itself. The last
@@ -208,6 +208,13 @@ pub const RULES: &[Rule] = &[
     // is doing its job does not belong in every project by default; one that wants it says
     // so by name.
     Rule::allow("nil-return-unchecked", Side::Lua),
+    // `allow`, and for a third reason again. The two above are about code that may be
+    // wrong; this one is about code that is right and that a library the project already
+    // depends on says in one call. It is silent unless `htlx` is installed — advice to use
+    // what a project has, never to take on what it does not — and it holds a loop to three
+    // conditions before reading it as a call, so it is rarely wrong. Rarely is still not a
+    // reason to argue with every project about working code, so a project asks for it.
+    Rule::allow("htlx-available", Side::Lua),
     Rule::warn("struct-fields", Side::Lua),
     Rule::warn("sealed-record", Side::Lua),
     Rule::warn("enum-exhaustive", Side::Lua),
@@ -231,7 +238,7 @@ pub const RULES: &[Rule] = &[
     // The prefix is not decoration. `unused` already means something else here — `htl
     // unused` reports modules nothing requires, not locals nothing reads — and these seven
     // words are Teal's to rename, not htl's; keeping them in a namespace of their own says
-    // where they came from and leaves htl's fourteen free of them.
+    // where they came from and leaves htl's fifteen free of them.
     //
     // All `warn`, which is what they have always been: the compiler raises them as
     // warnings and htl forwarded them as warnings long before it could name them. There is
@@ -419,7 +426,7 @@ impl Selection {
     }
 
     /// The rules of one side and whether each is on, for a consumer that has to be handed
-    /// the selection rather than ask about it — `lint.lua`, which runs its fourteen from a
+    /// the selection rather than ask about it — `lint.lua`, which runs its fifteen from a
     /// table. Fix classes are not among them: no producer produces one, so there is
     /// nothing to tell a producer about them.
     ///
@@ -436,7 +443,7 @@ impl Selection {
 /// A run's rule selection together with the `-- htl: allow(...)` comments of the sources it
 /// reports on: everything needed to decide whether a finding of the project layer is said.
 ///
-/// `lint.lua` answers the same two questions for its own fourteen, inside `report`. This is
+/// `lint.lua` answers the same two questions for its own fifteen, inside `report`. This is
 /// the other half — the same allow syntax, read from the file a finding points into. The
 /// mechanism was never specific to Lua rules: an allow comment needs a line number and a
 /// rule name, and a project-layer finding has both.
@@ -577,14 +584,17 @@ mod tests {
     ///
     /// `nil-return-unchecked` joined them later and is `allow` for a different reason: not
     /// an opinion, but a flow rule whose false positives are the cases where something did
-    /// check and it could not tell.
+    /// check and it could not tell. `htlx-available` for a third: the code it reports is
+    /// right, and the call it names is a library's, not htl's.
     #[test]
-    fn the_defaults_are_warn_except_the_opinions_and_the_flow_rule() {
+    fn the_defaults_are_warn_except_the_opinions_and_the_two_that_are_not() {
         for (name, level) in rule_defaults() {
             let want = match name {
-                "no-any" | "explicit-number" | "class-record" | "nil-return-unchecked" => {
-                    Level::Allow
-                }
+                "no-any"
+                | "explicit-number"
+                | "class-record"
+                | "nil-return-unchecked"
+                | "htlx-available" => Level::Allow,
                 _ => Level::Warn,
             };
             assert_eq!(level, want, "{name}");

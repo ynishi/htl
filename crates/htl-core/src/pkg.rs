@@ -1214,7 +1214,12 @@ impl crate::Htl {
     /// The directory on the path is [`Project::entries`], where each dep is reached at its
     /// `entry`; the links are written first if the lockfile calls for any that are missing.
     pub fn apply_project(&self, p: &Project) -> anyhow::Result<()> {
-        p.link_entries()?;
+        let installed = p.link_entries()?;
+        // The names, for the rules that are about a library the project has rather than
+        // about its own code (`htlx-available`). The lockfile's rather than the manifest's:
+        // a dependency nothing installed is one `require` cannot reach, and advice to use
+        // it would be advice to fail a check.
+        self.set_deps(&installed)?;
         let _ = std::fs::create_dir_all(&p.entries);
         self.add_path(&p.entries)?;
         for d in &p.target_dirs {
