@@ -3,6 +3,9 @@
 --
 --   nil-index        `t[k].x` / `t[k]:m()` / `t[k]()` / `t[k][j]` -- indexing a map/array
 --                    yields V, not V|nil in Teal, so chaining on it can raise at runtime.
+--   nil-return       the same chain over a call whose function is declared `---@nilable`:
+--                    the marker says the first return value may be nil, and Teal types it
+--                    `T` regardless, so indexing the call directly can raise at runtime.
 --   sealed-record    a table constructor for a record marked `---@sealed`, or an `as` cast
 --                    to one, outside the file that declares it (outside the functions the
 --                    marker names, when it names any).
@@ -34,7 +37,7 @@ local L = {}
 -- Which rules are on is not decided here. The registry — every rule name there is, its
 -- default level, and which half of htl implements it — is `lint::RULES` in lint.rs, because
 -- the project layer reports under those names too and could not read a list kept in Lua.
--- What this file owns is the twelve implementations below (`RULES`), and `L.run` is handed
+-- What this file owns is the thirteen implementations below (`RULES`), and `L.run` is handed
 -- the selection to run them under: a rule / on table, not a rule / level one. How much a
 -- finding matters is read where the run is judged, so a rule moving between `warn` and
 -- `deny` changes nothing about the work done here. `struct-fields` and `sealed-record` are on and still say
@@ -141,6 +144,41 @@ local function lint_nil_index(ast, report)
                CHAIN_WHAT[n.op.op] .. " directly on an index result: the value may be nil at runtime; bind it to a local and nil-check first")
          end
       end
+   end)
+end
+
+---------------------------------------------------------------- nil-return
+
+-- The same shape as `nil-index`, over a call rather than an index: `f(x).y`, `f(x):m()`,
+-- `f(x)[k]`, `f(x)()` where `f` is declared `---@nilable`. Teal types the result `T`
+-- because every Teal type accepts nil, so nothing in the check stops the chain; the marker
+-- beside the declaration is what says the call may hand back nothing, and this is the one
+-- use of the result that cannot be right whatever the run-time value is.
+--
+-- Which function a call reaches is type information, so `extra.nilable_at(y, x)` answers it
+-- from the checker's position report (see prelude.lua) — the marker travels with the
+-- declaration, so a `.d.tl` in `types/`, one a crate ships, and one in the project's own
+-- source all reach the rule the same way. What this rule adds is the site, and the name it
+-- reads off the call for the message.
+--
+-- Binding the call to a local is silent here on purpose: the guard that follows is what the
+-- marker asks for, and holding `local v = f(x)` to a guard is a flow question with its own
+-- false positives (a check inside a helper, a check on a second local, `or error(...)`) and
+-- its own rule to come.
+local function lint_nil_return(ast, report, extra)
+   local nilable_at = extra and extra.nilable_at
+   if not nilable_at then return end
+   walk(ast, function(n)
+      if n.kind ~= "op" or not n.op or not CHAIN_OPS[n.op.op] then return end
+      local call = n.e1
+      if not is_node(call) or call.kind ~= "op" or not call.op or call.op.op ~= "@funcall" then return end
+      local callee = call.e1
+      if not is_node(callee) or not callee.y or not callee.x then return end
+      if not nilable_at(callee.y, callee.x) then return end
+      local name = subject_key(callee)
+      report("nil-return", n.y, n.x,
+         "call result may be nil at runtime: " .. (name and (name .. " is") or "the function called here is") ..
+         " marked ---@nilable; bind it to a local and nil-check first")
    end)
 end
 
@@ -1124,6 +1162,7 @@ end
 
 local RULES = {
    { "nil-index", lint_nil_index },
+   { "nil-return", lint_nil_return },
    { "struct-fields", lint_struct_fields },
    { "sealed-record", lint_sealed_record },
    { "enum-exhaustive", lint_enum_exhaustive },

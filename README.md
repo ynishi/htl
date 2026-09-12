@@ -627,6 +627,7 @@ no-any = "warn"           # allow by default; see it while you migrate, without 
 | rule | default | catches |
 |---|---|---|
 | `nil-index` | warn | `t[k].x`, `t[k]:m()`, `t[k]()`, `t[k][j]` — Teal types a map/array lookup as `V`, not `V \| nil` |
+| `nil-return` | warn | the same four shapes over a call — `f(x).y`, `f(x):m()`, `f(x)()`, `f(x)[k]` — where `f` is declared `---@nilable`. Silent until a declaration carries the marker (see below) |
 | `struct-fields` | warn | a table built for a record marked `---@struct` that leaves out a field the record declares and `---@optional` does not exempt. Silent until a record carries the marker (see below). `htl fix` spells the missing fields at the site, as a suggestion it never applies |
 | `sealed-record` | warn | a table built for a record marked `---@sealed`, or an `as` cast to one, outside the file that declares it — outside the functions the marker names, when it names any (`---@sealed(gate.judge)`). Silent until a record carries the marker (see below) |
 | `enum-exhaustive` | warn | `if e == "a" ... elseif e == "b" ... end` over an enum with a value left unhandled and no `else`; enums nested in records and enums from required modules count |
@@ -901,6 +902,55 @@ caught, the optional case is not. That is the price of the marker rather than an
 oversight. A near-miss heuristic here would fire on the very keys the marker exists to
 allow, and a warning that is wrong whenever the marker is doing its job is worse than the
 silence.
+
+### Functions that may return nothing (`---@nilable`)
+
+A function that returns nil on some inputs — a parent directory that does not exist, an
+environment variable that is unset, a pattern that does not match — has no way to say so in
+a Teal signature. Every Teal type accepts nil, so `function(string): string` is already the
+declaration of a function that may return nil, and the checker treats the result as a
+`string` at every call site. `---@nilable` says the first return value may be nothing:
+
+```tl
+   -- nil when there is no parent.
+   parent: function(p: string): string      ---@nilable
+   ---@nilable
+   find: function(s: string, pat: string): string
+```
+
+The type does not change. `local d = path.parent(p)` still gives a `string`, so `if d then
+… end`, `d or "."` and passing `d` on all read as they always have, and what the marker
+buys is the `nil-return` lint over the one use that cannot be right whatever the run-time
+value is — indexing the call itself:
+
+```
+lint: src/main.tl:4:19: call result may be nil at runtime: path.parent is marked ---@nilable; bind it to a local and nil-check first [htl nil-return]
+```
+
+`f(x).y`, `f(x):m()`, `f(x)()` and `f(x)[k]` are the four shapes, the same four `nil-index`
+reports over an index, and binding the call to a local is what it asks for. Silence one
+occurrence with a trailing `-- htl: allow(nil-return)`.
+
+**Why not `string | nil`.** That form is real Teal and the checker does act on it — it
+refuses the index. The trouble is everything else: Teal narrows a union with `is` and with
+`as`, and with nothing else, so `if v then`, `v ~= nil` and `v or "."` all leave the union
+in place and every caller ends up writing `as string`. Declaring a nilable return that way
+would turn ordinary Lua into an error across every project on the declaration. The marker
+carries the same fact at the cost of being a lint rather than a type.
+
+The marker goes where the function is **declared**, in both forms — trailing, or on a line
+of its own above it — like `---@struct` and `---@sealed`, and it is read from whichever
+file holds the declaration: the project's own source, a `.d.tl` in `types/`, or one a crate
+ships. mlua-batteries 0.7.2 writes it on `path.parent` / `filename` / `stem` / `ext`,
+`env.get` / `home` and `regex.find` / `captures`, so a project using `std.*` gets the rule
+without writing anything.
+
+An unmarked function says nothing: no marker means *unknown*, not *nilable*, which is why
+adding the rule is silent on a project until someone writes a marker or depends on a
+declaration that has one. What it does not do yet is follow the local — `local v = f(x)`
+and then `v.y` with no check between them is a flow question, with false positives of its
+own (a check inside a helper, a check on a second local, `or error(...)`), and it is a rule
+of its own to come.
 
 ### The string boundary of an enum (`enum-cast`, `enum-table`)
 
