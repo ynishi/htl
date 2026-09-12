@@ -149,3 +149,21 @@ fn fmt_normalises_the_whitespace_around_the_code() {
 fn fmt_does_not_continue_after_a_generic_close() {
     assert_formats("generics");
 }
+
+/// A comment belongs to the block it is written in. Two shapes reach past what the syntax
+/// tree says on its own: a body that is nothing but a comment, whose `statements` node
+/// starts and ends at the terminator and so has no line inside it, and a body whose first
+/// line is a comment, whose node starts at the first *statement* and so begins below it.
+/// Before #231 the formatter moved both out a level — the first line of a function body
+/// all the way to column 1 — and the output was a fixed point, so `fmt --check` agreed
+/// with the damage and every later run kept it.
+///
+/// The fixture holds every block that opens one: `then`, `elseif`, `else`, `while`, both
+/// `for`s, `repeat` (which ends at `until`, not `end`), a bare `do`, a function, a method,
+/// a function value, a wrapped condition and a wrapped header. It also holds a
+/// comment-only table constructor, which was right before this and is here to stay right:
+/// its extent comes from the braces rather than from its contents.
+#[test]
+fn fmt_keeps_a_comment_in_the_block_it_was_written_in() {
+    assert_formats("comments");
+}

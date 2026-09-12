@@ -96,19 +96,53 @@ local function is_node(t)
    return type(t) == "table" and type(t.kind) == "string"
 end
 
-local function collect_spans(ast)
+-- Index of the token at a position, so a node can be asked what came just before it.
+local function tokens_by_pos(tokens)
+   local at = {}
+   for i, t in ipairs(tokens) do
+      if t.y and t.x then
+         at[t.y] = at[t.y] or {}
+         at[t.y][t.x] = i
+      end
+   end
+   return at
+end
+
+-- The line a block's body opens on: the line of the token just before the body's first
+-- one, which is whatever introduced it (`then`, `else`, `do`, `repeat`, a function's
+-- return type). Not the body's own line, because `statements` starts at its first
+-- *statement* — a body whose first line is a comment starts below it, and a body with no
+-- statements at all starts at the terminator that ends it. Either way the lines between
+-- belong to the block, and asking the token stream is what says so; comments are attached
+-- to the tokens around them rather than being tokens (`tl.lex`), so the one before is
+-- always the opener.
+local function opener_pos(at, tokens, n)
+   local i = at[n.y] and at[n.y][n.x]
+   if i and i > 1 then
+      local prev = tokens[i - 1]
+      if prev and prev.y and prev.x then return prev.y, prev.x end
+   end
+   return n.y, n.x
+end
+
+local function collect_spans(ast, tokens)
    local spans = {}
    local seen = {}
+   local at = tokens_by_pos(tokens)
    local function go(n)
       if type(n) ~= "table" or seen[n] then return end
       seen[n] = true
       if is_node(n) and n.yend then
          if n.kind == "statements" and n ~= ast then
-            spans[#spans + 1] = { kind = "block", y1 = n.y, x1 = n.x, y2 = n.yend, x2 = n.xend or 0 }
+            -- `y1`/`ox` is where the body opens and `by`/`x1` where its first statement
+            -- is; the two differ exactly when something the parser does not tokenize (a
+            -- comment) sits between them, or when there is no statement at all.
+            local oy, ox = opener_pos(at, tokens, n)
+            spans[#spans + 1] = { kind = "block", y1 = oy, ox = ox, by = n.y, x1 = n.x, y2 = n.yend, x2 = n.xend or 0 }
          elseif n.kind == "literal_table" then
-            spans[#spans + 1] = { kind = "brace", y1 = n.y, y2 = n.yend }
+            spans[#spans + 1] = { kind = "brace", y1 = n.y, x1 = n.x, y2 = n.yend }
          elseif (n.kind == "argument_list" or n.kind == "expression_list") and n.tk == "(" then
-            spans[#spans + 1] = { kind = "paren", y1 = n.y, y2 = n.yend }
+            spans[#spans + 1] = { kind = "paren", y1 = n.y, x1 = n.x, y2 = n.yend }
          elseif n.kind == "newtype" then
             spans[#spans + 1] = { kind = "typeblock", y1 = n.y, y2 = n.yend }
          end
@@ -218,7 +252,7 @@ function F.format(src, filename, opts)
    end
    local tokens = tl.lex(src, filename)
    local by_line = tokens_by_line(tokens)
-   local spans = collect_spans(ast)
+   local spans = collect_spans(ast, tokens)
    local type_extra = nested_type_depths(spans, by_line)
    local prot = protected_lines(src)
    local lines = split_lines(src)
@@ -242,20 +276,33 @@ function F.format(src, filename, opts)
       local blocks = {}
       for _, s in ipairs(spans) do
          if s.kind == "block" then
-            local after_start = (L > s.y1) or (L == s.y1 and firstX >= s.x1)
+            -- Past the line the body opens on, or on the line its first statement is on
+            -- and not to the left of it (`if x then y = 1` puts `y = 1` inside and the
+            -- `if` outside). The two tests are separate because the body's first statement
+            -- is not always on the opening line, and a column from another line says
+            -- nothing about this one.
+            local after_start = (L > s.y1) or (L == s.by and firstX >= s.x1)
             if after_start and L < s.y2 then blocks[#blocks + 1] = s end
          end
       end
       -- Brackets: a `(` / `{` span counts once per start line, and a `(` span does not
       -- count inside a block that opened after it (callback bodies indent one level,
       -- not two: `f("x", function()` ... `end)`).
+      --
+      -- "After" is a position and not a line. A callback's body opens at the `)` of its
+      -- own argument list, which is on the line the call opened on — so comparing lines
+      -- alone would miss it, while a call *inside* a block body (`while c do g(` ... `)`)
+      -- opens after that body did and has to keep counting.
       local bracket_lines = {}
       for _, s in ipairs(spans) do
          if s.kind ~= "block" and in_bracket(s, L) then
             local shadowed = false
             if s.kind == "paren" then
                for _, b in ipairs(blocks) do
-                  if b.y1 > s.y1 then shadowed = true break end
+                  if b.y1 > s.y1 or (b.y1 == s.y1 and b.ox > (s.x1 or 0)) then
+                     shadowed = true
+                     break
+                  end
                end
             end
             if not shadowed then bracket_lines[s.y1] = true end
