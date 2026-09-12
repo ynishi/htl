@@ -468,8 +468,14 @@ impl Interrupt {
 
     /// Install the hook that turns this flag into a Lua error.
     ///
-    /// Call it from the opener, on the state the handle will run. Replaces any hook
-    /// already on the state — a Lua state has one.
+    /// Call it from the opener, on the state the handle will run. It is the state's
+    /// *global* hook (`Lua::set_global_hook`), so a coroutine the script starts is
+    /// watched as well as the main thread — a thread hook (`Lua::set_hook`) covers only
+    /// the thread it was set on, and a loop inside `coroutine.wrap` would run past it.
+    /// Replaces any global hook already on the state, and a script with the `debug`
+    /// library can replace it in turn (`debug.sethook`): a host that runs Teal it does
+    /// not trust builds the state without `debug`
+    /// ([`Htl::with_checker_lua`](crate::Htl::with_checker_lua)).
     pub fn install(&self, h: &Htl) -> mlua::Result<()> {
         self.install_every(h, HOOK_EVERY)
     }
@@ -478,7 +484,7 @@ impl Interrupt {
     /// has measured its own scripts.
     pub fn install_every(&self, h: &Htl, every: u32) -> mlua::Result<()> {
         let flag = self.0.clone();
-        h.lua().set_hook(
+        h.lua().set_global_hook(
             mlua::HookTriggers::new().every_nth_instruction(every),
             move |_lua, _debug| {
                 if flag.swap(false, Ordering::SeqCst) {

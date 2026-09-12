@@ -396,6 +396,45 @@ the first function the two do not share. `host-module-shadowed` reports that at 
 `require`, naming both. It is a lint rather than a fix: which of the two should give up the
 name is the project's decision, and htl moves neither resolution order.
 
+### Your own `Lua`
+
+`Htl::new` opens every standard library — `debug`, `io` and `os` included — on a state
+it makes itself. That is the right state for `htl run`, for the checker, and for a host
+running Teal it wrote. A host running Teal it did not write (a mods directory, a script
+a user dropped in) decides what that Teal may reach, and decides it on the `Lua`: the
+libraries at construction, the allocator's bound, the hook that counts instructions.
+htl takes the state the host built and adds no limit of its own:
+
+```rust
+use htl::Htl;
+use htl::mlua::{Lua, LuaOptions, StdLib};
+
+let checker = Htl::new()?;                     // the checker keeps everything it needs
+// SAFETY: a state that loads bundles has to accept binary chunks, which mlua's safe
+// `new_with` refuses; this one loads only what the host hands it.
+let lua = unsafe {
+    Lua::unsafe_new_with(StdLib::ALL_SAFE ^ StdLib::OS ^ StdLib::IO, LuaOptions::default())
+};
+lua.set_memory_limit(8 << 20)?;                // mlua's: past it, an allocation is `MemoryError`
+let h = Htl::with_checker_lua(&checker, lua)?; // the program runs here; `os` and `io` are nil
+```
+
+`Htl::from_lua(lua)` is the same for the shared form, where the checker runs on the
+host's state too; that state then needs what the checker needs as well.
+
+What htl itself needs from a program state: `package` (the searcher and `preload`) and
+the base library's `load`; `debug`, only for `htl test --coverage`. The checker state
+`Htl::new` makes uses `string`, `table`, `math` and `package`, and `os.getenv` and
+`io.stderr` on its debug paths — and it is not the state a mod runs in.
+
+The limits are mlua's, and so are their edges, which are worth knowing before relying
+on one. An instruction hook fires only while Lua is executing Lua, so a host function
+that blocks is one instruction; `set_global_hook` reaches the coroutines a script
+starts, `set_hook` one thread. A thread has one hook, and a script with `debug` can
+replace it — leave `debug` out of a state that runs Teal you do not trust. A memory
+limit is checked after Lua's emergency collection, and `MemoryError` is what comes back.
+`htl check` settles what a module *is*; what it may *do* is settled here, by the host.
+
 ### Shipping the declaration to your users (`[package.metadata.htl] dts`)
 
 A crate that registers a module in someone else's Lua state has to hand them the
@@ -600,9 +639,10 @@ every later call on it answers `PANIC` without running anything.
 **One handle, one thread.** The handle records the thread that opened it and every entry
 checks it, so using it elsewhere is `WRONG_THREAD` rather than a data race
 (`game_threadsafe()` answers `0`, the `sqlite3_threadsafe()` convention). The exception is
-`game_interrupt(h)`, callable from any thread: it sets an atomic that a Lua debug hook
-turns into an error at the next tick, which is how a runaway mod is stopped from a host
-that cannot preempt it. One interrupt stops one run; the handle stays usable.
+`game_interrupt(h)`, callable from any thread: it sets an atomic that a Lua debug hook —
+the state's global one, so a loop inside a coroutine is reached too — turns into an
+error at the next tick, which is how a runaway mod is stopped from a host that cannot
+preempt it. One interrupt stops one run; the handle stays usable.
 
 **Conventions the generated code fixes**, so a project does not decide them again:
 `game_open` takes one JSON object — pass absolute paths, a seed and names in it rather
