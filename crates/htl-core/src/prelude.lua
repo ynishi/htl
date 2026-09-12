@@ -313,6 +313,53 @@ local function sealed_resolver(result, filename)
    end
 end
 
+-- `---@nilable`: functions whose first return value may be nil. Teal cannot say it in the
+-- type — every type there accepts nil, and `T | nil`, which the checker does act on, is
+-- narrowed by `is` and `as` alone, so declaring it would turn `if v then` and `v or d`
+-- into errors at every call site. The marker says it beside the declaration instead, the
+-- type stays `T`, and the `nil-return` lint holds the one shape that cannot be right:
+-- indexing the call directly.
+--
+-- Read from the declaring file like the markers above, and answered from the same position
+-- report. The function's own type carries `file` and `y` — a record field declared
+-- `parent: function(string): string` reports the field's line, and a `local function f`
+-- its own — so the marker is read off that line with no detour through the record that
+-- holds the field [measured: `tl.get_types`' `by_pos` at the callee position of
+-- `p.parent(x)` gives `file=types/p.d.tl y=2`, the line `parent:` is on].
+local function nilable_at_decl(cache, t)
+   local lines = source_lines(cache, t.file)
+   if not lines then return false end
+   return (marker_on(lines, t.y, "nilable")) and true or false
+end
+
+-- Resolver for the `nil-return` lint: true when the function being called at (y, x) is
+-- declared `---@nilable`. The position is the callee's — the variable in `f(x)`, the `.`
+-- expression in `p.parent(x)` — and both hold the function's type.
+--
+-- A type with fields is a record and not a function: the marker means nothing on one, and
+-- refusing it here keeps a `---@nilable` written by mistake on a record from reporting
+-- every call of a field of it.
+local function nilable_resolver(result, filename)
+   local ok, report = pcall(tl.get_types, result)
+   if not ok or type(report) ~= "table" then return nil end
+   local by_pos = report.by_pos and report.by_pos[filename]
+   if not by_pos then return nil end
+   local marked, sources = {}, {}
+   local function deref(id, depth)
+      local t = report.types[id]
+      if t and t.ref and depth < 8 then return deref(t.ref, depth + 1) end
+      return t
+   end
+   return function(y, x)
+      local id = by_pos[y] and by_pos[y][x]
+      if not id then return false end
+      local t = deref(id, 0)
+      if not t or t.fields or not t.file or not t.y then return false end
+      if marked[id] == nil then marked[id] = nilable_at_decl(sources, t) end
+      return marked[id]
+   end
+end
+
 -- `---@extensible`: records a table may carry keys beyond the ones they declare. Every
 -- Teal record is closed, and a value arriving from outside the program is where that
 -- costs: a mod written against a newer SDK, a save file from a later version, a table a
@@ -1046,6 +1093,7 @@ function H.check(filename, env, opts)
             subject_enum = subject,
             struct_at = struct_resolver(result, filename),
             sealed_at = sealed_resolver(result, filename),
+            nilable_at = nilable_resolver(result, filename),
             union_at = union_resolver(result, filename),
             cast_at = cast_at,
             enum_table_at = enum_table_at,

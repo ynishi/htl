@@ -1,17 +1,17 @@
 //! The rules a finding can be reported under, and which of them a run has on.
 //!
 //! Every rule name htl prints — the ` [htl <rule>]` suffix a finding's message ends with,
-//! and the `rule` field of `--format json` — is one entry of [`RULES`]. Twelve of them are
+//! and the `rule` field of `--format json` — is one entry of [`RULES`]. Thirteen of them are
 //! implemented in `lint.lua`, five in the project layer and seven by the vendored Teal
 //! compiler, and that difference used to decide what a project could say about them: the
-//! registry was `L.DEFAULT` in `lint.lua`, so `--lint` and `[lint]` knew the twelve and
+//! registry was `L.DEFAULT` in `lint.lua`, so `--lint` and `[lint]` knew the thirteen and
 //! answered `unknown lint rule: contract` to a name htl had just printed.
 //!
 //! The list lives on this side because both sides can read it here and only one of them
 //! could read it there. The Lua side keeps no defaults of its own any more: it is handed
 //! the resolved selection ([`Htl::select_lints`](crate::Htl::select_lints)), so the names a
 //! project may write and the names that run cannot drift apart. What `lint.lua` still owns
-//! is the *implementation* of its twelve — `tests/lint_registry.rs` holds that list to this
+//! is the *implementation* of its thirteen — `tests/lint_registry.rs` holds that list to this
 //! one, so a rule renamed on one side fails a test rather than going quietly silent.
 //!
 //! Whether a rule is on and how much it matters are one question here, answered by a
@@ -198,6 +198,7 @@ impl Rule {
 /// two are `htl fix`'s error classes, which the listing does not print — see [`Surfaces`].
 pub const RULES: &[Rule] = &[
     Rule::warn("nil-index", Side::Lua),
+    Rule::warn("nil-return", Side::Lua),
     Rule::warn("struct-fields", Side::Lua),
     Rule::warn("sealed-record", Side::Lua),
     Rule::warn("enum-exhaustive", Side::Lua),
@@ -221,7 +222,7 @@ pub const RULES: &[Rule] = &[
     // The prefix is not decoration. `unused` already means something else here — `htl
     // unused` reports modules nothing requires, not locals nothing reads — and these seven
     // words are Teal's to rename, not htl's; keeping them in a namespace of their own says
-    // where they came from and leaves htl's twelve free of them.
+    // where they came from and leaves htl's thirteen free of them.
     //
     // All `warn`, which is what they have always been: the compiler raises them as
     // warnings and htl forwarded them as warnings long before it could name them. There is
@@ -409,7 +410,7 @@ impl Selection {
     }
 
     /// The rules of one side and whether each is on, for a consumer that has to be handed
-    /// the selection rather than ask about it — `lint.lua`, which runs its twelve from a
+    /// the selection rather than ask about it — `lint.lua`, which runs its thirteen from a
     /// table. Fix classes are not among them: no producer produces one, so there is
     /// nothing to tell a producer about them.
     ///
@@ -426,7 +427,7 @@ impl Selection {
 /// A run's rule selection together with the `-- htl: allow(...)` comments of the sources it
 /// reports on: everything needed to decide whether a finding of the project layer is said.
 ///
-/// `lint.lua` answers the same two questions for its own twelve, inside `report`. This is
+/// `lint.lua` answers the same two questions for its own thirteen, inside `report`. This is
 /// the other half — the same allow syntax, read from the file a finding points into. The
 /// mechanism was never specific to Lua rules: an allow comment needs a line number and a
 /// rule name, and a project-layer finding has both.

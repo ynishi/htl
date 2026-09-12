@@ -228,7 +228,8 @@ fn an_allow_comment_cannot_be_written_on_a_marker_line() {
 /// The names are in `--list-lints` as well, which is where a reader looks for them without
 /// having to provoke one first. Sixteen was the count while the project layer's five were
 /// absent and `lint.lua`'s twelve were all there was; seventeen once they were registered,
-/// and twenty-four now that Teal's seven warning kinds are names too.
+/// twenty-four once Teal's seven warning kinds were names too, and twenty-five with
+/// `nil-return` beside `nil-index`.
 ///
 /// Each line is the name and the level a project that says nothing gets, so the listing
 /// also answers which rules are `allow` — which a reader used to have to turn a rule on to
@@ -277,7 +278,7 @@ fn the_listing_accounts_for_every_rule() {
     ] {
         assert!(listed.iter().any(|l| l == rule), "{rule} not in {listed:?}");
     }
-    assert_eq!(listed.len(), 24, "{listed:?}");
+    assert_eq!(listed.len(), 25, "{listed:?}");
 }
 
 /// The listing and a spec take the same names, and neither takes the two that `htl fix`
