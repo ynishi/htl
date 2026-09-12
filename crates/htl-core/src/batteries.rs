@@ -57,6 +57,54 @@ fn write_declarations() -> Result<PathBuf> {
     Ok(lib_dir())
 }
 
+/// Re-wrap each `std.<module>` loader so that a failing call raises a plain string.
+///
+/// A Rust function that returns `Err` raises, on the Lua side, a userdata whose
+/// `tostring` is the error text followed by `stack traceback:` and the frames — mlua
+/// builds that for every function it creates, and it is the right thing for the host,
+/// which gets the cause and the trace in one value. It is the wrong thing for the script
+/// that `pcall`s the function: `err` is not a string, `"failed: " .. err` is a type error,
+/// and `tostring(err)` prints five lines where a Lua `error("...")` prints one. So each
+/// function of a `std` module is called through `pcall`, and a failure is raised again as
+/// `error(<text before the traceback>, 0)`: what `pcall` receives is then the same kind of
+/// value it gets from Lua code, `"json.decode: EOF while parsing an object at line 1 column
+/// 1"`. The cut is the one [`strip_traceback`](crate::strip_traceback) makes on the Rust
+/// side. Level 0 because the text already names the function; a `main.tl:12:` prefix would
+/// point at this shim.
+///
+/// The loaders are wrapped, not the tables: a module is built on its first `require`, and
+/// the namespace loader builds itself out of `require` too, so the four lines below reach
+/// every function through the one place all of them pass. Values that are not functions
+/// (`json.null`) are left as they are.
+const WRAP_LOADERS: &str = r#"
+local prefix, names = ...
+local preload = package.preload
+local function plain(err)
+   local msg = tostring(err)
+   local at = msg:find("\nstack traceback:", 1, true)
+   if at then msg = msg:sub(1, at - 1) end
+   return msg
+end
+local function wrap(f)
+   return function(...)
+      local r = table.pack(pcall(f, ...))
+      if r[1] then return table.unpack(r, 2, r.n) end
+      error(plain(r[2]), 0)
+   end
+end
+for _, name in ipairs(names) do
+   local key = prefix .. "." .. name
+   local loader = preload[key]
+   preload[key] = function(...)
+      local m = loader(...)
+      for k, v in pairs(m) do
+         if type(v) == "function" then m[k] = wrap(v) end
+      end
+      return m
+   end
+end
+"#;
+
 impl Htl {
     /// Make `require("std.<module>")` work at runtime and its types visible to the checker.
     ///
@@ -65,6 +113,15 @@ impl Htl {
     pub fn install_std(&self) -> Result<()> {
         mlua_batteries::preload_all(self.lua(), PREFIX)
             .context("registering std.* (mlua-batteries) in package.preload")?;
+        let names: Vec<&str> = mlua_batteries::dts::entries()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        self.lua()
+            .load(WRAP_LOADERS)
+            .set_name("=std")
+            .call::<()>((PREFIX, names))
+            .context("wrapping std.* loaders")?;
         self.add_path(&write_declarations()?)?;
         Ok(())
     }
@@ -101,6 +158,64 @@ mod tests {
         let init = std::fs::read_to_string(dir.join("init.d.tl"))?;
         assert!(init.contains("local record std\n"), "{init}");
         assert!(init.contains("require(\"std.json\")"), "{init}");
+        Ok(())
+    }
+
+    /// What a script's `pcall` gets from a failing `std` function: a string, one line, the
+    /// text mlua would have put before `stack traceback:` — the same kind of value a Lua
+    /// `error("...")` gives it. Through the namespace too, since it is the same table.
+    #[test]
+    fn a_failing_std_call_raises_a_plain_string_without_a_traceback() -> Result<()> {
+        let h = Htl::new()?;
+        h.install_std()?;
+        let (kind, msg): (String, String) = h
+            .lua()
+            .load(
+                "local json = require('std.json')\n\
+                 local ok, err = pcall(json.decode, '{')\n\
+                 assert(not ok)\n\
+                 return type(err), err",
+            )
+            .eval()?;
+        assert_eq!(kind, "string");
+        assert_eq!(
+            msg,
+            "json.decode: EOF while parsing an object at line 1 column 1"
+        );
+        let via_ns: String = h
+            .lua()
+            .load(
+                "local std = require('std')\n\
+                 local ok, err = pcall(std.json.decode, '[1,')\n\
+                 assert(not ok)\n\
+                 return err",
+            )
+            .eval()?;
+        assert!(!via_ns.contains("traceback"), "{via_ns}");
+        assert!(via_ns.starts_with("json.decode: "), "{via_ns}");
+        assert_eq!(via_ns.lines().count(), 1, "{via_ns}");
+        Ok(())
+    }
+
+    /// The shim passes every return value through, `nil` included: `json.decode("null")`
+    /// is `nil` and not an error, and a call returning nothing stays a call returning
+    /// nothing.
+    #[test]
+    fn a_succeeding_std_call_returns_what_it_returned() -> Result<()> {
+        let h = Htl::new()?;
+        h.install_std()?;
+        let (n, first, rest): (i64, mlua::Value, String) = h
+            .lua()
+            .load(
+                "local json = require('std.json')\n\
+                 local r = table.pack(json.decode('null'))\n\
+                 local s = require('std.string')\n\
+                 return r.n, r[1], table.concat(s.split('a,b', ','), '+')",
+            )
+            .eval()?;
+        assert_eq!(n, 1);
+        assert!(matches!(first, mlua::Value::Nil));
+        assert_eq!(rest, "a+b");
         Ok(())
     }
 

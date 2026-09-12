@@ -1284,7 +1284,10 @@ declarations in front of the checker, so `htl check`, `htl test` and `include_tl
 them without the project holding a copy. Each declaration is the crate's own; what a
 function does and what it raises is documented there. Every one raises on failure rather
 than returning `nil, err`, so a result-style call is `pcall`, or a host module under
-`errors = "return"`.
+`errors = "return"`. What `pcall` receives is a string, one line — `json.decode: EOF while
+parsing an object at line 1 column 1` — the same kind of value a Lua `error("...")` gives
+it: a Rust function's failure would otherwise arrive as a userdata whose `tostring` carries
+a `stack traceback:` block, and htl re-raises it as the text in front of that block.
 
 The set is the crate's *default* and not `full`: a module that reaches the file system,
 the network or an async runtime (`fs`, `http`, `llm`, `task`) is a decision about what a
