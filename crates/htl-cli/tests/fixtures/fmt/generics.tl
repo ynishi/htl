@@ -1,0 +1,34 @@
+-- htl fmt sample: lines that end in a generic's closing `>`. None of them is an unfinished
+-- comparison, so none of the lines after them is a continuation. The `if` at the bottom is
+-- the comparison that does continue, so the two are told apart in one file.
+local record m
+   record Box<T>
+   v: T
+      get: function(self: Box<T>): T
+      wrap: function(self: Box<T>): Box<Box<T>>
+   end
+end
+
+local Box = m.Box
+
+function m.new<T>(v: T): m.Box<T>
+      return setmetatable({ v = v }, { __index = Box })
+end
+
+function Box.get<T>(self: Box<T>): T
+   return self.v
+end
+
+function Box.wrap<T>(self: Box<T>): Box<Box<T>>
+   return m.new(self)
+end
+
+function m.bigger(a: Box<number>, b: Box<number>): boolean
+   if a.v >
+   b.v then
+      return true
+   end
+   return false
+end
+
+return m
