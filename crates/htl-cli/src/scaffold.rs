@@ -55,8 +55,10 @@
 //!
 //! Bodies where doubling every brace for `format!` cost more than it was worth — the Rust
 //! host, the Teal sample, a C caller — live under `crates/htl-cli/templates/` and are
-//! read with `include_str!`, filled by replacing `{{name}}` / `{{mod}}` / `{{MOD}}`. They
-//! stay in this crate rather than being fetched. Short TOML and Markdown stay inline.
+//! read with `include_str!`, filled by replacing `{{name}}` / `{{mod}}` / `{{MOD}}`, and
+//! `{{std}}` for the one line a host's `preload` has under a pin that has `install_std`
+//! (see [`fill`]). They stay in this crate rather than being fetched. Short TOML and
+//! Markdown stay inline.
 //!
 //! # What the output depends on is data, not this CLI's version
 //!
@@ -189,6 +191,14 @@ impl HtlPin {
         self.at_least(0, 5)
     }
 
+    /// Whether the pinned htl has `Htl::install_std` — `std.*` from mlua-batteries, which
+    /// landed with the `std` feature after 0.4. It decides whether the Rust host's
+    /// `preload` calls it: under 0.4 the method does not exist and the line would be the
+    /// project's first compile error.
+    pub fn knows_std(&self) -> bool {
+        self.at_least(0, 5)
+    }
+
     /// `major.minor` against a release, for the `knows_*` questions above. No semver crate:
     /// what is compared is what [`SUPPORTED`] holds — `0.<minor>`, and a bare `<major>`
     /// once there is a 1.x — and a two-number compare is shorter than the dependency would
@@ -242,6 +252,9 @@ pub struct Ctx<'a> {
     /// Is there a `src/main.tl` to run? The inverse of `--lib`, already reconciled with
     /// the target by [`resolve_target`].
     pub script: bool,
+    /// Does the Rust host install `std.*`? [`HtlPin::knows_std`], carried here because the
+    /// line that does it is in a template body, and the pin is not.
+    pub std: bool,
 }
 
 /// A dependency line in the project's `Cargo.toml`: what to require, and the features the
@@ -533,6 +546,7 @@ fn plan(dir: &Path, name: &str, module: &str, opts: &Options) -> Vec<(PathBuf, S
         name,
         module,
         script: !opts.lib,
+        std: opts.htl.knows_std(),
     };
     let target = opts.target;
     let teal = target.map_or(&DEFAULT_TEAL, |t| &t.teal);
@@ -614,21 +628,33 @@ pub fn scaffold(dir: &Path, name: &str, opts: &Options, must_be_new: bool) -> Re
     Ok(out)
 }
 
-/// The three placeholders a template file may use. Plain `str::replace`: the bodies are
-/// ours, so there is nothing to escape and no engine to depend on. `{{MOD}}` is the
-/// module identifier upper-cased, which is how a generated C header spells its own
-/// constants (`{{MOD}}_OK`), and therefore how a caller written in C has to spell them.
+/// The placeholders a template file may use. Plain `str::replace`: the bodies are ours,
+/// so there is nothing to escape and no engine to depend on. `{{MOD}}` is the module
+/// identifier upper-cased, which is how a generated C header spells its own constants
+/// (`{{MOD}}_OK`), and therefore how a caller written in C has to spell them.
 ///
-/// There was a fourth, `{{htl}}`, and no template ever contained it — the `htl`
-/// requirement is assembled in [`t_cargo`], which is the only file that names one. What
-/// does spell `{{htl}}` is the snapshot tests' *normalisation*, which is the opposite
-/// direction and needs nothing here.
+/// `{{std}}` is the one line of a Rust host that depends on the pin rather than on the
+/// target: a whole line, placeholder and newline together, replaced by [`STD_LINE`] when
+/// the pinned htl has `install_std` and by nothing when it does not. It is a placeholder
+/// and not a second template because the alternative is two copies of `lib.rs` that differ
+/// in one line, and the rule that templates do not branch is about the *target* — the
+/// profile picks the body — which this does not touch.
+///
+/// There was a `{{htl}}`, and no template ever contained it — the `htl` requirement is
+/// assembled in [`t_cargo`], which is the only file that names one. What does spell
+/// `{{htl}}` is the snapshot tests' *normalisation*, which is the opposite direction and
+/// needs nothing here.
 fn fill(template: &str, ctx: &Ctx<'_>) -> String {
     template
+        .replace("{{std}}\n", if ctx.std { STD_LINE } else { "" })
         .replace("{{name}}", ctx.name)
         .replace("{{mod}}", ctx.module)
         .replace("{{MOD}}", &ctx.module.to_uppercase())
 }
+
+/// What `{{std}}` becomes in a host's `preload` under a pin that has it: `std.*` installed
+/// before the project's own module, so that module may require it.
+const STD_LINE: &str = "    // `std.*`: json, string, path and the rest, from mlua-batteries; typed in the checker\n    // the same way. Remove this line and the project has no native modules but `host`.\n    h.install_std()?;\n";
 
 fn teal_module(ctx: &Ctx<'_>) -> String {
     fill(T_TEAL_MODULE, ctx)
@@ -945,8 +971,8 @@ fn t_cargo(name: &str, target: &TargetProfile, htl: &HtlPin) -> String {
 mod tests {
     use super::{
         BuildTarget, Ctx, DEFAULT_HTL, DEFAULT_TARGET, HtlPin, PathBuf, REPOSITORY, Result,
-        SUPPORTED, dep_value, profile, resolve_target, script_mismatch, t_cargo, t_htl_toml,
-        target_names, version_parts,
+        SUPPORTED, dep_value, ffi_lib_rs, profile, resolve_target, rust_lib_rs, script_mismatch,
+        t_cargo, t_htl_toml, target_names, version_parts,
     };
     use htl::build_target::Script;
 
@@ -1040,6 +1066,42 @@ mod tests {
         assert!(HtlPin::Release("0.5".into()).knows_build_target());
         assert!(HtlPin::Main.knows_build_target());
         assert!(HtlPin::Path(PathBuf::from("../co")).knows_build_target());
+    }
+
+    /// `install_std` is the same vintage as `[build] target`: absent from 0.4, in
+    /// everything after it and in every checkout.
+    #[test]
+    fn the_pin_knows_std_from_the_release_after_0_4() {
+        assert!(!HtlPin::Release("0.4".into()).knows_std());
+        assert!(HtlPin::Release("0.5".into()).knows_std());
+        assert!(HtlPin::Main.knows_std());
+        assert!(HtlPin::Path(PathBuf::from("../co")).knows_std());
+    }
+
+    /// The host's `preload` installs `std.*` only under a pin that has it, and what it
+    /// writes is one whole line — no placeholder text and no blank line left behind
+    /// under the pin that does not.
+    #[test]
+    fn the_rust_host_installs_std_only_when_the_pin_has_it() {
+        let ctx = |std| Ctx {
+            name: "sample",
+            module: "sample",
+            script: true,
+            std,
+        };
+        let with = rust_lib_rs(&ctx(true));
+        assert!(with.contains("    h.install_std()?;\n"), "{with}");
+        assert!(!with.contains("{{std}}"), "{with}");
+        let without = rust_lib_rs(&ctx(false));
+        assert!(!without.contains("install_std"), "{without}");
+        assert!(!without.contains("{{std}}"), "{without}");
+        assert!(
+            without.contains("    Host.htl_preload(h)?;\n    // Stripped bytecode"),
+            "{without}"
+        );
+        // The C ABI host is a Rust host too, and gets the same line.
+        let ffi = ffi_lib_rs(&ctx(true));
+        assert!(ffi.contains("    h.install_std()?;\n"), "{ffi}");
     }
 
     /// The answer to that question, as bytes. Both halves matter: under a release that does
@@ -1232,6 +1294,7 @@ mod tests {
             name: "sample",
             module: "sample",
             script,
+            std: true,
         };
         let bin = profile(DEFAULT_TARGET).unwrap();
         assert!((bin.readme_commands)(&ctx(true)).contains("cargo run"));

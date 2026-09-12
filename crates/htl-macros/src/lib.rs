@@ -344,6 +344,7 @@ fn checker_for(tag: &str, manifest_dir: &Path, path: &Path) -> Result<Checker, S
             .map_err(|e| format!("{tag}: {e:#}"))?;
     }
     h.install_test_lib().map_err(|e| format!("{tag}: {e:#}"))?;
+    h.install_std().map_err(|e| format!("{tag}: {e:#}"))?;
     let root = cfg_root.unwrap_or_else(|| manifest_dir.to_path_buf());
     Ok(Checker {
         h,

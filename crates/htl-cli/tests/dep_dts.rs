@@ -171,6 +171,57 @@ fn a_crate_naming_a_file_it_does_not_ship_fails_naming_the_crate() {
     assert!(msg.contains("dts/dep.d.tl"), "{msg}");
 }
 
+/// A crate that ships one declaration per module names the directory and a `*`, and gets
+/// the same files under `types/` as it would have by listing them. The manifest is the
+/// fixture's with its one entry rewritten; a second file beside the first shows the pattern
+/// took both, in name order.
+#[test]
+fn a_star_in_the_manifest_ships_every_matching_file() {
+    let root = project("glob");
+    let dep = root.parent().unwrap().join("dep");
+    write(
+        &dep.join("Cargo.toml"),
+        "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+         [package.metadata.htl]\ndts = [\"dts/*.d.tl\"]\n",
+    );
+    write(
+        &dep.join("dts/also.d.tl"),
+        "local record also\n   n: integer\nend\n\nreturn also\n",
+    );
+    let out = htl(&root, &["dts"]);
+    let msg = err(&out);
+    assert!(out.status.success(), "{msg}");
+    assert!(msg.contains("wrote     types/dep/also.d.tl"), "{msg}");
+    assert!(msg.contains("wrote     types/dep/dep.d.tl"), "{msg}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("types/dep/dep.d.tl")).unwrap(),
+        DECL
+    );
+    let note = std::fs::read_to_string(root.join("types/dep/.htl-dts")).unwrap();
+    assert!(
+        note.contains("files = [\"also.d.tl\", \"dep.d.tl\"]"),
+        "{note}"
+    );
+}
+
+/// A pattern that matches nothing is the manifest's mistake, and the report names the
+/// pattern — the line to fix — the way it names a listed file that is not there.
+#[test]
+fn a_star_matching_nothing_fails_naming_the_pattern() {
+    let root = project("glob-none");
+    let dep = root.parent().unwrap().join("dep");
+    write(
+        &dep.join("Cargo.toml"),
+        "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+         [package.metadata.htl]\ndts = [\"types/*.d.tl\"]\n",
+    );
+    let out = htl(&root, &["dts"]);
+    let msg = err(&out);
+    assert!(!out.status.success(), "{msg}");
+    assert!(msg.contains("not written: dep 0.1.0"), "{msg}");
+    assert!(msg.contains("types/*.d.tl"), "{msg}");
+}
+
 /// Neither report is a lint, so neither wears a lint's `[htl <rule>]` suffix — the suffix
 /// that would send a reader to `--list-lints` and `[lint]` for a name that is in neither.
 /// Both conditions at once, because the two used to be told apart only by which of them

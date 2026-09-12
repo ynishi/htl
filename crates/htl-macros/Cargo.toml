@@ -18,7 +18,11 @@ proc-macro = true
 
 [dependencies]
 # Runs the Teal checker at expansion time. Generated code targets `::htl::` (the umbrella).
-htl-core = { workspace = true, features = ["pkg", "dts"] }
+# `std` because the checker here has to see what `require("std.json")` is, and a proc macro
+# cannot ask which features the crate it expands in gave `htl` — so the declarations are
+# in front of every expansion, as `htl.test`'s are, and a host that left the feature off
+# finds out at the first `require`, at run time, as it would for `htl.test`.
+htl-core = { workspace = true, features = ["pkg", "dts", "std"] }
 syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"

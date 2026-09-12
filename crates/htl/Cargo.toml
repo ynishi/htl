@@ -14,11 +14,17 @@ keywords = ["lua", "teal", "mlua", "typed", "scripting"]
 categories = ["development-tools", "game-development"]
 
 [features]
-default = ["macros", "pkg"]
+default = ["macros", "pkg", "std"]
 # include_tl! / include_tl_bytes! / TealRecord / host_module
 macros = ["dep:htl-macros"]
 # htl::pkg (mlua-pkg integration)
 pkg = ["htl-core/pkg"]
+# `Htl::install_std`: mlua-batteries as `require("std.json")` and the rest, typed. On by
+# default for the same reason `pkg` is: it is what a project written with `htl new` reaches
+# for, and the checker inside the proc macros sees `std.*` whether or not the host installs
+# it (as it sees `htl.test`), so a host that leaves it off does so knowingly, with
+# `default-features = false`. Its cost is serde_json, which htl-core already builds.
+std = ["htl-core/std"]
 # htl::dts (.d.tl generation from Rust source; `htl dts`)
 dts = ["htl-core/dts"]
 # `async fn` in a `#[host_module]` impl. Off by default: it turns on mlua's own `async`

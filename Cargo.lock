@@ -476,6 +476,7 @@ dependencies = [
  "blake3",
  "criterion",
  "mlua",
+ "mlua-batteries",
  "mlua-pkg",
  "semver",
  "serde",
@@ -761,6 +762,16 @@ dependencies = [
  "rustc-hash",
  "serde",
  "serde-value",
+]
+
+[[package]]
+name = "mlua-batteries"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d161892a140abc75ca751197f96d9066e80b2c416a1f18de5d24c34f6b57da6"
+dependencies = [
+ "mlua",
+ "serde_json",
 ]
 
 [[package]]
