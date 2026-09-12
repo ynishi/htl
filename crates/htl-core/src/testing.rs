@@ -250,7 +250,13 @@ pub struct SuiteReport {
     pub files: Vec<FileReport>,
     /// Every diagnostic the checks produced, over the whole run, as values.
     pub diagnostics: Vec<crate::Diagnostic>,
+    /// Tests that passed, summed over the files that ran — tests, not files, so a run of
+    /// one file with forty assertions is forty here and one in [`files`](Self::files).
     pub passed: usize,
+    /// Tests that failed, summed the same way. A file that failed to check contributes
+    /// nothing to either count and shows up in
+    /// [`files_with_errors`](Self::files_with_errors) instead, which is why that is the
+    /// field [`ok`](Self::ok) reads.
     pub failed: usize,
     /// Files that failed to check, raised, or had a failing test.
     pub files_with_errors: usize,
@@ -258,6 +264,9 @@ pub struct SuiteReport {
     pub skipped: usize,
     /// The seed every file's stream was derived from.
     pub seed: u64,
+    /// Wall time for the run: discovery, every file's
+    /// [`duration_ms`](FileReport::duration_ms), and the coverage report when one was
+    /// asked for. Larger than the files' sum rather than equal to it.
     pub duration_ms: f64,
     /// With `run.coverage`: what the line hooks saw.
     pub coverage: Option<crate::project::CoverageReport>,

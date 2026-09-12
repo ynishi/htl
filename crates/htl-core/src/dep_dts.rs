@@ -74,6 +74,10 @@ use std::path::{Path, PathBuf};
 pub struct DepDecl {
     /// The package that ships it.
     pub package: String,
+    /// The resolved version, as `cargo metadata` reports it — so a problem names the
+    /// version the run actually read, not the requirement the manifest wrote. It is what
+    /// the [`Note`] records beside the copy, and what every message about this entry
+    /// carries.
     pub version: String,
     /// The path inside the package, as that manifest wrote it.
     pub declared: String,
@@ -168,9 +172,18 @@ fn slashed(p: &Path) -> String {
 /// and none of this command's business).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Note {
+    /// The crate the copy came from, which is where a change to it belongs. Written as
+    /// `crate` in the file, since that is the word a reader of the directory wants and
+    /// `crate` is not a field name Rust will take.
     #[serde(rename = "crate")]
     pub package: String,
+    /// The version it was taken from, so that a stale copy can be told from a current one
+    /// by reading rather than by re-resolving.
     pub version: String,
+    /// What this run wrote, as paths below `types/<crate>/`. A record for whoever opens
+    /// the directory: [`orphans`] walks the disk instead of trusting it, because the note
+    /// is rewritten whenever anything is materialised and a file dropped from the
+    /// manifest would otherwise stop being reported by the very run that noticed it.
     pub files: Vec<String>,
 }
 

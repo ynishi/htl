@@ -2,7 +2,7 @@
 //! C header that declares them.
 //!
 //! This is [`dts`](crate::dts) pointed the other way. `dts` takes an `impl` block and
-//! says what Teal sees; this takes the same breakdown ([`dts::host_decl`]) and says what
+//! says what Teal sees; this takes the same breakdown ([`crate::dts::host_decl`]) and says what
 //! C sees. Both run in the proc macro at `cargo build` and in the CLI (`htl dts`), so a
 //! rename on the Rust side moves the `.d.tl` and the `.h` together, which is the drift a
 //! hand-written FFI layer keeps reintroducing.
@@ -168,6 +168,9 @@ pub struct CParam {
     pub name: String,
     /// What it is called in C (`_json` appended for a JSON payload).
     pub c_name: String,
+    /// How it crosses, which is not what [`ty`](Self::ty) says: the same `String` is
+    /// `Text` or `Json` depending on the Rust type it was built from, and an
+    /// [`Interrupt`](ParamKind::Interrupt) is not a C parameter at all.
     pub kind: ParamKind,
     /// The owned Rust type the wrapper builds (`&str` arrives as `String`).
     pub ty: Type,
@@ -208,7 +211,12 @@ pub struct CFn {
     pub rust_name: String,
     /// The exported symbol.
     pub c_name: String,
+    /// In the Rust fn's order, which is the C one. Not the C arity, though: an
+    /// [`Interrupt`](ParamKind::Interrupt) is carried here and left out of the
+    /// declaration, and the handle a method takes is not a Rust parameter at all.
     pub params: Vec<CParam>,
+    /// What comes back, and so how the wrapper is written — the four shapes in the
+    /// module docs are this field.
     pub shape: Shape,
     /// The Rust fn returns a `Result` the wrapper has to unwrap.
     pub is_result: bool,
@@ -219,6 +227,12 @@ pub struct CFn {
 /// The whole generated ABI for one `impl` block.
 #[derive(Clone)]
 pub struct CPlan {
+    /// What every exported name starts with (`<prefix>_open`, `<prefix>_free`,
+    /// `<prefix>_handle`). The Rust type's name lowercased unless
+    /// `#[c_export(prefix = "..")]` says otherwise, and checked to be a C identifier
+    /// prefix before anything is generated — it ends up in symbol names, where a mistake
+    /// is a link error rather than a compile one. [`RESERVED`] is what it already claims,
+    /// and so what a method may not be called.
     pub prefix: String,
     /// The Rust type the handle owns.
     pub type_name: String,
