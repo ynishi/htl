@@ -33,6 +33,16 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
+/// What a person does after editing `Cargo.toml`: write the lockfile the new manifest asks
+/// for. The graph is read with `--locked` when there is a lockfile, so a test that changes
+/// the dependencies mid-run has to refresh it or be refused — which is the point of
+/// `a_lockfile_the_manifest_has_outgrown_is_refused_naming_it` below, and noise everywhere
+/// else. Removing it rather than running `cargo update`: with no lockfile the flag is not
+/// passed, cargo resolves the path-only graph offline, and there is nothing to go stale.
+fn relock(root: &Path) {
+    let _ = std::fs::remove_file(root.join("Cargo.lock"));
+}
+
 /// Copy the fixture pair into a fresh scratch directory, `Cargo.toml.in` becoming the
 /// `Cargo.toml` cargo reads. Returns the consumer, which is where the commands are run.
 fn project(name: &str) -> PathBuf {
@@ -356,6 +366,7 @@ fn the_report_carries_no_rule_name_for_either_condition() {
         "[package]\nname = \"consumer\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
          [dependencies]\nother = { path = \"../other\" }\n",
     );
+    relock(&root);
     let other = root.parent().unwrap().join("other");
     write(
         &other.join("Cargo.toml"),
@@ -416,6 +427,7 @@ fn the_crate_std_carries_is_not_reported_as_a_departed_dependency() {
         "[package]\nname = \"consumer\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
          [dependencies]\nmlua-batteries = { path = \"../mlua-batteries\" }\n",
     );
+    relock(&root);
 
     let out = htl(&root, &["dts"]);
     let msg = err(&out);
@@ -438,6 +450,60 @@ fn the_crate_std_carries_is_not_reported_as_a_departed_dependency() {
     assert!(!msg.contains("types/mlua-batteries/json.d.tl\n"), "{msg}");
     // And the one that really did leave still reads as it did.
     assert!(msg.contains("dep is no longer a dependency"), "{msg}");
+}
+
+/// Reading the graph does not write the lockfile. The manifest here names a dependency the
+/// lockfile does not have, which is what a moved branch looks like from cargo's side, and
+/// the run says so instead of resolving over it. The file is byte-identical afterwards.
+#[test]
+fn a_lockfile_the_manifest_has_outgrown_is_refused_naming_it() {
+    let root = project("stale-lock");
+    // A lockfile for the manifest as it stands, written by the first run.
+    assert!(htl(&root, &["dts"]).status.success());
+    let lock = root.join("Cargo.lock");
+    let before = std::fs::read_to_string(&lock).expect("the first run wrote a lockfile");
+    assert!(before.contains("name = \"dep\""), "{before}");
+
+    // A second dependency the lockfile has never heard of.
+    let other = root.parent().unwrap().join("other");
+    write(
+        &other.join("Cargo.toml"),
+        "[package]\nname = \"other\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    );
+    write(&other.join("src/lib.rs"), "");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname = \"consumer\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+         [dependencies]\ndep = { path = \"../dep\" }\nother = { path = \"../other\" }\n",
+    );
+
+    let out = htl(&root, &["dts"]);
+    let msg = err(&out);
+    assert!(msg.contains("Cargo.lock does not cover"), "{msg}");
+    assert!(msg.contains("cargo update"), "{msg}");
+    // The reader is told it is the lockfile, not their Teal, and not a flag they passed.
+    assert!(!msg.contains("remove the --locked flag"), "{msg}");
+    assert_eq!(
+        std::fs::read_to_string(&lock).unwrap(),
+        before,
+        "the lockfile was rewritten"
+    );
+    // Reported, not fatal: the committed declarations stand and the check goes on.
+    assert!(out.status.success(), "{msg}");
+}
+
+/// A project that has never run a cargo command has no lockfile, and a refusal there would
+/// be a refusal to every scaffolded host until its first build. Nothing to protect, so the
+/// graph is read and cargo writes what that build would have written.
+#[test]
+fn a_project_with_no_lockfile_yet_is_resolved_rather_than_refused() {
+    let root = project("no-lock");
+    assert!(!root.join("Cargo.lock").exists());
+    let out = htl(&root, &["dts"]);
+    let msg = err(&out);
+    assert!(out.status.success(), "{msg}");
+    assert!(msg.contains("wrote     types/dep/dep.d.tl"), "{msg}");
+    assert!(!msg.contains("does not cover"), "{msg}");
 }
 
 /// The names are gone from the output, and they were never configurable: nothing sends a

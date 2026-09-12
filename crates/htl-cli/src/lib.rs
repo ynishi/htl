@@ -854,9 +854,10 @@ struct DepReport {
     /// Under `types/` and no longer shipped by anything. Reported, never deleted, and it
     /// fails nothing: what the file is for is the project's to say.
     left_in_place: Vec<String>,
-    /// The crate graph would not resolve, so nothing was asked for. The machine rather
-    /// than the project: the committed declarations stand and the check that follows names
-    /// the module if one is missing.
+    /// The crate graph would not resolve, so nothing was asked for — cargo could not be
+    /// run, or the project's lockfile does not cover its manifest and the graph is read
+    /// with `--locked`. Either way the committed declarations stand and the check that
+    /// follows names the module if one is missing, which is why this fails nothing.
     unresolved: Option<String>,
 }
 
