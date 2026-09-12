@@ -643,6 +643,7 @@ no-any = "warn"           # allow by default; see it while you migrate, without 
 |---|---|---|
 | `nil-index` | warn | `t[k].x`, `t[k]:m()`, `t[k]()`, `t[k][j]` — Teal types a map/array lookup as `V`, not `V \| nil` |
 | `nil-return` | warn | the same four shapes over a call — `f(x).y`, `f(x):m()`, `f(x)()`, `f(x)[k]` — where `f` is declared `---@nilable`. Silent until a declaration carries the marker (see below) |
+| `nil-return-unchecked` | allow | the local such a call was bound to, used as the base of a chain before any statement looks at it — `local d = f(x)` then `d:upper()`. One report per local, at the first use. Off by default: it is a flow question, and the shapes it gets wrong are the ones where something did check (see below) |
 | `struct-fields` | warn | a table built for a record marked `---@struct` that leaves out a field the record declares and `---@optional` does not exempt. Silent until a record carries the marker (see below). `htl fix` spells the missing fields at the site, as a suggestion it never applies |
 | `sealed-record` | warn | a table built for a record marked `---@sealed`, or an `as` cast to one, outside the file that declares it — outside the functions the marker names, when it names any (`---@sealed(gate.judge)`). Silent until a record carries the marker (see below) |
 | `enum-exhaustive` | warn | `if e == "a" ... elseif e == "b" ... end` over an enum with a value left unhandled and no `else`; enums nested in records and enums from required modules count |
@@ -962,10 +963,40 @@ without writing anything.
 
 An unmarked function says nothing: no marker means *unknown*, not *nilable*, which is why
 adding the rule is silent on a project until someone writes a marker or depends on a
-declaration that has one. What it does not do yet is follow the local — `local v = f(x)`
-and then `v.y` with no check between them is a flow question, with false positives of its
-own (a check inside a helper, a check on a second local, `or error(...)`), and it is a rule
-of its own to come.
+declaration that has one.
+
+**Following the local (`nil-return-unchecked`, off by default).** Binding the call is half
+the advice, and the other half is the check that follows it: `local d = path.parent(p)`
+and then `d:upper()` with nothing in between is the same run-time error the one-liner was.
+A second rule reports that — the first use of the local as the base of a chain, once per
+local, with everything that mentions the name in a condition, `assert`s it, or re-binds it
+counting as the check:
+
+```
+lint: src/main.tl:5:8: 'd' may be nil at runtime: it comes from path.parent, which is marked ---@nilable, and nothing checks it before this [htl nil-return-unchecked]
+```
+
+It is `allow` by default, unlike every other rule that has a marker behind it, and the
+level is the whole difference between the two halves. Indexing a call's result directly is
+wrong whatever an analysis says; asking whether a guard stands between two statements is a
+question a static rule gets wrong in three shapes that lua-language-server has had open on
+its own version for years — a check inside a helper predicate, a check on a second local,
+and `local d = f(p) or error(...)`. htl reads a guard loosely to stay wrong in the
+forgiving direction (a condition that merely *mentions* the name ends the tracking), and
+the `or` at the declaration is read, so the third of those is silent here — but the first
+two are not: `if has_parent(p) then d:upper() end` and `local ok = d ~= nil` followed by
+`if ok then` are both reported, because the name the condition mentions is not `d`. A rule
+that is still sometimes wrong while it is doing its job does not belong in every project by
+default. A project that wants it writes it down:
+
+```toml
+[lint.rules]
+nil-return-unchecked = "warn"   # or "deny" to fail the run on it
+```
+
+`[lint] strict = true` does not turn it on — strict promotes what a run *reports* to a
+failure, and an `allow` rule reports nothing — so the level is where it is asked for.
+One occurrence is silenced with a trailing `-- htl: allow(nil-return-unchecked)`.
 
 ### The string boundary of an enum (`enum-cast`, `enum-table`)
 

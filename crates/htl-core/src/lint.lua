@@ -6,6 +6,10 @@
 --   nil-return       the same chain over a call whose function is declared `---@nilable`:
 --                    the marker says the first return value may be nil, and Teal types it
 --                    `T` regardless, so indexing the call directly can raise at runtime.
+--   nil-return-unchecked
+--                    the local that call was bound to, used as the base of a chain before
+--                    any statement looks at it. The other half of `nil-return`, and the
+--                    half a flow question can be wrong about.   [allow]
 --   sealed-record    a table constructor for a record marked `---@sealed`, or an `as` cast
 --                    to one, outside the file that declares it (outside the functions the
 --                    marker names, when it names any).
@@ -37,7 +41,7 @@ local L = {}
 -- Which rules are on is not decided here. The registry — every rule name there is, its
 -- default level, and which half of htl implements it — is `lint::RULES` in lint.rs, because
 -- the project layer reports under those names too and could not read a list kept in Lua.
--- What this file owns is the thirteen implementations below (`RULES`), and `L.run` is handed
+-- What this file owns is the fourteen implementations below (`RULES`), and `L.run` is handed
 -- the selection to run them under: a rule / on table, not a rule / level one. How much a
 -- finding matters is read where the run is judged, so a rule moving between `warn` and
 -- `deny` changes nothing about the work done here. `struct-fields` and `sealed-record` are on and still say
@@ -179,6 +183,161 @@ local function lint_nil_return(ast, report, extra)
       report("nil-return", n.y, n.x,
          "call result may be nil at runtime: " .. (name and (name .. " is") or "the function called here is") ..
          " marked ---@nilable; bind it to a local and nil-check first")
+   end)
+end
+
+---------------------------------------------------------------- nil-return-unchecked
+
+-- The other half of `nil-return`: the local it tells you to bind, used before anything
+-- checks it. `local d = path.parent(p)` then `d:upper()` is the same run-time error as
+-- `path.parent(p):upper()`, and the first rule cannot see it because the base of the chain
+-- is no longer the call.
+--
+-- Held to one block at a time, from the declaration to the first use. A guard ends the
+-- tracking rather than narrowing anything: once a statement has looked at the name, what
+-- happens to it afterwards is the caller's, and this rule says nothing more about it. That
+-- is why a guard is read loosely — *any* mention of the name in an `if` / `while`
+-- condition, or as an argument to `assert`, counts. Being lenient there is the direction
+-- to be wrong in: a lint that is wrong while it is doing its job is worse than one that
+-- misses a case.
+--
+-- It is lenient about the *name*, not about the check, so of the three shapes
+-- lua-language-server still has open on its equivalent this covers one and reports two
+-- [measured, `htl check` on the installed binary]:
+--
+--   local d = f(p) or error("...")   -- silent: read at the declaration, where the `or`
+--                                    -- says the local cannot be nil afterwards
+--   if has_parent(p) then d:upper()  -- reported: the condition names `p`, not `d`
+--   local ok = d ~= nil              -- reported: the check is a declaration of another
+--   if ok then d:upper() end         -- local, and its condition names `ok`
+--
+-- Both are why the rule is `allow`: they are the cases where something did check and this
+-- could not tell, and a project turning it on is saying it would rather see them than miss
+-- the use that raises.
+--
+-- What counts as a use is narrow on purpose: the name as the *base* of a chain
+-- (`d.x` / `d:m()` / `d[k]` / `d()`), which is what raises. Passing it, returning it and
+-- assigning it are not reported — whether nil is allowed there is the other declaration's
+-- to say, and this rule does not read it.
+local GUARD_STMT = { ["if"] = true, ["while"] = true, ["repeat"] = true }
+
+-- Does the name appear anywhere in this expression? The question a guard is judged by.
+local function mentions(n, name)
+   if not is_node(n) then
+      if type(n) ~= "table" then return false end
+      for _, v in pairs(n) do
+         if type(v) == "table" and mentions(v, name) then return true end
+      end
+      return false
+   end
+   if (n.kind == "variable" or n.kind == "identifier") and n.tk == name then return true end
+   for k, v in pairs(n) do
+      if k ~= "kind" and not SKIP_KEYS[k] and type(v) == "table" and mentions(v, name) then return true end
+   end
+   return false
+end
+
+-- `assert(v, ...)` — the one call that settles a name without an `if` around it.
+local function asserts(n, name)
+   if not is_node(n) or n.kind ~= "op" or not n.op or n.op.op ~= "@funcall" then return false end
+   local callee = n.e1
+   if not is_node(callee) or callee.kind ~= "variable" or callee.tk ~= "assert" then return false end
+   return mentions(n.e2, name)
+end
+
+-- Whether a statement looks at `name` in a way that ends the tracking: a condition that
+-- mentions it, an `assert` of it, or a re-binding.
+local function settles(stmt, name)
+   if not is_node(stmt) then return false end
+   if GUARD_STMT[stmt.kind] then
+      -- The condition, and only the condition: `while d do` and `repeat ... until d` keep
+      -- theirs on the statement, an `if` keeps one per branch under `if_blocks`. A mention
+      -- inside a *body* is a use, which is what the caller looks for next.
+      if stmt.exp and mentions(stmt.exp, name) then return true end
+      for _, blk in ipairs(stmt.if_blocks or {}) do
+         if is_node(blk) and blk.exp and mentions(blk.exp, name) then return true end
+      end
+      return false
+   end
+   if stmt.kind == "assignment" then
+      return mentions(stmt.vars, name)
+   end
+   if stmt.kind == "op" and stmt.op and stmt.op.op == "@funcall" then
+      return asserts(stmt, name)
+   end
+   return false
+end
+
+-- The first `name.x` / `name:m()` / `name[k]` / `name()` in this subtree, or nil.
+--
+-- The right of an `and` / `or` whose left mentions the name is skipped: `d and d:upper()`
+-- and `(d or "/"):upper()` are the guard written inside the expression, and the second is
+-- not a chain on `d` at all — its base is the parenthesised `or`.
+local function first_chain_on(n, name)
+   if type(n) ~= "table" then return nil end
+   if is_node(n) then
+      if n.kind == "op" and n.op and CHAIN_OPS[n.op.op] then
+         local base = n.e1
+         if is_node(base) and base.kind == "variable" and base.tk == name then return n end
+      end
+      if n.kind == "op" and n.op and (n.op.op == "and" or n.op.op == "or") and mentions(n.e1, name) then
+         return first_chain_on(n.e1, name)
+      end
+   end
+   for i = 1, #n do
+      local hit = first_chain_on(n[i], name)
+      if hit then return hit end
+   end
+   for k, v in pairs(n) do
+      if type(k) ~= "number" and k ~= "kind" and not SKIP_KEYS[k] and type(v) == "table" then
+         local hit = first_chain_on(v, name)
+         if hit then return hit end
+      end
+   end
+   return nil
+end
+
+-- `local v = f(...)` where `f` is marked: the name it binds and the name of the function,
+-- or nil. A declaration binding more than one name is not this rule's — `local ok, v =
+-- pcall(...)` is a result, not a value that may be nil — and one whose expression is
+-- `f(...) or <anything>` cannot be nil after the line that declares it.
+local function nilable_binding(stmt, nilable_at)
+   if not is_node(stmt) or stmt.kind ~= "local_declaration" then return nil end
+   local vars, exps = stmt.vars, stmt.exps
+   if type(vars) ~= "table" or #vars ~= 1 or type(exps) ~= "table" or #exps ~= 1 then return nil end
+   local var = vars[1]
+   if not is_node(var) or type(var.tk) ~= "string" then return nil end
+   local exp = exps[1]
+   if not is_node(exp) or exp.kind ~= "op" or not exp.op then return nil end
+   if exp.op.op ~= "@funcall" then return nil end
+   local callee = exp.e1
+   if not is_node(callee) or not callee.y or not callee.x then return nil end
+   if not nilable_at(callee.y, callee.x) then return nil end
+   return var.tk, subject_key(callee)
+end
+
+local function lint_nil_return_unchecked(ast, report, extra)
+   local nilable_at = extra and extra.nilable_at
+   if not nilable_at then return end
+   walk(ast, function(block)
+      if block.kind ~= "statements" then return end
+      for i = 1, #block - 1 do
+         local name, fn = nilable_binding(block[i], nilable_at)
+         if name then
+            for j = i + 1, #block do
+               local stmt = block[j]
+               if settles(stmt, name) then break end
+               local hit = first_chain_on(stmt, name)
+               if hit then
+                  report("nil-return-unchecked", hit.y, hit.x,
+                     "'" .. name .. "' may be nil at runtime: it comes from " ..
+                     (fn and (fn .. ", which is") or "a function") ..
+                     " marked ---@nilable, and nothing checks it before this")
+                  break
+               end
+            end
+         end
+      end
    end)
 end
 
@@ -1163,6 +1322,7 @@ end
 local RULES = {
    { "nil-index", lint_nil_index },
    { "nil-return", lint_nil_return },
+   { "nil-return-unchecked", lint_nil_return_unchecked },
    { "struct-fields", lint_struct_fields },
    { "sealed-record", lint_sealed_record },
    { "enum-exhaustive", lint_enum_exhaustive },
