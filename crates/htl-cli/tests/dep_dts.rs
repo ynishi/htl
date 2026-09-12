@@ -375,6 +375,71 @@ fn the_report_carries_no_rule_name_for_either_condition() {
     assert!(!out.status.success(), "{msg}");
 }
 
+/// The crate behind `std.*` is skipped rather than materialised, and a directory an older
+/// htl wrote for it is not evidence that it left the graph — it is still a dependency here,
+/// by a path rather than by a registry so that this runs offline. The line says what is
+/// true of that copy, and the run succeeds: nothing was asked for and not written.
+///
+/// The departed dependency in the same project keeps the other message, so one run holds
+/// both readings of "absent from the resolved set" apart.
+#[test]
+fn the_crate_std_carries_is_not_reported_as_a_departed_dependency() {
+    let root = project("carried");
+    let scratch = root.parent().unwrap().to_path_buf();
+    // A path dependency with that crate's name: the skip is by name, and the fixture is
+    // the smaller half of what the real one ships.
+    let batteries = scratch.join("mlua-batteries");
+    write(
+        &batteries.join("Cargo.toml"),
+        "[package]\nname = \"mlua-batteries\"\nversion = \"0.7.2\"\nedition = \"2024\"\n\n\
+         [package.metadata.htl]\ndts = [\"types/mlua_batteries/json.d.tl\"]\n",
+    );
+    write(&batteries.join("src/lib.rs"), "");
+    write(
+        &batteries.join("types/mlua_batteries/json.d.tl"),
+        "local record json\n   encode: function(any): string\nend\n\nreturn json\n",
+    );
+    // What an htl without the feature left behind: the copy, and the note that says which
+    // crate it came from.
+    write(
+        &root.join("types/mlua-batteries/json.d.tl"),
+        "local record json\n   encode: function(any): string\nend\n\nreturn json\n",
+    );
+    write(
+        &root.join("types/mlua-batteries/.htl-dts"),
+        "crate = \"mlua-batteries\"\nversion = \"0.7.2\"\nfiles = [\"json.d.tl\"]\n",
+    );
+    // The fixture's own `dep`, materialised and then taken out of the graph.
+    assert!(htl(&root, &["dts"]).status.success());
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname = \"consumer\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+         [dependencies]\nmlua-batteries = { path = \"../mlua-batteries\" }\n",
+    );
+
+    let out = htl(&root, &["dts"]);
+    let msg = err(&out);
+    assert!(out.status.success(), "{msg}");
+    let carried = msg
+        .lines()
+        .find(|l| l.contains("types/mlua-batteries/json.d.tl"))
+        .unwrap_or_else(|| panic!("no line for the carried crate:\n{msg}"));
+    assert!(carried.starts_with("  left in place:"), "{carried}");
+    assert!(
+        carried.contains("mlua-batteries is on the path as std.* instead"),
+        "{carried}"
+    );
+    assert!(
+        carried.contains("nothing preloads this copy's module name"),
+        "{carried}"
+    );
+    assert!(!carried.contains("no longer"), "{carried}");
+    // Nothing of it was written: the crate is skipped, not materialised.
+    assert!(!msg.contains("types/mlua-batteries/json.d.tl\n"), "{msg}");
+    // And the one that really did leave still reads as it did.
+    assert!(msg.contains("dep is no longer a dependency"), "{msg}");
+}
+
 /// The names are gone from the output, and they were never configurable: nothing sends a
 /// reader to `--list-lints` for either of them, and neither is there.
 #[test]

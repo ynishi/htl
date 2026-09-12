@@ -128,6 +128,31 @@ impl DepDecl {
     }
 }
 
+/// Whether this build carries `name`'s declarations itself, so that a copy of them under
+/// `types/<name>/` is not the one a script reaches.
+///
+/// True for exactly one crate and only with the `std` feature: mlua-batteries, whose
+/// modules [`Htl::install_std`](crate::Htl::install_std) preloads as `std.*` and whose
+/// declarations it writes under [`lib_dir`](crate::lib_dir) with that prefix.
+///
+/// Asked in two places — [`decls`], which does not materialise such a crate, and
+/// [`orphans`], which says so about a directory left from a build that did. It is a fact
+/// about how this binary was compiled rather than anything read out of `cargo metadata`,
+/// so both ask it directly instead of one carrying the answer to the other: threading it
+/// through would change [`resolve`]'s signature to pass along something neither the graph
+/// nor the manifest said.
+fn carried_by_std(name: &str) -> bool {
+    #[cfg(feature = "std")]
+    {
+        name == crate::batteries::CRATE
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        let _ = name;
+        false
+    }
+}
+
 /// A path as it goes into the note and into a comparison: `/` whatever the platform
 /// separates with, so a note written on Windows reads the same everywhere and an orphan
 /// is told from a live declaration by the same string on both.
@@ -253,9 +278,9 @@ fn decls(meta: &serde_json::Value) -> Result<Vec<DepDecl>, String> {
         // The crate behind `std.*` is in every graph that has the feature on, and its
         // declarations are already under `lib_dir()` with the prefix the preload uses.
         // A copy under `types/mlua-batteries/` would be the same modules a second time
-        // under a name nothing answers `require` for.
-        #[cfg(feature = "std")]
-        if name == crate::batteries::CRATE {
+        // under a name nothing answers `require` for. `orphans` says that about one a
+        // build without the feature already wrote.
+        if carried_by_std(name) {
             continue;
         }
         let dts = &pkg["metadata"]["htl"]["dts"];
@@ -457,7 +482,7 @@ pub fn materialise(root: &Path, decls: &[DepDecl]) -> (Vec<(PathBuf, bool)>, Vec
 }
 
 /// Declarations under `types/` this command materialised for a crate that is no longer a
-/// dependency, or that the crate no longer ships.
+/// dependency, that the crate no longer ships, or whose modules this build carries itself.
 ///
 /// Reported, never deleted. What a file under `types/` is for is the project's to say —
 /// scripts may still require the module, the dependency may be coming back on the next
@@ -506,12 +531,31 @@ pub fn orphans(root: &Path, decls: &[DepDecl]) -> Vec<String> {
             if live.is_some_and(|files| files.contains(&name)) {
                 continue;
             }
-            let why = match live {
-                Some(_) => format!("{} no longer ships it", note.package),
-                None => format!("{} is no longer a dependency", note.package),
+            // A crate this build carries is absent from `decls` because it was skipped,
+            // not because it left the graph, and `live` cannot tell those apart — so ask
+            // the same question `decls` asked. What is true of such a copy is not what is
+            // true of an orphan: the crate is still a dependency, its modules are on the
+            // path under `std.`, and this directory is on the path too, offering the same
+            // modules under bare names that nothing preloads. A file that type-checks and
+            // has no implementation is worth a firmer word than "when nothing requires it".
+            let (why, advice) = if carried_by_std(&note.package) {
+                (
+                    format!(
+                        "{} is on the path as std.* instead, and nothing preloads this copy's \
+                         module name",
+                        note.package
+                    ),
+                    "delete it",
+                )
+            } else {
+                let why = match live {
+                    Some(_) => format!("{} no longer ships it", note.package),
+                    None => format!("{} is no longer a dependency", note.package),
+                };
+                (why, "delete it when nothing requires the module")
             };
             out.push(format!(
-                "{}: {why}; delete it when nothing requires the module",
+                "{}: {why}; {advice}",
                 path.strip_prefix(root).unwrap_or(&path).display()
             ));
         }
@@ -757,6 +801,79 @@ mod tests {
         .unwrap();
         let under: Vec<String> = d.iter().map(|d| slashed(&d.under().unwrap())).collect();
         assert_eq!(under, ["mine/other.d.tl", "mine/thing.d.tl"], "{d:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A materialised directory and its note, for asking `orphans` what it says about one.
+    fn materialised(root: &Path, package: &str, files: &[&str]) {
+        let dir = root.join("types").join(package);
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in files {
+            std::fs::write(dir.join(f), "return {}\n").unwrap();
+        }
+        let note = Note {
+            package: package.to_string(),
+            version: "0.1.0".into(),
+            files: files.iter().map(|f| f.to_string()).collect(),
+        };
+        std::fs::write(dir.join(crate::DEP_TYPES_NOTE), note.text()).unwrap();
+    }
+
+    /// Two ways to be absent from `decls`, and they do not read alike. The crate this
+    /// build carries was skipped and is still a dependency; the other one left the graph.
+    /// Both are `left in place` and neither fails anything — what differs is what the line
+    /// tells the reader to believe.
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_crate_this_build_carries_is_not_reported_as_a_departed_dependency() {
+        let dir = std::env::temp_dir().join(format!("htl-dep-dts-skip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        materialised(&dir, crate::batteries::CRATE, &["json.d.tl"]);
+        materialised(&dir, "gone", &["gone.d.tl"]);
+
+        let out = orphans(&dir, &[]);
+        assert_eq!(out.len(), 2, "{out:?}");
+        let carried = out
+            .iter()
+            .find(|l| l.contains(crate::batteries::CRATE))
+            .unwrap();
+        assert!(
+            carried.contains("is on the path as std.* instead"),
+            "{carried}"
+        );
+        assert!(
+            carried.contains("nothing preloads this copy's module name"),
+            "{carried}"
+        );
+        assert!(!carried.contains("no longer"), "{carried}");
+
+        let departed = out.iter().find(|l| l.contains("types/gone/")).unwrap();
+        assert!(
+            departed.contains("gone is no longer a dependency"),
+            "{departed}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The skip and the report ask one question, so a crate that is still shipping its own
+    /// declarations is unaffected by either: it is in `decls`, and `orphans` passes over
+    /// the files it lists.
+    #[test]
+    fn a_live_crates_own_files_are_not_orphans() {
+        let dir = std::env::temp_dir().join(format!("htl-dep-dts-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        materialised(&dir, "dep", &["dep.d.tl", "old.d.tl"]);
+        let live = DepDecl {
+            package: "dep".into(),
+            version: "0.1.0".into(),
+            declared: "dts/dep.d.tl".into(),
+            dts_root: None,
+            source: PathBuf::from("/w/d/dts/dep.d.tl"),
+        };
+        let out = orphans(&dir, std::slice::from_ref(&live));
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(out[0].contains("types/dep/old.d.tl"), "{out:?}");
+        assert!(out[0].contains("dep no longer ships it"), "{out:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

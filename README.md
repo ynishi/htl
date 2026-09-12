@@ -444,7 +444,7 @@ them; they are what a consumer's checkout copies from, before anything of yours 
 | `wrote <file>` | written now |
 | `unchanged <file>` | already what it should be |
 | `not written: <why>` | asked for and not written: a crate names a file in `[package.metadata.htl] dts` that is not a `.d.tl`, or is not in the package, or does not start at the `dts_root` that manifest declares, or names two that would be one file under `types/<crate>/`, or the file could not be written |
-| `left in place: <file>` | under `types/<crate>/` from an earlier run, and no longer shipped — the crate is gone from the graph, or still there and no longer naming the file |
+| `left in place: <file>` | under `types/<crate>/` from an earlier run, and not what is read now — the crate is gone from the graph, or still there and no longer naming the file, or one this binary carries itself ([`std.*`](#the-native-modules-std), whose copy an htl built without that feature may have written: the crate is still a dependency, and the line says so) |
 
 **The exit code is about `not written` and nothing else.** It is non-zero when a
 declaration this command was asked to write could not be written — so a CI step that
