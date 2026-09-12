@@ -143,6 +143,26 @@ fn new_writes_the_plain_tree() {
     assert_tree("plain", &root.join("sample"));
 }
 
+/// Under a pin that resolves a dependency at its entry (`main`, a checkout, 0.5 on) the
+/// manifest names `htlx` and the README's first step is the fetch. The default release
+/// does not, so this is the one tree the default-pin snapshots do not show; pinned on its
+/// own, it is where a change to the dependency line — the tag above all — is reviewed.
+#[test]
+fn new_htl_main_writes_the_htlx_dependency() {
+    let root = common::scratch("htl-cli-snapshot", "plain-main");
+    htl(&["new", "sample", "--htl", "main"], &root);
+    assert_tree("plain-main", &root.join("sample"));
+}
+
+/// `--no-x` under the same pin is the plain tree. Sharing the snapshot is the assertion
+/// that opting out changes nothing but the dependency and what mentions it.
+#[test]
+fn new_no_x_writes_the_plain_tree_whatever_the_pin() {
+    let root = common::scratch("htl-cli-snapshot", "plain-no-x");
+    htl(&["new", "sample", "--htl", "main", "--no-x"], &root);
+    assert_tree("plain", &root.join("sample"));
+}
+
 #[test]
 fn new_lib_writes_no_entry_script() {
     let root = common::scratch("htl-cli-snapshot", "lib");

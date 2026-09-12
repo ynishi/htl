@@ -108,6 +108,20 @@ pub const DEFAULT_HTL: &str = "0.4";
 /// which inherits `[workspace.package] repository`, so the URL is not written twice.
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 
+/// The collections library a scaffolded project depends on from the start: `htlx.list` /
+/// `tablex` / `seq` / `ordered`, pure Teal, in its own repository. Lua has no such layer of
+/// its own, so every project used to write the same fifty lines; the scaffold writes the
+/// dependency instead and the README's first step is `htl pkg install`.
+const HTLX_REPOSITORY: &str = "https://github.com/ynishi/htl-x";
+
+/// The tag of [`HTLX_REPOSITORY`] the scaffold pins. Like [`DEFAULT_HTL`], data with a
+/// default rather than anything derived: it moves when htl-x cuts a tag that the e2e
+/// consumer gate (`e2e/tests/htlx_consumer.rs`) has been seen to install, check and test
+/// against this checkout — and not before, because a tag nobody has pulled through this
+/// scaffold is a project `htl new` cannot promise works. Exact, not a prefix: mlua-pkg's
+/// `tag` is one ref, and a floating `v0.1` would be a tag htl-x has to keep moving.
+pub const HTLX_TAG: &str = "v0.1.0";
+
 impl Default for HtlPin {
     fn default() -> Self {
         HtlPin::Release(DEFAULT_HTL.to_string())
@@ -199,6 +213,18 @@ impl HtlPin {
         self.at_least(0, 5)
     }
 
+    /// Whether the pinned htl resolves an installed dependency at its `entry`
+    /// (`entries/<name>` below the project root, #204).
+    ///
+    /// It decides whether the manifest gets the `htlx` line. htl-x's `require("htlx.list")`
+    /// only lands on `src/htlx/list.tl` through that link; under `0.4` the same line
+    /// installs cleanly and every `require("htlx.*")` is then `module not found` — a
+    /// project broken by its own scaffold, which is the failure a default dependency is
+    /// most exposed to, so the pin that cannot read the dependency does not get it.
+    pub fn knows_dep_entry(&self) -> bool {
+        self.at_least(0, 5)
+    }
+
     /// `major.minor` against a release, for the `knows_*` questions above. No semver crate:
     /// what is compared is what [`SUPPORTED`] holds — `0.<minor>`, and a bare `<major>`
     /// once there is a 1.x — and a two-number compare is shorter than the dependency would
@@ -239,6 +265,18 @@ pub struct Options {
     /// The htl the scaffolded project depends on, already read from `--htl` by
     /// [`HtlPin::parse`] — so, like the target, a refusal happens before the first file.
     pub htl: HtlPin,
+    /// `--no-x`: leave the `htlx` dependency out of the manifest whatever the pin. For a
+    /// project that wants no dependency at all, or one that will name its own.
+    pub no_x: bool,
+}
+
+impl Options {
+    /// Whether the manifest gets the `htlx` line: the pin can read it
+    /// ([`HtlPin::knows_dep_entry`]) and `--no-x` was not given. Asked once here so the
+    /// manifest, the README's first step and the `next:` hint cannot disagree.
+    pub fn writes_htlx(&self) -> bool {
+        self.htl.knows_dep_entry() && !self.no_x
+    }
 }
 
 /// What a template is filled with: the package name and its Teal identifier. The
@@ -255,6 +293,9 @@ pub struct Ctx<'a> {
     /// Does the Rust host install `std.*`? [`HtlPin::knows_std`], carried here because the
     /// line that does it is in a template body, and the pin is not.
     pub std: bool,
+    /// Does the manifest name `htlx`? [`Options::writes_htlx`], carried here because the
+    /// README's first step depends on it the way its command block depends on `script`.
+    pub htlx: bool,
 }
 
 /// A dependency line in the project's `Cargo.toml`: what to require, and the features the
@@ -547,12 +588,13 @@ fn plan(dir: &Path, name: &str, module: &str, opts: &Options) -> Vec<(PathBuf, S
         module,
         script: !opts.lib,
         std: opts.htl.knows_std(),
+        htlx: opts.writes_htlx(),
     };
     let target = opts.target;
     let teal = target.map_or(&DEFAULT_TEAL, |t| &t.teal);
 
     let mut files = vec![
-        (dir.join("mlua-pkg.toml"), fill(T_MANIFEST, &ctx)),
+        (dir.join("mlua-pkg.toml"), t_manifest(&ctx)),
         (
             dir.join("htl.toml"),
             t_htl_toml(target.map(|t| t.target), &opts.htl),
@@ -655,6 +697,24 @@ fn fill(template: &str, ctx: &Ctx<'_>) -> String {
 /// What `{{std}}` becomes in a host's `preload` under a pin that has it: `std.*` installed
 /// before the project's own module, so that module may require it.
 const STD_LINE: &str = "    // `std.*`: json, string, path and the rest, from mlua-batteries; typed in the checker\n    // the same way. Remove this line and the project has no native modules but `host`.\n    h.install_std()?;\n";
+/// The project's `mlua-pkg.toml`: the template, and under a pin that can read it the
+/// `htlx` line, put directly under `[deps]`.
+///
+/// The template keeps its commented `lshape` example either way. Under `0.4` the section
+/// is otherwise empty and the comment is the only place the shape of a git dependency is
+/// shown; under a newer pin the real line above it shows the same shape, and one line of
+/// comment is a smaller cost than a template that changes with the pin — every other
+/// template is filled by name and module alone, and the manifest stays that way.
+fn t_manifest(ctx: &Ctx<'_>) -> String {
+    let base = fill(T_MANIFEST, ctx);
+    if !ctx.htlx {
+        return base;
+    }
+    let line = format!("htlx = {{ git = \"{HTLX_REPOSITORY}\", tag = \"{HTLX_TAG}\" }}\n");
+    // Exactly one `[deps]` in the template, and the line goes right after it — a
+    // template without the section would be a template this function cannot fill.
+    base.replace("[deps]\n", &format!("[deps]\n{line}"))
+}
 
 fn teal_module(ctx: &Ctx<'_>) -> String {
     fill(T_TEAL_MODULE, ctx)
@@ -812,18 +872,38 @@ fn t_gitignore(target: Option<&'static TargetProfile>, ctx: &Ctx<'_>) -> String 
 fn t_readme(ctx: &Ctx<'_>, target: Option<&'static TargetProfile>) -> String {
     let (name, m) = (ctx.name, ctx.module);
     let mut s = format!(
-        "# {name}\n\nTeal project managed with [htl](https://github.com/ynishi/htl).\n\n```sh\nhtl check .            # type-check + lints\n"
+        "# {name}\n\nTeal project managed with [htl](https://github.com/ynishi/htl).\n\n```sh\n"
     );
+    // With a dependency in the manifest the fetch is the first step, because until it has
+    // run `require("htlx.*")` resolves to nothing and every other command below is red.
+    if ctx.htlx {
+        s.push_str("htl pkg install        # fetch [deps] from mlua-pkg.toml — first, htlx is one of them\n");
+    }
+    s.push_str("htl check .            # type-check + lints\n");
     if ctx.script && target.is_none() {
         s.push_str("htl run src/main.tl    # run the entry script\n");
     }
-    s.push_str("htl test               # tests/*_test.tl via htl.test\nhtl fmt .              # whitespace formatter\nhtl pkg install        # fetch [deps] from mlua-pkg.toml\n");
+    s.push_str("htl test               # tests/*_test.tl via htl.test\nhtl fmt .              # whitespace formatter\n");
+    if !ctx.htlx {
+        s.push_str("htl pkg install        # fetch [deps] from mlua-pkg.toml\n");
+    }
     if let Some(t) = target {
         s.push_str(&(t.readme_commands)(ctx));
     }
     s.push_str(&format!(
-        "```\n\nModule: `src/{m}/init.tl` (`require(\"{m}\")` from `src/` and `tests/`).\n\n\
-         `mlua-pkg.toml` `entry = \"src/{m}\"` only matters to *consumers* that depend on this\n\
+        "```\n\nModule: `src/{m}/init.tl` (`require(\"{m}\")` from `src/` and `tests/`).\n\n"
+    ));
+    if ctx.htlx {
+        s.push_str(&format!(
+            "`htlx` ([htl-x]({HTLX_REPOSITORY}) {HTLX_TAG}) is a dependency from the start: the collections\n\
+             Lua does not have — `htlx.list` over arrays, `htlx.tablex` over maps, `htlx.seq` over\n\
+             iterators, `htlx.ordered` for insertion-ordered maps and sets — as `require(\"htlx.list\")`\n\
+             and the rest, once `htl pkg install` has run. Drop the line from `mlua-pkg.toml` if it\n\
+             is not wanted (`htl new --no-x` writes the project without it).\n\n"
+        ));
+    }
+    s.push_str(&format!(
+        "`mlua-pkg.toml` `entry = \"src/{m}\"` only matters to *consumers* that depend on this\n\
          package through mlua-pkg: they get it as `require(\"{name}\")`. "
     ));
     match target {
@@ -970,9 +1050,10 @@ fn t_cargo(name: &str, target: &TargetProfile, htl: &HtlPin) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        BuildTarget, Ctx, DEFAULT_HTL, DEFAULT_TARGET, HtlPin, PathBuf, REPOSITORY, Result,
-        SUPPORTED, dep_value, ffi_lib_rs, profile, resolve_target, rust_lib_rs, script_mismatch,
-        t_cargo, t_htl_toml, target_names, version_parts,
+        BuildTarget, Ctx, DEFAULT_HTL, DEFAULT_TARGET, HTLX_REPOSITORY, HTLX_TAG, HtlPin, Options,
+        PathBuf, REPOSITORY, Result, SUPPORTED, dep_value, ffi_lib_rs, profile, resolve_target,
+        rust_lib_rs, script_mismatch, t_cargo, t_htl_toml, t_manifest, t_readme, target_names,
+        version_parts,
     };
     use htl::build_target::Script;
 
@@ -1088,6 +1169,7 @@ mod tests {
             module: "sample",
             script: true,
             std,
+            htlx: false,
         };
         let with = rust_lib_rs(&ctx(true));
         assert!(with.contains("    h.install_std()?;\n"), "{with}");
@@ -1102,6 +1184,94 @@ mod tests {
         // The C ABI host is a Rust host too, and gets the same line.
         let ffi = ffi_lib_rs(&ctx(true));
         assert!(ffi.contains("    h.install_std()?;\n"), "{ffi}");
+    }
+
+    /// The same question for the `htlx` dependency: 0.4 installs it and cannot require it
+    /// (#204 is in no release), so 0.4 is not given it; 0.5, `main` and a checkout are.
+    #[test]
+    fn only_an_unreleased_htl_gets_the_htlx_dependency() {
+        assert!(!HtlPin::Release("0.4".into()).knows_dep_entry());
+        assert!(HtlPin::Release("0.5".into()).knows_dep_entry());
+        assert!(HtlPin::Main.knows_dep_entry());
+        assert!(HtlPin::Path(PathBuf::from("../co")).knows_dep_entry());
+    }
+
+    /// The manifest under the three shapes: the bare template under 0.4, the `htlx` line
+    /// right under `[deps]` under a pin that reads it, and the bare template again with
+    /// `--no-x` whatever the pin. The line is asserted whole because it is what a user's
+    /// `htl pkg install` fetches.
+    #[test]
+    fn the_manifest_names_htlx_only_when_the_pin_reads_it_and_no_x_is_not_given() {
+        let opts = |htl: HtlPin, no_x: bool| Options {
+            lib: false,
+            target: None,
+            htl,
+            no_x,
+        };
+        let ctx = |o: &Options| Ctx {
+            name: "sample",
+            module: "sample",
+            script: true,
+            std: o.htl.knows_std(),
+            htlx: o.writes_htlx(),
+        };
+        let old = opts(HtlPin::Release("0.4".into()), false);
+        let bare = t_manifest(&ctx(&old));
+        assert!(!bare.contains("htlx"), "{bare}");
+        assert!(bare.contains("[deps]\n# lshape"), "{bare}");
+
+        let main = opts(HtlPin::Main, false);
+        let with = t_manifest(&ctx(&main));
+        let line = format!(
+            "[deps]\nhtlx = {{ git = \"{HTLX_REPOSITORY}\", tag = \"{HTLX_TAG}\" }}\n# lshape"
+        );
+        assert!(with.contains(&line), "{with}");
+        // Everything but that one line is the bare manifest.
+        assert_eq!(with.replacen(&line, "[deps]\n# lshape", 1), bare);
+
+        let opted_out = opts(HtlPin::Main, true);
+        assert_eq!(t_manifest(&ctx(&opted_out)), bare);
+
+        // The tag is a tag, not a floating prefix: three numbers, `v` in front.
+        let n: Vec<&str> = HTLX_TAG.trim_start_matches('v').split('.').collect();
+        assert!(
+            HTLX_TAG.starts_with('v') && n.len() == 3 && n.iter().all(|p| p.parse::<u64>().is_ok()),
+            "HTLX_TAG {HTLX_TAG} is not an exact vX.Y.Z tag"
+        );
+    }
+
+    /// With the dependency in the manifest the README's first command is the fetch, and
+    /// the fetch appears once; without it the block is the one every project has had.
+    #[test]
+    fn the_readme_puts_the_fetch_first_when_there_is_something_to_fetch() {
+        let ctx = |htlx| Ctx {
+            name: "sample",
+            module: "sample",
+            script: true,
+            std: true,
+            htlx,
+        };
+        let with = t_readme(&ctx(true), None);
+        let block: Vec<&str> = with.lines().skip_while(|l| *l != "```sh").skip(1).collect();
+        assert!(block[0].starts_with("htl pkg install"), "{with}");
+        // Once in the command block; the prose may name it again.
+        let fetches = block
+            .iter()
+            .take_while(|l| **l != "```")
+            .filter(|l| l.starts_with("htl pkg install"))
+            .count();
+        assert_eq!(fetches, 1, "{with}");
+        assert!(with.contains("`htlx` ([htl-x]("), "{with}");
+        assert!(with.contains("htl new --no-x"), "{with}");
+
+        let without = t_readme(&ctx(false), None);
+        let block: Vec<&str> = without
+            .lines()
+            .skip_while(|l| *l != "```sh")
+            .skip(1)
+            .collect();
+        assert!(block[0].starts_with("htl check ."), "{without}");
+        assert!(!without.contains("htlx"), "{without}");
     }
 
     /// The answer to that question, as bytes. Both halves matter: under a release that does
@@ -1295,6 +1465,7 @@ mod tests {
             module: "sample",
             script,
             std: true,
+            htlx: false,
         };
         let bin = profile(DEFAULT_TARGET).unwrap();
         assert!((bin.readme_commands)(&ctx(true)).contains("cargo run"));

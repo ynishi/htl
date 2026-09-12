@@ -37,7 +37,7 @@ htl = "0.1"                    # embedding: engine + proc macros in one import
 
 | command | what it does |
 |---|---|
-| `htl new <name>` / `htl init [dir]` | scaffold: `mlua-pkg.toml`, `src/<mod>/init.tl`, `src/main.tl`, `tests/`, README (`--lib` for no entry script; `--target <name>` for what will run the output, `--embed` being the shorthand for `--target bin`; `--htl <req>` for which htl the project depends on) |
+| `htl new <name>` / `htl init [dir]` | scaffold: `mlua-pkg.toml`, `src/<mod>/init.tl`, `src/main.tl`, `tests/`, README (`--lib` for no entry script; `--target <name>` for what will run the output, `--embed` being the shorthand for `--target bin`; `--htl <req>` for which htl the project depends on; `--no-x` for no `htlx` dependency) |
 | `htl check [paths] [--strict] [--lint rule=level] [--no-cache] [--cache-mode per-module\|whole-run] [--explain-cache]` | type-check; htl lints as `lint:`, advisory at their default level and fatal at `deny` (`--strict` promotes every `warn` to `deny`); a module reached through `require` (an installed dep, a `[check] paths` dir) is checked with the file and its type errors are errors too, once per run, with the file that required it; what has not changed is replayed from `.htl/` (see Caching) |
 | `htl run <file.tl \| app.hb> [args]` | check then execute; `require` of a `.tl` with type errors fails |
 | `htl test [paths] [--filter s] [--lib mod] [--coverage] [--lcov file] [--junit file] [--no-cache]` | `*_test.tl` and `tests/**/*.tl`, one isolated state per file; checking is replayed from `.htl/`, the run never is (see Caching) |
@@ -1686,6 +1686,16 @@ see, and a rule that fires on them is a rule nobody can act on.
 mlua-pkg's `entry` is a directory, so a consumer's `require("<name>")` looks for
 `<name>/init.tl`. A flat package can instead ship `<name>/<name>.tl` (e.g. `entry = "src"`
 with `src/<name>.tl`); htl resolves that form in the checker and in `TealResolver`.
+
+`mlua-pkg.toml` names one dependency from the start: `htlx`, the collections Lua does not
+have ([htl-x](https://github.com/ynishi/htl-x) — `htlx.list` / `tablex` / `seq` /
+`ordered`, pure Teal), pinned at an exact tag, so the README's first step is `htl pkg
+install`. `htl new --no-x` leaves the line out. It is written only under a pin that
+resolves a dependency at its `entry` (`main`, a checkout, releases from 0.5 on); under
+`0.4` it would install and then fail every `require("htlx.*")`, so `0.4` does not get it.
+The tag the scaffold pins is a constant in the scaffold, and `just e2e` scaffolds a
+project, installs it and runs a test against it, which is what the constant is allowed to
+move on.
 
 ### Build targets (`--target <name>`)
 

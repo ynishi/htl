@@ -1,0 +1,130 @@
+===== files =====
+.gitignore
+README.md
+htl.toml
+mlua-pkg.toml
+src/main.tl
+src/sample/init.tl
+tests/sample_test.tl
+types/README.md
+===== .gitignore =====
+.htl/
+*.hb
+===== README.md =====
+# sample
+
+Teal project managed with [htl](https://github.com/ynishi/htl).
+
+```sh
+htl pkg install        # fetch [deps] from mlua-pkg.toml — first, htlx is one of them
+htl check .            # type-check + lints
+htl run src/main.tl    # run the entry script
+htl test               # tests/*_test.tl via htl.test
+htl fmt .              # whitespace formatter
+```
+
+Module: `src/sample/init.tl` (`require("sample")` from `src/` and `tests/`).
+
+`htlx` ([htl-x](https://github.com/ynishi/htl-x) v0.1.0) is a dependency from the start: the collections
+Lua does not have — `htlx.list` over arrays, `htlx.tablex` over maps, `htlx.seq` over
+iterators, `htlx.ordered` for insertion-ordered maps and sets — as `require("htlx.list")`
+and the rest, once `htl pkg install` has run. Drop the line from `mlua-pkg.toml` if it
+is not wanted (`htl new --no-x` writes the project without it).
+
+`mlua-pkg.toml` `entry = "src/sample"` only matters to *consumers* that depend on this
+package through mlua-pkg: they get it as `require("sample")`. Ignore it if nobody depends on this package.
+===== htl.toml =====
+# htl project settings (htl check / htl test / htl fmt / include_tl! all read this).
+# Command-line flags and HTL_LINTS / HTL_LINT override it.
+
+[lint]
+# strict = true   # warnings and lints fail htl check (not htl test); lints fail
+#                   include_tl!; false makes the macro advisory
+
+# Per rule: htl check --list-lints names every rule with the level it has by
+# default, and the README's "Lints" section says how to change one.
+
+[fmt]
+indent = 3
+
+[check]
+# paths = ["mods", "~/.cache/sdk"]   # extra dirs require() resolves from while checking
+# (src/ and types/ are always searched; hand-written .d.tl go under types/)
+
+# Where this project accepts modules written outside it:
+# [[contract]]
+# dir = "mods"             # relative to this file; "sites/*" = each subdirectory
+# module = "Site"          # optional: only this module name in each dir
+#
+# The shape those modules must have is declared on the record itself, so the two
+# cannot drift apart:
+#
+#   local record defs
+#      record Mod              ---@contract     -- inherits `dir` above;
+#         name: string         ---@required     -- ---@contract("other") overrides it
+#         monsters: {Monster}  ---@required
+#         factions: {Faction}                   -- unmarked: for the mods that want it
+#      end
+#   end
+#
+# The host must enforce it too: htl::pkg::contract_resolvers(root, &config).
+# `htl check` reports `contract-unenforced` when that call is not in the Rust sources.
+# enforced_by = "mods/_validate.lua"   # ...or name where it is enforced instead,
+#                          # for a Lua-side validator, a sibling crate, generated
+#                          # code. The file has to exist; a missing one is reported.
+===== mlua-pkg.toml =====
+[package]
+name = "sample"
+version = "0.1.0"
+# Consumers `require("sample")` -> this directory's init.tl
+entry = "src/sample"
+
+[deps]
+htlx = { git = "https://github.com/ynishi/htl-x", tag = "v0.1.0" }
+# lshape = { git = "https://github.com/ynishi/lshape", tag = "v0.1" }
+===== src/main.tl =====
+local sample = require("sample")
+
+local g = sample.greet(arg and arg[1] or "teal")
+print(g.text)
+===== src/sample/init.tl =====
+local record sample
+   record Greeting
+      who: string
+      text: string
+   end
+end
+
+function sample.greet(who: string): sample.Greeting
+   return { who = who, text = "hello, " .. who }
+end
+
+return sample
+===== tests/sample_test.tl =====
+local t = require("htl.test")
+local sample = require("sample")
+
+t.describe("sample.greet", function()
+   t.it("greets by name", function()
+      t.expect(sample.greet("teal")):to_equal({ who = "teal", text = "hello, teal" })
+   end)
+end)
+===== types/README.md =====
+# types/
+
+Hand-written `.d.tl` declarations for modules the host provides at run time and
+that ship no declaration of their own (a Rust crate re-exported to Lua, a runtime
+SDK): `xlib.d.tl` here makes `require("xlib")` typed in `htl check`, `htl test` and
+`include_tl!`. Consulted after the project root and `src/`, before `[check] paths`;
+a `.tl` source anywhere on the path beats a declaration, so nothing here can shadow
+an implementation, and a second declaration of the same module is reported
+(`duplicate-declaration`) rather than silently losing to one of them.
+
+Files htl writes here are the ones the project *publishes*: the module a
+`---@contract` type is declared in, for the authors of the modules that contract
+holds. Declarations generated from this crate's own Rust (`#[host_module]`) are
+written next to the scripts, not here. Both are committed.
+
+So is `<crate>/`, when there is one: a dependency that names its declarations in
+`[package.metadata.htl] dts` has them copied there by `htl dts` (and by check / run
+/ test). Edit the crate, not the copy — the next run writes it again.

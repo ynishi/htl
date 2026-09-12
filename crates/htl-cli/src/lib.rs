@@ -359,6 +359,7 @@ Examples:
                                    built against the unreleased htl (a git pin on main)
   htl new hello --embed --htl path:../htl
                                    built against a local checkout of this repository
+  htl new hello --no-x             without the htlx dependency the manifest gets by default
 
 Build targets: https://github.com/ynishi/htl#build-targets---target-name
 The cdylib target: https://github.com/ynishi/htl#the-cdylib-target---target-cdylib
@@ -380,6 +381,9 @@ The cdylib target: https://github.com/ynishi/htl#the-cdylib-target---target-cdyl
         /// `path:<checkout>`
         #[arg(long, value_name = "REQ", default_value = scaffold::DEFAULT_HTL)]
         htl: String,
+        /// Leave the htlx (htl-x collections) dependency out of mlua-pkg.toml
+        #[arg(long)]
+        no_x: bool,
     },
     /// Fill in the scaffold files that are missing in an existing directory
     Init {
@@ -396,6 +400,9 @@ The cdylib target: https://github.com/ynishi/htl#the-cdylib-target---target-cdyl
         /// `path:<checkout>`
         #[arg(long, value_name = "REQ", default_value = scaffold::DEFAULT_HTL)]
         htl: String,
+        /// Leave the htlx (htl-x collections) dependency out of mlua-pkg.toml
+        #[arg(long)]
+        no_x: bool,
     },
     /// Package management at the nearest `mlua-pkg.toml` project root: install / add /
     /// update / clean / patch, through mlua-pkg's library rather than its binary
@@ -699,14 +706,16 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
             embed,
             target,
             htl,
-        } => cmd_new(&name, lib, embed, target.as_deref(), &htl),
+            no_x,
+        } => cmd_new(&name, lib, embed, target.as_deref(), &htl, no_x),
         Cmd::Init {
             dir,
             lib,
             embed,
             target,
             htl,
-        } => cmd_init(dir.as_deref(), lib, embed, target.as_deref(), &htl),
+            no_x,
+        } => cmd_init(dir.as_deref(), lib, embed, target.as_deref(), &htl, no_x),
         Cmd::Gen { file, out } => cmd_gen(&file, out.as_deref()),
         Cmd::Run { file, args } => cmd_run(&file, &args),
         Cmd::Fix {
@@ -1015,6 +1024,7 @@ fn cmd_new(
     embed: bool,
     target: Option<&str>,
     htl: &str,
+    no_x: bool,
 ) -> Result<ExitCode> {
     let dir = PathBuf::from(name);
     let pkg_name = dir
@@ -1027,14 +1037,22 @@ fn cmd_new(
     // write for — the pin decides what goes into the files, so it is settled first too.
     let target = scaffold::resolve_target(target, embed, lib)?;
     let htl = scaffold::HtlPin::parse(htl)?;
-    let done = scaffold::scaffold(
-        &dir,
-        &pkg_name,
-        &scaffold::Options { lib, target, htl },
-        true,
-    )?;
+    let opts = scaffold::Options {
+        lib,
+        target,
+        htl,
+        no_x,
+    };
+    let done = scaffold::scaffold(&dir, &pkg_name, &opts, true)?;
     report_scaffold(&dir, &done.written, &[]);
-    eprintln!("next: cd {} && htl test", dir.display());
+    // The manifest names a dependency: the fetch comes before the first test, or the
+    // first test is a `module not found`.
+    let fetch = if opts.writes_htlx() {
+        "htl pkg install && "
+    } else {
+        ""
+    };
+    eprintln!("next: cd {} && {fetch}htl test", dir.display());
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1044,6 +1062,7 @@ fn cmd_init(
     embed: bool,
     target: Option<&str>,
     htl: &str,
+    no_x: bool,
 ) -> Result<ExitCode> {
     let dir = match dir {
         Some(d) => d.to_path_buf(),
@@ -1058,7 +1077,13 @@ fn cmd_init(
     let asked_for_a_target = target.is_some() || embed;
     let target = scaffold::resolve_target(target, embed, lib)?;
     let htl = scaffold::HtlPin::parse(htl)?;
-    let done = scaffold::scaffold(&dir, &name, &scaffold::Options { lib, target, htl }, false)?;
+    let opts = scaffold::Options {
+        lib,
+        target,
+        htl,
+        no_x,
+    };
+    let done = scaffold::scaffold(&dir, &name, &opts, false)?;
     // A target was named: say what it would have written and found already there. Without
     // one the old one-liner stands, so a plain re-run does not list the whole tree.
     let kept: &[PathBuf] = if asked_for_a_target { &done.kept } else { &[] };
