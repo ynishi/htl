@@ -58,8 +58,21 @@
 //! versions, not the ones that were resolved, and a registry dependency's files are under
 //! `$CARGO_HOME/registry/src/<registry>/<name>-<version>/`, a layout no project should be
 //! reimplementing. `cargo metadata` reports both — the resolved graph, and each package's
-//! `manifest_path` wherever cargo put it — and it neither builds nor, with everything
-//! already fetched, touches the network.
+//! `manifest_path` wherever cargo put it — and it does not build.
+//!
+//! It is run with `--locked` when the project has a `Cargo.lock`, which is what keeps a
+//! read a read. Resolving a graph is what writes a lockfile, and a project that pins a git
+//! dependency by branch resolves to a different revision every time the branch moves — so
+//! without the flag `htl check` on such a project rewrote its `Cargo.lock`, silently, as a
+//! side effect of type-checking Teal. With it, a lockfile that does not cover the manifest
+//! is a refusal to read the graph rather than a rewrite of the file: nothing is materialised
+//! that run, the committed declarations stand, and the message says which cargo command
+//! writes the lockfile.
+//!
+//! Only when there is one, because `--locked` refuses to resolve without a lockfile at all
+//! and a project that has never run a cargo command has none — a scaffolded host is in that
+//! state until its first build. There is nothing to protect there and nothing that can move:
+//! cargo writes what the next build would have written anyway.
 //!
 //! It is the whole graph rather than the direct dependencies because a runtime crate may
 //! well be pulled in by the one the project names; a module is registered in the Lua state
@@ -223,26 +236,56 @@ fn cargo() -> std::ffi::OsString {
 /// same file twice under two names.
 pub fn resolve(manifest_dir: &Path) -> Result<Vec<DepDecl>, String> {
     let manifest = manifest_dir.join("Cargo.toml");
-    let out = std::process::Command::new(cargo())
-        .args(["metadata", "--format-version", "1"])
+    let mut cmd = std::process::Command::new(cargo());
+    cmd.args(["metadata", "--format-version", "1"]);
+    // Only when there is a lockfile to protect. `--locked` refuses to resolve without one
+    // at all, and a project that has never run a cargo command has none: a scaffolded host
+    // is in that state until its first build. There is nothing to keep there — cargo writes
+    // what any build would have written a moment later — and the harm this flag is for is
+    // the rewrite of a lockfile a project was already building against.
+    if manifest_dir.join("Cargo.lock").is_file() {
+        cmd.arg("--locked");
+    }
+    let out = cmd
         .arg("--manifest-path")
         .arg(&manifest)
         .output()
         .map_err(|e| format!("running `cargo metadata` for {}: {e}", manifest.display()))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        let first = err
-            .lines()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("no output");
-        return Err(format!(
-            "`cargo metadata` for {}: {first}",
-            manifest.display()
-        ));
+        return Err(resolve_failed(manifest_dir, &manifest, &err));
     }
     let meta: serde_json::Value = serde_json::from_slice(&out.stdout)
         .map_err(|e| format!("reading `cargo metadata`: {e}"))?;
     decls(&meta)
+}
+
+/// Why the graph was not read, said as the reader's problem rather than cargo's.
+///
+/// The `--locked` refusal gets its own sentence because it is the one failure here that a
+/// person can act on and the one most easily mistaken for a fault in the project's Teal: the
+/// lockfile does not cover the manifest, which is a cargo command away from fixed, and until
+/// it is no dependency's declarations are materialised. Everything else is cargo's own first
+/// line, which is what it always was.
+fn resolve_failed(manifest_dir: &Path, manifest: &Path, stderr: &str) -> String {
+    // Cargo says "the lock file … needs to be updated but --locked was passed to prevent
+    // this". Matching the middle of that sentence rather than the whole of it: the wording
+    // has changed before, and every version of it has carried this much.
+    if stderr.contains("--locked") && stderr.contains("lock file") {
+        return format!(
+            "{} does not cover {}, so the crate graph was not read and no dependency's \
+             declarations were materialised. `cargo update` writes it (`cargo \
+             generate-lockfile` if there is none yet); htl reads the graph with `--locked` so \
+             that checking a project never rewrites its lockfile",
+            manifest_dir.join("Cargo.lock").display(),
+            manifest.display()
+        );
+    }
+    let first = stderr
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("no output");
+    format!("`cargo metadata` for {}: {first}", manifest.display())
 }
 
 /// The shipped declarations named in one `cargo metadata` document.
@@ -582,6 +625,39 @@ mod tests {
 
     fn meta(json: &str) -> serde_json::Value {
         serde_json::from_str(json).unwrap()
+    }
+
+    /// The `--locked` refusal reads as the lockfile's, names it, and says what writes it.
+    /// The stderr is cargo's own, as of 1.88.
+    #[test]
+    fn a_lockfile_that_does_not_cover_the_manifest_is_said_as_that() {
+        let msg = resolve_failed(
+            Path::new("/w/app"),
+            Path::new("/w/app/Cargo.toml"),
+            "error: the lock file /w/app/Cargo.lock needs to be updated but --locked was \
+             passed to prevent this\nIf you want to try to generate the lock file without \
+             accessing the network, remove the --locked flag and use --offline instead.\n",
+        );
+        assert!(msg.contains("/w/app/Cargo.lock"), "{msg}");
+        assert!(msg.contains("cargo update"), "{msg}");
+        assert!(msg.contains("`--locked`"), "{msg}");
+        // Not cargo's line verbatim: a reader who did not pass a flag should not be told
+        // about one they did not pass.
+        assert!(!msg.contains("remove the --locked flag"), "{msg}");
+    }
+
+    /// Any other failure is cargo's first line, as it was before the flag.
+    #[test]
+    fn another_failure_is_still_cargos_own_first_line() {
+        let msg = resolve_failed(
+            Path::new("/w/app"),
+            Path::new("/w/app/Cargo.toml"),
+            "\nerror: failed to parse manifest at `/w/app/Cargo.toml`\n\nCaused by:\n  …\n",
+        );
+        assert_eq!(
+            msg,
+            "`cargo metadata` for /w/app/Cargo.toml: error: failed to parse manifest at `/w/app/Cargo.toml`"
+        );
     }
 
     /// The graph, not the direct dependencies: `mid` is what the root names, and `leaf` is
