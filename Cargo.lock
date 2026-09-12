@@ -766,9 +766,9 @@ dependencies = [
 
 [[package]]
 name = "mlua-batteries"
-version = "0.7.1"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4731e0c5ee0ded1fce192d32f5c7fd1d0004cb39a7b87e7976f583ac4548d7c4"
+checksum = "6d161892a140abc75ca751197f96d9066e80b2c416a1f18de5d24c34f6b57da6"
 dependencies = [
  "mlua",
  "serde_json",
