@@ -414,6 +414,21 @@ characters in the file name and nothing else — no `?`, no `**` — and the dir
 spelled out. A pattern that matches nothing is reported like a listed file that is not
 there, under the pattern's own name.
 
+The file's own name is the module name, because `types/<crate>/` goes on the search path:
+`dts/mq.d.tl` is `require("mq")` however deep in the package it sat. A crate whose modules
+have a namespace — one that registers `mine.thing` — says where its paths start, and what
+is below that root is kept:
+
+```toml
+[package.metadata.htl]
+dts_root = "types"
+dts = ["types/mine/thing.d.tl", "types/other/log.d.tl"]
+```
+
+which lands at `types/<crate>/mine/thing.d.tl`, so `require("mine.thing")` is the module
+the crate registered, and two modules called `log` in two namespaces are two files. An
+entry that does not start at the root is reported like a file the crate does not ship.
+
 Every project that depends on the crate then gets them under `types/<crate>/` from `htl
 dts` (and from `check` / `run` / `test`, which generate before they work). Keep the files
 current the way this repository does — the macro rewrites them, CI diffs them — and commit
@@ -428,7 +443,7 @@ them; they are what a consumer's checkout copies from, before anything of yours 
 |---|---|
 | `wrote <file>` | written now |
 | `unchanged <file>` | already what it should be |
-| `not written: <why>` | asked for and not written: a crate names a file in `[package.metadata.htl] dts` that is not a `.d.tl`, or is not in the package, or names two that would be one file under `types/<crate>/`, or the file could not be written |
+| `not written: <why>` | asked for and not written: a crate names a file in `[package.metadata.htl] dts` that is not a `.d.tl`, or is not in the package, or does not start at the `dts_root` that manifest declares, or names two that would be one file under `types/<crate>/`, or the file could not be written |
 | `left in place: <file>` | under `types/<crate>/` from an earlier run, and no longer shipped — the crate is gone from the graph, or still there and no longer naming the file |
 
 **The exit code is about `not written` and nothing else.** It is non-zero when a
@@ -1015,9 +1030,11 @@ resolves the crate graph with `cargo metadata` and writes each of those files to
 `types/<crate>/<file>`, reported like the project's own (`wrote types/htl-mq/mq.d.tl`) and
 committed like them. That directory is on the search path in its own right, so the module
 keeps the name it was declared under whatever the crate is called: `htl-mq`'s `mq.d.tl` is
-`require("mq")`. A note beside them (`.htl-dts`) records which crate and version they came
-from, and is what tells the directory apart from one laid out by hand, where the path below
-`types/` is the module name.
+`require("mq")`. A crate whose modules have a namespace keeps that too, by naming the
+directory its paths start at (`dts_root`, see "Shipping the declaration to your users"). A
+note beside them (`.htl-dts`) records which crate and version they came from, and is what
+tells the directory apart from one laid out by hand, where the path below `types/` is the
+module name.
 
 Nothing is built to do it, and a project whose dependencies are already resolved and
 fetched needs no network. A manifest edited since the last resolve is resolved again, which

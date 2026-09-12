@@ -222,6 +222,125 @@ fn a_star_matching_nothing_fails_naming_the_pattern() {
     assert!(msg.contains("types/*.d.tl"), "{msg}");
 }
 
+/// A crate whose modules have a namespace says where its paths start, and what is below
+/// that root is kept: the file lands at `types/<crate>/mine/thing.d.tl` and the project
+/// requires the module the crate registered, `mine.thing`. Without the root the same
+/// entry would land as `thing.d.tl` and only `require("thing")` would resolve.
+#[test]
+fn a_dts_root_keeps_the_namespace_and_require_reads_it() {
+    let root = project("dts-root");
+    let dep = root.parent().unwrap().join("dep");
+    write(
+        &dep.join("Cargo.toml"),
+        "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+         [package.metadata.htl]\ndts_root = \"types\"\ndts = [\"types/mine/thing.d.tl\"]\n",
+    );
+    write(
+        &dep.join("types/mine/thing.d.tl"),
+        "local record thing\n   go: function(string): string\nend\n\nreturn thing\n",
+    );
+    let out = htl(&root, &["dts"]);
+    let msg = err(&out);
+    assert!(out.status.success(), "{msg}");
+    assert!(msg.contains("wrote     types/dep/mine/thing.d.tl"), "{msg}");
+    assert!(root.join("types/dep/mine/thing.d.tl").is_file(), "{msg}");
+    let note = std::fs::read_to_string(root.join("types/dep/.htl-dts")).unwrap();
+    assert!(note.contains("files = [\"mine/thing.d.tl\"]"), "{note}");
+
+    write(
+        &root.join("src/main.tl"),
+        "local thing = require(\"mine.thing\")\n\nreturn thing.go(\"x\")\n",
+    );
+    let out = htl(&root, &["check", "src/main.tl", "--no-cache"]);
+    assert!(out.status.success(), "{}", err(&out));
+
+    // The un-namespaced name is what the file would have been called without the root,
+    // and is not a module here.
+    write(
+        &root.join("src/main.tl"),
+        "local thing = require(\"thing\")\n\nreturn thing.go(\"x\")\n",
+    );
+    let out = htl(&root, &["check", "src/main.tl", "--no-cache"]);
+    assert!(!out.status.success(), "{}", err(&out));
+    assert!(
+        err(&out).contains("module not found: 'thing'"),
+        "{}",
+        err(&out)
+    );
+}
+
+/// Two modules of the same name in two namespaces are two files, where before the root
+/// they were one target and the second was a duplicate.
+#[test]
+fn two_namespaces_may_hold_the_same_module_name() {
+    let root = project("dts-root-two");
+    let dep = root.parent().unwrap().join("dep");
+    write(
+        &dep.join("Cargo.toml"),
+        "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+         [package.metadata.htl]\ndts_root = \"types\"\n\
+         dts = [\"types/a/log.d.tl\", \"types/b/log.d.tl\"]\n",
+    );
+    let decl = "local record log\n   n: integer\nend\n\nreturn log\n";
+    write(&dep.join("types/a/log.d.tl"), decl);
+    write(&dep.join("types/b/log.d.tl"), decl);
+    let out = htl(&root, &["dts"]);
+    let msg = err(&out);
+    assert!(out.status.success(), "{msg}");
+    assert!(msg.contains("wrote     types/dep/a/log.d.tl"), "{msg}");
+    assert!(msg.contains("wrote     types/dep/b/log.d.tl"), "{msg}");
+    assert!(!msg.contains("names both"), "{msg}");
+}
+
+/// An entry the root does not cover is the manifest's mistake: reported like a file the
+/// crate does not ship, naming the crate, the entry and the root, and the command fails.
+/// The entries the root does cover are written all the same.
+#[test]
+fn an_entry_outside_the_dts_root_fails_naming_the_entry_and_the_root() {
+    let root = project("dts-root-stray");
+    let dep = root.parent().unwrap().join("dep");
+    write(
+        &dep.join("Cargo.toml"),
+        "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+         [package.metadata.htl]\ndts_root = \"types\"\n\
+         dts = [\"types/mine/thing.d.tl\", \"dts/dep.d.tl\"]\n",
+    );
+    write(
+        &dep.join("types/mine/thing.d.tl"),
+        "local record thing\n   go: function(string): string\nend\n\nreturn thing\n",
+    );
+    let out = htl(&root, &["dts"]);
+    let msg = err(&out);
+    assert!(!out.status.success(), "{msg}");
+    assert!(msg.contains("not written: dep 0.1.0"), "{msg}");
+    assert!(msg.contains("dts/dep.d.tl"), "{msg}");
+    assert!(msg.contains("dts_root \"types\""), "{msg}");
+    assert!(msg.contains("wrote     types/dep/mine/thing.d.tl"), "{msg}");
+}
+
+/// A file from a layout the crate has since left is under `types/<crate>/` at a path
+/// nothing ships any more. It is reported wherever it sits in the tree, and it stays:
+/// what a file under `types/` is for is the project's to say.
+#[test]
+fn a_declaration_from_a_previous_layout_is_reported_left_in_place() {
+    let root = project("dts-root-moved");
+    assert!(htl(&root, &["dts"]).status.success());
+    assert!(root.join("types/dep/dep.d.tl").is_file());
+    let dep = root.parent().unwrap().join("dep");
+    write(
+        &dep.join("Cargo.toml"),
+        "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+         [package.metadata.htl]\ndts_root = \"types\"\ndts = [\"types/mine/dep.d.tl\"]\n",
+    );
+    write(&dep.join("types/mine/dep.d.tl"), DECL);
+    let out = htl(&root, &["dts"]);
+    let msg = err(&out);
+    assert!(out.status.success(), "{msg}");
+    assert!(msg.contains("wrote     types/dep/mine/dep.d.tl"), "{msg}");
+    assert!(msg.contains("left in place: types/dep/dep.d.tl"), "{msg}");
+    assert!(root.join("types/dep/dep.d.tl").is_file(), "not deleted");
+}
+
 /// Neither report is a lint, so neither wears a lint's `[htl <rule>]` suffix — the suffix
 /// that would send a reader to `--list-lints` and `[lint]` for a name that is in neither.
 /// Both conditions at once, because the two used to be told apart only by which of them
