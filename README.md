@@ -1729,6 +1729,18 @@ and is refused up front, naming them, if one is missing.
   everything that defers to preload, a `.d.tl` stepping aside for the implementation
   or an mlua-pkg resolver over a mods dir, sees bundled modules too, and files on disk
   do not override the bundle.
+- A second `install_bundle` writes nothing, because every name is taken. Putting a newer
+  bundle into a state that is already running is `Htl::replace_bundle(&b, keep)`: the
+  names the old bundle installed go from `package.preload` and `package.loaded`, so the
+  next `require` of one evaluates the new module, while the host's own modules are
+  untouched — a bundle only takes back what it wrote. `keep` is the exception, for a
+  module that *is* the state: `replace_bundle(&b, &["world"])` leaves `world`'s evaluated
+  table exactly as it is, mutations included, and the new bundle's `world` is never
+  evaluated. Nothing is run at replace time and the entry is not re-run; what to do with
+  it is the host's. A reference already taken is not reached by any of this: a `local m =
+  require "rules"` captured by a closure that is still running keeps the old table until
+  that closure is gone. The returned `Replaced` lists `dropped`, `kept` and `added` — a
+  module both bundles carry is in the first and the last, which is what happened to it.
 - `htl build <dir>` (the older form) still bundles every `.tl` under a directory.
 
 From Rust, `include_bundle!` does the same at `cargo build` and keeps the guarantee
