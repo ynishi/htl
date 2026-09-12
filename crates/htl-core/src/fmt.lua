@@ -134,6 +134,40 @@ for k in pairs(BIN_LAST) do BIN_FIRST[k] = true end
 BIN_FIRST["-"] = nil
 BIN_FIRST["="] = nil
 
+-- Does the line whose tokens these are end in an operator that leaves it unfinished?
+--
+-- `BIN_LAST` is keyed on token text, and the lexer hands out the same `>` for `a > b` and
+-- for the close of `Box<T>` — so a line ending in a generic's closing angle (`record
+-- Map<K, V>`, `function f<T>(): Box<T>`) would read as a comparison waiting for its right
+-- side, and the line after it would get a continuation level it does not have. The two are
+-- told apart on the line itself: a type-argument list opens with a `<` that directly
+-- follows an identifier, and its close matches one of those. A trailing `>` (or `>>`, which
+-- the lexer produces for the two closes of `Box<Box<T>>` and which is in the table as the
+-- shift) is a continuation only when no such open is left for it to close. A comparison
+-- that happens to sit on a line with a generic open (`if a < b and Box<T> >`) is read as a
+-- close; Teal does not write that line, and the cost is one missing level rather than a
+-- wrong one on every generic record.
+local function ends_unfinished(toks)
+   local last = toks[#toks]
+   if not last or not BIN_LAST[last.tk] then
+      return false
+   end
+   if last.tk ~= ">" and last.tk ~= ">>" then
+      return true
+   end
+   local open = 0
+   for i, t in ipairs(toks) do
+      if t.tk == "<" and i > 1 and toks[i - 1].kind == "identifier" then
+         open = open + 1
+      elseif t.tk == ">" then
+         open = open - 1
+      elseif t.tk == ">>" then
+         open = open - 2
+      end
+   end
+   return open < 0
+end
+
 local function tokens_by_line(tokens)
    local by = {}
    for _, t in ipairs(tokens) do
@@ -234,7 +268,7 @@ function F.format(src, filename, opts)
 
    local out = {}
    local blank_run = 0
-   local prev_last_tk = nil -- last token of the previous code line
+   local prev_unfinished = false -- did the previous code line end in an operator?
    for L, line in ipairs(lines) do
       if prot[L] then
          out[#out + 1] = line
@@ -250,11 +284,11 @@ function F.format(src, filename, opts)
             local depth = base_depth(L, firstX)
             local toks = by_line[L]
             local first_tk = toks and toks[1] and toks[1].tk
-            if (prev_last_tk and BIN_LAST[prev_last_tk]) or (first_tk and BIN_FIRST[first_tk]) then
+            if prev_unfinished or (first_tk and BIN_FIRST[first_tk]) then
                depth = depth + 1
             end
             out[#out + 1] = string.rep(" ", depth * indent_w) .. content
-            if toks and #toks > 0 then prev_last_tk = toks[#toks].tk end
+            if toks and #toks > 0 then prev_unfinished = ends_unfinished(toks) end
          end
       end
    end

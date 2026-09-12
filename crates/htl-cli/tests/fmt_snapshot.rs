@@ -136,3 +136,16 @@ fn fmt_recomputes_the_indentation_of_a_messy_module() {
 fn fmt_normalises_the_whitespace_around_the_code() {
     assert_formats("edges");
 }
+
+/// A line that ends in a generic's closing `>` is not an unfinished comparison. A record
+/// header (`record Box<T>`), a method whose return type is the record (`: Box<T>`), one
+/// whose return type nests it (`: Box<Box<T>>`, which the lexer reads as one `>>`) and a
+/// function header with a type parameter and a generic return — the line after each keeps
+/// its own level. The one comparison that does break across lines (`if a.v >` / `b.v`) is
+/// in the same file and keeps its continuation, so the rule is seen from both sides. The
+/// two misindented lines (`v: T`, the `return` in `m.new`) are what makes the fixture
+/// unformatted; before #205 the formatter moved those *in* rather than back.
+#[test]
+fn fmt_does_not_continue_after_a_generic_close() {
+    assert_formats("generics");
+}
