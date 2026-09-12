@@ -35,9 +35,24 @@ H.lint_cfg = {}
 -- so the selection is consulted where `result.warnings` is collected — see `warnings_of`.
 H.tl_cfg = {}
 
-function H.set_lints(cfg, tl_cfg)
-   H.lint_cfg = cfg
-   H.tl_cfg = tl_cfg or {}
+-- Takes each side as the names that are on and the names that are off, and builds the two
+-- maps here, for the reason `H.set_deps` below gives: the prelude is not always in the
+-- state its caller holds (`Htl::with_checker`), and a table made on the other side of that
+-- line cannot be passed across it.
+--
+-- The off names are carried and not dropped because absent and `false` differ here:
+-- `H.tl_cfg[rule] ~= false` is what decides whether a Teal warning kind is said, so a kind
+-- left out of the table would be said rather than silenced.
+local function on_off(on, off)
+   local t = {}
+   for _, name in ipairs(on or {}) do t[name] = true end
+   for _, name in ipairs(off or {}) do t[name] = false end
+   return t
+end
+
+function H.set_lints(lua_on, lua_off, tl_on, tl_off)
+   H.lint_cfg = on_off(lua_on, lua_off)
+   H.tl_cfg = on_off(tl_on, tl_off)
 end
 
 -- Dependency name -> true, for the deps the project installed. Set by the Rust side from
@@ -1134,6 +1149,14 @@ function H.check(filename, env, opts)
    local dep_errors = dependency_errors(filename, result, env)
    return { ok = #errors == 0, errors = errors, error_fixes = error_fixes, warnings = warnings, deps = deps,
       lints = lints, lint_fixes = lint_fixes, requires = requires, dependency_errors = dep_errors, result = result }
+end
+
+-- `H.check` of what is on disk right now: a fresh env, nothing seeded, nothing stored --
+-- the two options `Htl::check_written` is for. They are set here rather than handed over
+-- as a table, so that nothing built in the caller's state has to cross into this one (see
+-- `H.set_deps`).
+function H.check_written(filename)
+   return H.check(filename, nil, { seed = false, store = false })
 end
 
 -- Type-check + generate Lua source. Returns code, checkinfo (code is nil on failure).
