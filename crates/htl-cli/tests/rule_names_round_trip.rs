@@ -229,8 +229,8 @@ fn an_allow_comment_cannot_be_written_on_a_marker_line() {
 /// having to provoke one first. Sixteen was the count while the project layer's five were
 /// absent and `lint.lua`'s twelve were all there was; seventeen once they were registered,
 /// twenty-four once Teal's seven warning kinds were names too, twenty-five with
-/// `nil-return` beside `nil-index`, and twenty-six with `nil-return-unchecked` beside
-/// `nil-return`.
+/// `nil-return` beside `nil-index`, twenty-six with `nil-return-unchecked` beside
+/// `nil-return`, and twenty-seven with `htlx-available`.
 ///
 /// Each line is the name and the level a project that says nothing gets, so the listing
 /// also answers which rules are `allow` — which a reader used to have to turn a rule on to
@@ -258,11 +258,12 @@ fn the_listing_accounts_for_every_rule() {
         allow,
         [
             "nil-return-unchecked",
+            "htlx-available",
             "no-any",
             "explicit-number",
             "class-record"
         ],
-        "the three opinions and the one flow rule, and nothing else, is what a project does not get by default"
+        "the three opinions, the flow rule and the library one, and nothing else, is what a project does not get by default"
     );
     assert!(
         lines.iter().all(|(_, l)| l == "allow" || l == "warn"),
@@ -284,7 +285,7 @@ fn the_listing_accounts_for_every_rule() {
     ] {
         assert!(listed.iter().any(|l| l == rule), "{rule} not in {listed:?}");
     }
-    assert_eq!(listed.len(), 26, "{listed:?}");
+    assert_eq!(listed.len(), 27, "{listed:?}");
 }
 
 /// The listing and a spec take the same names, and neither takes the two that `htl fix`

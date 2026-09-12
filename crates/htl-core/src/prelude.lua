@@ -40,6 +40,25 @@ function H.set_lints(cfg, tl_cfg)
    H.tl_cfg = tl_cfg or {}
 end
 
+-- Dependency name -> true, for the deps the project installed. Set by the Rust side from
+-- the lockfile that `Htl::apply_project` links the entries from, so what is here is what
+-- `require` can actually reach — a name in the manifest that nothing installed would be a
+-- `module not found` a lint has no business talking around.
+--
+-- Empty for a run with no project (the proc macros, `htl run` on a loose file), which is
+-- what a rule reading it should treat as "no". Rules that name a library ask this; nothing
+-- about a project's own modules is in it.
+H.deps = {}
+
+-- Takes the names as a list and keeps the set, so that the table is built in this state:
+-- the prelude is not always in the state its caller holds (`Htl::with_checker`), and a
+-- table made on the other side of that line cannot be passed across it.
+function H.set_deps(names)
+   local deps = {}
+   for _, name in ipairs(names or {}) do deps[name] = true end
+   H.deps = deps
+end
+
 -- The rules lint.lua implements, for the test that holds this list to the registry.
 function H.lint_rules()
    return lint.rule_names()
@@ -1094,6 +1113,7 @@ function H.check(filename, env, opts)
             struct_at = struct_resolver(result, filename),
             sealed_at = sealed_resolver(result, filename),
             nilable_at = nilable_resolver(result, filename),
+            deps = H.deps,
             union_at = union_resolver(result, filename),
             cast_at = cast_at,
             enum_table_at = enum_table_at,

@@ -10,6 +10,9 @@
 --                    the local that call was bound to, used as the base of a chain before
 --                    any statement looks at it. The other half of `nil-return`, and the
 --                    half a flow question can be wrong about.   [allow]
+--   htlx-available   a loop whose whole body is a function htl-x already has, in a project
+--                    that depends on htl-x. Not about correctness: the loop is right, and
+--                    so is the call.   [allow]
 --   sealed-record    a table constructor for a record marked `---@sealed`, or an `as` cast
 --                    to one, outside the file that declares it (outside the functions the
 --                    marker names, when it names any).
@@ -41,7 +44,7 @@ local L = {}
 -- Which rules are on is not decided here. The registry — every rule name there is, its
 -- default level, and which half of htl implements it — is `lint::RULES` in lint.rs, because
 -- the project layer reports under those names too and could not read a list kept in Lua.
--- What this file owns is the fourteen implementations below (`RULES`), and `L.run` is handed
+-- What this file owns is the fifteen implementations below (`RULES`), and `L.run` is handed
 -- the selection to run them under: a rule / on table, not a rule / level one. How much a
 -- finding matters is read where the run is judged, so a rule moving between `warn` and
 -- `deny` changes nothing about the work done here. `struct-fields` and `sealed-record` are on and still say
@@ -334,6 +337,219 @@ local function lint_nil_return_unchecked(ast, report, extra)
                      (fn and (fn .. ", which is") or "a function") ..
                      " marked ---@nilable, and nothing checks it before this")
                   break
+               end
+            end
+         end
+      end
+   end)
+end
+
+---------------------------------------------------------------- htlx-available
+
+-- A loop whose whole body is a function htl-x already has, in a project that already has
+-- htl-x. Not a correctness rule: the loop is right, and so is the call that replaces it.
+--
+-- Silent unless the project depends on htl-x (`extra.deps.htlx`, set from the lockfile the
+-- project installed from -- see prelude.lua and `Htl::apply_project`). A lint that tells a
+-- project to take on a dependency is a different kind of advice from one that tells it to
+-- use what it has, and only the second is this rule's.
+--
+-- Three shapes so far, each the body of a `for i = 1, #t do` with nothing else in it:
+--
+--   out[i] = f(t[i])            out[#out + 1] = f(t[i])     ->  list.map(t, f)
+--   out[t[i]] = true                                        ->  list.to_set(t)
+--   if p(t[i]) then out[#out + 1] = t[i] end                 ->  list.filter(t, p)
+--
+-- `sum`, `contains`, `tablex.keys` and `sorted_pairs` are the same idea over other shapes
+-- and are not written yet.
+--
+-- What keeps this from reading intent out of a loop that only looks like one of the three:
+--
+-- * the index is used *only* as `t[i]`. A loop that also counts with `i`, indexes a second
+--   array with it, or passes it to `f` is doing something the call cannot say.
+-- * `from` is the literal 1 and there is no `step`. `for i = 2, #t` and `for i = #t, 1, -1`
+--   are a slice and a reverse.
+-- * the accumulator is declared empty on the statement directly above the loop. That is
+--   what makes the call *equal* to the loop rather than merely similar: `list.map` hands
+--   back a new array, and a loop over an `out` that already held something does not.
+--   It is also both real shapes this was written from.
+--
+-- `allow` by default all the same. The three conditions above make a false positive
+-- unlikely, not impossible -- an `f` with a side effect the author wants in that order, a
+-- loop whose point is the assignment into a specific `out` -- and a rule that argues with a
+-- project about code that is already right does not belong on by default.
+local HTLX_MODULE = "list"
+
+-- Whether the loop's index is used only to subscript a name: `t[i]`, and `out[i]` on the
+-- left of the assignment, which is the same use on the other side of the `=`.
+--
+-- Anything else — `i` in arithmetic, passed to a function, compared — is a loop doing
+-- something with the position, and a call over elements cannot say it. Which arrays are
+-- subscripted is not this question's: the shape matchers below already insist the element
+-- read is the array the loop measures, so a `for i = 1, #a do out[i] = f(b[i]) end` is
+-- refused there rather than here.
+local function index_uses_ok(n, idx)
+   if type(n) ~= "table" then return true end
+   if is_node(n) and n.kind == "op" and n.op and n.op.op == "@index"
+      and is_node(n.e2) and n.e2.kind == "variable" and n.e2.tk == idx then
+      -- The subscript is accounted for; the base may not hide another use.
+      return index_uses_ok(n.e1, idx)
+   end
+   if is_node(n) and n.kind == "variable" and n.tk == idx then return false end
+   for i = 1, #n do
+      if not index_uses_ok(n[i], idx) then return false end
+   end
+   for k, v in pairs(n) do
+      if type(k) ~= "number" and k ~= "kind" and not SKIP_KEYS[k] and type(v) == "table" then
+         if not index_uses_ok(v, idx) then return false end
+      end
+   end
+   return true
+end
+
+-- `t[i]` exactly, for the array and index this loop runs over.
+local function is_element(n, arr, idx)
+   return is_node(n) and n.kind == "op" and n.op and n.op.op == "@index"
+      and is_node(n.e1) and n.e1.kind == "variable" and n.e1.tk == arr
+      and is_node(n.e2) and n.e2.kind == "variable" and n.e2.tk == idx
+end
+
+-- `out[i]` / `out[#out + 1]` — the two ways a loop writes the next element. Returns the
+-- accumulator's name, or nil.
+local function append_target(n, idx)
+   if not (is_node(n) and n.kind == "op" and n.op and n.op.op == "@index") then return nil end
+   local base, sub = n.e1, n.e2
+   if not (is_node(base) and base.kind == "variable") then return nil end
+   local name = base.tk
+   if is_node(sub) and sub.kind == "variable" and sub.tk == idx then return name end
+   -- `#out + 1`
+   if is_node(sub) and sub.kind == "op" and sub.op and sub.op.op == "+"
+      and is_node(sub.e1) and sub.e1.kind == "op" and sub.e1.op and sub.e1.op.op == "#"
+      and is_node(sub.e1.e1) and sub.e1.e1.kind == "variable" and sub.e1.e1.tk == name
+      and is_node(sub.e2) and sub.e2.tk == "1" then
+      return name
+   end
+   return nil
+end
+
+-- A call of one argument, `f(t[i])`: the function's written name, or nil.
+local function one_arg_call_on_element(n, arr, idx)
+   if not (is_node(n) and n.kind == "op" and n.op and n.op.op == "@funcall") then return nil end
+   local args = n.e2
+   if type(args) ~= "table" or #args ~= 1 or not is_element(args[1], arr, idx) then return nil end
+   return subject_key(n.e1)
+end
+
+-- The `for i = 1, #t do` header: the array it measures and the index it binds, or nil.
+local function plain_forward_loop(n)
+   if not (is_node(n) and n.kind == "fornum") then return nil end
+   if n.step ~= nil then return nil end
+   if not (is_node(n.from) and n.from.tk == "1") then return nil end
+   local to = n.to
+   if not (is_node(to) and to.kind == "op" and to.op and to.op.op == "#") then return nil end
+   if not (is_node(to.e1) and to.e1.kind == "variable") then return nil end
+   if not (is_node(n.var) and type(n.var.tk) == "string") then return nil end
+   return to.e1.tk, n.var.tk
+end
+
+-- `local out: T = {}` / `local out = {}` directly above the loop: the name it declares, or
+-- nil. The empty table is what makes the call equal to the loop.
+local function declares_empty(stmt)
+   if not (is_node(stmt) and stmt.kind == "local_declaration") then return nil end
+   local vars, exps = stmt.vars, stmt.exps
+   if type(vars) ~= "table" or #vars ~= 1 or type(exps) ~= "table" or #exps ~= 1 then return nil end
+   local var, exp = vars[1], exps[1]
+   if not (is_node(var) and type(var.tk) == "string") then return nil end
+   if not (is_node(exp) and exp.kind == "literal_table" and #exp == 0) then return nil end
+   return var.tk
+end
+
+-- The call that replaces this loop, or nil: `{ call = "list.map(rows, f)", acc = "out" }`.
+local function htlx_call_for(loop, arr, idx)
+   local body = loop.body
+   if type(body) ~= "table" or #body ~= 1 then return nil end
+   local stmt = body[1]
+   if not is_node(stmt) then return nil end
+
+   if stmt.kind == "assignment" then
+      local vars, exps = stmt.vars, stmt.exps
+      if type(vars) ~= "table" or #vars ~= 1 or type(exps) ~= "table" or #exps ~= 1 then return nil end
+      local target, value = vars[1], exps[1]
+      -- `out[t[i]] = true` -> to_set
+      if is_node(target) and target.kind == "op" and target.op and target.op.op == "@index"
+         and is_node(target.e1) and target.e1.kind == "variable"
+         and is_element(target.e2, arr, idx)
+         and is_node(value) and value.kind == "boolean" and value.tk == "true" then
+         return { acc = target.e1.tk, call = HTLX_MODULE .. ".to_set(" .. arr .. ")" }
+      end
+      -- `out[i] = f(t[i])` / `out[#out + 1] = f(t[i])` -> map
+      local acc = append_target(target, idx)
+      if acc then
+         local fn = one_arg_call_on_element(value, arr, idx)
+         if fn then
+            return { acc = acc, call = HTLX_MODULE .. ".map(" .. arr .. ", " .. fn .. ")" }
+         end
+      end
+      return nil
+   end
+
+   -- `if p(t[i]) then out[#out + 1] = t[i] end` -> filter
+   if stmt.kind == "if" then
+      local blocks = stmt.if_blocks
+      if type(blocks) ~= "table" or #blocks ~= 1 then return nil end
+      local blk = blocks[1]
+      if not is_node(blk) then return nil end
+      local fn = one_arg_call_on_element(blk.exp, arr, idx)
+      if not fn then return nil end
+      local inner = blk.body
+      if type(inner) ~= "table" or #inner ~= 1 then return nil end
+      local a = inner[1]
+      if not (is_node(a) and a.kind == "assignment") then return nil end
+      local vars, exps = a.vars, a.exps
+      if type(vars) ~= "table" or #vars ~= 1 or type(exps) ~= "table" or #exps ~= 1 then return nil end
+      local acc = append_target(vars[1], idx)
+      if not acc or not is_element(exps[1], arr, idx) then return nil end
+      return { acc = acc, call = HTLX_MODULE .. ".filter(" .. arr .. ", " .. fn .. ")" }
+   end
+
+   return nil
+end
+
+local function lint_htlx_available(ast, report, extra)
+   local deps = extra and extra.deps
+   if not (deps and deps.htlx) then return end
+   walk(ast, function(block)
+      if block.kind ~= "statements" then return end
+      for i = 2, #block do
+         local loop = block[i]
+         local declared = declares_empty(block[i - 1])
+         if declared and is_node(loop) then
+            local arr, idx = plain_forward_loop(loop)
+            if arr and arr ~= declared and index_uses_ok(loop.body, idx) then
+               local hit = htlx_call_for(loop, arr, idx)
+               if hit and hit.acc == declared then
+                  -- The rewrite is the loop replaced by the assignment, which is what the
+                  -- loop did: `out` was `{}` on the line above, so the call's new array is
+                  -- the array the loop would have built. Left as a suggestion and never
+                  -- applied -- merging it into the declaration above is the edit a person
+                  -- would actually make, and this rule does not write that line.
+                  local fix
+                  if loop.yend and loop.xend then
+                     fix = {
+                        applicability = "suggest",
+                        edits = { {
+                           -- `xend` is the column of the `d` of the closing `end`
+                           -- (`verify_end` writes the keyword's column plus two); an edit's
+                           -- end column is the one after the last it replaces.
+                           line = loop.y, col = loop.x,
+                           end_line = loop.yend, end_col = loop.xend + 1,
+                           text = hit.acc .. " = " .. hit.call,
+                        } },
+                     }
+                  end
+                  report("htlx-available", loop.y, loop.x,
+                     "this loop is " .. hit.call .. ": htlx is a dependency of this project, "
+                     .. "and `require(\"htlx." .. HTLX_MODULE .. "\")` has it", fix)
                end
             end
          end
@@ -1323,6 +1539,7 @@ local RULES = {
    { "nil-index", lint_nil_index },
    { "nil-return", lint_nil_return },
    { "nil-return-unchecked", lint_nil_return_unchecked },
+   { "htlx-available", lint_htlx_available },
    { "struct-fields", lint_struct_fields },
    { "sealed-record", lint_sealed_record },
    { "enum-exhaustive", lint_enum_exhaustive },
