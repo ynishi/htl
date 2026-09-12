@@ -838,6 +838,35 @@ pub(crate) struct CheckerHandle(pub(crate) Table);
 
 const RUNTIME_REGISTRY_KEY: &str = "htl.runtime";
 
+/// Registry key under which a state remembers, per bundle entry, which `package.preload`
+/// names that bundle wrote (`Htl::bundle_record`).
+const BUNDLE_REGISTRY_KEY: &str = "htl.bundles";
+
+/// What [`Htl::replace_bundle`] did, so a host can say it rather than guess.
+///
+/// Three lists because three things happen to a name, and a host that logs "reloaded" for
+/// all of them is hiding the two that matter: a module that went away for good, and one
+/// whose live value was deliberately spared.
+///
+/// A module both bundles carry appears in `dropped` *and* in `added` — which is what
+/// happened to it: the old one was taken out of `package.loaded`, and the new one is what
+/// the next `require` will evaluate. Nothing is in both `dropped` and `kept`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Replaced {
+    /// Names the old bundle had installed that are now out of `package.preload` and
+    /// `package.loaded`: the next `require` of one evaluates whatever answers it now, and
+    /// for a name the new bundle does not carry there may be nothing left to answer.
+    pub dropped: Vec<String>,
+    /// Names from `keep` that the old bundle had actually installed, and whose evaluated
+    /// value is still in `package.loaded`. Shorter than the `keep` that was asked for when
+    /// a name in it was never this bundle's — the host's own module, or a typo — which is
+    /// the only report of that.
+    pub kept: Vec<String>,
+    /// Names the new bundle wrote into `package.preload`. Not what it carries: a name the
+    /// host had registered first is still the host's and is not here.
+    pub added: Vec<String>,
+}
+
 /// The part of the prelude a runtime state needs when its checker lives elsewhere:
 /// the strict searcher (asking the checker through `gen`), the declaration-only
 /// module, and `package.path` bookkeeping.
@@ -1504,8 +1533,36 @@ impl Htl {
             .collect())
     }
 
-    /// Install a searcher serving modules from a bundle.
-    pub fn install_bundle(&self, b: &bundle::Bundle) -> Result<()> {
+    /// The names each bundle wrote into `package.preload`, keyed by the bundle's entry.
+    ///
+    /// In the registry rather than in the `Htl`: it is a fact about the Lua state, and a
+    /// `&Htl` is shared, so a `RefCell` here would be a second place to keep the same
+    /// thing in step with. What it is for is [`replace_bundle`](Self::replace_bundle) — a
+    /// bundle can take back the names it installed only if something remembers which
+    /// those were, and which belonged to the host all along.
+    fn bundle_record(&self) -> Result<Table> {
+        if let Value::Table(t) = self
+            .lua
+            .named_registry_value::<Value>(BUNDLE_REGISTRY_KEY)?
+        {
+            return Ok(t);
+        }
+        let t = self.lua.create_table()?;
+        self.lua
+            .set_named_registry_value(BUNDLE_REGISTRY_KEY, t.clone())?;
+        Ok(t)
+    }
+
+    /// The two questions asked before a bundle touches the state, so that a caller that
+    /// is about to disturb what is already there can ask them first
+    /// ([`replace_bundle`](Self::replace_bundle) drops modules, and a refusal after that
+    /// would leave the host with neither the old ones nor the new).
+    ///
+    /// Both are reads. Running it twice — once by the caller, once by
+    /// [`install_bundle`](Self::install_bundle), which stays correct on its own — costs a
+    /// chunk dump and two table lookups and answers the same either way: the names it
+    /// checks for are the host's, and a replace never removes one of those.
+    fn check_installable(&self, b: &bundle::Bundle) -> Result<()> {
         // Bytecode from a Lua that disagrees with ours would fail with "bad binary
         // format" somewhere inside the first require; say what differs instead.
         // The header cannot tell one 5.4.x from another, so the htl versions go in the
@@ -1551,12 +1608,25 @@ impl Htl {
                     .join(", ")
             );
         }
+        Ok(())
+    }
+
+    /// Install a searcher serving modules from a bundle.
+    ///
+    /// Idempotent, and deliberately so: a second call installs nothing, because every
+    /// name is taken by the first. Putting a *newer* bundle into a state that is already
+    /// running is [`replace_bundle`](Self::replace_bundle).
+    pub fn install_bundle(&self, b: &bundle::Bundle) -> Result<()> {
+        self.check_installable(b)?;
+        let package: Table = self.lua.globals().get("package")?;
+        let preload: Table = package.get("preload")?;
         // Bundled modules become `package.preload` entries: the same place a host puts
         // its own modules, so everything that already defers to preload (a `.d.tl`
         // stepping aside for the implementation, mlua-pkg resolvers ahead of Lua's
         // searchers) sees them without knowing about bundles. A name the host preloaded
         // first is left alone: the host wins. Loaders get (modname, ":preload:") as
         // Lua's preload searcher passes them.
+        let mut written: Vec<String> = Vec::new();
         for m in &b.modules {
             if !matches!(preload.get::<Value>(m.name.as_str())?, Value::Nil) {
                 continue;
@@ -1579,8 +1649,91 @@ impl Htl {
                         f.call::<Value>((modname, origin))
                     })?;
             preload.set(m.name.as_str(), loader)?;
+            written.push(m.name.clone());
+        }
+        // Only what this call wrote, and added to whatever the entry already had: a name
+        // skipped above was the host's and is not this bundle's to take back, and a
+        // second install of the same bundle writes nothing and must not erase the record
+        // the first one made.
+        let record = self.bundle_record()?;
+        let names: Table = match record.get::<Value>(b.entry.as_str())? {
+            Value::Table(t) => t,
+            _ => {
+                let t = self.lua.create_table()?;
+                record.set(b.entry.as_str(), t.clone())?;
+                t
+            }
+        };
+        let already: Vec<String> = names
+            .sequence_values::<String>()
+            .collect::<mlua::Result<Vec<_>>>()?;
+        for name in written {
+            if !already.contains(&name) {
+                names.push(name)?;
+            }
         }
         Ok(())
+    }
+
+    /// Put a newer bundle into a state that is already running: the modules the bundle
+    /// recorded under the same entry go, `keep`'s loaded values stay, and the host's are
+    /// untouched.
+    ///
+    /// Nothing is evaluated here. A dropped name is gone from `package.preload` and
+    /// `package.loaded`, so the next `require` of it runs the new module; a name in
+    /// `keep` keeps the value it already evaluated to, which is how a `world` or a `save`
+    /// module carries state across the swap. The entry is not re-run either — what to do
+    /// with it is the host's, and a frame loop holding a table asks for the entry again
+    /// and swaps what it holds.
+    ///
+    /// A reference already taken is not reached by any of this. `local m = require
+    /// "rules"` captured by a closure that is still running keeps the old table until that
+    /// closure is gone. That is Lua, and no amount of bookkeeping here changes it.
+    ///
+    /// The bundle is checked before anything is dropped, so a refusal — a fingerprint
+    /// that disagrees, a host module that was never registered — leaves the state as it
+    /// was rather than holding neither bundle.
+    pub fn replace_bundle(&self, b: &bundle::Bundle, keep: &[&str]) -> Result<Replaced> {
+        self.check_installable(b)?;
+        let package: Table = self.lua.globals().get("package")?;
+        let preload: Table = package.get("preload")?;
+        let loaded: Table = package.get("loaded")?;
+        let record = self.bundle_record()?;
+        let previous: Vec<String> = match record.get::<Value>(b.entry.as_str())? {
+            Value::Table(t) => t
+                .sequence_values::<String>()
+                .collect::<mlua::Result<Vec<_>>>()?,
+            _ => Vec::new(),
+        };
+        let (mut dropped, mut kept) = (Vec::new(), Vec::new());
+        for name in &previous {
+            // The preload entry goes either way: it is the old bundle's loader, and the
+            // new bundle's belongs there. A kept name never reaches it — `package.loaded`
+            // answers first — but if anything ever clears that, the next require should
+            // find the module this state actually holds.
+            preload.set(name.as_str(), Value::Nil)?;
+            if keep.contains(&name.as_str()) {
+                kept.push(name.clone());
+            } else {
+                loaded.set(name.as_str(), Value::Nil)?;
+                dropped.push(name.clone());
+            }
+        }
+        // Cleared, not merged into: a module the old bundle had and the new one does not
+        // is gone, and a record that still named it would offer it to the next replace.
+        record.set(b.entry.as_str(), Value::Nil)?;
+        self.install_bundle(b)?;
+        let added: Vec<String> = match record.get::<Value>(b.entry.as_str())? {
+            Value::Table(t) => t
+                .sequence_values::<String>()
+                .collect::<mlua::Result<Vec<_>>>()?,
+            _ => Vec::new(),
+        };
+        Ok(Replaced {
+            dropped,
+            kept,
+            added,
+        })
     }
 
     /// Install the bundle and run its entry module with `...` = args.
