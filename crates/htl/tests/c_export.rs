@@ -388,6 +388,49 @@ fn interrupt_stops_a_runaway_script_from_another_thread() {
     unsafe { game_close(h) };
 }
 
+/// A script that does its looping inside a coroutine is on another Lua thread, and a
+/// thread hook would not see it. The interrupt is the state's global hook, so it does.
+/// The loop is bounded by the clock rather than infinite: if the interrupt does not reach
+/// it, the test fails on the status after five seconds instead of hanging the suite.
+#[test]
+fn interrupt_reaches_a_loop_inside_a_coroutine() {
+    let h = open("hi");
+    let addr = h as usize;
+    let stopper = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        unsafe { game_interrupt(addr as *mut c_void) }
+    });
+
+    let started = std::time::Instant::now();
+    let src = "local t = os.clock()\n\
+               coroutine.wrap(function() while os.clock() - t < 5 do end end)()\n\
+               return 'finished'";
+    let p = unsafe { game_run(h, cstr(src).as_ptr()) };
+    let took = started.elapsed();
+
+    assert_eq!(stopper.join().unwrap(), ffi::Status::Ok.code());
+    assert!(
+        p.is_null(),
+        "the coroutine ran to the end of its five seconds"
+    );
+    assert_eq!(
+        game_last_status(),
+        ffi::Status::Interrupted.code(),
+        "{}",
+        last_error()
+    );
+    assert!(
+        took < std::time::Duration::from_secs(4),
+        "it stopped when it was asked to, after {took:?}"
+    );
+
+    assert_eq!(
+        take(unsafe { game_run(h, cstr("return 'ok'").as_ptr()) }),
+        "ok"
+    );
+    unsafe { game_close(h) };
+}
+
 /// The status codes the header states and the ones the runtime answers with are two
 /// tables in two modules behind two features. This is what keeps them one set.
 #[test]
