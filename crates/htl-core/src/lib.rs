@@ -20,6 +20,13 @@
     doc = "
 //! That method is [`Htl::install_std`]."
 )]
+// Every public item here is `htl`'s public API: that crate is `pub use htl_core::*;`, and
+// `missing_docs` fires where an item is defined rather than where it is re-exported — so
+// the ratchet `htl` took in #224 does nothing for the half a reader actually meets unless
+// it is here too. It arrives with the change that took the count to zero, which is the
+// only moment it costs nothing and the only one at which it is true.
+#![deny(missing_docs)]
+
 pub use mlua;
 
 use anyhow::{Context, Result, anyhow, bail};
