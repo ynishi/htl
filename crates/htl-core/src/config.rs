@@ -241,7 +241,7 @@ pub struct Contract {
 pub struct LintConfig {
     /// `[lint.rules]` — the level of each rule this project has an opinion about.
     ///
-    /// A key is any entry of [`lint::RULES`](crate::lint::RULES) — one of htl's own rules,
+    /// A key is any entry of [`crate::lint::RULES`] — one of htl's own rules,
     /// or one of the vendored Teal compiler's warning kinds under its `tl:` prefix
     /// (`"tl:hint"`, `"tl:unused"`, ..., which have to be quoted because `:` is not a bare
     /// TOML key). `htl check --list-lints` prints them all with their defaults. A value is

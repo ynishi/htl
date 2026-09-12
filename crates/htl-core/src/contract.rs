@@ -59,9 +59,11 @@ pub struct Resolved {
     /// `[[contract]] enforced_by`. Not a marker argument: enforcement is the host's
     /// business, and the record is published to authors who have no use for the path.
     pub enforced_by: Option<String>,
-    /// The file the marker is in, and the line it is on: where to point when something
-    /// about this contract is wrong.
+    /// The file the marker is in: where to point when something about this contract is
+    /// wrong. Not where the contract applies — that is [`dir`](Self::dir) — but where the
+    /// sentence that set it up was written, which is the line a person has to edit.
     pub declared_in: PathBuf,
+    /// The line of that marker, counted from 1.
     pub declared_at: usize,
 }
 

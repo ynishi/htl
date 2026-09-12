@@ -42,6 +42,10 @@ use anyhow::{Result, bail};
 use serde::Serialize;
 use std::fmt;
 
+/// What a bundle of the current format starts with. Public because a reader that has
+/// bytes from somewhere — a file, an embedded slice — tells a bundle from a Lua chunk or
+/// a script by this before it decides what to do with them; [`Bundle::is_bundle`] is the
+/// same question asked of both versions at once.
 pub const MAGIC: &[u8] = b"HTLB\x02";
 const MAGIC_V1: &[u8] = b"HTLB\x01";
 
@@ -61,39 +65,71 @@ pub fn format_version(bytes: &[u8]) -> Option<u8> {
 /// How a module's payload is stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
+    /// Dumped Lua chunk, from the mlua this build vendors. Smaller and skips parsing, and
+    /// the reason a bundle carries a fingerprint at all: a host whose Lua chunk header
+    /// disagrees cannot load it.
     Bytecode,
+    /// Lua source. Loads under any 5.4, which is what `--source` is for — a big-endian
+    /// host, a Lua built with other integer or float types, a bundle meant to outlive a
+    /// Lua upgrade.
     Source,
 }
 
+/// One module in a bundle: the name a `require` asks for, and the bytes that answer it.
 #[derive(Debug, Clone)]
 pub struct Module {
+    /// The `require` name, not a path. A bundle is loaded by name — what file it came
+    /// from is the linker's business and is gone by the time it is written.
     pub name: String,
+    /// Which of the two forms `payload` is in. Per module rather than per bundle: a
+    /// single build can hold bytecode for what compiled and source for what did not.
     pub kind: Kind,
+    /// The chunk itself, bytecode or source by `kind`. Bytes rather than a `String`
+    /// because bytecode is not text.
     pub payload: Vec<u8>,
 }
 
+/// A whole program as one file: [`decode`](Self::decode)d from bytes,
+/// [`encode`](Self::encode)d back to them, and installed into a state by
+/// [`Htl::install_bundle`](crate::Htl::install_bundle).
 #[derive(Debug, Clone, Default)]
 pub struct Bundle {
+    /// The module to run once the rest are registered. A name in `modules`, not a path.
     pub entry: String,
     /// Lua bytecode header of the compiling state (see [`crate::Htl::fingerprint`]);
     /// empty when no module is bytecode.
     pub fingerprint: Vec<u8>,
+    /// Which htl built this, for the mismatch message. Advisory — a bundle from an older
+    /// htl whose fingerprint agrees still loads — and recorded because the Lua chunk
+    /// header cannot tell one 5.4.x from another, so nothing else says which Lua produced
+    /// the bytes.
     pub htl_version: String,
     /// `require` names the bundle expects the host to provide (Rust `#[host_module]`s,
     /// `preload`s): declared only by a `.d.tl` at link time, or listed in `[build] host`.
     pub host_modules: Vec<String>,
+    /// Every module the entry's require closure reached, the entry included. Order is the
+    /// linker's; `require` finds them by name, so nothing depends on it.
     pub modules: Vec<Module>,
 }
 
 impl Bundle {
+    /// Whether these bytes are a bundle of either format — the question a caller holding
+    /// an unknown file asks before [`decode`](Self::decode), which fails on anything else.
     pub fn is_bundle(bytes: &[u8]) -> bool {
         bytes.starts_with(MAGIC) || bytes.starts_with(MAGIC_V1)
     }
 
+    /// The module registered under `name`, or `None` when the bundle does not carry it —
+    /// which for a name in [`host_modules`](Self::host_modules) is the expected answer.
+    ///
+    /// A scan rather than a map: a bundle is decoded once and read a handful of times, and
+    /// building an index would cost more than the walks it saves.
     pub fn module(&self, name: &str) -> Option<&Module> {
         self.modules.iter().find(|m| m.name == name)
     }
 
+    /// The bytes, in the format at the top of this module. Always the current version —
+    /// `HTLB\x01` is decoded for bundles that already exist and never written.
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(MAGIC);
@@ -116,6 +152,17 @@ impl Bundle {
         buf
     }
 
+    /// A bundle of either format, read from bytes.
+    ///
+    /// Both versions land in this one struct, so a caller does not branch on which it was
+    /// given; [`format_version`] is there for the one that wants to say. A version 1
+    /// bundle carries no fingerprint, htl version or host modules, and its every module is
+    /// bytecode, so those fields come back empty rather than guessed at.
+    ///
+    /// Every failure is about the bytes — bad magic, truncated, a module kind this build
+    /// does not know, a name that is not UTF-8 — and none of them is about the Lua inside.
+    /// Whether the bytecode loads is [`Htl::install_bundle`](crate::Htl::install_bundle)'s
+    /// question, and it is asked against the fingerprint this returns.
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         if bytes.starts_with(MAGIC_V1) {
             return Self::decode_v1(&bytes[MAGIC_V1.len()..]);
@@ -221,8 +268,15 @@ pub struct LuaHeader {
     pub version: String,
     /// The bytecode format number (`0` for stock Lua).
     pub format: u8,
+    /// `sizeof(Instruction)`. These three are what make a bundle portable or not: two
+    /// hosts agreeing on all of them, the version and the endianness can load each
+    /// other's bytecode whatever CPU or operating system they run on.
     pub instruction_bytes: u8,
+    /// `sizeof(lua_Integer)`. `8` unless the host's Lua was built with another
+    /// `LUA_INT_TYPE`, which is one of the two cases `--source` exists for.
     pub integer_bytes: u8,
+    /// `sizeof(lua_Number)`. `8` — a double — unless the host's Lua was built with another
+    /// `LUA_FLOAT_TYPE`.
     pub number_bytes: u8,
     /// `"little"` or `"big"`: how `LUAC_INT` came out.
     pub endian: &'static str,

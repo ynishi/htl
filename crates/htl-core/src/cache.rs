@@ -188,8 +188,15 @@ struct Probe {
 /// output from the run it claims to reproduce.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Recorded {
+    /// [`Severity::as_str`](crate::Severity::as_str)'s word. A string rather than the enum
+    /// because an entry outlives the build that wrote it, and a word this build does not
+    /// know has to read back as itself rather than fail the whole entry.
     pub severity: String,
+    /// The finished line, position prefix and `[htl <rule>]` suffix included — what the
+    /// sink was handed, not what it was assembled from.
     pub text: String,
+    /// The fix the diagnostic carried, for `htl fix` replaying instead of re-checking.
+    /// `None` when the diagnostic had none, which is most of them.
     pub fix: Option<FixJson>,
     /// Set when the text is an error in a module this one required rather than in this
     /// one: the dependency and the file that required it. The entry carries every such
@@ -207,19 +214,32 @@ pub struct FixJson {
     /// reads these back, and a borrowed field cannot be deserialized into. The JSON is
     /// unchanged either way.
     pub applicability: String,
+    /// The edits, in the order [`Fix`] holds them. A fix is all of them or none: applying
+    /// part of one leaves the file in a state nobody asked for.
     pub edits: Vec<EditJson>,
 }
 
+/// One replacement in a [`FixJson`]: a half-open span and what goes there.
+///
+/// Positions are the checker's — lines and columns counted from 1 — rather than byte
+/// offsets, because that is what the diagnostic beside it says and an entry that stored
+/// them differently would have to be trusted to convert the same way twice.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct EditJson {
+    /// First line of the span.
     pub line: usize,
+    /// First column of the span, inclusive.
     pub col: usize,
+    /// Last line of the span; the same as `line` for an edit inside one line.
     pub end_line: usize,
+    /// Column the span stops before, exclusive — so an empty span is an insertion.
     pub end_col: usize,
+    /// What replaces the span. Empty to delete it.
     pub text: String,
 }
 
 impl FixJson {
+    /// A fix as an entry stores it, for the run that writes one.
     pub fn from_fix(f: &Fix) -> Self {
         Self {
             applicability: f.applicability.as_str().to_string(),
@@ -237,6 +257,8 @@ impl FixJson {
         }
     }
 
+    /// And back, for a replayed one. An applicability this build does not know reads as
+    /// the most cautious of the three rather than failing the entry — see the match below.
     pub fn to_fix(&self) -> Fix {
         Fix {
             applicability: match self.applicability.as_str() {
@@ -269,6 +291,8 @@ impl FixJson {
 pub struct DependencyJson {
     /// The file the error is in, as the checker found it.
     pub file: String,
+    /// The file whose `require` pulled it in — which is the one the reader is looking at,
+    /// and so the one a message about somebody else's file has to name.
     pub required_by: String,
     /// `dependency` / `external`, or none for a file of the project's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -280,9 +304,16 @@ pub struct DependencyJson {
 /// through a module nobody edited is still a cycle.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RequireJson {
+    /// The name as the source spells it.
     pub module: String,
+    /// What it resolved to, `None` when the checker found nothing — a host module, or a
+    /// require that will fail. Stored either way: the cycle lint reads the resolved ones,
+    /// and a name that starts resolving is a change this entry has to notice.
     pub path: Option<String>,
+    /// Where the `require` is, so a finding about it points at the call rather than the
+    /// file.
     pub line: usize,
+    /// Column of the same.
     pub col: usize,
 }
 
@@ -291,12 +322,22 @@ pub struct RequireJson {
 pub struct Module {
     /// Its diagnostics, its contract lints included, in the order they were printed.
     pub diagnostics: Vec<Recorded>,
+    /// How many of `diagnostics` were errors, counted when the entry was written.
+    ///
+    /// Stored rather than recounted on replay: the three are what a run adds up to decide
+    /// its exit code, and a replay that recounted them would be deciding that from its own
+    /// reading of the severity strings instead of from what the original run concluded.
     pub errors: usize,
+    /// Warnings, as `errors`.
     pub warnings: usize,
+    /// Lints, as `errors`.
     pub lints: usize,
     /// What the checker resolved this module's requires to. The next run keys on these,
     /// which is how a dependency's edit invalidates its dependents.
     pub deps: Vec<String>,
+    /// Every `require` in the source and where it went, which `deps` is the resolved,
+    /// deduplicated half of. Kept whole because the cycle lint reports a call site, and a
+    /// path cannot say which line asked for it.
     pub requires: Vec<RequireJson>,
     /// The Lua this module generates, for entries under [`gen_key`]. `htl check` never needs
     /// it and stores `None`; `htl test` stores it so a replay can go straight to running.
@@ -318,12 +359,22 @@ pub struct Module {
 /// on their way to a terminal, these are the fields the runner reads back.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct CheckInfoJson {
+    /// [`CheckInfo::errors`], verbatim.
     pub errors: Vec<String>,
+    /// [`CheckInfo::warnings`], verbatim.
     pub warnings: Vec<String>,
+    /// [`CheckInfo::lints`], verbatim.
     pub lints: Vec<String>,
+    /// [`CheckInfo::deps`] as strings. `PathBuf` does not round-trip through JSON on every
+    /// platform; these are normalised on the way in and rebuilt on the way out.
     pub deps: Vec<String>,
+    /// [`CheckInfo::requires`], in this module's own JSON shape.
     pub requires: Vec<RequireJson>,
+    /// Parallel to `errors`, as in [`CheckInfo::error_fixes`]: `error_fixes[i]` belongs to
+    /// `errors[i]`. Stored as a full-length vector of `Option` rather than as the fixes
+    /// that exist, so the pairing survives without an index.
     pub error_fixes: Vec<Option<FixJson>>,
+    /// Parallel to `lints`, as `error_fixes` is to `errors`.
     pub lint_fixes: Vec<Option<FixJson>>,
     /// `CheckInfo::dependency_errors`, so the runner reads back the whole of what the
     /// check said. Absent in entries written before the field existed.
@@ -397,8 +448,12 @@ impl CheckInfoJson {
 /// One `htl::DependencyError` as an entry stores it.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DependencyErrorJson {
+    /// The required module the error is in.
     pub file: String,
+    /// The file whose `require` reached it — the one being checked, and the one a report
+    /// names.
     pub required_by: String,
+    /// The error as the dependency's own check phrased it.
     pub text: String,
 }
 
@@ -536,6 +591,9 @@ pub enum Mode {
 }
 
 impl Mode {
+    /// The mode a flag or an environment variable names, or `None` for a word this build
+    /// does not know — which the caller reports as a bad argument rather than silently
+    /// taking the default for.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "per-module" => Some(Mode::PerModule),
@@ -544,6 +602,8 @@ impl Mode {
         }
     }
 
+    /// The word [`parse`](Self::parse) reads, and the one a run's summary line prints. The
+    /// two are one spelling on purpose, so what a report says can be pasted back as a flag.
     pub fn as_str(self) -> &'static str {
         match self {
             Mode::PerModule => "per-module",
@@ -561,6 +621,8 @@ impl Mode {
 pub struct Options {
     /// `--no-cache` turns this off. Separate from how the cache is grained.
     pub enabled: bool,
+    /// How much of a run one entry covers. Held here rather than decided per lookup, so
+    /// the whole run reads and writes the same grain.
     pub mode: Mode,
     /// Say why lookups missed, and what the run did with the store.
     pub explain: bool,
@@ -585,9 +647,16 @@ impl Default for Options {
 /// disagrees with.
 #[derive(Default, Copy, Clone, Debug)]
 pub struct Stats {
+    /// Modules replayed from an entry.
     pub hits: usize,
+    /// Modules the store had nothing usable for, so they were checked. Counts a key that
+    /// was not there and an entry whose inputs had moved alike — both cost the same check,
+    /// and `explain` is what tells them apart.
     pub misses: usize,
+    /// Entries written. Not the same as `misses`: a run with writing off, or one whose
+    /// write failed, misses without storing.
     pub stored: usize,
+    /// Entries the sweep dropped, which only `htl check` does.
     pub evicted: usize,
 }
 
@@ -698,7 +767,7 @@ pub const MODULE: &str = "module";
 /// `include_bundle!` from different working directories — and its generated Lua is the
 /// same file's Lua whichever way it was reached. So the key is the canonical path and the
 /// lint selection, and nothing about the invocation, and the entry is stamped without the
-/// binary ([`Stamp`]): that is what lets `htl test`, `htl build` and the macros replay one
+/// binary (the entry's stamp): that is what lets `htl test`, `htl build` and the macros replay one
 /// another's entries (#100).
 pub fn module_gen_key(path: &Path, lint: Option<&str>) -> Key {
     let mut h = blake3::Hasher::new();
@@ -736,6 +805,7 @@ pub fn source_mentions_require(text: &str) -> bool {
 /// reach a few hundred entries by honest means). A command's flags override what this
 /// read; the proc macros have no flags and take this as it is.
 impl Options {
+    /// The options the environment asks for, before any flag is applied.
     pub fn from_env() -> Self {
         Self {
             enabled: std::env::var_os("HTL_NO_CACHE").is_none(),
@@ -841,6 +911,7 @@ pub struct EntrySummary {
     pub kind: String,
     /// The files it is about. One, except for a whole-run entry.
     pub subjects: Vec<String>,
+    /// Size of the entry's file on disk, which is what `htl cache status` totals.
     pub bytes: u64,
     /// Seconds since the entry was last written or replayed. The sweep drops the oldest.
     pub age_secs: u64,
@@ -849,8 +920,13 @@ pub struct EntrySummary {
 /// What a project's store holds.
 #[derive(Serialize, Debug)]
 pub struct Contents {
+    /// The store's directory, said even when it holds nothing — "empty" and "not where you
+    /// thought" are different answers and a reader cannot tell them apart without it.
     pub dir: String,
+    /// One per entry file. Empty when the directory is missing or unreadable, which are
+    /// not distinguished: neither is a store this run can use.
     pub entries: Vec<EntrySummary>,
+    /// The whole store's bytes, summed over `entries`.
     pub bytes: u64,
 }
 
@@ -1003,6 +1079,9 @@ impl Cache {
         self.dir.join(format!("{}.json", key.hash))
     }
 
+    /// The grain this store was opened with. A caller that decides between a per-module
+    /// walk and a whole-run lookup asks the store rather than re-reading the flags, so the
+    /// two cannot disagree.
     pub fn mode(&self) -> Mode {
         self.opts.mode
     }
@@ -1259,7 +1338,8 @@ impl Cache {
     /// something untrue. Dropping an entry that was still good costs the check it would have
     /// skipped and nothing else. The two questions deserve different tools.
     ///
-    /// "Oldest" is least recently *used*, because a hit touches its entry ([`Self::touch`]).
+    /// "Oldest" is least recently *used*: a hit touches its entry, which is what makes the
+    /// two differ.
     /// Without that it would mean least recently written, and the shape run most often —
     /// written first — would age out while a shape tried once survived.
     pub fn sweep(&self, keep: &[Key], files: usize) {

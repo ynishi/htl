@@ -3,7 +3,7 @@
 //! Embeds the Teal compiler (`tl.lua`) into an mlua state so `.tl` sources can be
 //! type-checked, generated and executed without any external toolchain.
 //!
-//! - [`Htl::check`] / [`Htl::gen`]: type-check and generate Lua from a `.tl` file
+//! - [`Htl::check`] / [`Htl::gen_lua`]: type-check and generate Lua from a `.tl` file
 //! - [`Htl::install_searcher`]: strict `require` for `.tl` (type errors abort the require)
 //! - [`Htl::preload`]: register generated Lua (e.g. from `include_tl!`) under a module name
 //! - [`bundle`]: stripped-bytecode bundles produced by `htl build`
@@ -11,8 +11,21 @@
 //! Two libraries ship inside the binary rather than on a project's search path, and both
 //! are installed the same way — a `package.preload` entry for the run, a `.d.tl` under
 //! [`lib_dir`] for the checker: `htl.test` ([`Htl::install_test_lib`], `describe` / `it` /
-//! `expect`) and, with the `std` feature, `std.*` ([`Htl::install_std`], mlua-batteries'
-//! modules under the namespace that crate leaves to its host).
+//! `expect`) and, with the `std` feature, `std.*` — mlua-batteries' modules under the
+//! namespace that crate leaves to its host. The method that installs them is named and
+//! linked below when the feature that compiles it is on; a link to an item that is not
+//! compiled is a broken one.
+#![cfg_attr(
+    feature = "std",
+    doc = "
+//! That method is [`Htl::install_std`]."
+)]
+// Every public item here is `htl`'s public API: that crate is `pub use htl_core::*;`, and
+// `missing_docs` fires where an item is defined rather than where it is re-exported — so
+// the ratchet `htl` took in #224 does nothing for the half a reader actually meets unless
+// it is here too. It arrives with the change that took the count to zero, which is the
+// only moment it costs nothing and the only one at which it is true.
+#![deny(missing_docs)]
 
 pub use mlua;
 
@@ -165,6 +178,8 @@ pub enum Applicability {
 }
 
 impl Applicability {
+    /// The lowercase word this is stored and printed as — the one spelling that crosses
+    /// between a run, `--format json`, and the cached fix a later run reads back.
     pub fn as_str(self) -> &'static str {
         match self {
             Applicability::Safe => "safe",
@@ -178,10 +193,17 @@ impl Applicability {
 /// an insertion has `end == start`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Edit {
+    /// First line of the range to replace, counted from 1.
     pub line: usize,
+    /// First byte-column, counted from 1. Bytes rather than characters, because that is
+    /// what the checker reports and what an applier slices with.
     pub col: usize,
+    /// Line the range ends on. Equal to [`line`](Self::line) for an edit within one line.
     pub end_line: usize,
+    /// Byte-column the range ends at, exclusive — so the character at `end_col` survives.
+    /// Equal to [`col`](Self::col) for an insertion, which replaces nothing.
     pub end_col: usize,
+    /// What goes in the range's place. Empty deletes it.
     pub text: String,
 }
 
@@ -191,17 +213,24 @@ pub struct Edit {
 /// store reads back what `--format json` prints.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Fix {
+    /// Whether `htl fix` may apply this without being asked twice.
     pub applicability: Applicability,
+    /// The rewrite, as one or more replacements. A fix is all of them or none: they are
+    /// applied together, because a rewrite that lands half-way is worse than one that did
+    /// not land.
     pub edits: Vec<Edit>,
 }
 
 /// One literal `require` call in a checked file.
 #[derive(Debug, Clone)]
 pub struct RequireSite {
+    /// The name as the call spells it, before any separator or entry mapping.
     pub module: String,
     /// Resolved file, `None` when the checker could not find it.
     pub path: Option<PathBuf>,
+    /// Line of the `require` call, counted from 1.
     pub line: usize,
+    /// Byte-column of the call, counted from 1.
     pub col: usize,
 }
 
@@ -232,8 +261,14 @@ pub type CoverageSpans = (Vec<(usize, usize)>, Vec<FunctionSpan>);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModuleKind {
+    /// A `.tl` the checker compiles and the program runs — the only kind that is both.
     Source,
+    /// A `.d.tl`: types with no implementation. Requiring one at run time gets an empty
+    /// table, which is why a module that resolves to a declaration and nothing else
+    /// type-checks and then fails.
     Declaration,
+    /// A plain `.lua`, which the checker has nothing to say about. What is left when
+    /// neither of the other two is reachable.
     Lua,
 }
 
@@ -265,7 +300,10 @@ impl std::fmt::Display for ModuleKind {
 /// One file `require(name)` could have resolved to. See [`Htl::module_candidates`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleCandidate {
+    /// The file itself.
     pub path: PathBuf,
+    /// Which of the three it is, which is what decides whether it wins over the ones
+    /// found after it.
     pub kind: ModuleKind,
     /// The search-path directory it was found under.
     pub dir: PathBuf,
@@ -279,6 +317,9 @@ pub struct ContractResult {
     /// Declared fields absent from the module's returned table literal; `None` when the
     /// return value is not a literal (not decidable statically).
     pub missing: Option<Vec<String>>,
+    /// Line and column of the returned table literal, for the report about
+    /// [`missing`](Self::missing) to point at. `(1, 1)` when the checker gave no position,
+    /// so a message always has somewhere to point rather than none.
     pub missing_at: (usize, usize),
     /// Names `require_fields` asked for that the contract type does not declare. The
     /// config is wrong about the type, which is a different finding from a module that
@@ -726,6 +767,9 @@ pub fn require_cycles(infos: &[(PathBuf, CheckInfo)]) -> Vec<String> {
 }
 
 impl CheckInfo {
+    /// `true` when nothing failed the check — errors only. Warnings and lints are the
+    /// caller's to promote ([`clean`](Self::clean) is the stricter question), so this is
+    /// what decides whether generated code may be run.
     pub fn ok(&self) -> bool {
         self.errors.is_empty()
     }
@@ -1083,6 +1127,12 @@ impl Htl {
         Ok(this)
     }
 
+    /// The Lua state this `Htl` runs programs in.
+    ///
+    /// Not always the one the checker is in: [`with_checker`](Self::with_checker) makes a
+    /// fresh state for the program and leaves the prelude in the checker's. So a value
+    /// built from this state must not be handed to a function that came from the other —
+    /// that is `Lua instance passed Value created from a different main Lua state`.
     pub fn lua(&self) -> &Lua {
         &self.lua
     }
@@ -1410,7 +1460,7 @@ impl Htl {
     /// The same walk `declaration_sites` does for the `duplicate-declaration` lint, over
     /// all three kinds rather than declarations alone: a searcher answers with the first
     /// hit and says nothing about the others, and which of two files is read is decided by
-    /// a position nobody wrote down. [`resolve`] is what turns this into a report.
+    /// a position nobody wrote down. [`contract::resolve`] is what turns this into a report.
     pub fn module_candidates(&self, name: &str) -> Result<Vec<ModuleCandidate>> {
         let f: Function = self.h.get("module_candidates")?;
         let t: Table = f.call(name)?;
@@ -1676,7 +1726,7 @@ fn declarations_key(decls: &[(String, String)]) -> String {
 /// feature, `std/*.d.tl` below it. The files are written on demand by the library that owns
 /// them, only when their content changes.
 ///
-/// The key is [`declarations_key`] over what this build would write, and not the version,
+/// The key is a hash over what this build would write, and not the version,
 /// because the version does not tell two builds apart. `CARGO_PKG_VERSION` is the same on
 /// the release and on every build from `main` after it, and those differ by exactly what
 /// lands here: a binary with `std` writes `std/*.d.tl` that a binary without it cannot
@@ -1806,7 +1856,8 @@ pub fn is_tl_source(p: &Path) -> bool {
 }
 
 /// The note `htl dts` writes beside the declarations it materialises from a dependency
-/// crate, in `types/<crate>/`. See [`dep_dts`].
+/// crate, in `types/<crate>/`. The module that writes it is `dep_dts`, which the `dts`
+/// feature compiles.
 pub const DEP_TYPES_NOTE: &str = ".htl-dts";
 
 /// The immediate subdirectories of `types/` holding declarations materialised from a

@@ -142,6 +142,9 @@ pub enum Surfaces {
 /// nothing about it gets, which half implements it, and where the name is taken.
 #[derive(Debug, Clone, Copy)]
 pub struct Rule {
+    /// The one spelling of this rule everywhere it can be named: a report's `[htl <name>]`
+    /// suffix, `[lint.rules]`, `--lint`, `HTL_LINTS`, `-- htl: allow(...)`, and the fix
+    /// filters. A `tl:` prefix marks a name the Teal compiler gave rather than htl.
     pub name: &'static str,
     /// What a check says under this name for a project that configures nothing. A
     /// [`Surfaces::FixOnly`] rule is [`Level::Allow`], which is not a placeholder: no
@@ -149,7 +152,11 @@ pub struct Rule {
     /// and it is the answer nothing can change — the listing does not print it and a spec
     /// refuses to set it.
     pub default: Level,
+    /// Which half of htl implements it, and so where a finding under it comes from. Not a
+    /// setting — a project cannot move a rule from one side to the other — but it is what
+    /// decides which selection table a run hands the name to.
     pub side: Side,
+    /// Which of the two name surfaces may contain it. See [`Surfaces`].
     pub surfaces: Surfaces,
 }
 
@@ -460,6 +467,8 @@ pub struct Lints {
 type AllowedLines = HashMap<usize, Vec<String>>;
 
 impl Lints {
+    /// A run over an already-built [`Selection`]. The allow-comment cache starts empty and
+    /// fills as findings arrive, so a run that reports nothing reads no source.
     pub fn new(sel: Selection) -> Self {
         Self {
             sel,
@@ -472,6 +481,8 @@ impl Lints {
         Ok(Self::new(Selection::parse(spec)?))
     }
 
+    /// The levels this run resolved to, for a caller that has to hand them somewhere else
+    /// — the Lua side's selection table, or a report of what a spec came to.
     pub fn selection(&self) -> &Selection {
         &self.sel
     }

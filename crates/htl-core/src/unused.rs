@@ -86,6 +86,9 @@ pub enum EntryKind {
 }
 
 impl EntryKind {
+    /// The lowercase word this kind is written as, in `--format json` and in the text
+    /// report's per-kind grouping. One spelling for both, so a reader of either is reading
+    /// the same name.
     pub fn as_str(self) -> &'static str {
         match self {
             EntryKind::Main => "main",
@@ -106,12 +109,15 @@ pub struct Entry {
     /// none: nothing requires it).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
+    /// Which of the four declarations made this an entry — the answer to "why is this
+    /// reached", which is what a reader disputing a finding asks first.
     pub kind: EntryKind,
 }
 
 /// A `.tl` no entry's closure reaches.
 #[derive(Serialize, Debug, Clone)]
 pub struct Module {
+    /// As the walk spelled it, so it matches the paths the rest of the report prints.
     pub path: String,
     /// The name a `require` would have to spell to reach it, when the search path gives
     /// it one.
@@ -122,6 +128,8 @@ pub struct Module {
 /// A name in `mlua-pkg.toml` `[deps]` that no reached module requires.
 #[derive(Serialize, Debug, Clone)]
 pub struct Dependency {
+    /// The `[deps]` key, which is the name a `require` would spell — not the package's
+    /// own name or its git URL. It is the line to delete.
     pub name: String,
 }
 
@@ -133,8 +141,12 @@ pub struct Summary {
     pub considered: usize,
     /// How many of them an entry reaches.
     pub reached: usize,
+    /// How many files the walk started from. Printed beside the other two counts because
+    /// a surprising number of findings is usually a surprising number of entries.
     pub entries: usize,
+    /// Findings of the first kind: the length of [`Report::modules`].
     pub modules: usize,
+    /// Findings of the second: the length of [`Report::dependencies`].
     pub dependencies: usize,
     /// Nothing to start from, so nothing was reported (see the module doc).
     pub no_entry: bool,
@@ -148,9 +160,15 @@ pub struct Summary {
 /// What no entry reaches.
 #[derive(Serialize, Debug, Clone, Default)]
 pub struct Report {
+    /// The modules under the reported paths that no entry's closure reaches.
     pub modules: Vec<Module>,
+    /// The `[deps]` names no reached module requires.
     pub dependencies: Vec<Dependency>,
+    /// What the walk started from. Carried even though nothing unused is listed here: a
+    /// finding is only as good as the entries behind it, and this is how a reader checks
+    /// them.
     pub entries: Vec<Entry>,
+    /// The counts, and the two flags a caller decides an exit code from.
     pub summary: Summary,
 }
 

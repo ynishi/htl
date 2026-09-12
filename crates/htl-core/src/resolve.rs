@@ -31,6 +31,8 @@ pub enum Status {
 }
 
 impl Status {
+    /// The lowercase word the `status` column prints and `--format json` carries. One
+    /// spelling for both forms of the report.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Read => "read",
@@ -60,6 +62,8 @@ pub enum OriginKind {
 /// Where a candidate came from, when it came from somewhere.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Origin {
+    /// Which of the four brought it here, which is what decides where an edit to it
+    /// belongs — the crate, the lockfile, or the tree.
     pub kind: OriginKind,
     /// The crate or dependency that ships it.
     pub name: String,
@@ -89,21 +93,34 @@ impl Origin {
 pub struct Candidate {
     /// Its place in the order the searchers consult, from 1.
     pub order: usize,
+    /// The file itself, relative to the project root when there is one. This is the row's
+    /// answer; every other field says what to make of it.
     pub path: String,
     /// The search-path directory it was found under.
     pub dir: String,
+    /// Declaration, Teal or Lua — which decides what a reader gets from it, and whether
+    /// something else has to supply the implementation.
     pub kind: ModuleKind,
+    /// Whether the checker reads this one, and if not, why not.
     pub status: Status,
     /// The `order` of the candidate that is read instead of this one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shadowed_by: Option<usize>,
+    /// Where it came from, when it is not the project's own file. `None` is the ordinary
+    /// case: a path under `src/` or `types/` that somebody here wrote.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<Origin>,
 }
 
+/// The counts a summary line is made of, and the verdict an exit code reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Summary {
+    /// How many files the name could have resolved to — the length of
+    /// [`Resolution::candidates`].
     pub candidates: usize,
+    /// How many of them an earlier candidate answers for. Not a defect on its own: an
+    /// override is what a search path is for, and this is the number that says one is
+    /// happening.
     pub shadowed: usize,
     /// The name resolves to a file. What the exit code says.
     pub ok: bool,
@@ -112,15 +129,22 @@ pub struct Summary {
 /// What `htl resolve <module>` answers with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Resolution {
+    /// The name as it was asked about — what a `require` in the sources spells, echoed so
+    /// a stored or piped report says what question it answers.
     pub module: String,
     /// The file the checker reads, absent when the name resolves to nothing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read: Option<String>,
+    /// Every file the name could have resolved to, in the order the searchers consult
+    /// them — the read one among them rather than pulled out, because its place in the
+    /// order is the explanation.
     pub candidates: Vec<Candidate>,
     /// Every directory the search path consults, in order, whether or not it held
     /// anything for this name. A directory that holds nothing is half the answer when
     /// the name resolves to nothing at all.
     pub searched: Vec<String>,
+    /// The counts and the verdict, for a caller that wants the answer without walking the
+    /// rows.
     pub summary: Summary,
 }
 

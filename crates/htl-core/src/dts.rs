@@ -241,6 +241,11 @@ impl RenameRule {
 /// `#[teal(...)]` / `#[host_module(...)]` arguments.
 #[derive(Debug, Clone, Default)]
 pub struct TealAttrs {
+    /// `#[teal(name = "..")]` / `#[host_module(name = "..")]`: what the item is called on
+    /// the Teal side, when that is not the Rust identifier. It names a module, a record,
+    /// or one enum variant's word, depending on what it was parsed from — and is refused
+    /// on a record reached through `records = [..]`, where the host's own signatures
+    /// already spell the Rust name.
     pub name: Option<String>,
     /// `#[teal(rename_all = "..")]` on an enum: how its variants are spelled on the Teal
     /// side. The Rust names are unchanged, and so are the union's variant record names
@@ -402,15 +407,32 @@ fn uses_header(uses: &[String]) -> String {
 pub enum RecordKind {
     /// A struct with named fields: `record N` with `(field, teal type)` in declaration
     /// order, crossing as a plain table.
-    Record { fields: Vec<(String, String)> },
+    Record {
+        /// Rust field name and the Teal type it maps to. The name is the Rust one:
+        /// `rename_all` spells variants, and renaming fields is a decision nobody has
+        /// asked for, so `#[teal(..)]` on a field is refused rather than applied here.
+        fields: Vec<(String, String)>,
+    },
     /// `struct N(T)`: `type N = T`, crossing as `T` does.
-    Alias { inner: String },
+    Alias {
+        /// The Teal type of the one field — already mapped, so `struct Id(String)` holds
+        /// `string` rather than `String`.
+        inner: String,
+    },
     /// An enum of unit variants: `enum N "A" "B" end`, crossing as the variant name —
     /// as `#[teal(rename_all)]` / `#[teal(name)]` spell it, in declaration order.
-    Enum { variants: Vec<String> },
+    Enum {
+        /// The words themselves, not the Rust identifiers: this is what the `enum` body
+        /// lists and what a value crossing the boundary must be one of.
+        variants: Vec<String>,
+    },
     /// An enum with a data variant: one `where`-discriminated record per variant and
     /// `type N = N_A | N_B`, crossing as a table whose `kind` names the variant.
-    Union { variants: Vec<UnionVariant> },
+    Union {
+        /// One per variant, in declaration order, which is the order the generated
+        /// `type N = N_A | N_B` lists them in.
+        variants: Vec<UnionVariant>,
+    },
 }
 
 /// One variant of a data-carrying enum.
@@ -424,6 +446,8 @@ pub struct UnionVariant {
     /// The word the `kind` tag carries: `where self.kind == "in_review"`, and what the
     /// value crossing the boundary must say. Equals `name` unless renamed.
     pub word: String,
+    /// What it carries, and so which fields its record has beyond `kind` — the one thing
+    /// that differs between the variants of a union whose records are otherwise alike.
     pub shape: VariantShape,
 }
 
@@ -438,13 +462,22 @@ pub enum VariantShape {
     Struct(Vec<(String, String)>),
 }
 
+/// One `#[derive(TealRecord)]` item, lowered: the shape it takes, the module text that
+/// declares it, and the attributes that decided both.
 #[derive(Debug, Clone)]
 pub struct RecordDecl {
+    /// The Teal name — `#[teal(name = "..")]` when given, the Rust identifier otherwise.
+    /// What the declaration declares and what a caller writes.
     pub name: String,
+    /// Which of the four shapes it lowered to, kept beside the text because a caller that
+    /// nests this record needs the parts rather than the finished module.
     pub kind: RecordKind,
     /// Full module text: `local record NAME ... end  return NAME` (or the `enum` /
     /// `type` form; a union's is the top-level form, which only `DECL` ever holds).
     pub decl: String,
+    /// What was parsed off the item: where to write it (`dts`), what to import (`uses`),
+    /// how variants are spelled. Carried so the caller can act on them without parsing
+    /// the attribute a second time.
     pub attrs: TealAttrs,
 }
 
@@ -773,27 +806,42 @@ fn nested_record_decls(
 
 // ---------------------------------------------------------------- host modules
 
+/// One parameter of a `#[host_module]` method, as both sides need it: the Teal
+/// declaration and the Rust wrapper that receives the value.
 #[derive(Clone)]
 pub struct HostParam {
+    /// The Rust parameter name, which is also the one the declaration spells — a Teal
+    /// caller passes positionally, but the name is what the signature reads as.
     pub name: String,
     /// Type the Lua side hands over (`&str` -> `String`, `&[T]` -> `Vec<T>`, `&T` -> `T`).
     pub owned_ty: Type,
     /// The Rust fn takes a reference; the wrapper passes `&value`.
     pub by_ref: bool,
+    /// The Teal type, already mapped — `string` for a `&str`, `{T}` for a `Vec<T>`. The
+    /// declaration's half of [`owned_ty`](Self::owned_ty).
     pub teal: String,
     /// Declared `name?: T` — an `Option<T>` the Lua caller may leave out. Only a
     /// *trailing* run of them can be marked (see `host_decl`).
     pub optional: bool,
 }
 
+/// One `pub fn` of a `#[host_module]` impl block, broken down for the declaration and for
+/// the wrapper that registers it.
 #[derive(Clone)]
 pub struct HostMethod {
+    /// The Rust fn name, which is the key it is registered under and the name Teal calls.
     pub name: String,
     /// `None` = associated fn (no `self`), `Some(false)` = `&self`, `Some(true)` = `&mut self`.
     pub receiver: Option<bool>,
+    /// In declaration order, which is the order a Teal caller passes them. The receiver is
+    /// not among them — it is [`receiver`](Self::receiver) — so a method's Teal arity is
+    /// this length either way.
     pub params: Vec<HostParam>,
     /// Teal type of the success value (`T` of `Result<T, E>`, or the plain return); empty for unit.
     pub ret_teal: String,
+    /// The Rust fn returns a `Result`. What that becomes on the Teal side is
+    /// [`HostDecl::err_mode`]'s to say — a raise or a second return value — so this only
+    /// records that there is an `Err` to decide about.
     pub ret_is_result: bool,
     /// The success value is `()` (nothing to hand back but "it worked").
     pub ret_is_unit: bool,
@@ -804,13 +852,27 @@ pub struct HostMethod {
     pub is_async: bool,
 }
 
+/// A `#[host_module]` impl block, lowered: what Teal is told, and what the macro needs to
+/// write the wrappers that make it true.
 #[derive(Clone)]
 pub struct HostDecl {
+    /// The Rust type the block is `impl`ed on. What the wrappers are generated against,
+    /// and what a `Self` in a signature was mapped to.
     pub type_name: String,
+    /// The Teal module name — `#[host_module(name = "..")]`, or the type name — which is
+    /// what `require` asks for and what the declaration's record is called.
     pub module: String,
+    /// The finished `.d.tl` text, including any nested `records` and `uses` imports.
     pub decl: String,
+    /// Every `pub fn` that crosses, in source order. The wrappers are generated from
+    /// these, so a method missing here is one Teal cannot call however the declaration
+    /// reads.
     pub methods: Vec<HostMethod>,
+    /// What was parsed off `#[host_module(..)]`: where to write the declaration, what to
+    /// import, which records to nest.
     pub attrs: TealAttrs,
+    /// How an `Err` reaches Lua — raised, or returned beside the value. Decided once for
+    /// the block rather than per method, so a module does not mix the two conventions.
     pub err_mode: ErrMode,
 }
 
@@ -971,7 +1033,11 @@ pub fn host_decl(
 pub struct Generated {
     /// Absolute output path (`<manifest_dir>/<dts>`).
     pub target: PathBuf,
+    /// The declaration itself. Returned rather than written, so the caller decides — the
+    /// proc macro writes at expansion time, `htl dts` after its own scan.
     pub text: String,
+    /// The `.rs` it was derived from. A scan reads many files into one list, and this is
+    /// what says which of them a given declaration came from.
     pub source: PathBuf,
     /// `host_module <module>`, or `RecordDecl::what` (`record <Name>` / `enum <Name>` /
     /// `type <Name>`), for reporting.

@@ -17,7 +17,7 @@
 //! on behalf of a file the walk checks itself — and hands each one to an [`Output`], which
 //! is the caller's.
 //!
-//! A test run is the same arrangement over [`crate::testing`]: [`test`] carries the
+//! A test run is the same arrangement over [`crate::testing`]: [`test()`] carries the
 //! per-file isolation, the filter, fail-fast, the seed, the store and the coverage hooks,
 //! and hands each [`FileReport`] to the caller as it lands. `htl test` prints them;
 //! [`crate::testing::run_tests`] collects them, which is how a host runs a project's Teal
@@ -44,6 +44,12 @@ use std::path::{Component, Path, PathBuf};
 /// be said again. An implementation prints it, collects it, or forwards it; it does not
 /// decide any of the above.
 pub trait Output {
+    /// Take one diagnostic the run has decided to say.
+    ///
+    /// `text` is the finished line. `fix` is what `htl fix` would apply, when the
+    /// diagnostic carries one. `dependency` is set when the finding is in somebody else's
+    /// package rather than in this project, which is what lets a caller file it
+    /// differently without parsing the path back out of the text.
     fn diagnostic(
         &mut self,
         severity: Severity,
@@ -57,10 +63,12 @@ pub trait Output {
 /// to print to — a `build.rs`, a test, an editor — wants.
 #[derive(Debug, Default)]
 pub struct Collect {
+    /// Everything said so far, in the order the run said it.
     pub diagnostics: Vec<Diagnostic>,
 }
 
 impl Collect {
+    /// Take what has been collected, leaving the sink empty and reusable for the next run.
     pub fn take(&mut self) -> Vec<Diagnostic> {
         std::mem::take(&mut self.diagnostics)
     }
@@ -130,6 +138,8 @@ pub struct Sink<O: Output> {
 }
 
 impl<O: Output> Sink<O> {
+    /// A sink over `out`, judging nothing and having said nothing yet. A run that wants
+    /// `deny` to reach its exit code calls [`judge_by`](Self::judge_by) as well.
     pub fn new(out: O) -> Self {
         Self {
             out,
@@ -169,6 +179,8 @@ impl<O: Output> Sink<O> {
         self.walked = files.iter().map(|f| canonical(f)).collect();
     }
 
+    /// Say a diagnostic that carries no fix — the run's own messages, and every finding
+    /// but a fixable lint.
     pub fn diag(&mut self, severity: Severity, text: &str) {
         self.diag_with_fix(severity, text, None);
     }
@@ -200,7 +212,7 @@ impl<O: Output> Sink<O> {
     ///
     /// Every one is recorded, so the file's cache entry carries them all and a later run
     /// that replays only this file still hears about its dependency. Which of them are
-    /// said is decided at output time, once per run — see [`emit`](Self::emit).
+    /// said is decided at output time, once per run — see this type's `emit`.
     ///
     /// No fix rides along even when the checker found one: a fix under `.htl/` is
     /// overwritten at the next install, and one under a `[check] paths` directory is
@@ -535,6 +547,9 @@ pub struct Origins {
 }
 
 impl Origins {
+    /// Work out the two sets of directories once, from where the walk started, where the
+    /// project root is, the config, and the resolved contracts — so that classifying a
+    /// file afterwards is a prefix test rather than a fresh look at the filesystem.
     pub fn new(
         start: &Path,
         root: &Path,
@@ -565,6 +580,8 @@ impl Origins {
         }
     }
 
+    /// Which origin `file` has, or `None` for the project's own — the word a dependency
+    /// diagnostic carries as its `origin`.
     pub fn of(&self, file: &Path) -> Option<&'static str> {
         let file = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
         if self.dependency.iter().any(|d| file.starts_with(d)) {
@@ -584,10 +601,18 @@ impl Origins {
 /// One value rather than five parameters, because they are one decision — a walk is not
 /// free to answer any of them differently from one file to the next.
 pub struct Walk<'a> {
+    /// `htl.toml` and where it was found, or `None` for a run outside a project.
     pub cfg: &'a Config,
+    /// The `[[contract]]` directories, already resolved: what a module under one of them
+    /// is held to.
     pub contracts: &'a [crate::contract::Resolved],
+    /// Where a file the check pulls in lives, for the `origin` its diagnostics carry.
     pub origins: &'a Origins,
+    /// Module names the Rust host registers, which resolve at run time and so must not be
+    /// reported as missing.
     pub host_modules: &'a [String],
+    /// The rules and levels this run reports under, resolved from the config and the
+    /// command line before the first file.
     pub lints: &'a crate::lint::Lints,
 }
 
@@ -672,12 +697,22 @@ pub fn resolved_requires(requires: &[cache::RequireJson]) -> Vec<(String, PathBu
 
 /// What a harvest works with, gathered so the call site reads as one thing.
 pub struct Harvest<'a> {
+    /// Where the generated modules are written.
     pub store: &'a cache::Cache,
+    /// The state the test file was checked in, which is what knows the modules it reached
+    /// and can generate each of them without resolving the graph a second time.
     pub session: &'a crate::testing::TestSession,
+    /// `htl.toml`'s own path, recorded as an input of every entry: a config change invalidates
+    /// what was generated under it.
     pub cfg_inputs: &'a [PathBuf],
+    /// The project root, for the search directories an entry records.
     pub root: &'a Path,
+    /// The config, read for those same search directories.
     pub cfg: &'a Config,
+    /// The `--lint` spec the run was given, part of an entry's key: a module generated
+    /// under one selection must not be replayed under another.
     pub lint: Option<&'a str>,
+    /// The store's own switches — whether to read, whether to write, whether to explain.
     pub opts: cache::Options,
     /// Modules already harvested by an earlier file in this run. Test files overlap heavily,
     /// and generating one twice writes the same entry twice.
@@ -840,6 +875,8 @@ pub struct Report {
     pub files: Vec<PathBuf>,
     /// Errors, including those of required modules as the run said them (once each).
     pub errors: usize,
+    /// Warnings the run said — the Teal compiler's own kinds, under the rule names htl
+    /// gives them.
     pub warnings: usize,
     /// Lints, including the project-level ones: require cycles, contract problems, and a
     /// contract no host enforces.
@@ -1102,13 +1139,19 @@ pub fn check<O: Output>(
 pub struct NeverRan {
     /// As the source writes it: `f`, `M.f`, `M:f`.
     pub name: String,
+    /// Where its body starts, so the report points at the function rather than at the
+    /// module.
     pub line: usize,
 }
 
+/// What a run covered of one module.
 #[derive(Serialize, Debug, Clone)]
 pub struct CoverageModule {
+    /// As the report prints it — relative to the project root when there is one.
     pub path: String,
+    /// Statements at least one test ran.
     pub executed: usize,
+    /// Statements the module has. `executed` over this is the percentage.
     pub total: usize,
     /// Unexecuted statements as `[first_line, last_line]` ranges.
     pub unexecuted: Vec<(usize, usize)>,
@@ -1130,10 +1173,17 @@ pub struct CoverageModule {
     pub functions: Vec<(String, usize, bool)>,
 }
 
+/// What a whole run covered: the modules it entered, and the totals over them.
 #[derive(Serialize, Debug, Clone, Default)]
 pub struct CoverageReport {
+    /// One per module the run loaded. A module nothing required is not here at all — it
+    /// has no coverage to report, which is [`crate::unused`]'s question rather than this
+    /// one.
     pub modules: Vec<CoverageModule>,
+    /// Statements run, summed over the modules.
     pub executed: usize,
+    /// Statements those modules have, summed. The pair is the percentage a summary line
+    /// prints.
     pub total: usize,
 }
 
@@ -1311,7 +1361,9 @@ pub struct TestReport {
     pub files: Vec<PathBuf>,
     /// How many of them ran. Fewer than `files` when `fail_fast` stopped the run.
     pub ran: usize,
+    /// Tests that passed, summed over the files — tests, not files.
     pub passed: usize,
+    /// Tests that failed, summed the same way. A file can contribute to both.
     pub failed: usize,
     /// Files that failed to check, raised, or had a failing test.
     pub files_with_errors: usize,
@@ -1320,6 +1372,7 @@ pub struct TestReport {
     pub replayed: usize,
     /// The seed every file's stream was derived from, given or drawn.
     pub seed: u64,
+    /// Wall time for the whole run, including the checks that were not replayed.
     pub duration_ms: f64,
     /// With `run.coverage`: what the line hooks saw, over the modules the checks reached.
     pub coverage: Option<CoverageReport>,

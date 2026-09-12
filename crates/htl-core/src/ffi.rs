@@ -653,7 +653,8 @@ impl<T> Handle<T> {
 
     /// Ask the run in progress on this handle to stop, from any thread.
     ///
-    /// Reads only [`Shared`], which nothing mutates after the handle is built, so this
+    /// Reads only the handle's shared state, which nothing mutates after the handle is
+    /// built, so this
     /// does not race with the owning thread being inside [`Handle::enter`]. It answers
     /// [`Status::Ok`] once the flag is set — whether anything was running, and whether
     /// the opener installed the hook, is not knowable from here.

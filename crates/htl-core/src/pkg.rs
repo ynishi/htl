@@ -95,6 +95,13 @@ impl TealResolver {
         }
     }
 
+    /// The character in a module name that stands for a directory boundary. `.` by
+    /// default, as `require("a.b")` writes it.
+    ///
+    /// It is a setting rather than a constant because the name a host registers a module
+    /// under is the host's to choose, and one that uses `/` or `::` still has to reach
+    /// `a/b.tl` on disk. Only the separator moves: the candidate list built from it
+    /// (`.tl`, `/init.tl`, `/<last>.tl`, `.d.tl`) is the same whatever it is.
     pub fn with_module_separator(mut self, sep: char) -> Self {
         self.module_separator = sep;
         self
@@ -382,9 +389,22 @@ impl TealResolver {
 /// declared: `target_dirs`.
 #[derive(Debug, Clone)]
 pub struct Project {
+    /// The directory holding `mlua-pkg.toml`, and what every other path here is derived
+    /// from. Canonicalised when [`Project::find`] walked up to it, so two starting points
+    /// under the same project produce the same paths.
     pub root: PathBuf,
+    /// `<root>/mlua-pkg.toml`. Recorded even when it does not parse: [`Project::at`] takes
+    /// what it can from a broken manifest and leaves the reporting of it to mlua-pkg, so a
+    /// project with a syntax error still has a root and a cache directory to name.
     pub manifest: PathBuf,
+    /// `<root>/mlua-pkg.lock`. Its presence is the whole of [`installed`](Self::installed):
+    /// a lockfile is what `mlua-pkg install` writes last, so a project that has one has
+    /// deps to resolve and a project that does not has nothing under [`entries`](Self::entries)
+    /// to find.
     pub lockfile: PathBuf,
+    /// `<root>/.htl/modules`: everything installed, under the same `.htl` the check cache
+    /// lives in, because both are regenerated from the manifest rather than written by
+    /// hand and both are what a `.gitignore` excludes in one line.
     pub pkgs_dir: PathBuf,
     /// `pkgs_dir/vendored`: one link per installed dep, pointing at the **package root**
     /// mlua-pkg fetched (or at the patched copy standing in for it). The name is
@@ -428,7 +448,12 @@ pub struct Project {
 /// type error in there is the dependency's name to report either way.
 #[derive(Debug, Clone)]
 pub struct Patched {
+    /// The `[deps]` key, which is also the module name `require` reaches the dependency
+    /// by — and so the name a diagnostic in the copy is reported under.
     pub name: String,
+    /// Where `patch_dir` points, made absolute against the project root. The manifest
+    /// writes it relative; a walker asked whether it may enter a directory needs the
+    /// absolute form.
     pub dir: PathBuf,
 }
 
@@ -439,7 +464,12 @@ pub struct Patched {
 /// it happened rather than leaving the manifest quietly different from what `add` wrote.
 #[derive(Debug, Clone)]
 pub struct AddDone {
+    /// What mlua-pkg's own `add` returned, passed through unchanged so a caller reads the
+    /// same report it would have got without htl in the way.
     pub report: mlua_pkg::ops::AddReport,
+    /// The `patch_dir` the entry had before `add` rewrote it, when there was one. `None`
+    /// means nothing was carried across — either the entry declared no patch, or the
+    /// dependency is new.
     pub kept_patch_dir: Option<PathBuf>,
 }
 
@@ -452,16 +482,26 @@ pub struct AddDone {
 /// removed. See [`Project::patch_status`].
 #[derive(Debug, Clone)]
 pub struct PatchStatus {
+    /// The `[deps]` key the patched dependency is declared under.
     pub name: String,
+    /// The copy in the tree, absolute — reported whether or not it is [`in_use`](Self::in_use),
+    /// since "the directory is there and nothing reads it" is the finding worth printing.
     pub dir: PathBuf,
     /// The revision the copy was taken from (`patch_base`), when the lockfile has one.
     pub base: Option<String>,
     /// The revision the pin resolves to, as the last install recorded it.
     pub locked: Option<String>,
+    /// Whether the copy is what the dependency resolves from. False when the directory is
+    /// gone, when there is no recorded `base`, or when `base` and `locked` have diverged —
+    /// the three ways a patch stops being the thing in use, told apart by the two fields
+    /// above rather than by a second enum.
     pub in_use: bool,
 }
 
+/// The manifest's file name, taken from mlua-pkg rather than spelled here, so htl and the
+/// tool that writes the file cannot disagree about what it is called.
 pub const MANIFEST_NAME: &str = mlua_pkg::project::MANIFEST_FILE_NAME;
+/// The lockfile's file name, from mlua-pkg for the same reason as [`MANIFEST_NAME`].
 pub const LOCKFILE_NAME: &str = mlua_pkg::project::LOCKFILE_FILE_NAME;
 
 /// Where [`Project::patch`] puts a dependency it takes into the tree: `patches/<dep>`,
@@ -1236,27 +1276,51 @@ impl crate::Htl {
 }
 
 /// Error raised when a `.tl` module fails the type check at `require` time.
+///
+/// Every variant carries `module` — the name that was required, not the path it resolved
+/// to — because that is the name the `require` in the caller's source spells, and the
+/// caller is where the mistake is read from. All four are returned as `Some(Err)` so the
+/// `Registry` stops rather than falling through to a later resolver: a `.tl` that does not
+/// check must not be quietly replaced by a `.lua` of the same name.
 #[derive(Debug)]
 pub enum TealResolveError {
+    /// The module does not type-check on its own terms.
     TypeCheck {
+        /// The name that was required.
         module: String,
+        /// The checker's errors, one per line as it reported them.
         errors: Vec<String>,
     },
     /// The module type-checks on its own but is not assignable to the resolver's
     /// [`expect_type`](TealResolver::expect_type).
     Expectation {
+        /// The name that was required.
         module: String,
+        /// The type path the resolver demands, as `expect_type` was given it.
         expected: String,
+        /// Why the assignment failed. The message adds a hint to annotate the returned
+        /// table, because these errors are about the whole value and carry no line of
+        /// their own until the module names its type.
         errors: Vec<String>,
     },
     /// [`require_fields`](TealResolver::require_fields): required fields absent at run time.
     MissingFields {
+        /// The name that was required.
         module: String,
+        /// The type whose fields were demanded — the same `expect_type`, since
+        /// `require_fields` only applies alongside it.
         expected: String,
+        /// The fields that were nil. Named rather than counted: every Teal record field is
+        /// nilable, so which ones are missing is the whole of what the type check could
+        /// not say.
         fields: Vec<String>,
     },
+    /// The file could not be read through the sandbox — outside the root, or gone between
+    /// the resolver finding it and opening it.
     Read {
+        /// The name that was required.
         module: String,
+        /// What the sandbox refused or failed on.
         source: ReadError,
     },
 }
