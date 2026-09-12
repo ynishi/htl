@@ -23,6 +23,29 @@
 //! `types/<crate>/<file>`, written with [`write_if_changed`](crate::write_if_changed) and
 //! committed like the declarations the project generates itself.
 //!
+//! # A crate whose modules have a namespace says where its paths start
+//!
+//! `types/<crate>/` is on the search path, so a file's own name is the module name:
+//! `htl-mq`'s `dts/mq.d.tl` is `require("mq")` however deep in its package it sat. That is
+//! right for a crate with a module or two, and wrong for one that registers `mine.thing` —
+//! the namespace is in the path and only the name survives, so the module a project has to
+//! `require` is not the module the crate registered, and two modules called `log` in two
+//! namespaces both want the same file.
+//!
+//! Such a crate names the directory its paths start at:
+//!
+//! ```toml
+//! [package.metadata.htl]
+//! dts_root = "types"
+//! dts = ["types/mine/thing.d.tl", "types/other/log.d.tl"]
+//! ```
+//!
+//! and what is below that root is the module path, kept: `types/<crate>/mine/thing.d.tl`,
+//! `require("mine.thing")`. Without the key nothing changes — the file name alone, which
+//! is what every crate shipping declarations today is written for. An entry that does not
+//! start at the root is that manifest's mistake and is reported like a file it does not
+//! ship.
+//!
 //! Copying rather than searching the dependency where cargo unpacked it is what makes a
 //! fresh clone check: the registry cache is machine-local and empty until someone builds,
 //! `types/` is in the repository. It is also what keeps `include_tl!` out of cargo — the
@@ -54,17 +77,65 @@ pub struct DepDecl {
     pub version: String,
     /// The path inside the package, as that manifest wrote it.
     pub declared: String,
+    /// That manifest's `dts_root`, when it set one: the directory [`declared`](Self::declared)
+    /// starts at. Kept as the manifest wrote it rather than applied here, because what it
+    /// cannot be applied to is a problem to report beside the others — see [`Self::under`].
+    pub dts_root: Option<String>,
     /// Where cargo has that file on this machine.
     pub source: PathBuf,
-    /// The name it takes under `types/<package>/`, which is what `require` says.
-    pub file: String,
 }
 
 impl DepDecl {
-    /// Where it is materialised, given the directory `types/` sits in.
-    pub fn target(&self, root: &Path) -> PathBuf {
-        root.join("types").join(&self.package).join(&self.file)
+    /// The path it takes under `types/<package>/` — which is what `require` says — or why
+    /// the manifest does not name one.
+    ///
+    /// A method rather than the field it used to be, now that a crate can have a
+    /// namespace: without a root it is the file name, one component that cannot fail to
+    /// exist; under one it is the rest of the path below that root, which is several, and
+    /// which an entry the root does not cover has none of. That is the manifest's mistake,
+    /// and it reads as one rather than as an empty name.
+    pub fn under(&self) -> Result<PathBuf, String> {
+        let declared = Path::new(&self.declared);
+        let Some(root) = &self.dts_root else {
+            return match declared.file_name() {
+                Some(name) => Ok(PathBuf::from(name)),
+                None => Err(self.says("is not a path to a file")),
+            };
+        };
+        declared
+            .strip_prefix(root)
+            .map(Path::to_path_buf)
+            .map_err(|_| {
+                self.says(&format!(
+                    "does not start at the dts_root {root:?} that manifest declares"
+                ))
+            })
     }
+
+    /// Where it is materialised, given the directory `types/` sits in.
+    pub fn target(&self, root: &Path) -> Result<PathBuf, String> {
+        Ok(root.join("types").join(&self.package).join(self.under()?))
+    }
+
+    /// `<crate> <version> names <entry> in [package.metadata.htl] dts, which …` — the one
+    /// sentence every problem about an entry is a tail of, so that a reader always learns
+    /// whose manifest to open and which of its lines.
+    fn says(&self, tail: &str) -> String {
+        format!(
+            "{} {} names {} in [package.metadata.htl] dts, which {tail}",
+            self.package, self.version, self.declared
+        )
+    }
+}
+
+/// A path as it goes into the note and into a comparison: `/` whatever the platform
+/// separates with, so a note written on Windows reads the same everywhere and an orphan
+/// is told from a live declaration by the same string on both.
+fn slashed(p: &Path) -> String {
+    p.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// The note beside a materialised set, read back to tell a directory this command wrote
@@ -196,6 +267,18 @@ fn decls(meta: &serde_json::Value) -> Result<Vec<DepDecl>, String> {
                 "{name} {version}: [package.metadata.htl] dts is not a list of paths"
             ));
         };
+        // Whether the key is a string is the manifest's shape, like `dts` itself, and is
+        // settled here; whether it covers an entry is about that entry and is settled
+        // where the entry is written.
+        let dts_root = match &pkg["metadata"]["htl"]["dts_root"] {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(s) => Some(s.clone()),
+            _ => {
+                return Err(format!(
+                    "{name} {version}: [package.metadata.htl] dts_root is not a path"
+                ));
+            }
+        };
         let dir = crate::parent_dir(Path::new(mpath));
         for entry in list {
             let Some(rel) = entry.as_str() else {
@@ -208,16 +291,22 @@ fn decls(meta: &serde_json::Value) -> Result<Vec<DepDecl>, String> {
                     package: name.to_string(),
                     version: version.to_string(),
                     source: dir.join(&rel),
-                    file: Path::new(&rel)
-                        .file_name()
-                        .map(|f| f.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
+                    dts_root: dts_root.clone(),
                     declared: rel,
                 });
             }
         }
     }
-    out.sort_by(|a, b| (&a.package, &a.file).cmp(&(&b.package, &b.file)));
+    // In the order they are written and reported in, which is where they land rather than
+    // where they came from: the file name when that is all there is, the path below the
+    // root when there is one. An entry no root covers has no place to land and sorts by
+    // what the manifest said, beside the entries it was written next to.
+    out.sort_by_cached_key(|d| {
+        (
+            d.package.clone(),
+            d.under().unwrap_or_else(|_| PathBuf::from(&d.declared)),
+        )
+    });
     Ok(out)
 }
 
@@ -297,14 +386,18 @@ pub fn materialise(root: &Path, decls: &[DepDecl]) -> (Vec<(PathBuf, bool)>, Vec
     let mut notes: BTreeMap<&str, Note> = BTreeMap::new();
     let mut taken: BTreeMap<PathBuf, &DepDecl> = BTreeMap::new();
     for d in decls {
-        let target = d.target(root);
-        if d.file.is_empty() || !crate::is_declaration(Path::new(&d.file)) {
-            problems.push(format!(
-                "{} {} names {} in [package.metadata.htl] dts, which is not a `.d.tl` file",
-                d.package, d.version, d.declared
-            ));
+        let under = match d.under() {
+            Ok(u) => u,
+            Err(e) => {
+                problems.push(e);
+                continue;
+            }
+        };
+        if !crate::is_declaration(&under) {
+            problems.push(d.says("is not a `.d.tl` file"));
             continue;
         }
+        let target = root.join("types").join(&d.package).join(&under);
         if let Some(first) = taken.get(&target) {
             problems.push(format!(
                 "{} {} names both {} and {} in [package.metadata.htl] dts, which would be one \
@@ -337,7 +430,7 @@ pub fn materialise(root: &Path, decls: &[DepDecl]) -> (Vec<(PathBuf, bool)>, Vec
                         files: Vec::new(),
                     })
                     .files
-                    .push(d.file.clone());
+                    .push(slashed(&under));
                 written.push((target, w));
             }
             Err(e) => problems.push(format!(
@@ -378,12 +471,14 @@ pub fn materialise(root: &Path, decls: &[DepDecl]) -> (Vec<(PathBuf, bool)>, Vec
 /// still checked, exactly as before.
 pub fn orphans(root: &Path, decls: &[DepDecl]) -> Vec<String> {
     let types = root.join("types");
-    let mut current: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    let mut current: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
     for d in decls {
-        current
-            .entry(&d.package)
-            .or_default()
-            .insert(d.file.as_str());
+        if let Ok(under) = d.under() {
+            current
+                .entry(&d.package)
+                .or_default()
+                .insert(slashed(&under));
+        }
     }
     let mut out = Vec::new();
     for dir in materialised_dirs(&types) {
@@ -394,17 +489,21 @@ pub fn orphans(root: &Path, decls: &[DepDecl]) -> Vec<String> {
         // What is on disk, not what the note lists: the note is rewritten whenever
         // anything is materialised, and a file dropped from a crate's manifest would
         // otherwise stop being reported by the very run that noticed it was gone.
-        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        //
+        // The whole tree below the crate's directory, not its top level: under a
+        // `dts_root` a declaration lands at `mine/thing.d.tl`, and a namespace the crate
+        // has stopped shipping is a directory of files nobody would otherwise hear about.
+        let mut files: Vec<PathBuf> = walkdir::WalkDir::new(&dir)
+            .sort_by_file_name()
             .into_iter()
-            .flatten()
             .filter_map(Result::ok)
-            .map(|e| e.path())
+            .map(|e| e.into_path())
             .filter(|p| p.is_file() && crate::is_declaration(p))
             .collect();
         files.sort();
         for path in files {
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            if live.is_some_and(|files| files.contains(name.as_ref())) {
+            let name = slashed(path.strip_prefix(&dir).unwrap_or(&path));
+            if live.is_some_and(|files| files.contains(&name)) {
                 continue;
             }
             let why = match live {
@@ -450,11 +549,11 @@ mod tests {
         .unwrap();
         assert_eq!(d.len(), 1, "{d:?}");
         assert_eq!(d[0].package, "htl-mq");
-        assert_eq!(d[0].file, "mq.d.tl");
+        assert_eq!(d[0].under(), Ok(PathBuf::from("mq.d.tl")));
         assert_eq!(d[0].source, PathBuf::from("/w/mq/dts/mq.d.tl"));
         assert_eq!(
             d[0].target(Path::new("/p")),
-            PathBuf::from("/p/types/htl-mq/mq.d.tl")
+            Ok(PathBuf::from("/p/types/htl-mq/mq.d.tl"))
         );
     }
 
@@ -542,7 +641,7 @@ mod tests {
             "{d:?}"
         );
         assert_eq!(d[0].source, dir.join("types/b/env.d.tl"));
-        assert_eq!(d[0].file, "env.d.tl");
+        assert_eq!(d[0].under(), Ok(PathBuf::from("env.d.tl")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -571,6 +670,94 @@ mod tests {
         assert!(wildcard("a*b*c", "axxbyyc"));
         assert!(!wildcard("a*bc*c", "abc"));
         assert!(!wildcard("?.d.tl", "a.d.tl"));
+    }
+
+    /// One `dts_root` fixture, so that every question below is asked of the same manifest.
+    fn rooted(root: &str, entries: &str, manifest: &str) -> Result<Vec<DepDecl>, String> {
+        decls(&meta(&format!(
+            r#"{{
+              "packages": [
+                {{"id": "root", "name": "app", "version": "0.1.0", "manifest_path": "/w/app/Cargo.toml"}},
+                {{"id": "dep", "name": "my-mod", "version": "0.1.0", "manifest_path": "{manifest}",
+                 "metadata": {{"htl": {{"dts_root": {root}, "dts": {entries}}}}}}}
+              ],
+              "resolve": {{"root": "root", "nodes": [
+                {{"id": "root", "dependencies": ["dep"]}}, {{"id": "dep", "dependencies": []}}]}}
+            }}"#
+        )))
+    }
+
+    /// What is below the root is the module path, kept: the namespace survives the copy,
+    /// and two modules of the same name in two namespaces are two files.
+    #[test]
+    fn a_dts_root_keeps_the_path_below_it() {
+        let d = rooted(
+            "\"types\"",
+            "[\"types/mine/thing.d.tl\", \"types/a/log.d.tl\", \"types/b/log.d.tl\"]",
+            "/w/d/Cargo.toml",
+        )
+        .unwrap();
+        let under: Vec<String> = d.iter().map(|d| slashed(&d.under().unwrap())).collect();
+        assert_eq!(
+            under,
+            ["a/log.d.tl", "b/log.d.tl", "mine/thing.d.tl"],
+            "{d:?}"
+        );
+        assert_eq!(
+            d[2].target(Path::new("/p")),
+            Ok(PathBuf::from("/p/types/my-mod/mine/thing.d.tl"))
+        );
+        assert_eq!(d[2].source, PathBuf::from("/w/d/types/mine/thing.d.tl"));
+    }
+
+    /// An entry the root does not cover is that manifest's mistake, named with the entry
+    /// and the root, and it is a problem beside the others rather than a stop: the crate's
+    /// other declarations are still written.
+    #[test]
+    fn an_entry_outside_the_dts_root_is_reported_naming_both() {
+        let d = rooted(
+            "\"types\"",
+            "[\"types/mine/thing.d.tl\", \"dts/stray.d.tl\"]",
+            "/w/d/Cargo.toml",
+        )
+        .unwrap();
+        assert_eq!(d.len(), 2, "{d:?}");
+        let stray = d.iter().find(|d| d.declared == "dts/stray.d.tl").unwrap();
+        let e = stray.under().unwrap_err();
+        assert!(e.contains("my-mod 0.1.0"), "{e}");
+        assert!(e.contains("dts/stray.d.tl"), "{e}");
+        assert!(e.contains("dts_root \"types\""), "{e}");
+        assert!(d.iter().any(|d| d.under().is_ok()), "{d:?}");
+    }
+
+    /// The key says what the paths start at, so it is a path; anything else is the same
+    /// kind of mistake as a `dts` that is not a list, and is answered the same way.
+    #[test]
+    fn a_dts_root_that_is_not_a_path_is_an_error_naming_the_crate() {
+        let e = rooted("42", "[\"types/a.d.tl\"]", "/w/d/Cargo.toml").unwrap_err();
+        assert!(e.contains("my-mod 0.1.0"), "{e}");
+        assert!(e.contains("dts_root is not a path"), "{e}");
+    }
+
+    /// The two keys compose: the `*` names the files, the root says where their paths
+    /// start, and what lands keeps the namespace between them.
+    #[test]
+    fn a_dts_root_and_a_star_compose() {
+        let dir = std::env::temp_dir().join(format!("htl-dep-dts-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("types/mine")).unwrap();
+        for f in ["thing.d.tl", "other.d.tl", "notes.md"] {
+            std::fs::write(dir.join("types/mine").join(f), "").unwrap();
+        }
+        let d = rooted(
+            "\"types\"",
+            "[\"types/mine/*.d.tl\"]",
+            &dir.join("Cargo.toml").display().to_string(),
+        )
+        .unwrap();
+        let under: Vec<String> = d.iter().map(|d| slashed(&d.under().unwrap())).collect();
+        assert_eq!(under, ["mine/other.d.tl", "mine/thing.d.tl"], "{d:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
