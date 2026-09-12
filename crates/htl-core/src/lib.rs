@@ -3,7 +3,7 @@
 //! Embeds the Teal compiler (`tl.lua`) into an mlua state so `.tl` sources can be
 //! type-checked, generated and executed without any external toolchain.
 //!
-//! - [`Htl::check`] / [`Htl::gen`]: type-check and generate Lua from a `.tl` file
+//! - [`Htl::check`] / [`Htl::gen_lua`]: type-check and generate Lua from a `.tl` file
 //! - [`Htl::install_searcher`]: strict `require` for `.tl` (type errors abort the require)
 //! - [`Htl::preload`]: register generated Lua (e.g. from `include_tl!`) under a module name
 //! - [`bundle`]: stripped-bytecode bundles produced by `htl build`
@@ -11,9 +11,15 @@
 //! Two libraries ship inside the binary rather than on a project's search path, and both
 //! are installed the same way — a `package.preload` entry for the run, a `.d.tl` under
 //! [`lib_dir`] for the checker: `htl.test` ([`Htl::install_test_lib`], `describe` / `it` /
-//! `expect`) and, with the `std` feature, `std.*` ([`Htl::install_std`], mlua-batteries'
-//! modules under the namespace that crate leaves to its host).
-
+//! `expect`) and, with the `std` feature, `std.*` — mlua-batteries' modules under the
+//! namespace that crate leaves to its host. The method that installs them is named and
+//! linked below when the feature that compiles it is on; a link to an item that is not
+//! compiled is a broken one.
+#![cfg_attr(
+    feature = "std",
+    doc = "
+//! That method is [`Htl::install_std`]."
+)]
 pub use mlua;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -1447,7 +1453,7 @@ impl Htl {
     /// The same walk `declaration_sites` does for the `duplicate-declaration` lint, over
     /// all three kinds rather than declarations alone: a searcher answers with the first
     /// hit and says nothing about the others, and which of two files is read is decided by
-    /// a position nobody wrote down. [`resolve`] is what turns this into a report.
+    /// a position nobody wrote down. [`contract::resolve`] is what turns this into a report.
     pub fn module_candidates(&self, name: &str) -> Result<Vec<ModuleCandidate>> {
         let f: Function = self.h.get("module_candidates")?;
         let t: Table = f.call(name)?;
@@ -1713,7 +1719,7 @@ fn declarations_key(decls: &[(String, String)]) -> String {
 /// feature, `std/*.d.tl` below it. The files are written on demand by the library that owns
 /// them, only when their content changes.
 ///
-/// The key is [`declarations_key`] over what this build would write, and not the version,
+/// The key is a hash over what this build would write, and not the version,
 /// because the version does not tell two builds apart. `CARGO_PKG_VERSION` is the same on
 /// the release and on every build from `main` after it, and those differ by exactly what
 /// lands here: a binary with `std` writes `std/*.d.tl` that a binary without it cannot
@@ -1843,7 +1849,8 @@ pub fn is_tl_source(p: &Path) -> bool {
 }
 
 /// The note `htl dts` writes beside the declarations it materialises from a dependency
-/// crate, in `types/<crate>/`. See [`dep_dts`].
+/// crate, in `types/<crate>/`. The module that writes it is `dep_dts`, which the `dts`
+/// feature compiles.
 pub const DEP_TYPES_NOTE: &str = ".htl-dts";
 
 /// The immediate subdirectories of `types/` holding declarations materialised from a

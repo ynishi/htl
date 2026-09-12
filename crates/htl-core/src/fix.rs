@@ -39,7 +39,7 @@ impl FixOptions {
     /// Refuse a rule name none of these filters could ever match.
     ///
     /// The filters are string comparisons against the name a candidate was filed under
-    /// ([`rule_of`]), so a name that is not a rule quietly matches nothing: `--rule
+    /// (the rule a diagnostic is filed under), so a name that is not a rule quietly matches nothing: `--rule
     /// nil-idex` would report a run that fixed nothing, which is what a project with
     /// nothing to fix also reports. The names come from a person either way — a flag or
     /// `[fix]` in `htl.toml` — so they are held to the registry the way a lint spec is

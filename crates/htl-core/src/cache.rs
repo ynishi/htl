@@ -767,7 +767,7 @@ pub const MODULE: &str = "module";
 /// `include_bundle!` from different working directories — and its generated Lua is the
 /// same file's Lua whichever way it was reached. So the key is the canonical path and the
 /// lint selection, and nothing about the invocation, and the entry is stamped without the
-/// binary ([`Stamp`]): that is what lets `htl test`, `htl build` and the macros replay one
+/// binary (the entry's stamp): that is what lets `htl test`, `htl build` and the macros replay one
 /// another's entries (#100).
 pub fn module_gen_key(path: &Path, lint: Option<&str>) -> Key {
     let mut h = blake3::Hasher::new();
@@ -1338,7 +1338,8 @@ impl Cache {
     /// something untrue. Dropping an entry that was still good costs the check it would have
     /// skipped and nothing else. The two questions deserve different tools.
     ///
-    /// "Oldest" is least recently *used*, because a hit touches its entry ([`Self::touch`]).
+    /// "Oldest" is least recently *used*: a hit touches its entry, which is what makes the
+    /// two differ.
     /// Without that it would mean least recently written, and the shape run most often —
     /// written first — would age out while a shape tried once survived.
     pub fn sweep(&self, keep: &[Key], files: usize) {
