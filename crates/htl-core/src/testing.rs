@@ -17,12 +17,22 @@ const TEST_DTL: &str = include_str!("../lua/test.d.tl");
 /// Module name of the bundled assertion library.
 pub const DEFAULT_LIB: &str = "htl.test";
 
+/// What this library writes under [`crate::lib_dir`]: its declaration, and the path it
+/// takes there. A list of one, and a list rather than the constant because
+/// [`crate::lib_dir`] hashes it into the directory's name — the name and the contents come
+/// from the same place, so the first cannot describe files the binary does not write.
+pub(crate) fn declarations() -> Vec<(String, String)> {
+    vec![("htl/test.d.tl".to_string(), TEST_DTL.to_string())]
+}
+
 /// [`crate::lib_dir`] with this library's declaration in it: `htl/test.d.tl`, written on
 /// demand, only when its content changes.
 pub fn lib_dir() -> Result<PathBuf> {
     let dir = crate::lib_dir();
-    write_if_changed(&dir.join("htl").join("test.d.tl"), TEST_DTL)
-        .with_context(|| format!("writing bundled declarations under {}", dir.display()))?;
+    for (path, source) in declarations() {
+        write_if_changed(&dir.join(path), &source)
+            .with_context(|| format!("writing bundled declarations under {}", dir.display()))?;
+    }
     Ok(dir)
 }
 

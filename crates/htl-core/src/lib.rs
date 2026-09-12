@@ -20,6 +20,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use mlua::chunk::ChunkMode;
 use mlua::{Function, Lua, Table, Value, Variadic};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 pub mod build_target;
 pub mod bundle;
@@ -1616,13 +1617,63 @@ pub fn write_if_changed(path: &Path, text: &str) -> std::io::Result<bool> {
     Ok(true)
 }
 
+/// Everything the libraries inside the binary write under [`lib_dir`]: the path each file
+/// takes below that directory, and its source, sorted so that the order the parts are
+/// collected in is not part of the answer.
+///
+/// The feature branch is here rather than in either library because this is the union, and
+/// the union is what the directory is named after. Each library owns the half it writes
+/// ([`testing::declarations`], [`batteries::declarations`]) and writes exactly that half,
+/// so the name and the contents cannot drift apart.
+fn bundled_declarations() -> Vec<(String, String)> {
+    let mut out = testing::declarations();
+    #[cfg(feature = "std")]
+    out.extend(batteries::declarations());
+    out.sort();
+    out
+}
+
+/// A directory name for a set of declarations: the first sixteen hex characters of a
+/// blake3 over every path and source in it.
+///
+/// Sixteen because this is read by a person — in `htl resolve`'s searched-order line, in a
+/// listing of the temp directory — and sixty-four bits is already far past what telling a
+/// handful of builds on one machine apart asks for. Each part is length-prefixed so that
+/// two different lists cannot hash alike by running together: `("ab", "c")` and
+/// `("a", "bc")` are different keys.
+fn declarations_key(decls: &[(String, String)]) -> String {
+    let mut h = blake3::Hasher::new();
+    for (path, source) in decls {
+        for part in [path.as_str(), source.as_str()] {
+            h.update(&(part.len() as u64).to_le_bytes());
+            h.update(part.as_bytes());
+        }
+    }
+    h.finalize().to_hex()[..16].to_string()
+}
+
 /// Where the libraries that ship inside the binary put their `.d.tl` so the checker can see
-/// them: `<tmp>/htl-lib-<version>/`, with `htl/test.d.tl` and, under the `std` feature,
-/// `std/*.d.tl` below it. Keyed by this crate's version so two htl builds on one machine
-/// never read each other's declarations; the files are written on demand by the library
-/// that owns them, only when their content changes.
+/// them: `<tmp>/htl-lib-<version>-<key>/`, with `htl/test.d.tl` and, under the `std`
+/// feature, `std/*.d.tl` below it. The files are written on demand by the library that owns
+/// them, only when their content changes.
+///
+/// The key is [`declarations_key`] over what this build would write, and not the version,
+/// because the version does not tell two builds apart. `CARGO_PKG_VERSION` is the same on
+/// the release and on every build from `main` after it, and those differ by exactly what
+/// lands here: a binary with `std` writes `std/*.d.tl` that a binary without it cannot
+/// preload, and one that found them on its search path type-checked a project against
+/// modules it then failed to load (#220). Keyed by content, the two have different
+/// directories and neither can see the other's; two builds that would write the same files
+/// still share one, which is the case worth sharing.
+///
+/// The version stays in the name because that is what a person reading the path uses.
 pub fn lib_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("htl-lib-{}", env!("CARGO_PKG_VERSION")))
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let key = declarations_key(&bundled_declarations());
+        std::env::temp_dir().join(format!("htl-lib-{}-{key}", env!("CARGO_PKG_VERSION")))
+    })
+    .clone()
 }
 
 /// Parent directory of a file, `.` when the path has none.
@@ -1916,4 +1967,80 @@ pub fn module_name(root: &Path, file: &Path) -> Result<String> {
         bail!("cannot derive module name for {}", file.display());
     }
     Ok(parts.join("."))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decl(path: &str, source: &str) -> (String, String) {
+        (path.to_string(), source.to_string())
+    }
+
+    /// The reason the key exists: a build carrying one declaration more than another — a
+    /// feature set, a newer mlua-batteries — lands somewhere else, so neither finds the
+    /// other's files on its search path.
+    #[test]
+    fn a_different_set_of_declarations_is_a_different_key() {
+        let base = vec![decl("htl/test.d.tl", "local record t end\nreturn t\n")];
+        let mut more = base.clone();
+        more.push(decl(
+            "std/json.d.tl",
+            "local record json end\nreturn json\n",
+        ));
+        assert_ne!(declarations_key(&base), declarations_key(&more));
+
+        // And a set of the same size whose content moved.
+        let mut edited = base.clone();
+        edited[0].1.push('\n');
+        assert_ne!(declarations_key(&base), declarations_key(&edited));
+    }
+
+    /// And the same set is the same key, so a build uses the directory it used last time
+    /// and the files it wrote there are still its own.
+    #[test]
+    fn the_same_set_is_the_same_key() {
+        let decls = vec![
+            decl("htl/test.d.tl", "local record t end\nreturn t\n"),
+            decl("std/json.d.tl", "local record json end\nreturn json\n"),
+        ];
+        assert_eq!(declarations_key(&decls), declarations_key(&decls.clone()));
+    }
+
+    /// Length-prefixed: moving a character from a path into the source after it is a
+    /// different set of files and reads as one.
+    #[test]
+    fn the_parts_cannot_run_together() {
+        assert_ne!(
+            declarations_key(&[decl("ab", "c")]),
+            declarations_key(&[decl("a", "bc")])
+        );
+    }
+
+    /// The list is what this build writes: `htl.test`'s declaration whatever the features,
+    /// and `std`'s exactly when the feature that installs them is on.
+    #[test]
+    fn the_list_holds_what_this_build_writes() {
+        let decls = bundled_declarations();
+        assert!(decls.iter().any(|(p, _)| p == "htl/test.d.tl"), "{decls:?}");
+        assert_eq!(
+            decls.iter().any(|(p, _)| p.starts_with("std/")),
+            cfg!(feature = "std")
+        );
+    }
+
+    /// What the directory name is made of, and that asking twice gives one answer — the
+    /// key is computed once and the path is a constant for the life of the process.
+    #[test]
+    fn the_directory_carries_the_version_and_the_key() {
+        let dir = lib_dir();
+        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        let prefix = format!("htl-lib-{}-", env!("CARGO_PKG_VERSION"));
+        assert!(name.starts_with(&prefix), "{name}");
+        assert_eq!(
+            name[prefix.len()..],
+            declarations_key(&bundled_declarations())
+        );
+        assert_eq!(dir, lib_dir());
+    }
 }
