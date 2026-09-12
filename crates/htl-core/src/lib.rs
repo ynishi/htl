@@ -999,6 +999,23 @@ impl Htl {
     pub fn with_checker(checker: &Htl) -> Result<Self> {
         // SAFETY: as in `new`.
         let lua = unsafe { Lua::unsafe_new() };
+        Self::with_checker_lua(checker, lua)
+    }
+
+    /// [`with_checker`](Self::with_checker) with the program state supplied.
+    ///
+    /// This is the constructor for a host that decides what the program state is made of
+    /// — which standard libraries it opens (`Lua::unsafe_new_with`), what its allocator
+    /// is bounded to (`Lua::set_memory_limit`), what hook counts its instructions
+    /// (`Lua::set_global_hook`) — while the checker keeps running on a state of its own,
+    /// with whatever it needs. Every such limit is mlua's and is set on `lua` by the
+    /// host; htl adds none of its own and puts nothing in the way of them.
+    ///
+    /// What htl itself needs from `lua`: `package` (the searcher and `preload`) and the
+    /// base library's `load`; `debug`, only for [`coverage_start`](Self::coverage_start).
+    /// A state that will load bundles has to come from `unsafe_new_with`: mlua's safe
+    /// `new_with` refuses binary chunks, which is what a bundle is.
+    pub fn with_checker_lua(checker: &Htl, lua: Lua) -> Result<Self> {
         let r: Table = lua
             .load(RUNTIME_PRELUDE)
             .set_name("=htl-runtime")
