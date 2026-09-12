@@ -99,13 +99,19 @@ local function source_lines(cache, file)
    return lines
 end
 
+-- On the line itself (trailing), or on the line above it when that line is nothing but
+-- markers (own line). The line above is not read when it is a declaration of its own: a
+-- trailing `---@optional` belongs to the field it trails, and reading it from the next
+-- line too made `a: string   ---@optional` exempt `b` as well — one marker, two fields,
+-- and `struct-fields` silent about the second. Same rule as `marker_on` below and as
+-- `contract.rs`'s reader, which had it from the start.
 local function has_marker(lines, y, marker)
    if not lines or not y then return false end
-   -- On the line itself (trailing), or on the line above it (own line).
-   for _, l in ipairs({ lines[y], lines[y - 1] }) do
-      if l and l:match("%-%-%-@" .. marker .. "%f[%W]") then return true end
-   end
-   return false
+   local pat = "%-%-%-@" .. marker .. "%f[%W]"
+   local l = lines[y]
+   if l and l:match(pat) then return true end
+   local above = lines[y - 1]
+   return (above and above:match("^%s*%-%-%-@") and above:match(pat)) and true or false
 end
 
 local function indent_of(line)
@@ -201,12 +207,11 @@ end
 -- the `---@struct` markers above and for the same reason: the checker discards comments,
 -- and the file being checked is rarely the one that declares the record.
 --
--- Read more strictly than `has_marker`, which also accepts the line above the declaration.
--- A record nested directly under `record Judged   ---@sealed` sits on that line, and a
--- marker read that loosely would seal the nested one too; on its own line the marker has
--- to be on a line that is only a marker comment. `marker_on` is the reader `---@sealed`
--- and `---@extensible` (below) share, since both mark a record and both are read from a
--- declaring file that may nest one record inside another.
+-- The same position rule as `has_marker`: the line itself, or the line above when it is
+-- only a marker comment. A record nested directly under `record Judged   ---@sealed` sits
+-- on that line, and a marker read from any line above would seal the nested one too.
+-- `marker_on` differs from `has_marker` in what it returns — the marker's argument list
+-- as well — and is the reader `---@sealed` and `---@extensible` (below) share.
 local function marker_args(line, marker)
    if not line then return false, nil end
    local at = line:find("%-%-%-@" .. marker .. "%f[%W]")

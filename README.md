@@ -778,7 +778,8 @@ long. An extra key that is nothing like the missing one is not offered.
 
 The markers go where the record is **declared**, and the report lands where it is
 **built**, so an SDK can declare the shape its mods must fill in. Both marker forms work:
-trailing on the field's own line, or on the line above it. Every construction site counts
+trailing on the field's own line, or on a line of its own above it — a marker trailing
+one field is that field's and not the next one's. Every construction site counts
 — a bare literal, an element of an array or map of that record, a literal passed as a
 typed argument, and a function's `return`.
 

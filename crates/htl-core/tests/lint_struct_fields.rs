@@ -187,6 +187,32 @@ fn the_optional_fields_may_be_absent_and_a_whole_literal_is_silent() {
     assert!(lints_of(&dir, "mod.tl").is_empty());
 }
 
+/// A trailing `---@optional` belongs to the field it trails and to no other: the field
+/// declared on the next line is still required. The own-line form (`---@optional` alone
+/// on the line above) keeps working.
+#[test]
+fn a_trailing_marker_does_not_reach_the_next_line() {
+    let dir = scratch("trailing");
+    write(
+        &dir.join("defs.tl"),
+        "local record defs\n   record Def   ---@struct\n      a: string   ---@optional\n\
+         \x20     b: string\n      ---@optional\n      c: string\n   end\nend\nreturn defs\n",
+    );
+    write(
+        &dir.join("mod.tl"),
+        "local defs = require(\"defs\")\nlocal m: defs.Def = { c = \"c\" }\nreturn m\n",
+    );
+    let lints = lints_of(&dir, "mod.tl");
+    assert_eq!(lints.len(), 1, "{lints:?}");
+    assert!(lints[0].contains("Def is built without b"), "{}", lints[0]);
+    // `a` (trailing) and `c` (own line) are optional: a literal with only `b` is whole.
+    write(
+        &dir.join("mod.tl"),
+        "local defs = require(\"defs\")\nlocal m: defs.Def = { b = \"b\" }\nreturn m\n",
+    );
+    assert!(lints_of(&dir, "mod.tl").is_empty());
+}
+
 /// The form a mod actually writes: records nested in an array of them.
 #[test]
 fn an_element_of_an_array_of_the_record_is_held_to_it() {
