@@ -1157,13 +1157,13 @@ impl Htl {
     /// that.
     ///
     /// Slower than `check`: a cold environment re-checks the modules this file requires.
+    ///
+    /// The two options it differs from `check` by are set in the prelude rather than in a
+    /// table built here, for the reason [`set_deps`](Self::set_deps) gives: `h` is not
+    /// always in `self.lua`, and a table that crossed that line would raise.
     pub fn check_written(&self, file: &Path) -> Result<CheckInfo> {
-        let f: Function = self.h.get("check")?;
-        let opts = self.lua.create_table()?;
-        opts.set("seed", false)?;
-        opts.set("store", false)?;
-        // `H.check(filename, env, opts)`: a nil env is a fresh one.
-        let t: Table = f.call((path_str(file), mlua::Value::Nil, opts))?;
+        let f: Function = self.h.get("check_written")?;
+        let t: Table = f.call(path_str(file))?;
         read_checkinfo(&t)
     }
 
@@ -1186,20 +1186,30 @@ impl Htl {
     /// ask about the project-layer rules has in hand ([`lint::Lints`]), so that the file
     /// rules and the project rules of one run come from one resolution of one spec.
     ///
-    /// Two tables cross, one per producer on the Lua side: the rules `lint.lua` implements,
-    /// which it runs from, and Teal's warning kinds, which the prelude filters the
-    /// checker's warnings by as it collects them. Neither keeps defaults of its own.
+    /// Two selections cross, one per producer on the Lua side: the rules `lint.lua`
+    /// implements, which it runs from, and Teal's warning kinds, which the prelude filters
+    /// the checker's warnings by as it collects them. Neither keeps defaults of its own.
+    ///
+    /// Each side crosses as the names that are on and the names that are off, and the
+    /// table is built on the other side — for the reason [`set_deps`](Self::set_deps)
+    /// gives, and it applies here the harder way: `h` is not always in `self.lua`
+    /// ([`with_checker`](Self::with_checker) keeps the prelude in the checker's), and a
+    /// table made here and passed there is `Lua instance passed Value created from a
+    /// different main Lua state`. Both lists, not just the on ones, because absent and
+    /// `false` are not the same answer to the prelude: a Teal warning kind is said unless
+    /// its entry is exactly `false`.
     pub fn select_lints(&self, sel: &lint::Selection) -> Result<()> {
-        let t = self.lua.create_table()?;
-        for (name, on) in sel.of_side(lint::Side::Lua) {
-            t.set(name, on)?;
-        }
-        let tl = self.lua.create_table()?;
-        for (name, on) in sel.of_side(lint::Side::Tl) {
-            tl.set(name, on)?;
-        }
+        let split = |side| {
+            let (mut on, mut off) = (Vec::new(), Vec::new());
+            for (name, is_on) in sel.of_side(side) {
+                if is_on { &mut on } else { &mut off }.push(name.to_string());
+            }
+            (on, off)
+        };
+        let (lua_on, lua_off) = split(lint::Side::Lua);
+        let (tl_on, tl_off) = split(lint::Side::Tl);
         let f: Function = self.h.get("set_lints")?;
-        f.call::<()>((t, tl))?;
+        f.call::<()>((lua_on, lua_off, tl_on, tl_off))?;
         Ok(())
     }
 
@@ -1289,6 +1299,12 @@ impl Htl {
     pub fn install_searcher(&self) -> Result<()> {
         if self.split {
             // The searcher runs in the program state and asks the checker for code.
+            //
+            // Both states are in hand here and nothing crosses: `bridge` is built in
+            // `self.lua` and handed to `runtime()`, which is a table out of `self.lua`'s
+            // own registry. The checker's `gen_fn` is only ever *called* — its arguments
+            // and results are Rust values on the way through, which is what a value has to
+            // be to pass between two states.
             let gen_fn: Function = self.h.get("gen_for_require")?;
             let bridge = self.lua.create_function(move |_, name: String| {
                 let (kind, a, b): (String, Option<String>, Option<String>) = gen_fn.call(name)?;
