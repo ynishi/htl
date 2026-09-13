@@ -288,6 +288,23 @@ fn main() -> anyhow::Result<()> {
 fills the `arg` table the way the `lua` CLI and `htl run` do, so the same `main.tl` runs
 unchanged both ways (`htl new --embed` writes both calls).
 
+A string that looks like a number is one only where the program says so, and that is
+three layers. Checked Teal is the checker's: `"10" + 1` and `s * 2` are type errors, on
+an `any` as much as on a `string`, and `tonumber(...)` is a `number` that no `integer`
+accepts. What the checker did not see is Lua's — the far side of a cast, `(v as integer)
++ 1` where `v` is the `"10"` that `std.json.decode` or `arg` handed over; a function
+`load` built from a string; Lua source the host gave `exec` — and Lua 5.4 reads
+`"10" + 1` there as `11`. `h.strict_strings()?` in `preload` makes that an error naming
+the string (it removes the arithmetic metamethods from the string metatable, which is
+where Lua keeps that conversion). It does not touch `10 .. ""`, which the VM does, nor
+`"10" < "9"`, which is a string comparison, nor `tonumber` and `math.tointeger`, which
+convert because they were asked to — so a value that arrives as `any` is converted once,
+where it arrives, by the program: `s:match("^%-?%d+$")` and `math.tointeger` when hex, an
+exponent and surrounding whitespace are not wanted, `tonumber` when they are, and never
+a cast. The third layer, a host's own argument, is `#[host_module]`'s: mlua converts a
+Lua string to an `i64` parameter and a number to a `String` one, so a parameter that may
+see a value from that edge takes `mlua::Value` and matches the kind it means.
+
 The second argument to `exec` is the chunk name: the name every frame of a run-time
 failure inside that chunk is reported under. `@<path>` is a source location and prints as
 the path, so `@scripts/main.tl` gives a reader something to open; `=<label>` is a bare

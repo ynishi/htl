@@ -1448,6 +1448,47 @@ impl Htl {
         Ok(())
     }
 
+    /// Make arithmetic on a string a run-time error instead of a conversion.
+    ///
+    /// Lua 5.4 reads `"10" + 1` as `11`: the string library's metatable carries `__add`
+    /// and the other seven arithmetic metamethods, and each one converts its string
+    /// operands and retries. Checked Teal never gets there: the checker refuses the
+    /// expression on a `string`, and on an `any` too. It happens in what the checker did
+    /// not see — the far side of a cast (`(v as integer) + 1` where `v` came from
+    /// `std.json.decode` or `arg` as `"10"`), a function `load` built from a string, Lua
+    /// source a host handed to [`exec`](Self::exec) — and there the conversion is
+    /// silent. This removes the eight from the string metatable of the program state, so
+    /// the same expression fails as `attempt to perform arithmetic on a string value`,
+    /// naming the operand.
+    ///
+    /// What it does not cover, because Lua does those elsewhere: `10 .. ""` (number to
+    /// string under concatenation is in the VM, behind Lua's `LUA_NOCVTN2S` build flag,
+    /// which is the vendored Lua's to set); `"10" < "9"` (a string comparison, true, and
+    /// not a conversion); and `tonumber` / `math.tointeger`, which convert because they
+    /// were asked to. `__index` stays, so `s:upper()` and every other string method are
+    /// untouched.
+    ///
+    /// Opt-in, for a host's `preload` beside `install_std`; the CLI does not turn it on,
+    /// since `htl run` and `htl test` run Teal the checker has passed. Calling it twice is
+    /// the same as once. In a state that also holds the checker (the default; see
+    /// [`with_checker`](Self::with_checker) for the split) the checker runs under it too,
+    /// which it can: nothing in `tl` adds a string to a number.
+    pub fn strict_strings(&self) -> Result<()> {
+        self.lua
+            .load(
+                r#"
+local mt = getmetatable("")
+for _, k in ipairs { "__add", "__sub", "__mul", "__div", "__mod", "__pow", "__unm", "__idiv" } do
+   mt[k] = nil
+end
+"#,
+            )
+            .set_name("=strict_strings")
+            .exec()
+            .context("removing arithmetic metamethods from the string metatable")?;
+        Ok(())
+    }
+
     /// Execute Lua source with `...` = args.
     pub fn exec(&self, lua_src: &str, chunk_name: &str, args: &[String]) -> Result<()> {
         let f = self
