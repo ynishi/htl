@@ -229,20 +229,36 @@ impl HtlPin {
 
     /// Whether the pinned htl's linker can serve a library's module from a bundle: it
     /// names a `<dir>/init.tl` entry after its directory, and leaves a name in `host`
-    /// out even when a file could answer it (#242, in 0.5.2). It decides how the Rust
-    /// host embeds its Teal: as one file (`include_tl_bytes!`) under a pin without it,
-    /// as the module's require closure (`include_bundle!`) under one with it — which is
-    /// what carries a dependency from `mlua-pkg.toml` into the binary. A fresh project
-    /// pinned `0.5` resolves the newest 0.5.x, so the series is the answer; `0.4`'s
-    /// linker would name the entry `init` and the host's `require("<mod>")` would fail.
+    /// out even when a file could answer it (#243). It decides how the Rust host embeds
+    /// its Teal: as one file (`include_tl_bytes!`) under a pin without it, as the
+    /// module's require closure (`include_bundle!`) under one with it — which is what
+    /// carries a dependency from `mlua-pkg.toml` into the binary.
+    ///
+    /// The linker change landed after 0.5.0, so no 0.5.x has it and the answer is the
+    /// release after: 0.6. It was `0.5` for one commit, on the reading that a `0.5` pin
+    /// resolves the newest 0.5.x and a patch would carry the change — but a patch never
+    /// changes what a release pin is written against (see [`HtlPin::at_least`]), and
+    /// every project the default pin wrote in that window built against 0.5.1, whose
+    /// linker named the library's entry `init`, and failed its own `cargo test` on
+    /// `require("<mod>")`.
     pub fn knows_bundle_entry(&self) -> bool {
-        self.at_least(0, 5)
+        self.at_least(0, 6)
     }
 
     /// `major.minor` against a release, for the `knows_*` questions above. No semver crate:
     /// what is compared is what [`SUPPORTED`] holds — `0.<minor>`, and a bare `<major>`
     /// once there is a 1.x — and a two-number compare is shorter than the dependency would
     /// be. A pin that is not a release is every key this workspace has.
+    ///
+    /// The number a `knows_*` compares against is the release whose `.0` first carried
+    /// the thing asked about, and nothing else. A release pin `0.<n>` is cargo's
+    /// `>=0.n.0, <0.(n+1).0`: a project written under it may resolve any 0.n.x, so what
+    /// the scaffold writes for it has to be read by 0.n.0 — a patch release never moves
+    /// what a release pin is written against. So a change on `main` that no release
+    /// carries is asked about with the *next* minor, and until that minor is on
+    /// crates.io it reaches a project only through `path:<checkout>` (or `main`, which
+    /// pins nothing). The default pin is raised to that minor after the publish, as
+    /// [`DEFAULT_HTL`] says, and that is when the default output takes the new shape.
     fn at_least(&self, major: u64, minor: u64) -> bool {
         match self {
             HtlPin::Main | HtlPin::Path(_) => true,
@@ -955,8 +971,20 @@ fn t_readme(ctx: &Ctx<'_>, target: Option<&'static TargetProfile>) -> String {
              Lua does not have — `htlx.list` over arrays, `htlx.tablex` over maps, `htlx.seq` over\n\
              iterators, `htlx.ordered` for insertion-ordered maps and sets — as `require(\"htlx.list\")`\n\
              and the rest, once `htl pkg install` has run. Drop the line from `mlua-pkg.toml` if it\n\
-             is not wanted (`htl new --no-x` writes the project without it).\n\n"
+             is not wanted (`htl new --no-x` writes the project without it).\n"
         ));
+        // A host that embeds the one file carries no dependency into the binary: the
+        // require works under `htl run` / `htl test`, where the search path answers it,
+        // and not from Rust. Said here rather than left for the first `cargo run` to say
+        // as `module 'htlx.list' not found` (#242).
+        if target.is_some() && !ctx.bundle {
+            s.push_str(&format!(
+                "The Rust host embeds `src/{m}/init.tl` alone, so `htlx` is there for `htl run` and\n\
+                 `htl test` and not from the binary; the htl this project pins does not link a\n\
+                 module's require closure into the host.\n"
+            ));
+        }
+        s.push('\n');
     }
     s.push_str(&format!(
         "`mlua-pkg.toml` `entry = \"src/{m}\"` only matters to *consumers* that depend on this\n\
@@ -1244,10 +1272,11 @@ mod tests {
     }
 
     /// The host embeds its module as the require closure only under a pin whose linker
-    /// serves a bundle's entry by its module name; under `0.4` it embeds the one file, as
-    /// it always did, and runs the entry with `exec`. Both bodies, for both hosts, and the
-    /// binary that goes with each — so a `--htl 0.4` project never sees a bundle whose
-    /// entry that linker would name `init`.
+    /// serves a bundle's entry by its module name; under a release without it (`0.4`
+    /// and every 0.5.x) it embeds the one file, as it always did, and runs the entry
+    /// with `exec`. Both bodies, for both hosts, and the binary that goes with each — so
+    /// a project pinned at one of those never sees a bundle whose entry that linker would
+    /// name `init`.
     #[test]
     fn the_rust_host_embeds_a_bundle_only_when_the_pin_links_it() {
         let ctx = |bundle| Ctx {
@@ -1306,9 +1335,31 @@ mod tests {
                 && main.contains("h.exec(MAIN, \"@src/main.tl\", &args)?;"),
             "{main}"
         );
+        // No 0.5.x carries the linker: 0.5.0 named a library's entry `init`, and a patch
+        // never changes what a release pin is written against.
         assert!(!HtlPin::Release("0.4".into()).knows_bundle_entry());
-        assert!(HtlPin::Release("0.5".into()).knows_bundle_entry());
+        assert!(!HtlPin::Release("0.5".into()).knows_bundle_entry());
+        assert!(HtlPin::Release("0.6".into()).knows_bundle_entry());
         assert!(HtlPin::Main.knows_bundle_entry());
+        assert!(HtlPin::Path(PathBuf::from("../co")).knows_bundle_entry());
+    }
+
+    /// A `knows_*` asks about a release: the one whose `.0` first carried the thing, or —
+    /// for a change on `main` that no release carries — the next minor. Nothing further
+    /// out is a release anyone can name yet, so every question has to answer yes under
+    /// the minor after this workspace's own version. What this cannot catch is a
+    /// question answered *too early* (a released number for an unreleased change, which
+    /// is what `knows_bundle_entry` had for one commit); that is the unpatched scaffold
+    /// gate's to catch, by building and testing the default pin's output against
+    /// crates.io.
+    #[test]
+    fn no_pin_question_is_answered_beyond_the_next_release() {
+        let (major, minor) = version_parts(env!("CARGO_PKG_VERSION"));
+        let next = HtlPin::Release(format!("{major}.{}", minor + 1));
+        assert!(next.knows_build_target());
+        assert!(next.knows_std());
+        assert!(next.knows_dep_entry());
+        assert!(next.knows_bundle_entry());
     }
 
     /// The same question for the `htlx` dependency: 0.4 installs it and cannot require it

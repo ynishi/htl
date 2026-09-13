@@ -247,10 +247,12 @@ fn embed_scaffold_optimises_the_proc_macro_build() {
 /// `arg` the way `htl run` does before the entry runs — so the same `main.tl` runs
 /// unchanged both ways. The e2e `the_bin_target_builds_tests_and_greets` is where the
 /// argument actually crosses (`cargo run -- Ada`); this holds the shape that makes it.
+/// Under `--htl main`: the bundle is written only for a pin whose linker serves it, and
+/// no release does yet — the default pin's binary runs the entry with `exec`.
 #[test]
 fn embed_scaffold_runs_main_as_a_bundle_that_fills_arg() {
     let root = scratch("arg");
-    let (ok, _, stderr) = htl(&["new", "sample", "--embed"], &root);
+    let (ok, _, stderr) = htl(&["new", "sample", "--embed", "--htl", "main"], &root);
     assert!(ok, "{stderr}");
     let main_rs = std::fs::read_to_string(root.join("sample/src/main.rs")).unwrap();
     let main_tl = std::fs::read_to_string(root.join("sample/src/main.tl")).unwrap();
