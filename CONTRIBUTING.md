@@ -78,8 +78,10 @@ was run — the project, the command, the arguments — and what came out.
 
 A change that has to be built against, and not only run by, an unreleased htl is
 `htl new … --htl path:<checkout>`, which pins the scaffold at this working copy;
-`just e2e-scaffold-unpatched` is the other end of that, scaffolding with the
-default pin and building it against the published release.
+`just e2e-scaffold-unpatched` is the other end of that, scaffolding under each
+release pin and running each project's tests against the published release.
+A release pin gets what that release's `.0` reads and nothing newer: a change no
+release carries is written only for the next minor, and reached through `path:`.
 
 `HTL_PROFILE=1` prints per-phase timings; a performance change quotes them,
 before and after, and says which build produced them.

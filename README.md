@@ -1942,8 +1942,8 @@ pin takes.
 `include_tl!` by the pinned crate, and unknown keys there are an error rather than
 something ignored — so a key this repository has added and no release carries yet is not
 written into a project pinned at a release that lacks it; under `main` or a checkout it
-can be. `just e2e-scaffold-unpatched` is that rule as a gate: it scaffolds with the default
-pin and builds against crates.io with nothing patched.
+can be. `just e2e-scaffold-unpatched` is that rule as a gate: it scaffolds under each
+release pin and runs each project's tests against crates.io with nothing patched.
 
 #### The bin target (`--target bin`)
 
