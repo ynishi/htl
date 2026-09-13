@@ -179,6 +179,19 @@ fn new_embed_writes_the_rust_host() {
     assert_tree("embed", &root.join("sample"));
 }
 
+/// The Rust host under a pin whose linker serves a bundle's entry by its module name:
+/// `include_bundle!` in `lib.rs`, `run_bundle` in `main.rs`, and no paragraph in the
+/// README about the dependency staying out of the binary. No release has that linker yet,
+/// so the default pin's `embed` snapshot is the one-file host and this is the only tree
+/// that pins the bundle shape byte for byte; the diff between the two files is exactly
+/// what the next minor changes in a scaffolded host.
+#[test]
+fn new_embed_htl_main_writes_the_rust_host_around_a_bundle() {
+    let root = common::scratch("htl-cli-snapshot", "embed-main");
+    htl(&["new", "sample", "--embed", "--htl", "main"], &root);
+    assert_tree("embed-main", &root.join("sample"));
+}
+
 /// `--embed` is the shorthand for `--target bin`, and sharing the snapshot is what says
 /// the two write the same tree rather than two trees that happen to look alike.
 #[test]

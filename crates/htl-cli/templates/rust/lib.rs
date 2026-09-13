@@ -30,7 +30,7 @@ impl Host {
 {{embed}}
 
 /// Register what this crate provides on a fresh `Htl`: the Rust `host` module, then the
-/// Teal module as `require("{{mod}}")` and what it requires.
+/// Teal module as `require("{{mod}}")`.
 pub fn preload(h: &Htl) -> anyhow::Result<()> {
     Host.htl_preload(h)?;
 {{std}}
