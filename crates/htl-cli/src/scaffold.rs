@@ -94,8 +94,10 @@ pub enum HtlPin {
 
 /// Every htl release `--htl` accepts by number: the ones this scaffold is known to write a
 /// project for, newest last. A release is added here once a project written for it builds
-/// — which is what `just e2e-scaffold-unpatched` asks of [`DEFAULT_HTL`] on every commit —
-/// and an older one stays for as long as it keeps answering that question.
+/// and passes its own tests against crates.io — which is what `just e2e-scaffold-unpatched`
+/// asks of every entry here, in CI — and an older one stays for as long as it keeps
+/// answering that question. The recipe's list is held to this one by
+/// `the_unpatched_gate_scaffolds_every_supported_release`.
 pub const SUPPORTED: &[&str] = &["0.4", "0.5"];
 
 /// The release a scaffold pins when `--htl` is not given: the newest in [`SUPPORTED`].
@@ -862,10 +864,11 @@ fn t_types_readme() -> String {
 /// that crate does not carry is not ignored there but fatal, at the project's first
 /// `cargo build`. What is written here is therefore decided per pin — the
 /// [`HtlPin::knows_build_target`] family — and `just e2e-scaffold-unpatched` is the gate
-/// that asks the question for real: it builds a [`DEFAULT_HTL`] scaffold against crates.io,
-/// with nothing patched, and goes red when this file says something the pinned release does
-/// not understand. `[toolchain]` is the key it was learned on, written a release early, and
-/// every project `htl new` wrote in between failed to build.
+/// that asks the question for real: it scaffolds under every release in [`SUPPORTED`],
+/// runs each project's tests against crates.io with nothing patched, and goes red when
+/// this file says something the pinned release does not understand. `[toolchain]` is the
+/// key it was learned on, written a release early, and every project `htl new` wrote in
+/// between failed to build.
 ///
 /// `[lint.rules]` is out for the same reason, and a commented example of it would be too:
 /// a comment is one user action away from being a key, and the user who uncomments it is
@@ -1140,6 +1143,28 @@ mod tests {
         target_names, version_parts,
     };
     use htl::build_target::Script;
+
+    /// `just e2e-scaffold-unpatched` scaffolds under every release in [`SUPPORTED`] and
+    /// tests each against crates.io, and the recipe is bash, which cannot read the
+    /// constant. Its `for htl in …` line is the copy, read here from the justfile at the
+    /// workspace root and held equal — so a release added to (or dropped from) the set
+    /// without the gate following it is a red test, not a pin nobody has built.
+    #[test]
+    fn the_unpatched_gate_scaffolds_every_supported_release() {
+        let justfile = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../justfile"),
+        )
+        .expect("the justfile at the workspace root");
+        let line = justfile
+            .lines()
+            .map(str::trim)
+            .find(|l| l.starts_with("for htl in ") && l.ends_with("; do"))
+            .expect("the `for htl in …; do` line of e2e-scaffold-unpatched");
+        let listed: Vec<&str> = line["for htl in ".len()..line.len() - "; do".len()]
+            .split_whitespace()
+            .collect();
+        assert_eq!(listed, SUPPORTED, "justfile: {line}");
+    }
 
     /// The default has to be a release `--htl` would accept by name, or the flag's default
     /// is a value the flag itself refuses.

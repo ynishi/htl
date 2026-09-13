@@ -210,7 +210,7 @@ e2e-scaffold-packaged:
 # the manifest a user gets, and the difference between the two is the whole of what a user
 # meets first: `htl new`, then `cargo build`, with nothing redirected.
 #
-# It goes red for two reasons, and both are worth a minute.
+# It goes red for three reasons, and each is worth a minute.
 #
 # The scaffold wrote something the pinned release does not understand. `htl.toml` is parsed
 # inside `include_tl!` by the pinned crate, whose `HtlConfig` is `deny_unknown_fields`, so a
@@ -220,14 +220,25 @@ e2e-scaffold-packaged:
 # `htl new` wrote in between failed at its first `cargo build`, and nothing in this
 # repository said so. This is the gate that would have.
 #
+# Or the scaffold wrote something the pinned release compiles and cannot serve. #244 is the
+# instance: the host embedded a bundle whose entry the published linker named `init`, so the
+# project built and its own `cargo test` failed on `require("<mod>")`. A `cargo build` here
+# was green through all of it, which is why each project is *tested* below, not built —
+# the scaffold writes the test, and it is the one that asks the pinned htl for the module.
+#
 # Or `scaffold::DEFAULT_HTL` was not raised after a release, and projects are still pinning
 # an htl older than the keys the scaffold now writes. That is the same failure read from the
 # other end, and raising the constant is what fixes it.
 #
-# It needs the network: three projects resolve and download `htl` from crates.io. That is
-# why it is not in `pre-push`, which is otherwise offline, and why CI runs it in the e2e job
+# Every release in `scaffold::SUPPORTED` is scaffolded, not the default alone: `--htl 0.4`
+# is a promise the scaffold makes by name, and the older shape has no other gate — its
+# snapshot says what is written, not that the release it names can run it. The list below
+# is held to `SUPPORTED` by a unit test in `scaffold.rs`.
+#
+# It needs the network: the projects resolve and download `htl` from crates.io. That is why
+# it is not in `pre-push`, which is otherwise offline, and why CI runs it in the e2e job
 # beside the other two that reach out.
-# A default-pin scaffold, built against the published htl with nothing patched.
+# A scaffold under each supported release pin, tested against the published htl with nothing patched.
 e2e-scaffold-unpatched:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -235,7 +246,7 @@ e2e-scaffold-unpatched:
     # The same shape as the other scaffold gates use, and a directory of its own: these
     # projects resolve `htl` from the registry, so their graph is not the one `e2e-scaffold`
     # holds and sharing it would rebuild both halves on every switch. mlua is compiled once
-    # for the three below.
+    # per htl release below.
     target="${CARGO_TARGET_DIR:-$root/target}/e2e-scaffold-unpatched"
     dir="$(mktemp -d)"
     trap 'rm -rf "$dir"' EXIT
@@ -243,27 +254,31 @@ e2e-scaffold-unpatched:
     # just put the binary, and a guess here is wrong under a `[build] target-dir` in
     # .cargo/config.toml and under any `--target` — it would name a file that is missing,
     # or worse, a stale one from an earlier layout.
-    cargo run -q -p htl-cli --bin htl -- new "$dir/bin-sample" --target bin
-    cargo run -q -p htl-cli --bin htl -- new "$dir/lib-sample" --target bin --lib
-    cargo run -q -p htl-cli --bin htl -- new "$dir/cdylib-sample" --target cdylib --lib
-    for project in bin-sample lib-sample cdylib-sample; do
-      manifest="$(<"$dir/$project/Cargo.toml")"
-      # The `unpatched_pin` invariant from e2e/tests/scaffold_targets.rs, in the shell: a
-      # released htl to build against, and nothing redirecting it. Two `if`s over bash's own
-      # string matching rather than `! grep …`, because `set -e` exempts a `!`-inverted
-      # command — which is how the gate this pair descends from reported nothing however the
-      # manifest looked, and it would have failed in the direction that looks like success.
-      if [[ "$manifest" != *$'\nhtl = '* ]]; then
-        echo "$dir/$project/Cargo.toml: names no htl to build against" >&2
-        exit 1
-      fi
-      if [[ "$manifest" == *patch.crates-io* ]]; then
-        echo "$dir/$project/Cargo.toml: redirects its own pin, so this is not the manifest a user gets" >&2
-        exit 1
-      fi
-      # No `--config patch.crates-io…`, which is the entire point: what resolves here is
-      # what crates.io has.
-      (cd "$dir/$project" && cargo build --target-dir "$target")
+    for htl in 0.4 0.5; do
+      cargo run -q -p htl-cli --bin htl -- new "$dir/$htl/bin-sample" --target bin --htl "$htl"
+      cargo run -q -p htl-cli --bin htl -- new "$dir/$htl/lib-sample" --target bin --lib --htl "$htl"
+      cargo run -q -p htl-cli --bin htl -- new "$dir/$htl/cdylib-sample" --target cdylib --lib --htl "$htl"
+      for project in bin-sample lib-sample cdylib-sample; do
+        manifest="$(<"$dir/$htl/$project/Cargo.toml")"
+        # The `unpatched_pin` invariant from e2e/tests/scaffold_targets.rs, in the shell: a
+        # released htl to build against, and nothing redirecting it. Two `if`s over bash's
+        # own string matching rather than `! grep …`, because `set -e` exempts a `!`-inverted
+        # command — which is how the gate this pair descends from reported nothing however
+        # the manifest looked, and it would have failed in the direction that looks like
+        # success.
+        if [[ "$manifest" != *$'\nhtl = '* ]]; then
+          echo "$dir/$htl/$project/Cargo.toml: names no htl to build against" >&2
+          exit 1
+        fi
+        if [[ "$manifest" == *patch.crates-io* ]]; then
+          echo "$dir/$htl/$project/Cargo.toml: redirects its own pin, so this is not the manifest a user gets" >&2
+          exit 1
+        fi
+        # No `--config patch.crates-io…`, which is the entire point: what resolves here is
+        # what crates.io has. `cargo test`, not `cargo build`: the library's test is the
+        # `require("<mod>")` through preload that #244 failed.
+        (cd "$dir/$htl/$project" && cargo test --target-dir "$target")
+      done
     done
 
 # Every benchmark: the figures in the README come from these. Ten samples each; a few minutes.
