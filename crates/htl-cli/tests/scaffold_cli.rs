@@ -243,8 +243,12 @@ fn embed_scaffold_optimises_the_proc_macro_build() {
     );
 }
 
+/// The script reads `arg[1]`, and the binary runs it through `run_bundle`, which fills
+/// `arg` the way `htl run` does before the entry runs — so the same `main.tl` runs
+/// unchanged both ways. The e2e `the_bin_target_builds_tests_and_greets` is where the
+/// argument actually crosses (`cargo run -- Ada`); this holds the shape that makes it.
 #[test]
-fn embed_scaffold_fills_arg_before_running_main() {
+fn embed_scaffold_runs_main_as_a_bundle_that_fills_arg() {
     let root = scratch("arg");
     let (ok, _, stderr) = htl(&["new", "sample", "--embed"], &root);
     assert!(ok, "{stderr}");
@@ -254,13 +258,20 @@ fn embed_scaffold_fills_arg_before_running_main() {
         main_tl.contains("arg[1]"),
         "the script reads arg:\n{main_tl}"
     );
-    let set = main_rs
-        .find("h.set_arg(\"main.tl\", &args)?")
-        .expect("set_arg call");
-    let exec = main_rs
-        .find("h.exec(MAIN, \"@src/main.tl\", &args)?")
-        .expect("exec call");
-    assert!(set < exec, "set_arg comes before exec:\n{main_rs}");
+    assert!(
+        main_rs.contains(
+            "include_bundle!(\"src/main.tl\", host = [\"host\", \"sample\"], debug = true)"
+        ),
+        "the entry's closure is the bundle, minus what the library provides:\n{main_rs}"
+    );
+    assert!(
+        main_rs.contains("h.run_bundle(&Bundle::decode(MAIN)?, &args)?"),
+        "run_bundle fills arg and passes ...:\n{main_rs}"
+    );
+    assert!(
+        !main_rs.contains("set_arg") && !main_rs.contains("h.exec("),
+        "nothing fills arg or runs the entry a second way:\n{main_rs}"
+    );
 }
 
 /// `--lib` is "no entry script", and the binary exists only to run one: without a script

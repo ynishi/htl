@@ -11,9 +11,12 @@
 //! machine without it gets a red `htl pkg install` naming the URL rather than a skip,
 //! because a gate that skips is a gate nobody notices has stopped running.
 //!
-//! No cargo runs inside the project — it is a plain Teal tree — so none of the nested-cargo
-//! care `scaffold_targets.rs` takes is needed here, and the binary is located the same way
-//! that file does it: asked of cargo, never assembled from a path.
+//! The first test's project is a plain Teal tree and no cargo runs inside it. The second
+//! scaffolds a `bin` project and runs `cargo run` in it, since what it asks is whether the
+//! dependency reaches the *binary* (#242); that project pins this checkout by path, so
+//! nothing is patched in, and the nested cargo gets the same `CARGO_*` scrubbing
+//! `scaffold_targets.rs` explains. The `htl` binary is located the way that file does it:
+//! asked of cargo, never assembled from a path.
 
 use std::ffi::OsString;
 use std::fs;
@@ -152,6 +155,103 @@ fn the_scaffolds_htlx_dependency_installs_checks_and_tests_against_this_htl() {
     assert!(
         report.contains("ok   ./tests/x_test.tl  (2 passed, 0 failed"),
         "htl test did not run the consumer file green:\n{report}"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// `cargo <args>` inside a scaffolded project, on this checkout's toolchain and with the
+/// `CARGO_*` scrubbing [`htl_bin`] does, in a target directory of its own so the project's
+/// graph (it builds htl from the checkout it pins) is not the workspace's.
+fn cargo_in(project: &Path, args: &[&str]) -> Command {
+    let mut cmd =
+        Command::new(std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo")));
+    for (key, _) in std::env::vars_os() {
+        let name = key.to_string_lossy();
+        let keep = name == "CARGO_HOME" || name == "CARGO_TARGET_DIR";
+        if name.starts_with("CARGO_") && !keep {
+            cmd.env_remove(&key);
+        }
+    }
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace_root().join("target"))
+        .join("e2e-scaffold");
+    cmd.args(args)
+        .arg("--target-dir")
+        .arg(target)
+        .current_dir(project);
+    cmd
+}
+
+/// The entry of a `bin` project, requiring the dependency the scaffold gave it, and the
+/// library's module requiring it too — the two places a user writes a `require`.
+const BIN_MAIN: &str = r#"local x_bin = require("x_bin")
+local host = require("host")
+local list = require("htlx.list")
+
+print(host:greet("Ada"))
+local doubled = list.map({ 1, 2, 3 }, function(n: integer): integer return n * 2 end)
+print("entry:", table.concat(doubled, ","))
+print("library:", x_bin.sorted_keys({ b = 2, a = 1 }))
+"#;
+
+/// The scaffold's module with one function added; `greet` stays, since the scaffold's own
+/// test file calls it and `htl check .` reads that file too.
+const BIN_MODULE: &str = r#"local tablex = require("htlx.tablex")
+
+local record x_bin
+   record Greeting
+      who: string
+      text: string
+   end
+end
+
+function x_bin.greet(who: string): x_bin.Greeting
+   return { who = who, text = "hello, " .. who }
+end
+
+function x_bin.sorted_keys(t: {string:integer}): string
+   local keys: {string} = {}
+   for k, _ in tablex.sorted_pairs(t) do
+      table.insert(keys, k)
+   end
+   return table.concat(keys, ",")
+end
+
+return x_bin
+"#;
+
+/// The other half of the contract, and the one #242 found broken: the dependency the
+/// scaffold names is not only checked and tested by the CLI but *carried into the
+/// binary*. The Rust host embeds the require closure, so `htlx` required from the entry
+/// and from the library's module both resolve inside `cargo run`, with the project
+/// pinned to this checkout and nothing patched in.
+#[test]
+fn the_scaffolds_htlx_dependency_is_in_the_binary_a_bin_project_builds() {
+    let root = scratch("htlx-in-binary");
+    let checkout = format!("path:{}", workspace_root().display());
+    htl(
+        &["new", "x-bin", "--target", "bin", "--htl", &checkout],
+        &root,
+    );
+    let project = root.join("x-bin");
+
+    htl(&["pkg", "install"], &project);
+    fs::write(project.join("src/main.tl"), BIN_MAIN).unwrap();
+    fs::write(project.join("src/x_bin/init.tl"), BIN_MODULE).unwrap();
+    htl(&["check", "."], &project);
+
+    let out = cargo_in(&project, &["run", "-q"])
+        .output()
+        .expect("cargo run could not be started");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    println!("--- cargo run ---\n{stdout}{stderr}");
+    assert!(out.status.success(), "cargo run: {}\n{stderr}", out.status);
+    assert!(
+        stdout.contains("entry:\t2,4,6") && stdout.contains("library:\ta,b"),
+        "htlx did not reach the binary from both the entry and the library:\n{stdout}"
     );
 
     let _ = fs::remove_dir_all(&root);

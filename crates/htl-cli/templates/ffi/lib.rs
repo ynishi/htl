@@ -29,20 +29,14 @@ impl Host {
     }
 }
 
-// The Teal module, type-checked at `cargo build` and embedded as stripped bytecode. Keep
-// this after `#[host_module]` (same file, source order) so the declaration exists when the
-// module is checked.
-const MODULE: &[u8] = htl::include_tl_bytes!("src/{{mod}}/init.tl");
+{{embed}}
 
 /// Register what this crate provides on a fresh `Htl`: the Rust `host` module, then the
-/// Teal module as `require("{{mod}}")`.
+/// Teal module as `require("{{mod}}")` and what it requires.
 pub fn preload(h: &Htl) -> anyhow::Result<()> {
     Host.htl_preload(h)?;
 {{std}}
-    // Stripped bytecode: small, and with neither line numbers nor a chunk name, so a
-    // failure inside this module reads `?: in function '{{mod}}.greet'`. `htl run
-    // src/{{mod}}/init.tl` and `htl test` run the Teal itself and name file and line.
-    h.preload_bytes("{{mod}}", MODULE)?;
+{{install}}
     Ok(())
 }
 

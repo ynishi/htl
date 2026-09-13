@@ -44,7 +44,10 @@ pub struct LinkOptions {
     pub source: bool,
     /// Modules to include even if no literal `require` reaches them.
     pub extra: Vec<String>,
-    /// Modules the host provides at run time (besides those declared only by a `.d.tl`).
+    /// Modules the host provides at run time, besides those declared only by a `.d.tl`.
+    /// A name here is left out of the bundle and not walked, whether or not a file on
+    /// the search path could answer it — a library that bundles its own module names it
+    /// here in the binary's bundle so the two do not carry it twice.
     pub host: Vec<String>,
 }
 
@@ -197,11 +200,7 @@ pub fn link_with(
     store: Option<LinkStore<'_>>,
 ) -> Result<Linked> {
     let mut out = Linked::default();
-    let entry_name = entry
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(str::to_string)
-        .unwrap_or_else(|| "main".into());
+    let entry_name = entry_module_name(entry);
     let host_declared: HashSet<String> = opts.host.iter().cloned().collect();
     let mut host: BTreeSet<String> = BTreeSet::new();
     let mut queued: HashSet<String> = HashSet::new();
@@ -250,15 +249,18 @@ pub fn link_with(
             if queued.contains(&r.module) || host.contains(&r.module) {
                 continue;
             }
+            // A name the caller said the host provides is the host's before the search
+            // path is asked: a file that could answer it is not bundled and not walked.
+            if host_declared.contains(&r.module) {
+                host.insert(r.module.clone());
+                continue;
+            }
             match classify(h, &r.module, r.path.as_deref())? {
                 Target::File(p) => {
                     queued.insert(r.module.clone());
                     queue.push_back((r.module.clone(), p));
                 }
                 Target::Host => {
-                    host.insert(r.module.clone());
-                }
-                Target::Missing if host_declared.contains(&r.module) => {
                     host.insert(r.module.clone());
                 }
                 Target::Missing => out.errors.push(unresolved(&path, r)),
@@ -391,6 +393,25 @@ enum Target {
 
 /// What a `require(name)` points at for the linker. `found` is the checker's own
 /// resolution when already known (a require site); otherwise it is looked up.
+/// The module name an entry file answers to: its stem, except that `<dir>/init.tl` is
+/// the module `<dir>` — the name a `require` of it is written as, and so the name a
+/// bundle has to serve it under once a host has installed the bundle and a program asks
+/// for it. `htl build src/main.tl` is `main` as before; `include_bundle!("src/pkg/init.tl")`
+/// is `pkg`, not `init`.
+fn entry_module_name(entry: &Path) -> String {
+    let stem = entry.file_stem().and_then(|s| s.to_str());
+    match stem {
+        Some("init") => entry
+            .parent()
+            .and_then(|d| d.file_name())
+            .and_then(|s| s.to_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| "init".into()),
+        Some(s) => s.to_string(),
+        None => "main".into(),
+    }
+}
+
 fn classify(h: &Htl, name: &str, found: Option<&Path>) -> Result<Target> {
     let (found, lua) = match found {
         Some(p) => (Some(p.to_path_buf()), None),

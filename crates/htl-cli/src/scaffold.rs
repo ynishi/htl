@@ -13,8 +13,9 @@
 //! ├── README.md
 //! └── Cargo.toml + src/lib.rs    Rust host (only with a target): #[host_module] exposing
 //!     + src/main.rs               `host` to Teal (declaration -> src/host.d.tl), the
-//!                                 module embedded with include_tl_bytes!, and a thin
-//!                                 binary on top when there is an entry script
+//!                                 module and its require closure embedded with
+//!                                 include_bundle!, and a thin binary on top when there
+//!                                 is an entry script
 //! ```
 //!
 //! A target may add to that: the `cdylib` one writes `examples/c/` and `examples/python/`
@@ -56,7 +57,8 @@
 //! Bodies where doubling every brace for `format!` cost more than it was worth — the Rust
 //! host, the Teal sample, a C caller — live under `crates/htl-cli/templates/` and are
 //! read with `include_str!`, filled by replacing `{{name}}` / `{{mod}}` / `{{MOD}}`, and
-//! `{{std}}` for the one line a host's `preload` has under a pin that has `install_std`
+//! `{{std}}` / `{{embed}}` / `{{install}}` for what a host's `lib.rs` has under one pin
+//! and not another — `{{std}}` is the one line a host's `preload` has under a pin that has `install_std`
 //! (see [`fill`]). They stay in this crate rather than being fetched. Short TOML and
 //! Markdown stay inline.
 //!
@@ -225,6 +227,18 @@ impl HtlPin {
         self.at_least(0, 5)
     }
 
+    /// Whether the pinned htl's linker can serve a library's module from a bundle: it
+    /// names a `<dir>/init.tl` entry after its directory, and leaves a name in `host`
+    /// out even when a file could answer it (#242, in 0.5.2). It decides how the Rust
+    /// host embeds its Teal: as one file (`include_tl_bytes!`) under a pin without it,
+    /// as the module's require closure (`include_bundle!`) under one with it — which is
+    /// what carries a dependency from `mlua-pkg.toml` into the binary. A fresh project
+    /// pinned `0.5` resolves the newest 0.5.x, so the series is the answer; `0.4`'s
+    /// linker would name the entry `init` and the host's `require("<mod>")` would fail.
+    pub fn knows_bundle_entry(&self) -> bool {
+        self.at_least(0, 5)
+    }
+
     /// `major.minor` against a release, for the `knows_*` questions above. No semver crate:
     /// what is compared is what [`SUPPORTED`] holds — `0.<minor>`, and a bare `<major>`
     /// once there is a 1.x — and a two-number compare is shorter than the dependency would
@@ -296,6 +310,10 @@ pub struct Ctx<'a> {
     /// Does the manifest name `htlx`? [`Options::writes_htlx`], carried here because the
     /// README's first step depends on it the way its command block depends on `script`.
     pub htlx: bool,
+    /// Does the Rust host embed its module's require closure as a bundle, rather than the
+    /// one file? [`HtlPin::knows_bundle_entry`], carried here because the lines that do it
+    /// are in template bodies, and `src/main.rs` is a different body under each answer.
+    pub bundle: bool,
 }
 
 /// A dependency line in the project's `Cargo.toml`: what to require, and the features the
@@ -487,6 +505,7 @@ const T_TEAL_MAIN: &str = include_str!("../templates/teal/main.tl");
 const T_RUST_MAIN_TL: &str = include_str!("../templates/rust/main.tl");
 const T_RUST_LIB_RS: &str = include_str!("../templates/rust/lib.rs");
 const T_RUST_MAIN_RS: &str = include_str!("../templates/rust/main.rs");
+const T_RUST_MAIN_FILE_RS: &str = include_str!("../templates/rust/main-file.rs");
 const T_FFI_LIB_RS: &str = include_str!("../templates/ffi/lib.rs");
 const T_FFI_TEAL_MODULE: &str = include_str!("../templates/ffi/init.tl");
 const T_FFI_TEAL_TEST: &str = include_str!("../templates/ffi/test.tl");
@@ -589,6 +608,7 @@ fn plan(dir: &Path, name: &str, module: &str, opts: &Options) -> Vec<(PathBuf, S
         script: !opts.lib,
         std: opts.htl.knows_std(),
         htlx: opts.writes_htlx(),
+        bundle: opts.htl.knows_bundle_entry(),
     };
     let target = opts.target;
     let teal = target.map_or(&DEFAULT_TEAL, |t| &t.teal);
@@ -689,6 +709,18 @@ pub fn scaffold(dir: &Path, name: &str, opts: &Options, must_be_new: bool) -> Re
 fn fill(template: &str, ctx: &Ctx<'_>) -> String {
     template
         .replace("{{std}}\n", if ctx.std { STD_LINE } else { "" })
+        .replace(
+            "{{embed}}\n",
+            if ctx.bundle { EMBED_BUNDLE } else { EMBED_FILE },
+        )
+        .replace(
+            "{{install}}\n",
+            if ctx.bundle {
+                INSTALL_BUNDLE
+            } else {
+                INSTALL_FILE
+            },
+        )
         .replace("{{name}}", ctx.name)
         .replace("{{mod}}", ctx.module)
         .replace("{{MOD}}", &ctx.module.to_uppercase())
@@ -697,6 +729,20 @@ fn fill(template: &str, ctx: &Ctx<'_>) -> String {
 /// What `{{std}}` becomes in a host's `preload` under a pin that has it: `std.*` installed
 /// before the project's own module, so that module may require it.
 const STD_LINE: &str = "    // `std.*`: json, string, path and the rest, from mlua-batteries; typed in the checker\n    // the same way. Remove this line and the project has no native modules but `host`.\n    h.install_std()?;\n";
+
+/// What `{{embed}}` becomes in a host's `lib.rs` under a pin whose linker serves a
+/// bundle's entry by its module name ([`HtlPin::knows_bundle_entry`]): the module and its
+/// require closure, linked at `cargo build`.
+const EMBED_BUNDLE: &str = "// The Teal module and everything it requires, linked at `cargo build` and embedded as one\n// bundle of stripped bytecode: a dependency from `mlua-pkg.toml` rides along, and a\n// `require` that resolves to nothing fails the build here rather than at run time. `host`\n// is this crate's; a name declared only by a `.d.tl` (`std.*`) is the host's too. Keep\n// this after `#[host_module]` (same file, source order) so the declaration exists when the\n// closure is checked.\nconst BUNDLE: &[u8] = htl::include_bundle!(\"src/{{mod}}/init.tl\", host = [\"host\"]);\n";
+
+/// What `{{embed}}` becomes under a pin without that linker: the one file, as before.
+const EMBED_FILE: &str = "// The Teal module, type-checked at `cargo build` and embedded as stripped bytecode. Keep\n// this after `#[host_module]` (same file, source order) so the declaration exists when the\n// module is checked.\nconst MODULE: &[u8] = htl::include_tl_bytes!(\"src/{{mod}}/init.tl\");\n";
+
+/// What `{{install}}` becomes in `preload` beside [`EMBED_BUNDLE`].
+const INSTALL_BUNDLE: &str = "    // Every module in the bundle goes into `package.preload`; a name already there\n    // (`host`, `std.*`) stays the host's. Stripped bytecode is small and has neither line\n    // numbers nor a chunk name, so a failure inside this module reads `?: in function\n    // '{{mod}}.greet'`. `htl run src/{{mod}}/init.tl` and `htl test` run the Teal itself\n    // and name file and line.\n    h.install_bundle(&htl::bundle::Bundle::decode(BUNDLE)?)?;\n";
+
+/// What `{{install}}` becomes beside [`EMBED_FILE`].
+const INSTALL_FILE: &str = "    // Stripped bytecode: small, and with neither line numbers nor a chunk name, so a\n    // failure inside this module reads `?: in function '{{mod}}.greet'`. `htl run\n    // src/{{mod}}/init.tl` and `htl test` run the Teal itself and name file and line.\n    h.preload_bytes(\"{{mod}}\", MODULE)?;\n";
 /// The project's `mlua-pkg.toml`: the template, and under a pin that can read it the
 /// `htlx` line, put directly under `[deps]`.
 ///
@@ -736,8 +782,18 @@ fn rust_lib_rs(ctx: &Ctx<'_>) -> String {
     fill(T_RUST_LIB_RS, ctx)
 }
 
+/// The binary: under a pin whose linker serves a bundle, the entry's closure as a bundle
+/// run with `run_bundle`; under one without, the entry as one file run with `exec`. Two
+/// bodies rather than placeholders, because they differ in every line that does anything.
 fn rust_main_rs(ctx: &Ctx<'_>) -> String {
-    fill(T_RUST_MAIN_RS, ctx)
+    fill(
+        if ctx.bundle {
+            T_RUST_MAIN_RS
+        } else {
+            T_RUST_MAIN_FILE_RS
+        },
+        ctx,
+    )
 }
 
 fn ffi_lib_rs(ctx: &Ctx<'_>) -> String {
@@ -1052,8 +1108,8 @@ mod tests {
     use super::{
         BuildTarget, Ctx, DEFAULT_HTL, DEFAULT_TARGET, HTLX_REPOSITORY, HTLX_TAG, HtlPin, Options,
         PathBuf, REPOSITORY, Result, SUPPORTED, dep_value, ffi_lib_rs, profile, resolve_target,
-        rust_lib_rs, script_mismatch, t_cargo, t_htl_toml, t_manifest, t_readme, target_names,
-        version_parts,
+        rust_lib_rs, rust_main_rs, script_mismatch, t_cargo, t_htl_toml, t_manifest, t_readme,
+        target_names, version_parts,
     };
     use htl::build_target::Script;
 
@@ -1170,6 +1226,7 @@ mod tests {
             script: true,
             std,
             htlx: false,
+            bundle: true,
         };
         let with = rust_lib_rs(&ctx(true));
         assert!(with.contains("    h.install_std()?;\n"), "{with}");
@@ -1178,12 +1235,80 @@ mod tests {
         assert!(!without.contains("install_std"), "{without}");
         assert!(!without.contains("{{std}}"), "{without}");
         assert!(
-            without.contains("    Host.htl_preload(h)?;\n    // Stripped bytecode"),
+            without.contains("    Host.htl_preload(h)?;\n    // Every module in the bundle"),
             "{without}"
         );
         // The C ABI host is a Rust host too, and gets the same line.
         let ffi = ffi_lib_rs(&ctx(true));
         assert!(ffi.contains("    h.install_std()?;\n"), "{ffi}");
+    }
+
+    /// The host embeds its module as the require closure only under a pin whose linker
+    /// serves a bundle's entry by its module name; under `0.4` it embeds the one file, as
+    /// it always did, and runs the entry with `exec`. Both bodies, for both hosts, and the
+    /// binary that goes with each — so a `--htl 0.4` project never sees a bundle whose
+    /// entry that linker would name `init`.
+    #[test]
+    fn the_rust_host_embeds_a_bundle_only_when_the_pin_links_it() {
+        let ctx = |bundle| Ctx {
+            name: "sample",
+            module: "sample",
+            script: true,
+            std: bundle,
+            htlx: bundle,
+            bundle,
+        };
+        let with = rust_lib_rs(&ctx(true));
+        assert!(
+            with.contains("include_bundle!(\"src/sample/init.tl\", host = [\"host\"])"),
+            "{with}"
+        );
+        assert!(
+            with.contains("h.install_bundle(&htl::bundle::Bundle::decode(BUNDLE)?)?;"),
+            "{with}"
+        );
+        assert!(
+            !with.contains("include_tl_bytes") && !with.contains("{{"),
+            "{with}"
+        );
+        let ffi = ffi_lib_rs(&ctx(true));
+        assert!(
+            ffi.contains("include_bundle!(\"src/sample/init.tl\"") && !ffi.contains("{{"),
+            "{ffi}"
+        );
+        let main = rust_main_rs(&ctx(true));
+        assert!(
+            main.contains(
+                "include_bundle!(\"src/main.tl\", host = [\"host\", \"sample\"], debug = true)"
+            ) && main.contains("h.run_bundle(&Bundle::decode(MAIN)?, &args)?;"),
+            "{main}"
+        );
+
+        let without = rust_lib_rs(&ctx(false));
+        assert!(
+            without.contains("include_tl_bytes!(\"src/sample/init.tl\")")
+                && without.contains("h.preload_bytes(\"sample\", MODULE)?;"),
+            "{without}"
+        );
+        assert!(
+            !without.contains("include_bundle") && !without.contains("{{"),
+            "{without}"
+        );
+        let ffi = ffi_lib_rs(&ctx(false));
+        assert!(
+            ffi.contains("include_tl_bytes!") && !ffi.contains("{{"),
+            "{ffi}"
+        );
+        let main = rust_main_rs(&ctx(false));
+        assert!(
+            main.contains("include_tl!(\"src/main.tl\")")
+                && main.contains("h.set_arg(\"main.tl\", &args)?;")
+                && main.contains("h.exec(MAIN, \"@src/main.tl\", &args)?;"),
+            "{main}"
+        );
+        assert!(!HtlPin::Release("0.4".into()).knows_bundle_entry());
+        assert!(HtlPin::Release("0.5".into()).knows_bundle_entry());
+        assert!(HtlPin::Main.knows_bundle_entry());
     }
 
     /// The same question for the `htlx` dependency: 0.4 installs it and cannot require it
@@ -1214,6 +1339,7 @@ mod tests {
             script: true,
             std: o.htl.knows_std(),
             htlx: o.writes_htlx(),
+            bundle: o.htl.knows_bundle_entry(),
         };
         let old = opts(HtlPin::Release("0.4".into()), false);
         let bare = t_manifest(&ctx(&old));
@@ -1250,6 +1376,7 @@ mod tests {
             script: true,
             std: true,
             htlx,
+            bundle: true,
         };
         let with = t_readme(&ctx(true), None);
         let block: Vec<&str> = with.lines().skip_while(|l| *l != "```sh").skip(1).collect();
@@ -1466,6 +1593,7 @@ mod tests {
             script,
             std: true,
             htlx: false,
+            bundle: true,
         };
         let bin = profile(DEFAULT_TARGET).unwrap();
         assert!((bin.readme_commands)(&ctx(true)).contains("cargo run"));
