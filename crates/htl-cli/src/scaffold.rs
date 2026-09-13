@@ -94,7 +94,7 @@ pub enum HtlPin {
 /// project for, newest last. A release is added here once a project written for it builds
 /// — which is what `just e2e-scaffold-unpatched` asks of [`DEFAULT_HTL`] on every commit —
 /// and an older one stays for as long as it keeps answering that question.
-pub const SUPPORTED: &[&str] = &["0.4"];
+pub const SUPPORTED: &[&str] = &["0.4", "0.5"];
 
 /// The release a scaffold pins when `--htl` is not given: the newest in [`SUPPORTED`].
 ///
@@ -102,7 +102,7 @@ pub const SUPPORTED: &[&str] = &["0.4"];
 /// on crates.io there is nothing for a scaffolded project to resolve, so this number lags
 /// `CARGO_PKG_VERSION` between a bump and a publish and never leads it — which the tests
 /// below assert, because the failure mode of leading it is a scaffold nobody can build.
-pub const DEFAULT_HTL: &str = "0.4";
+pub const DEFAULT_HTL: &str = "0.5";
 
 /// This repository, for the `main` pin's git dependency. Taken from the package metadata,
 /// which inherits `[workspace.package] repository`, so the URL is not written twice.
@@ -1187,9 +1187,9 @@ mod tests {
     }
 
     /// The same question for the `htlx` dependency: 0.4 installs it and cannot require it
-    /// (#204 is in no release), so 0.4 is not given it; 0.5, `main` and a checkout are.
+    /// (#204 landed in 0.5), so 0.4 is not given it; 0.5, `main` and a checkout are.
     #[test]
-    fn only_an_unreleased_htl_gets_the_htlx_dependency() {
+    fn the_pin_knows_the_dependency_entry_from_the_release_after_0_4() {
         assert!(!HtlPin::Release("0.4".into()).knows_dep_entry());
         assert!(HtlPin::Release("0.5".into()).knows_dep_entry());
         assert!(HtlPin::Main.knows_dep_entry());

@@ -16,14 +16,20 @@ types/README.md
 Teal project managed with [htl](https://github.com/ynishi/htl).
 
 ```sh
+htl pkg install        # fetch [deps] from mlua-pkg.toml — first, htlx is one of them
 htl check .            # type-check + lints
 htl run src/main.tl    # run the entry script
 htl test               # tests/*_test.tl via htl.test
 htl fmt .              # whitespace formatter
-htl pkg install        # fetch [deps] from mlua-pkg.toml
 ```
 
 Module: `src/sample/init.tl` (`require("sample")` from `src/` and `tests/`).
+
+`htlx` ([htl-x](https://github.com/ynishi/htl-x) v0.1.0) is a dependency from the start: the collections
+Lua does not have — `htlx.list` over arrays, `htlx.tablex` over maps, `htlx.seq` over
+iterators, `htlx.ordered` for insertion-ordered maps and sets — as `require("htlx.list")`
+and the rest, once `htl pkg install` has run. Drop the line from `mlua-pkg.toml` if it
+is not wanted (`htl new --no-x` writes the project without it).
 
 `mlua-pkg.toml` `entry = "src/sample"` only matters to *consumers* that depend on this
 package through mlua-pkg: they get it as `require("sample")`. Ignore it if nobody depends on this package.
@@ -74,6 +80,7 @@ version = "0.1.0"
 entry = "src/sample"
 
 [deps]
+htlx = { git = "https://github.com/ynishi/htl-x", tag = "v0.1.0" }
 # lshape = { git = "https://github.com/ynishi/lshape", tag = "v0.1" }
 ===== src/main.tl =====
 local sample = require("sample")
