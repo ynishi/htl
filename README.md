@@ -1926,7 +1926,7 @@ record is a decision the project made rather than a note about itself; dropping
 #### Which htl the project depends on (`--htl <req | main | path:<checkout>>`)
 
 A target that writes Rust writes a `Cargo.toml`, and `--htl` is what that manifest pins.
-Without it a project pins the newest release the scaffold supports — `0.4` today — which is
+Without it a project pins the newest release the scaffold supports — `0.5` today — which is
 data in the scaffold rather than the version of the `htl` you happen to have installed:
 the two move at different moments, and this one moves when a release that understands
 everything the scaffold writes is on crates.io. A release the scaffold has not been asked

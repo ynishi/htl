@@ -46,7 +46,7 @@ fn new_pins_the_default_release() {
     let root = scratch("dep");
     let (ok, _, stderr) = htl(&["new", "a", "--target", "bin"], &root);
     assert!(ok, "{stderr}");
-    assert_eq!(htl_line(&root.join("a/Cargo.toml")), "htl = \"0.4\"");
+    assert_eq!(htl_line(&root.join("a/Cargo.toml")), "htl = \"0.5\"");
 }
 
 /// `--htl main` is the dogfood pin: the project builds against the repository rather than
@@ -108,9 +108,9 @@ fn the_cdylib_pin_keeps_its_features_under_every_pin_kind() {
     assert!(line.contains("features = [\"ffi\"]"), "{line}");
 }
 
-/// `[build] target` is written only when the pinned htl can read it. Under the default
-/// release the key does not exist yet, so the project that has a target gets the same
-/// `htl.toml` as one that has none; under `main` or a checkout it is recorded. The `main`
+/// `[build] target` is written only when the pinned htl can read it. Under `0.4` the key
+/// does not exist, so the project that has a target gets the same `htl.toml` as one that
+/// has none; under the default release, `main` or a checkout it is recorded. The `main`
 /// case also runs `htl check` on the project it wrote, which is the assertion that matters:
 /// the file this scaffold produced is one an htl that carries the key accepts.
 #[test]
@@ -118,9 +118,17 @@ fn new_records_the_target_when_the_pin_reads_it() {
     let root = scratch("build-target");
     let config = |name: &str| std::fs::read_to_string(root.join(name).join("htl.toml")).unwrap();
 
-    let (ok, _, stderr) = htl(&["new", "a", "--target", "bin"], &root);
+    let (ok, _, stderr) = htl(&["new", "a", "--target", "bin", "--htl", "0.4"], &root);
     assert!(ok, "{stderr}");
     assert!(!config("a").contains("target ="), "{}", config("a"));
+
+    let (ok, _, stderr) = htl(&["new", "a5", "--target", "bin"], &root);
+    assert!(ok, "{stderr}");
+    assert!(
+        config("a5").contains("target = \"bin\""),
+        "{}",
+        config("a5")
+    );
 
     let (ok, _, stderr) = htl(&["new", "b", "--target", "bin", "--htl", "main"], &root);
     assert!(ok, "{stderr}");

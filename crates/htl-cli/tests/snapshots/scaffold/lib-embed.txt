@@ -33,14 +33,20 @@ opt-level = 3
 Teal project managed with [htl](https://github.com/ynishi/htl).
 
 ```sh
+htl pkg install        # fetch [deps] from mlua-pkg.toml — first, htlx is one of them
 htl check .            # type-check + lints
 htl test               # tests/*_test.tl via htl.test
 htl fmt .              # whitespace formatter
-htl pkg install        # fetch [deps] from mlua-pkg.toml
 cargo test             # the library's Rust test: the module loaded through preload
 ```
 
 Module: `src/sample/init.tl` (`require("sample")` from `src/` and `tests/`).
+
+`htlx` ([htl-x](https://github.com/ynishi/htl-x) v0.1.0) is a dependency from the start: the collections
+Lua does not have — `htlx.list` over arrays, `htlx.tablex` over maps, `htlx.seq` over
+iterators, `htlx.ordered` for insertion-ordered maps and sets — as `require("htlx.list")`
+and the rest, once `htl pkg install` has run. Drop the line from `mlua-pkg.toml` if it
+is not wanted (`htl new --no-x` writes the project without it).
 
 `mlua-pkg.toml` `entry = "src/sample"` only matters to *consumers* that depend on this
 package through mlua-pkg: they get it as `require("sample")`. The Rust host is a library:
@@ -90,6 +96,11 @@ indent = 3
 # enforced_by = "mods/_validate.lua"   # ...or name where it is enforced instead,
 #                          # for a Lua-side validator, a sibling crate, generated
 #                          # code. The file has to exist; a missing one is reported.
+
+[build]
+# What runs this project's output: hb (the htl binary, the default when absent), bin,
+# cdylib. Written by htl new --target; see README "Build targets".
+target = "bin"
 ===== mlua-pkg.toml =====
 [package]
 name = "sample"
@@ -98,6 +109,7 @@ version = "0.1.0"
 entry = "src/sample"
 
 [deps]
+htlx = { git = "https://github.com/ynishi/htl-x", tag = "v0.1.0" }
 # lshape = { git = "https://github.com/ynishi/lshape", tag = "v0.1" }
 ===== src/lib.rs =====
 //! The project as a library: the Rust host, the Teal module embedded beside it, and
@@ -138,6 +150,9 @@ const MODULE: &[u8] = htl::include_tl_bytes!("src/sample/init.tl");
 /// Teal module as `require("sample")`.
 pub fn preload(h: &Htl) -> anyhow::Result<()> {
     Host.htl_preload(h)?;
+    // `std.*`: json, string, path and the rest, from mlua-batteries; typed in the checker
+    // the same way. Remove this line and the project has no native modules but `host`.
+    h.install_std()?;
     // Stripped bytecode: small, and with neither line numbers nor a chunk name, so a
     // failure inside this module reads `?: in function 'sample.greet'`. `htl run
     // src/sample/init.tl` and `htl test` run the Teal itself and name file and line.
