@@ -305,6 +305,64 @@ fn declaration_steps_aside_for_a_bundled_module() {
     assert_eq!(v, 100, "host wins over the bundle");
 }
 
+/// `src/pkg/init.tl` is the module `pkg` — that is how a `require` of it is written — so
+/// a bundle whose entry it is has to serve it under that name, or a host that installs
+/// the bundle and a program that requires the module never meet. The stem, `init`, is
+/// what the entry used to be called.
+#[test]
+fn an_init_entry_is_named_after_its_directory() {
+    let root = scratch("init-entry");
+    write(
+        &root.join("src/pkg/init.tl"),
+        "local helper = require(\"pkg.helper\")\nreturn { x = helper.one() }\n",
+    );
+    write(
+        &root.join("src/pkg/helper.tl"),
+        "local record helper\nend\nfunction helper.one(): integer\n   return 1\nend\nreturn helper\n",
+    );
+    let h = Htl::new().unwrap();
+    h.add_path(&root.join("src")).unwrap();
+    let linked = link(&h, &root.join("src/pkg/init.tl"), &LinkOptions::default()).unwrap();
+    assert!(linked.ok(), "{:?}", linked.errors);
+    let b = linked.bundle().unwrap();
+    assert_eq!(b.entry, "pkg");
+    let names: Vec<&str> = b.modules.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(names, vec!["pkg", "pkg.helper"]);
+
+    // Installed, not run: the way a library hands its module to a host, and the way that
+    // host's program then asks for it.
+    let r = Htl::new().unwrap();
+    r.install_bundle(b).unwrap();
+    let x: i64 = r.lua().load("return require('pkg').x").eval().unwrap();
+    assert_eq!(x, 1);
+}
+
+/// A name in `host` is the host's whether or not a file on the search path could answer
+/// it: it is left out of the bundle and its own requires are not walked. That is what
+/// lets a binary's bundle leave out the module its library already bundles, instead of
+/// carrying it a second time.
+#[test]
+fn a_declared_host_module_is_left_out_even_when_a_file_answers_it() {
+    let root = project("host-declared");
+    let h = checker(&root);
+    let opts = LinkOptions {
+        host: vec!["util".into()],
+        ..Default::default()
+    };
+    let linked = link(&h, &root.join("src/main.tl"), &opts).unwrap();
+    assert!(linked.ok(), "{:?}", linked.errors);
+    let names: Vec<&str> = linked.modules.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["main", "unused"],
+        "util is the host's and mathx, which only util requires, is not reached"
+    );
+    assert_eq!(
+        linked.host_modules,
+        vec!["host".to_string(), "util".to_string()]
+    );
+}
+
 #[test]
 fn source_bundles_carry_no_fingerprint_and_run() {
     let root = project("source");

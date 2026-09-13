@@ -416,22 +416,27 @@ impl Host {
     }
 }
 
-// The Teal module, type-checked at `cargo build` and embedded as stripped bytecode. Keep
+// The Teal module and everything it requires, linked at `cargo build` and embedded as one
+// bundle of stripped bytecode: a dependency from `mlua-pkg.toml` rides along, and a
+// `require` that resolves to nothing fails the build here rather than at run time. `host`
+// is this crate's; a name declared only by a `.d.tl` (`std.*`) is the host's too. Keep
 // this after `#[host_module]` (same file, source order) so the declaration exists when the
-// module is checked.
-const MODULE: &[u8] = htl::include_tl_bytes!("src/sample/init.tl");
+// closure is checked.
+const BUNDLE: &[u8] = htl::include_bundle!("src/sample/init.tl", host = ["host"]);
 
 /// Register what this crate provides on a fresh `Htl`: the Rust `host` module, then the
-/// Teal module as `require("sample")`.
+/// Teal module as `require("sample")` and what it requires.
 pub fn preload(h: &Htl) -> anyhow::Result<()> {
     Host.htl_preload(h)?;
     // `std.*`: json, string, path and the rest, from mlua-batteries; typed in the checker
     // the same way. Remove this line and the project has no native modules but `host`.
     h.install_std()?;
-    // Stripped bytecode: small, and with neither line numbers nor a chunk name, so a
-    // failure inside this module reads `?: in function 'sample.greet'`. `htl run
-    // src/sample/init.tl` and `htl test` run the Teal itself and name file and line.
-    h.preload_bytes("sample", MODULE)?;
+    // Every module in the bundle goes into `package.preload`; a name already there
+    // (`host`, `std.*`) stays the host's. Stripped bytecode is small and has neither line
+    // numbers nor a chunk name, so a failure inside this module reads `?: in function
+    // 'sample.greet'`. `htl run src/sample/init.tl` and `htl test` run the Teal itself
+    // and name file and line.
+    h.install_bundle(&htl::bundle::Bundle::decode(BUNDLE)?)?;
     Ok(())
 }
 
