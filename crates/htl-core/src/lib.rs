@@ -83,6 +83,7 @@ pub mod unused;
 
 pub use build_target::BuildTarget;
 pub use diagnostic::{Diagnostic, Severity};
+pub use teal::Strict;
 
 /// Registry key under which the prelude table is stored (lets `pkg::TealResolver`
 /// reach the compiler from a bare `&Lua`).

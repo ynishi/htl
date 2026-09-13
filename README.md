@@ -303,7 +303,10 @@ where it arrives, by the program: `s:match("^%-?%d+$")` and `math.tointeger` whe
 exponent and surrounding whitespace are not wanted, `tonumber` when they are, and never
 a cast. The third layer, a host's own argument, is `#[host_module]`'s: mlua converts a
 Lua string to an `i64` parameter and a number to a `String` one, so a parameter that may
-see a value from that edge takes `mlua::Value` and matches the kind it means.
+see a value from that edge is a `Strict<T>` — `n: Strict<i64>` is declared `integer`
+exactly as `i64` is, takes a Lua integer (or a float with no fraction) and refuses
+`"10"` with `error converting Lua string to integer`. `Strict<String>`, `Strict<bool>`
+and `Strict<f64>` are the same for their kinds; it derefs to `T`.
 
 The second argument to `exec` is the chunk name: the name every frame of a run-time
 failure inside that chunk is reported under. `@<path>` is a source location and prints as
