@@ -6,7 +6,8 @@
 //!
 //! Type mapping is syntactic: `f64 -> number`, integers -> `integer`, `String`/`&str`
 //! -> `string`, `bool -> boolean`, `Vec<T> -> {T}`, `HashMap<K, V> -> {K:V}`,
-//! `Option<T> -> T`, `Result<T, _> -> T`, other identifiers pass through as record names.
+//! `Option<T> -> T`, `Result<T, _> -> T`, `Strict<T> -> T`, other identifiers pass through
+//! as record names.
 //! An `Option<T>` *parameter* is declared `name?: T` where Teal accepts the mark (a
 //! trailing run of them); a field and a return value stay `T`.
 //!
@@ -92,6 +93,9 @@ pub fn teal_type(ty: &Type, self_name: &str) -> Result<String, String> {
                 "Vec" | "VecDeque" | "HashSet" | "BTreeSet" => format!("{{{}}}", arg(0)?),
                 "HashMap" | "BTreeMap" => format!("{{{}:{}}}", arg(0)?, arg(1)?),
                 "Option" | "Result" | "Box" | "Rc" | "Arc" => arg(0)?,
+                // `Strict<T>` holds the runtime to the declaration `T` already makes; the
+                // declaration itself is `T`'s.
+                "Strict" => arg(0)?,
                 // mlua's handles to a userdata value: the Teal side sees the host type
                 // itself, which is what `open(..) -> Session` declared on the way out.
                 "UserDataRef" | "UserDataRefMut" | "UserDataOwned" => arg(0)?,
