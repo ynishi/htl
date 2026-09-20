@@ -127,10 +127,11 @@ Refs #<issue>
 - Formatting and clippy fixes go in their own commits.
 - Never commit `workspace/`, `.worktrees/`, `.claude/`, `*.hb` or local agent
   state. If a commit needs `git add -f`, stop: something is filed wrong.
-- The version bump (`[workspace.package] version` and the three internal
-  dependency versions in `Cargo.toml`) rides with the last change of a release,
-  not in a commit of its own; that commit's subject ends with the version,
-  `(0.1.N)`, which is how the history reads as a release log.
+- The version bump is not written by hand. A dispatch of the `Release-plz` workflow
+  opens a release PR with the bump and the CHANGELOG, and merging it publishes
+  (`release-plz.toml` says how). The subject decides the size of the next release:
+  a PR whose title starts with `feat:` makes it a minor, which on 0.x is the unit
+  that changes what a scaffold or a release pin can know; anything else is a patch.
 
 ## Pull requests
 

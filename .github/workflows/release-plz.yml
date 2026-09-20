@@ -1,0 +1,73 @@
+name: Release-plz
+
+on:
+  workflow_dispatch:
+    inputs:
+      auto_merge:
+        description: "Merge the release PR automatically once its checks pass"
+        type: boolean
+        default: true
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  # Opens the release PR (version bump + CHANGELOG) at the current HEAD. Runs only
+  # when dispatched by the repository owner; a push to main never opens one.
+  release-plz-pr:
+    name: Release-plz PR
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && github.actor == github.repository_owner }}
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-pr
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - id: release-pr
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      # GITHUB_TOKEN must not merge: a merge it makes does not trigger the release
+      # job below. RELEASE_PLZ_TOKEN (PAT) does.
+      - name: Arm auto-merge on the release PR
+        if: ${{ inputs.auto_merge && steps.release-pr.outputs.prs != '[]' }}
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          PRS: ${{ steps.release-pr.outputs.prs }}
+        run: |
+          for n in $(echo "$PRS" | jq -r '.[].number'); do
+            gh pr merge "$n" --auto --squash
+          done
+
+  # Publishes the four crates and pushes the v<version> tag when the release PR
+  # lands on main (release_always = false). The tag push fires release.yml (dist).
+  release-plz-release:
+    name: Release-plz release
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'push' && github.repository_owner == 'ynishi' }}
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
