@@ -12,7 +12,7 @@ readme = "../../README.md"
 documentation = "https://docs.rs/htl-core"
 keywords = ["lua", "teal", "mlua", "typed", "scripting"]
 categories = ["development-tools", "game-development"]
-include = ["src/**/*", "lua/**/*", "vendor/**/*"]
+include = ["src/**/*", "lua/**/*", "vendor/**/*", "build.rs"]
 
 [features]
 default = ["pkg"]
