@@ -1,0 +1,38 @@
+# release-plz: the release PR and the publish that follows it.
+#
+# A release is cut in two steps, neither of them a local command. A dispatch of
+# `Release-plz` (.github/workflows/release-plz.yml) opens a release PR at the current
+# main: the version bump and the CHANGELOG. Merging that PR publishes the four crates
+# in dependency order and pushes the `v<version>` tag, and that tag is what
+# `Release` (cargo-dist) builds binaries for.
+#
+# The next version is read from the commits since the last tag. The workspace is on
+# 0.x, where release-plz would bump patch for everything short of a `!` breaking
+# marker. Here a minor is the unit that changes what a scaffold or a release pin can
+# know, so a PR whose title starts with `feat:` asks for one; anything else is a patch.
+# `features_always_increment_minor` is what makes `feat:` mean minor on 0.x.
+
+[workspace]
+semver_check = false
+features_always_increment_minor = true
+changelog_update = false
+dependencies_update = false
+# The GitHub Release is created by cargo-dist (release.yml) from the tag, with the
+# binaries attached; release-plz only publishes and tags.
+git_release_enable = false
+git_tag_enable = false
+git_tag_name = "v{{ version }}"
+# Publish only when the commit that landed on main is the release PR's; an ordinary
+# merge never publishes.
+release_always = false
+pr_labels = ["release"]
+
+# The four crates move in lockstep through `[workspace.package] version`, so one crate
+# is enough to tag and to keep the single root CHANGELOG. `htl-cli` is that crate; the
+# other three fold their commits into its changelog.
+[[package]]
+name = "htl-cli"
+git_tag_enable = true
+changelog_update = true
+changelog_path = "./CHANGELOG.md"
+changelog_include = ["htl-core", "htl-macros", "htl"]
