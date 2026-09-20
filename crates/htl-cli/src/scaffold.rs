@@ -746,6 +746,14 @@ fn t_types_readme() -> String {
 /// a copy to keep in step. The comments below name neither and send the reader to
 /// `htl check --list-lints`, which answers from the binary they have.
 ///
+/// The commented `[check] paths` example names one relative directory and nothing else.
+/// A `~/...` entry resolves (see `htl::config::resolve_path`) and the README's `htl.toml`
+/// sample still shows one, but this line is written into every project htl scaffolds, and
+/// a commit-time scanner that looks for absolute or home-relative paths in committed
+/// configuration flags it there — in a file the author did not write and whose commented
+/// line does nothing. An example that costs every new project an exemption is the wrong
+/// example; the feature is documented where a reader goes looking for it.
+///
 /// `[build] target` is written whenever the project has a target. `htl init --target
 /// <name>` on a project that already has an `htl.toml` keeps that file and therefore does
 /// not add the key; a project that predates the key adds the `[build]` section by hand,
@@ -764,7 +772,7 @@ fn t_htl_toml(target: Option<BuildTarget>) -> String {
      [fmt]\n\
      indent = 3\n\n\
      [check]\n\
-     # paths = [\"mods\", \"~/.cache/sdk\"]   # extra dirs require() resolves from while checking\n\
+     # paths = [\"mods\"]   # extra dirs require() resolves from while checking\n\
      # (src/ and types/ are always searched; hand-written .d.tl go under types/)\n\n\
      # Where this project accepts modules written outside it:\n\
      # [[contract]]\n\

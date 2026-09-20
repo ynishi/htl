@@ -1562,6 +1562,11 @@ the assertion surface small enough to read in one screen. Matchers: `to_equal`,
 `t.expect_all(f()):to_equal(false, "no door")` (`t.expect(f())` is a 2-argument call and
 a type error; the message says so).
 
+A matcher that is not one of these is a type error too — `invalid key 'to_be' in type
+Expect<integer>` — and the checker appends the list above to it, read from the same
+declaration it refused the call against, so the names are in front of you at the moment
+you need them rather than here.
+
 A test builds values far more often than it asserts them, and what it builds is usually
 one valid value with a single thing varied, so a record with a handful of fields and a
 dozen tests is a dozen places that spell every field. Adding a field to it then means a

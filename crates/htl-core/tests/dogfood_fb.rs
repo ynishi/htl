@@ -356,3 +356,114 @@ fn an_unrelated_first_field_syntax_error_is_untouched() {
         ci.errors
     );
 }
+
+/// The matchers declared on `Expect` in `htl/test.d.tl`, read the way the test's subject
+/// is meant to be read: out of the declaration. Two lists written by hand -- one in the
+/// checker, one here -- would agree until somebody added a matcher.
+fn declared_matchers(record: &str) -> Vec<String> {
+    let src = include_str!("../lua/test.d.tl");
+    let body = src
+        .split_once(&format!("record {record}<"))
+        .expect("record in test.d.tl")
+        .1
+        .split_once("\n   end")
+        .expect("record end")
+        .0;
+    body.lines()
+        .filter_map(|l| l.trim().split_once(": function("))
+        .map(|(name, _)| name.to_string())
+        .collect()
+}
+
+/// `t.expect(#params):to_be(2)` is refused as `invalid key 'to_be' in type
+/// Expect<integer>`, which names the key that is wrong and not one that is right. The
+/// message carries the set the declaration allows, and keeps Teal's own text in front of
+/// it so anything matching on that keeps matching.
+#[test]
+fn an_unknown_matcher_names_the_matchers() {
+    let dir = scratch("matchers");
+    let file = dir.join("m_test.tl");
+    write(
+        &file,
+        "local t = require(\"htl.test\")\n\
+         t.describe(\"x\", function()\n   t.it(\"y\", function()\n      t.expect(1):to_be(1)\n   end)\nend)\n",
+    );
+    let h = Htl::new().unwrap();
+    h.install_test_lib().unwrap();
+    h.add_path(&dir).unwrap();
+    let ci = h.check(&file).unwrap();
+    assert_eq!(ci.errors.len(), 1, "{:?}", ci.errors);
+    let e = &ci.errors[0];
+    assert!(
+        e.contains("m_test.tl:4:") && e.contains("invalid key 'to_be' in type Expect<integer>;"),
+        "Teal's text is the prefix: {e}"
+    );
+    let declared = declared_matchers("Expect");
+    assert!(declared.len() > 10, "precondition: {declared:?}");
+    assert!(
+        declared.iter().all(|m| e.contains(m.as_str())),
+        "every declared matcher is named: {declared:?} in {e}"
+    );
+    assert!(e.contains("(README, \"Tests\")"), "{e}");
+}
+
+/// `expect_all` hands back a different record, and the message answers for that one:
+/// `Expect2` declares one matcher, so one is what it lists.
+#[test]
+fn the_two_value_expect_lists_its_own_matcher() {
+    let dir = scratch("matchers2");
+    let file = dir.join("m2_test.tl");
+    write(
+        &file,
+        "local t = require(\"htl.test\")\n\
+         local function two(): integer, string\n   return 1, \"a\"\nend\n\
+         t.describe(\"x\", function()\n   t.it(\"y\", function()\n      t.expect_all(two()):to_be(1, \"a\")\n   end)\nend)\n",
+    );
+    let h = Htl::new().unwrap();
+    h.install_test_lib().unwrap();
+    h.add_path(&dir).unwrap();
+    let ci = h.check(&file).unwrap();
+    assert_eq!(ci.errors.len(), 1, "{:?}", ci.errors);
+    let e = &ci.errors[0];
+    assert_eq!(declared_matchers("Expect2"), vec!["to_equal".to_string()]);
+    assert!(
+        e.contains(
+            "in type Expect2<integer, string>; the matchers are to_equal (README, \"Tests\")"
+        ),
+        "{e}"
+    );
+}
+
+/// A matcher that exists says nothing, and neither does an `invalid key` about a record
+/// of the project's own: the list is read out of the file this file's `require("htl.test")`
+/// resolved to, so a project with an `Expect` of its own is not told about these.
+#[test]
+fn a_valid_matcher_and_a_foreign_record_get_no_matcher_list() {
+    let dir = scratch("matchers-quiet");
+    let h = Htl::new().unwrap();
+    h.install_test_lib().unwrap();
+    h.add_path(&dir).unwrap();
+
+    let ok = dir.join("ok_test.tl");
+    write(
+        &ok,
+        "local t = require(\"htl.test\")\n\
+         t.describe(\"x\", function()\n   t.it(\"y\", function()\n      t.expect(1):to_equal(1)\n   end)\nend)\n",
+    );
+    let ci = h.check(&ok).unwrap();
+    assert!(ci.ok(), "{:?}", ci.errors);
+
+    let own = dir.join("own.tl");
+    write(
+        &own,
+        "local record box\n   record Expect<T>\n      get: function(self): T\n   end\nend\n\
+         local e: box.Expect<integer>\nprint(e:to_be(1))\nreturn box\n",
+    );
+    let ci = h.check(&own).unwrap();
+    let e = ci
+        .errors
+        .iter()
+        .find(|e| e.contains("'to_be'"))
+        .expect("invalid key error");
+    assert!(!e.contains("the matchers are"), "{e}");
+}
