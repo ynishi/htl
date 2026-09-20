@@ -21,9 +21,19 @@ Rust impl Host ──#[host_module]▶ UserData impl + host.d.tl   (Rust signatu
 cargo install htl-cli          # binaries: htl, cargo-htl  (so `cargo htl <verb>` works)
 ```
 
+Or a prebuilt binary from the [latest release](https://github.com/ynishi/htl/releases/latest)
+— macOS (Apple Silicon, Intel), Linux (aarch64, x86_64) and Windows (x86_64). The
+installers put `htl` and `cargo-htl` in `$CARGO_HOME/bin`, where `cargo install` would:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/ynishi/htl/releases/latest/download/htl-cli-installer.sh | sh
+brew install ynishi/tap/htl-cli
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/ynishi/htl/releases/latest/download/htl-cli-installer.ps1 | iex"
+```
+
 ```toml
 [dependencies]
-htl = "0.1"                    # embedding: engine + proc macros in one import
+htl = "0.6"                    # embedding: engine + proc macros in one import
 ```
 
 | crate | role |
