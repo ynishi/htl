@@ -1724,13 +1724,80 @@ fn report_patched(paths: &[PathBuf]) {
 /// anyone from creating a project.
 ///
 /// The version compared is this binary's, which is the one the pin is about. The `htl`
-/// crate a Rust host builds against is Cargo's business and is pinned in `Cargo.toml`.
+/// crate a Rust host builds against is Cargo's, pinned in `Cargo.toml` — a separate
+/// question, and the one [`warn_cargo_htl_mismatch`] answers.
 fn load_config(first: &Path) -> Result<project::Config> {
     let cfg = project::config_of(first)?;
     if let Some((_, path, c)) = &cfg {
         htl::config::check_toolchain(c, path, env!("CARGO_PKG_VERSION"))?;
     }
     Ok(cfg)
+}
+
+/// Say so, once, when the `Cargo.toml` around this project asks for an `htl` crate this
+/// command is not.
+///
+/// The two halves of htl are released together and a project uses both: the crate the host
+/// links, and the command that checks the Teal beside it. A project left at `htl = "0.5.1"`
+/// while the installed CLI had moved to 0.6.0 was checked by one and built against the
+/// other, and nothing in either output mentioned the other one — which is the whole of the
+/// failure, since either version alone was fine.
+///
+/// **A warning, not an error, and not one of the summary's `warning(s)`** — that count is
+/// the checker's, and this is not about the sources. A project goes to a hard error over a
+/// version skew for one of two reasons, and htl has neither: the format between the halves
+/// is unstable, so a mismatched pair miscompiles rather than failing (wasm-bindgen refuses
+/// a JS glue built by another version); or the diagnostic downstream is opaque, so the
+/// person would otherwise read a type error from deep inside a dependency (cargo's
+/// `rust-version`). Here both halves worked — the run that produced this report is the
+/// evidence — and the line is worth printing only because the person has no other way to
+/// notice. npm's `engines` is the same shape and warns by default; Prisma says nothing at
+/// all, and its silence is filed as a bug.
+///
+/// Read from the `Cargo.toml` of the crate the project sits in, `[dependencies] htl` only:
+/// a string, or a table with `version`. A table without one — `path`, `git`, or a
+/// `workspace = true` inheritance — states no requirement here and is passed over without
+/// a word, which is exactly what a scaffold written by a checkout-built CLI produces. No
+/// `Cargo.toml`, no `[dependencies]`, no `htl` key, or a requirement cargo itself would
+/// reject: nothing is printed, because there is nothing this can be surer about than cargo.
+fn warn_cargo_htl_mismatch(first: &Path) {
+    let Some(root) = htl::dts::find_cargo_package_root(first) else {
+        return;
+    };
+    let Ok(text) = fs::read_to_string(root.join("Cargo.toml")) else {
+        return;
+    };
+    let Ok(manifest) = text.parse::<toml::Table>() else {
+        return;
+    };
+    let Some(dep) = manifest.get("dependencies").and_then(|d| d.get("htl")) else {
+        return;
+    };
+    let req_text = match dep {
+        toml::Value::String(s) => s.as_str(),
+        toml::Value::Table(t) => match t.get("version").and_then(toml::Value::as_str) {
+            Some(s) => s,
+            None => return,
+        },
+        _ => return,
+    };
+    let running = env!("CARGO_PKG_VERSION");
+    let (Ok(req), Ok(version)) = (
+        semver::VersionReq::parse(req_text),
+        semver::Version::parse(running),
+    ) else {
+        return;
+    };
+    if req.matches(&version) {
+        return;
+    }
+    // Both ways out are named because either is the right one: the project may be the
+    // thing that is current, in which case the command is what moves.
+    eprintln!(
+        "htl {running}; Cargo.toml asks for htl {req_text} — the crate and the CLI are \
+         meant to move together (cargo install htl-cli --version {req_text}, or bump the \
+         dependency)"
+    );
 }
 
 fn cmd_fmt(paths: &[PathBuf], check: bool, indent: Option<usize>) -> Result<ExitCode> {
@@ -2077,6 +2144,7 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
     }
     // htl.toml first, then --lint, so the flag wins; `strict` from the file unless flagged.
     let cfg = load_config(&paths[0])?;
+    warn_cargo_htl_mismatch(&paths[0]);
     let strict = flags.strict
         || cfg
             .as_ref()
@@ -2110,7 +2178,13 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
             cache: project::cache_options(use_cache, cache_mode, &cfg, explain),
         },
     )?;
-    let fail = report_check(sink.out(), json, &rep, strict)?;
+    let fail = report_check(
+        sink.out(),
+        json,
+        &rep,
+        strict,
+        patched_files(&paths, &rep.files),
+    )?;
     Ok(if fail {
         ExitCode::FAILURE
     } else {
@@ -2404,13 +2478,45 @@ fn human_age(secs: u64) -> String {
     }
 }
 
+/// How many of the files a walk visited came out of a patched dependency.
+///
+/// The prefix test a diagnostic's `origin` is decided by, asked of the file list instead,
+/// and canonicalised on both sides for the same reason it is there: the walk spells a file
+/// the way the command line spelled the root it started from (`htl check .` gives
+/// `./patches/mathx/src/mathx.tl`), while the `patch_dir` the manifest declares is
+/// absolute. Zero for a project with no patch, which is what keeps the summary line below
+/// unchanged for everyone who has never run `htl pkg patch`.
+fn patched_files(paths: &[PathBuf], files: &[PathBuf]) -> usize {
+    let dirs: Vec<PathBuf> = project::patched(paths)
+        .into_iter()
+        .map(|d| fs::canonicalize(&d).unwrap_or(d))
+        .collect();
+    if dirs.is_empty() {
+        return 0;
+    }
+    files
+        .iter()
+        .filter(|f| {
+            let f = fs::canonicalize(f).unwrap_or_else(|_| (*f).to_path_buf());
+            dirs.iter().any(|d| f.starts_with(d))
+        })
+        .count()
+}
+
 /// The one place a check reports its totals, so a replayed module and a checked one cannot
 /// drift apart in how they are summarized. Returns whether the run counts as a failure.
+///
+/// `patched` is how many of those files are a patched dependency's ([`patched_files`]),
+/// split out of the count rather than added to it. One `htl pkg patch` turned a project's
+/// `15 file(s)` into `25 file(s)` with nothing said, and a file count that moves for a
+/// reason the line does not give is a file count a reader cannot use: the dependency's
+/// `tests/` are now in the walk, they are not the project's, and the line has to say so.
 fn report_check(
     out: &mut report::Out,
     json: bool,
     rep: &project::Report,
     strict: bool,
+    patched: usize,
 ) -> Result<bool> {
     let (files, replayed) = (rep.files.len(), rep.replayed);
     let (errors, warnings, lints) = (rep.errors, rep.warnings, rep.lints);
@@ -2419,6 +2525,7 @@ fn report_check(
     if json {
         report::emit(&report::CheckReport {
             files,
+            patched,
             diagnostics: out.take(),
             summary: report::CheckSummary {
                 errors,
@@ -2448,8 +2555,15 @@ fn report_check(
             0 => String::new(),
             n => format!(", {n} at deny"),
         };
+        // A project with no patch reads exactly as it read before the split existed: the
+        // second number appears only when there is something on the other side of it, and
+        // the two always add up to the one number that was there.
+        let counted = match patched {
+            0 => format!("{files} file(s)"),
+            n => format!("{} file(s) + {n} in patched dependencies", files - n),
+        };
         eprintln!(
-            "htl check: {files} file(s), {errors} error(s), {warnings} warning(s), {lints} lint(s){denied}{}{cached}",
+            "htl check: {counted}, {errors} error(s), {warnings} warning(s), {lints} lint(s){denied}{}{cached}",
             if strict { " [strict]" } else { "" }
         );
     }

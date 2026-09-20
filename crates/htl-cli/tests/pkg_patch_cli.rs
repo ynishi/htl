@@ -83,9 +83,46 @@ fn check_reads_the_patched_copy_and_names_the_dependency() {
         err.contains("patched patches/mathx (mathx)"),
         "the run says which dependency the directory stands in for: {err}"
     );
+    // One of the project's own and two of the dependency's — added up, the three files the
+    // walk visited, and split so that the jump from one to three is accounted for.
     assert!(
-        err.contains("3 file(s)"),
-        "the copy's sources are checked with the project's own: {err}"
+        err.contains("htl check: 1 file(s) + 2 in patched dependencies,"),
+        "the copy's sources are checked with the project's own, and counted apart: {err}"
+    );
+}
+
+/// The same two numbers for a consumer: `files` keeps its meaning (everything the walk
+/// visited) so that nobody reading it is moved by the new field, and `patched` is the part
+/// of it the project did not write.
+#[test]
+fn json_carries_the_total_and_the_patched_part_of_it() {
+    let root = patched_project("check-json");
+    let (ok, out, err) = htl(&["check", "--format", "json"], &root);
+    assert!(ok, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect(&out);
+    assert_eq!(v["files"], 3, "{out}");
+    assert_eq!(v["patched"], 2, "{out}");
+}
+
+/// The line a project with no patch gets is the line it always got: one count, no `+`.
+/// The split is news only where there is something to split.
+#[test]
+fn a_project_without_a_patch_prints_the_line_it_always_did() {
+    let root = scratch("unpatched");
+    write(
+        &root.join("mlua-pkg.toml"),
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\n",
+    );
+    write(&root.join("src/main.tl"), "local x: number = 1\nprint(x)\n");
+    let (ok, _, err) = htl(&["check"], &root);
+    assert!(ok, "{err}");
+    assert!(
+        err.contains("htl check: 1 file(s), 0 error(s), 0 warning(s), 0 lint(s)"),
+        "the summary of an unpatched project changed: {err}"
+    );
+    assert!(
+        !err.contains("patched"),
+        "a project with no patch was told about one: {err}"
     );
 }
 

@@ -1208,6 +1208,13 @@ command runs the project, as before — which is what `htl new` currently writes
 scaffolded Rust host builds against the released `htl` crate and that crate rejects a key
 newer than itself. Add it by hand to pin a project whose htl already knows it.
 
+The two halves are still released together, so `htl check` prints one line when the
+`htl = "0.6"` in the project's `Cargo.toml` does not admit the command running — `htl
+0.6.2; Cargo.toml asks for htl 0.5.1 — the crate and the CLI are meant to move together
+(cargo install htl-cli --version 0.5.1, or bump the dependency)`. A warning and nothing
+more: the check that printed it worked, and which half is the stale one is the project's
+to say. A `path` or `git` dependency states no version here and is passed over.
+
 `[check] paths` is for modules the host supplies at run time from somewhere the
 checker would not look (an SDK cache, a mods dir): the CLI, `include_tl!` and
 `contract_resolvers` all add them, plus the `htl.toml` dir, its `src/` and its
@@ -1476,6 +1483,12 @@ to `htl fix` (a fix there would go at the next install — patching is how a dep
 edited). The criterion for walking is who writes the directory — one that install
 regenerates (`target_dir`) is skipped, one that the project edits is checked.
 
+Those extra files are counted apart, so the number does not move without saying why: a
+check that reads a patched dependency ends `htl check: 15 file(s) + 10 in patched
+dependencies, 0 error(s), ...`, the two adding up to every file the walk visited. A
+project with no patch prints the one number, as before. Under `--format json` the whole
+is `files` and the second half is `patched` ("Machine-readable output").
+
 **Upgrading.** A patch is bound to the revision it was taken from. When the pin moves —
 the dependency was upgraded — install fetches the new revision and resolves from it, the
 copy is left alone, and every install says so until the patch is refreshed or removed:
@@ -1739,10 +1752,13 @@ stdout and nothing on stderr (the text form is stderr-only, so the two never mix
 `cache status` and `bundle info` do. The exit code is the same as in text mode. Field
 names are stable; fields may be added, not renamed.
 
-- `check`: `{ files, diagnostics: [{ severity: "error"|"warning"|"lint", file, line,
-  col, rule?, message, required_by?, origin? }], summary: { errors, warnings, lints,
+- `check`: `{ files, patched, diagnostics: [{ severity: "error"|"warning"|"lint", file,
+  line, col, rule?, message, required_by?, origin? }], summary: { errors, warnings, lints,
   denied, strict, ok } }`. `rule` is the lint rule (`nil-index`, `contract`, ...), split
-  out of the message. `denied` is how many of `warnings` + `lints` were said under a rule
+  out of the message. `files` is every file the walk visited and `patched` how many of
+  them came out of a `patch_dir` dependency (see Patched dependencies), so the project's
+  own is the difference — which is the pair the text summary prints. `denied` is how many
+  of `warnings` + `lints` were said under a rule
   at `deny` — a count of levels, so it overlaps those two rather than adding to them, and
   `ok` is false whenever it is not zero. An error in a module the check reached through `require` has `file` set
   to that module and `required_by` to the file that required it; `origin` is
