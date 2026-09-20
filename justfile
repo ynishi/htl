@@ -133,7 +133,7 @@ e2e-scaffold-packaged:
     # Four crates in one command, because three of them depend on each other at versions
     # nobody has published: while it verifies each tarball by building it, cargo overlays
     # the packages it is building on the registry, so `htl`'s requirement on `htl-core`
-    # 0.5.1 resolves to the `htl-core` 0.5.1 being packaged beside it. No `--allow-dirty`:
+    # 0.6.0 resolves to the `htl-core` 0.6.0 being packaged beside it. No `--allow-dirty`:
     # what is under test has to be what git has, or it is not the tarball that would be
     # uploaded — and a clean worktree is also what puts .cargo_vcs_info.json inside it.
     # Cargo scopes that to the files it is about to ship, which is the right scope and
