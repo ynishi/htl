@@ -1306,7 +1306,8 @@ fn cmd_pkg_patch(dep: &str, force: bool) -> Result<ExitCode> {
     let project = htl::pkg::Project::find(&cwd).context(
         "no mlua-pkg.toml above the current directory: a patch belongs to a project, so this runs in one",
     )?;
-    let report = project.patch(dep, force)?;
+    let done = project.patch(dep, force)?;
+    let report = &done.report;
     let rel = report
         .patch_dir
         .strip_prefix(&project.root)
@@ -1314,6 +1315,15 @@ fn cmd_pkg_patch(dep: &str, force: bool) -> Result<ExitCode> {
     let verb = if report.created { "patched" } else { "rebuilt" };
     let base: String = report.base.chars().take(7).collect();
     eprintln!("  {verb} {} ({dep} at {base})", rel.display());
+    // Only when there was something to drop: on a dependency whose repository holds
+    // nothing but the package this line would be noise, and the reader would learn the
+    // rule from a line that says nothing happened.
+    if !done.dropped.is_empty() {
+        eprintln!(
+            "  dropped {} (the repository's, not the package's)",
+            done.dropped.join(", ")
+        );
+    }
     eprintln!("htl: it is the project's code now — edit it, commit it, then `htl pkg install`.");
     Ok(ExitCode::SUCCESS)
 }

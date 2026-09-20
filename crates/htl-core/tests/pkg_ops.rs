@@ -55,6 +55,35 @@ fn remote(name: &str) -> (String, String) {
     (format!("file://{}", dir.display()), sha)
 }
 
+/// The same dependency as a repository really is: the package (both manifests, the
+/// README, the licence texts, a dotfile of its own below the root) with the repository's
+/// housekeeping beside it — a CI workflow, ignore rules, a stray `.DS_Store`.
+fn remote_with_housekeeping(name: &str) -> (String, String) {
+    let dir = scratch(name);
+    write(&dir.join("src/mathx.tl"), SOURCE);
+    write(&dir.join("src/.luacheckrc"), "std = \"lua54\"\n");
+    write(&dir.join("types/mathx.d.tl"), DECL);
+    write(&dir.join("README.md"), "# mathx\n");
+    write(&dir.join("LICENSE-MIT"), "MIT\n");
+    write(&dir.join("LICENSE-APACHE"), "Apache-2.0\n");
+    write(&dir.join("htl.toml"), "[check]\nstrict = true\n");
+    write(
+        &dir.join("mlua-pkg.toml"),
+        "[package]\nname = \"mathx\"\nversion = \"0.1.0\"\nentry = \"src\"\n",
+    );
+    write(
+        &dir.join(".github/workflows/ci.yml"),
+        "name: ci\non: [push]\n",
+    );
+    write(&dir.join(".gitignore"), "/target\n*.log\n");
+    write(&dir.join(".DS_Store"), "\0\0\n");
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-qm", "mathx"]);
+    let sha = git(&dir, &["rev-parse", "HEAD"]);
+    (format!("file://{}", dir.display()), sha)
+}
+
 fn project(name: &str, url: &str, sha: &str) -> PathBuf {
     let root = scratch(name);
     write(
@@ -127,6 +156,57 @@ fn install_resolves_a_patched_dependency_from_its_copy() {
             .unwrap()
             .contains("n + n"),
         "the project's own edit is what is installed"
+    );
+}
+
+/// The copy is the package, not the repository it was checked out of: every dot-entry at
+/// its root goes, and nothing else does. `.github` and `.gitignore` are the two that cost
+/// the project something once committed — an inert workflow the `.github/workflows/*`
+/// gates still fire on, and ignore rules from another repository dropping files from this
+/// one's commits.
+#[test]
+fn patch_drops_the_repositorys_dot_entries_and_keeps_the_package() {
+    let (url, sha) = remote_with_housekeeping("remote-housekeeping");
+    let root = project("housekeeping", &url, &sha);
+    let done = Project::at(&root).patch("mathx", false).unwrap();
+    assert_eq!(
+        done.dropped,
+        vec![".DS_Store", ".git", ".github", ".gitignore"],
+        "and the caller is told which ones, so the report can say it"
+    );
+
+    let dir = root.join("patches/mathx");
+    for gone in [".git", ".github", ".gitignore", ".DS_Store"] {
+        assert!(
+            std::fs::symlink_metadata(dir.join(gone)).is_err(),
+            "{gone} is the repository's housekeeping and is not committed here"
+        );
+    }
+    for kept in [
+        "src/mathx.tl",
+        "types/mathx.d.tl",
+        "README.md",
+        "LICENSE-MIT",
+        "LICENSE-APACHE",
+        "htl.toml",
+        "mlua-pkg.toml",
+        // Below the root a dotfile belongs to the package the way any other file there
+        // does, and htl does not know which ones the dependency needs.
+        "src/.luacheckrc",
+    ] {
+        assert!(dir.join(kept).is_file(), "{kept} is the package's own");
+    }
+
+    // The issue's acceptance: what is left is still a package install resolves from.
+    let report = Project::at(&root).install().unwrap();
+    assert!(report.packages[0].patched, "{report:?}");
+    assert_eq!(
+        std::fs::canonicalize(report.packages[0].root()).unwrap(),
+        std::fs::canonicalize(&dir).unwrap()
+    );
+    assert!(
+        report.packages[0].require_dir().join("mathx.tl").is_file(),
+        "{report:?}"
     );
 }
 

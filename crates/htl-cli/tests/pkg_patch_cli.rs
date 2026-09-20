@@ -114,11 +114,20 @@ fn test_finds_nothing_when_the_only_suite_is_the_dependencys() {
     );
 }
 
-/// `htl pkg patch <dep>` end to end: a dependency on disk, taken into the tree.
+/// `htl pkg patch <dep>` end to end: a dependency on disk, taken into the tree — the
+/// package, and not the repository it was checked out of. The upstream here carries what a
+/// real one does beside its source, a CI workflow and an ignore file, and neither is
+/// committed into this project.
 #[test]
 fn patch_reports_where_the_copy_is() {
     let dep = scratch("remote");
     write(&dep.join("src/mathx.tl"), "return {}\n");
+    write(&dep.join("README.md"), "# mathx\n");
+    write(
+        &dep.join(".github/workflows/ci.yml"),
+        "name: ci\non: [push]\n",
+    );
+    write(&dep.join(".gitignore"), "/target\n");
     git(&dep, &["init", "-q"]);
     git(&dep, &["add", "."]);
     git(&dep, &["commit", "-qm", "mathx"]);
@@ -140,11 +149,32 @@ fn patch_reports_where_the_copy_is() {
         err.contains(&format!("patched patches/mathx (mathx at {})", &sha[..7])),
         "{err}"
     );
+    assert!(
+        err.contains("dropped .git, .github, .gitignore (the repository's, not the package's)"),
+        "the run says what it left out, once, and only because there was something: {err}"
+    );
     assert!(root.join("patches/mathx/src/mathx.tl").is_file(), "{err}");
+    assert!(root.join("patches/mathx/README.md").is_file(), "{err}");
+    for gone in [".git", ".github", ".gitignore"] {
+        assert!(
+            std::fs::symlink_metadata(root.join("patches/mathx").join(gone)).is_err(),
+            "{gone} is under patches/mathx, where the project would commit it: {err}"
+        );
+    }
     assert!(
         std::fs::read_to_string(root.join("mlua-pkg.toml"))
             .unwrap()
             .contains("patch_dir = \"patches/mathx\""),
+        "{err}"
+    );
+
+    // And the copy is still what install resolves the dependency from (the acceptance).
+    let (ok, _, err) = htl(&["pkg", "install"], &root);
+    assert!(ok, "{err}");
+    assert!(err.contains("mathx"), "{err}");
+    assert!(
+        std::fs::canonicalize(root.join(".htl/modules/vendored/mathx")).unwrap()
+            == std::fs::canonicalize(root.join("patches/mathx")).unwrap(),
         "{err}"
     );
 }
