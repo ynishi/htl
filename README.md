@@ -2085,6 +2085,24 @@ than from the tests, and stays quiet for a chain with an `else`, for a single `i
 is a guard, not a dispatch), and where every branch returns and code follows, which is the
 `else` written differently. Those are the same exemptions `enum-exhaustive` makes.
 
+Because the clause is read *before* the body's fields, a record cannot open with a field
+called `where`: on the first line, `where: any` is parsed as the predicate and dies on
+the `:`. The name is taken in that one position only — a `where` field one line further
+down is an ordinary field — and the quoted spelling Lua tables already allow works
+anywhere, first line included:
+
+```tl
+local record FindArgs
+   ["where"]: any     -- read back as args["where"]; args.where does not parse
+   pkg: string
+end
+```
+
+Teal reports the first-line form as a bare `syntax error` plus a second error on the next
+field's line. htl replaces it with `'where' opens a union predicate when it is the first
+line of a record or interface body; write ["where"]: <type>, or put another field first`,
+and drops the follow-on.
+
 This is a Teal feature, not an htl one; it is documented here because the error above is
 what a reader meets first, and it reads like a dead end rather than a pointer to `where`.
 
@@ -2105,6 +2123,10 @@ what a reader meets first, and it reads like a dead end rather than a pointer to
 - **A union of two records**: "cannot discriminate a union between multiple table
   types" reads like a limit on the type system, and it is a limit on `is`, which each
   record can lift for itself with a `where` clause (see above).
+- **A field called `where`**: only on a record or interface body's *first* line, where
+  Teal reads the union predicate before the fields. The bare "syntax error" and the
+  follow-on error on the next field's line become one message naming the keyword and the
+  two ways out — `["where"]: <type>`, or any other field first (see above).
 - **Multi-value call in last position**: `t.expect(can_cast(x))` with `can_cast`
   returning `boolean, string` is a 2-argument call, and Teal reports "wrong number of
   arguments" at `expect`. htl names the expanding call and the two fixes (bind first,

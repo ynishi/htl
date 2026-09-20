@@ -886,6 +886,73 @@ local function self_require_errors(filename, ast)
    return out
 end
 
+-- What a record body's first line may not be called, and the two spellings that work.
+--
+-- The sentence keeps the `syntax error:` prefix Teal's own parse errors carry, because
+-- that prefix is how the rest of htl recognises a file the parser rejected (`htl fix`
+-- refuses to rewrite one), and because it is still true: the parse failed.
+local WHERE_FIELD_MSG =
+   "syntax error: 'where' opens a union predicate when it is the first line of a record " ..
+   "or interface body; write [\"where\"]: <type>, or put another field first"
+
+-- Explain the bare "syntax error" a field named `where` produces, and drop the parse
+-- errors that follow from it.
+--
+-- `where` is not one of Teal's keywords -- the lexer hands it back as an identifier --
+-- but `parse_record_body` reads an optional `where <expression>` clause, the predicate
+-- that discriminates a union variant (it is stored as the record's `__is` metamethod),
+-- after the body's array-interface and `is` lists and *before* its field loop starts. So
+-- `where: any` on the body's first line is parsed as that clause's expression, dies on
+-- the `:` that follows, and is reported as a bare "syntax error" naming neither `where`
+-- nor the field. One line further down the field loop has begun and `where` is an
+-- ordinary field name; `["where"]` takes the field loop's bracketed-string-literal
+-- branch and is accepted in any position, first line included. Both of those type-check
+-- today, so what the message has to name is the position, not the name -- "`where` is
+-- reserved in a record body" would be false.
+--
+-- Spotting the candidate is a line match, but being wrong about it would put a
+-- confident, misleading sentence on an unrelated parse failure, so the guess is proved
+-- before it is printed: the line is rewritten to the bracketed spelling and the file
+-- parsed again. The message is swapped in only when that rewrite clears the error, and
+-- the errors the parser goes on to report on later lines are dropped only when the same
+-- rewrite clears them too -- which is what "a consequence of this one" means here,
+-- rather than a rule about adjacency. The price is one extra parse (no type check) of a
+-- file that has already failed to parse, and none at all for a file that has not.
+--
+-- Returns msgs, dropped, both keyed by index into `syntax_errors`: `msgs[i]` replaces
+-- that error's text, `dropped[i]` removes the error.
+local function explain_where_field(filename, src, syntax_errors)
+   local msgs, dropped = {}, {}
+   if not src then return msgs, dropped end
+   local lines = {}
+   for line in (src .. "\n"):gmatch("([^\n]*)\n") do lines[#lines + 1] = line end
+   for i, e in ipairs(syntax_errors) do
+      local line = e.msg == "syntax error" and e.y and lines[e.y]
+      local indent, gap = nil, nil
+      if line then indent, gap = line:match("^(%s*)where(%s*):") end
+      -- The error has to point at that very colon; anything else on the line is a
+      -- different failure that happens to sit next to a `where`.
+      if indent and e.x == #indent + 5 + #gap + 1 then
+         local rewritten = {}
+         for j, l in ipairs(lines) do rewritten[j] = l end
+         rewritten[e.y] = indent .. "[\"where\"]" .. line:sub(#indent + 6)
+         local _, errs = tl.parse(table.concat(rewritten, "\n"), filename, "tl")
+         local still = {}
+         for _, r in ipairs(errs or {}) do still[r.y or 0] = true end
+         if not still[e.y] then
+            msgs[i] = WHERE_FIELD_MSG
+            local j = i + 1
+            while syntax_errors[j] and syntax_errors[j].y and syntax_errors[j].y > e.y
+               and not still[syntax_errors[j].y] do
+               dropped[j] = true
+               j = j + 1
+            end
+         end
+      end
+   end
+   return msgs, dropped
+end
+
 local function collect_errors(filename, result, src)
    -- A result served again from the env cache (every runtime `require` of a module
    -- already checked) would otherwise re-walk its AST for require sites and re-resolve
@@ -897,17 +964,34 @@ local function collect_errors(filename, result, src)
    -- error_fixes[i] = fix for errors[i], or false: a rewrite `htl fix` may apply.
    local error_fixes = {}
    result.htl_errors, result.htl_error_fixes, result.htl_errors_for = errors, error_fixes, filename
-   for _, e in ipairs(result.syntax_errors or {}) do errors[#errors + 1] = fmt(filename, e) end
-   if result.ast and #(result.syntax_errors or {}) == 0 then
+   -- The file's text, read from disk once and only when something below asks for it: the
+   -- caller has it on some paths and not on others, and a check whose file both parses
+   -- and requires nothing suspicious never needs it.
+   local function source()
+      if src == nil then
+         local fd = io.open(filename, "rb")
+         src = fd and fd:read("a") or false
+         if fd then fd:close() end
+      end
+      return src or nil
+   end
+   local syntax_errors = result.syntax_errors or {}
+   local where_msgs, where_dropped = {}, {}
+   if #syntax_errors > 0 then
+      where_msgs, where_dropped = explain_where_field(filename, source(), syntax_errors)
+   end
+   for i, e in ipairs(syntax_errors) do
+      if not where_dropped[i] then
+         errors[#errors + 1] =
+            fmt(filename, { filename = e.filename, y = e.y, x = e.x, msg = where_msgs[i] or e.msg })
+      end
+   end
+   if result.ast and #syntax_errors == 0 then
       -- Cheap text prefilter: only when some `require("<name>")` in the source resolves
       -- to this very file is the AST walked for exact positions. The walk costs tens of
       -- ms on a large module and it ran for every module a program required [measured].
-      if not src then
-         local fd = io.open(filename, "rb")
-         if fd then src = fd:read("a"); fd:close() end
-      end
       local suspicious = false
-      for name in (src or ""):gmatch("require%s*%(?%s*[\"']([^\"']+)[\"']") do
+      for name in (source() or ""):gmatch("require%s*%(?%s*[\"']([^\"']+)[\"']") do
          local found, fd = tl.search_module(name, true)
          if fd then fd:close() end
          if found and norm_path(found) == norm_path(filename) then suspicious = true break end
