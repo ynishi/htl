@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2](https://github.com/ynishi/htl/compare/v0.6.1...v0.6.2) - 2026-09-20
+
+### Other
+
+- README says the four ways to install the CLI, not only cargo ([#262](https://github.com/ynishi/htl/pull/262))
+
 ## [0.6.1](https://github.com/ynishi/htl/compare/v0.6.0...v0.6.1) - 2026-09-20
 
 ### Other
