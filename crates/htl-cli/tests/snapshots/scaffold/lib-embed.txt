@@ -72,7 +72,7 @@ current Rust signatures.
 indent = 3
 
 [check]
-# paths = ["mods", "~/.cache/sdk"]   # extra dirs require() resolves from while checking
+# paths = ["mods"]   # extra dirs require() resolves from while checking
 # (src/ and types/ are always searched; hand-written .d.tl go under types/)
 
 # Where this project accepts modules written outside it:

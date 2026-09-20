@@ -18,7 +18,7 @@
 //! indent = 3
 //!
 //! [check]
-//! paths = ["mods", "~/.cache/tsk/sdk"]   # extra dirs the checker resolves require() from
+//! paths = ["mods"]   # extra dirs the checker resolves require() from
 //!
 //! [[contract]]
 //! dir = "mods"                 # or "sites/*" for one level of subdirectories

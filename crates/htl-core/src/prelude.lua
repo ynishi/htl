@@ -953,6 +953,74 @@ local function explain_where_field(filename, src, syntax_errors)
    return msgs, dropped
 end
 
+-- The methods declared directly in `record <name>` in a Teal declaration's text, in the
+-- order they are written.
+--
+-- A line scan rather than a parse: the only caller reads `htl/test.d.tl`, a file this
+-- crate ships, and running the parser over it to answer one error message would cost
+-- more than the message is worth. `record`, `enum` and `interface` openers are counted
+-- so that a nested one cannot end the scan early, and only depth 1 contributes names --
+-- a method of a nested record is not a method of this one.
+local function record_method_names(src, name)
+   local out = {}
+   local depth
+   for line in (src .. "\n"):gmatch("([^\n]*)\n") do
+      if not depth then
+         -- `record Expect<T>` or a bare `record SnapshotConfig`; the anchors keep
+         -- `Expect` from matching the line that opens `Expect2`.
+         if line:match("^%s*record%s+" .. name .. "%s*<") or line:match("^%s*record%s+" .. name .. "%s*$") then
+            depth = 1
+         end
+      elseif line:match("^%s*end%s*$") then
+         depth = depth - 1
+         if depth == 0 then break end
+      elseif line:match("^%s*record%s") or line:match("^%s*enum%s") or line:match("^%s*interface%s") then
+         depth = depth + 1
+      elseif depth == 1 then
+         local m = line:match("^%s*([%a_][%w_]*)%s*:%s*function%s*%(")
+         if m then out[#out + 1] = m end
+      end
+   end
+   return out
+end
+
+-- The matchers a misspelt one is missing from, appended to Teal's own message.
+--
+-- `t.expect(#params):to_be(2)` fails as `invalid key 'to_be' in type Expect<integer>`.
+-- That names the key and the type and stops: the reader is told the name is wrong and
+-- not one name that is right. The set is in the README's "Tests" section, but the moment
+-- the checker refuses a matcher is exactly the moment nobody goes to look, so the set
+-- travels with the message.
+--
+-- It is not written out here. `htl/test.d.tl` is the declaration the call was checked
+-- against, and `result.dependencies` holds the very file tl resolved this module's
+-- `require("htl.test")` to, so the names are read back out of that file: one source of
+-- truth, and a matcher added to the declaration is in the message the same day. The file
+-- is read at most once per checked file and only when such an error exists, which is why
+-- this is a closure over the result rather than a table built up front.
+--
+-- Requiring the dependency is also what keeps the hint honest: a project with a generic
+-- `Expect` record of its own, in a file that never requires `htl.test`, gets Teal's text
+-- unchanged, because those matchers are not the ones it is missing.
+local function matcher_lister(result)
+   local known = {} -- record name -> "a, b, c", or false when there is nothing to say
+   return function(type_name)
+      local list = known[type_name]
+      if list == nil then
+         list = false
+         local decl = (result.dependencies or {})["htl.test"]
+         local fd = decl and io.open(decl, "rb")
+         if fd then
+            local names = record_method_names(fd:read("a"), type_name)
+            fd:close()
+            if #names > 0 then list = table.concat(names, ", ") end
+         end
+         known[type_name] = list
+      end
+      return list or nil
+   end
+end
+
 local function collect_errors(filename, result, src)
    -- A result served again from the env cache (every runtime `require` of a module
    -- already checked) would otherwise re-walk its AST for require sites and re-resolve
@@ -1009,6 +1077,7 @@ local function collect_errors(filename, result, src)
       if extensible == nil then extensible = extensible_keys(filename, result) end
       return extensible[(e.y or 0) .. ":" .. (e.x or 0)] == key
    end
+   local matchers_of = matcher_lister(result)
    for _, e in ipairs(result.type_errors or {}) do
       local msg = explain_self_require(filename, e)
       local own = e.filename == nil or e.filename == filename
@@ -1017,6 +1086,14 @@ local function collect_errors(filename, result, src)
          local explained = explain_arity(result.ast, e, msg)
          if explained ~= msg then hinted[e.y] = true end
          msg, fix = explain_forward_ref(result.ast, src, e, explained)
+      end
+      -- `invalid key 'to_be' in type Expect<integer>`: the assertion library's own type
+      -- said no, so the answer is the set of names it says yes to. Teal's text stays the
+      -- prefix -- anything matching on it keeps matching.
+      local expect = msg:match("^invalid key '[%w_]+' in type (Expect%d*)%s*<")
+      if expect then
+         local list = matchers_of(expect)
+         if list then msg = msg .. "; the matchers are " .. list .. " (README, \"Tests\")" end
       end
       -- tl follows the arity error with "argument N: got X, expected T (unresolved
       -- generic)" for the very same call: a consequence, not a second mistake.
