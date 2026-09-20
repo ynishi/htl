@@ -19,6 +19,3 @@ install-path = "CARGO_HOME"
 install-updater = false
 # A GitHub repo to push Homebrew formulas to
 tap = "ynishi/homebrew-tap"
-# Build every target on pull requests too. Set for this PR only, so the five release
-# builds run once before the first tag; back to "plan" before it merges.
-pr-run-mode = "upload"
