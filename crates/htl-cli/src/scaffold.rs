@@ -464,6 +464,157 @@ pub fn module_ident(name: &str) -> String {
     s
 }
 
+/// Rust's keywords, as cargo refuses them for a package name. The list is a copy of
+/// `is_keyword` in cargo's `src/cargo/util/restricted_names.rs` (read from the cargo
+/// 0.99.0 sources), which is the Rust reference's strict *and* reserved sets together —
+/// `become` and `typeof` are no more usable as a crate name than `match` is.
+const RUST_KEYWORDS: &[&str] = &[
+    "Self", "abstract", "as", "async", "await", "become", "box", "break", "const", "continue",
+    "crate", "do", "dyn", "else", "enum", "extern", "false", "final", "fn", "for", "if", "impl",
+    "in", "let", "loop", "macro", "match", "mod", "move", "mut", "override", "priv", "pub", "ref",
+    "return", "self", "static", "struct", "super", "trait", "true", "try", "type", "typeof",
+    "unsafe", "unsized", "use", "virtual", "where", "while", "yield",
+];
+
+/// What cargo's list above does not have and a scaffolded crate still cannot be called.
+/// `gen` is reserved in the 2024 edition, which is the edition [`t_cargo`] writes, and
+/// cargo's `is_keyword` has not caught up: `cargo new gen` succeeds (cargo 1.95.0), and
+/// the crate it writes stops at "expected expression, found reserved keyword gen" the
+/// moment anything spells the crate's own path — which `src/main.rs` does, on its
+/// `preload` line. Measured, not assumed: a two-file crate named `gen` on edition
+/// 2024, `pub fn f()` in the library and `gen::f()` in the binary, fails to compile on
+/// rustc 1.95.0.
+const RUST_KEYWORDS_BEYOND_CARGO: &[&str] = &["gen"];
+
+/// Lua 5.4's keywords, all 22 of them (§3.1 of the reference manual). Teal keeps every
+/// one: `local end = require("end")` is a syntax error in both languages, and the
+/// scaffold writes exactly that line.
+const LUA_KEYWORDS: &[&str] = &[
+    "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in",
+    "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
+];
+
+/// Teal's contextual words that the scaffold's own files cannot carry. They are not
+/// keywords — Teal lets a variable be called `record` — but each one opens a type
+/// declaration after `local`, so the entry script's `local g = record.greet(..)` is read
+/// as the declaration `local record g` and the project does not check.
+///
+/// Measured against this checkout's binary rather than reasoned about, by scaffolding a
+/// project under each of the nine contextual words Teal has and running `htl check .` on
+/// it: `record`, `enum` and `interface` fail (`syntax error: this syntax is no longer
+/// valid; use 'local record g'`); `type`, `where`, `is`, `as`, `global` and `macroexp`
+/// scaffold and check clean, so they are not refused.
+const TEAL_TYPE_WORDS: &[&str] = &["record", "enum", "interface"];
+
+/// Refuse a project name the scaffold cannot write into the files it is about to write,
+/// before it writes the first one.
+///
+/// The name is not only a directory. It is the package in `mlua-pkg.toml`, the module
+/// directory `src/<mod>/`, the record that module declares, the local `src/main.tl` binds
+/// `require` to — and, when the project has a target, the crate in `Cargo.toml` and the
+/// path `src/main.rs` reaches `preload` through. [`module_ident`] makes an identifier out
+/// of the name and promises nothing more: it replaces what is not alphanumeric and
+/// prefixes a leading digit, so `pub` comes out of it as `pub`, and `htl new pub --embed`
+/// writes eleven files whose `cargo build` is "visibility `pub` is not followed by an
+/// item". No later stage can fix that, which is why the question is asked here, beside
+/// the ones [`resolve_target`] and [`HtlPin::parse`] ask: a refused name leaves nothing
+/// behind.
+///
+/// Two sets, because two languages read the name.
+///
+/// **When the project has a target** it has a `Cargo.toml` ([`t_cargo`] is the only file
+/// that names a crate, and `plan` writes it exactly when there is a target), and then the
+/// rules are the ones `cargo new` applies — [`RUST_KEYWORDS`] from cargo's own
+/// `restricted_names`, plus [`RUST_KEYWORDS_BEYOND_CARGO`], a leading digit, and a
+/// character outside `[A-Za-z0-9_-]`. Adopting cargo's set rather than inventing one
+/// means a name htl takes is a name `cargo new` would have taken, and the refusal can
+/// keep cargo's shape (``invalid package name `pub`: it is a Rust keyword``) so that a
+/// reader who has met it once recognises it. It is stricter than cargo in one place:
+/// cargo's package name is any Unicode XID and warns about non-ASCII, while rustc does
+/// not support a non-ASCII crate name — and `module_ident` would turn those characters
+/// into `_`, leaving the crate and the module spelled differently. A plain project keeps
+/// them: nothing there is compiled by rustc.
+///
+/// **Every project writes Teal**, so [`LUA_KEYWORDS`] and [`TEAL_TYPE_WORDS`] are checked
+/// for every target, and against the *identifier* rather than the name, because that is
+/// what reaches the templates. Only a name that is already an identifier can become one
+/// of these words — every substitution `module_ident` makes produces a `_`, and no
+/// keyword has one — so the refusal names the name the user typed. `--lib` writes no
+/// `src/main.tl` and so, today, none of the three Teal words breaks anything in the tree
+/// it produces; they are still refused there, because the line that breaks is the first
+/// line the author writes when the project grows an entry script, and a name that is
+/// wrong in one target and right in another is a worse rule than a name that is wrong.
+///
+/// What is not refused: `123abc` for a plain project (`module_ident` makes it `_123abc`,
+/// which checks), a name a Rust keyword is merely a part of (`pubs`, `my-pub`), and a
+/// name whose separators make an identifier out of it (`my-lib` → `my_lib`).
+fn refuse_reserved_name(name: &str, module: &str, writes_cargo: bool) -> Result<()> {
+    if writes_cargo {
+        if RUST_KEYWORDS.contains(&name) {
+            bail!("{}", rust_refusal(name, module, "it is a Rust keyword"));
+        }
+        if RUST_KEYWORDS_BEYOND_CARGO.contains(&name) {
+            bail!(
+                "{}",
+                rust_refusal(
+                    name,
+                    module,
+                    "it is a keyword reserved by Rust's 2024 edition, which is the edition this scaffold writes"
+                )
+            );
+        }
+        if name.starts_with(|c: char| c.is_ascii_digit()) {
+            bail!(
+                "{}",
+                rust_refusal(name, module, "the name cannot start with a digit")
+            );
+        }
+        if let Some(ch) = name
+            .chars()
+            .find(|c| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_'))
+        {
+            bail!(
+                "{}",
+                rust_refusal(
+                    name,
+                    module,
+                    &format!(
+                        "invalid character `{ch}`: the name has to be ASCII letters, digits, `-` and `_`"
+                    )
+                )
+            );
+        }
+    }
+    if LUA_KEYWORDS.contains(&module) {
+        bail!("{}", teal_refusal(name, module, "it is a Lua keyword"));
+    }
+    if TEAL_TYPE_WORDS.contains(&module) {
+        bail!(
+            "{}",
+            teal_refusal(name, module, "it is how Teal opens a type declaration")
+        );
+    }
+    Ok(())
+}
+
+/// Why a name the Rust half cannot carry is refused: cargo's sentence, then what htl does
+/// with the name, then the way out. Its own function because four reasons share
+/// everything but the clause in the middle, and the value of taking cargo's shape is that
+/// it is the *same* shape each time.
+fn rust_refusal(name: &str, module: &str, reason: &str) -> String {
+    format!(
+        "invalid project name `{name}`: {reason}; a project with a target is a crate named after it and a host that preloads its module through that name (`{module}::preload`), so what cargo or rustc refuses here is a project that does not build — scaffold it under another name"
+    )
+}
+
+/// The same, for the half every target writes. The line quoted is the one `src/main.tl`
+/// would have carried, which is the shortest way to say why the name cannot work.
+fn teal_refusal(name: &str, module: &str, reason: &str) -> String {
+    format!(
+        "invalid project name `{name}`: {reason}; the scaffold binds the module to a local of that name (`local {module} = require(\"{module}\")`) and declares a record called it, so the project it would write does not check — scaffold it under another name"
+    )
+}
+
 /// Every target the scaffold has a profile for, in registry order: what `--target`
 /// accepts and what a typo is answered with. `hb` is deliberately absent — it is the tree
 /// plain `htl new` writes, so naming it as a scaffold would be offering a flag for the
@@ -597,6 +748,11 @@ pub struct Scaffolded {
 
 /// Write every template file that does not exist yet.
 /// With `must_be_new`, the directory must not exist (or be empty).
+///
+/// Two refusals come first, in the order a user meets them: the directory has to be free
+/// (under `must_be_new`), and the name has to be one the templates can carry
+/// ([`refuse_reserved_name`]). Both happen before the first write, so neither leaves half
+/// a project behind.
 pub fn scaffold(dir: &Path, name: &str, opts: &Options, must_be_new: bool) -> Result<Scaffolded> {
     if must_be_new && dir.exists() && dir.read_dir()?.next().is_some() {
         bail!(
@@ -605,6 +761,7 @@ pub fn scaffold(dir: &Path, name: &str, opts: &Options, must_be_new: bool) -> Re
         );
     }
     let m = module_ident(name);
+    refuse_reserved_name(name, &m, opts.target.is_some())?;
 
     let mut out = Scaffolded {
         written: Vec::new(),
@@ -1002,9 +1159,10 @@ fn t_cargo(name: &str, target: &TargetProfile, htl: &HtlPin) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        BuildTarget, Ctx, DEFAULT_TARGET, HTLX_REPOSITORY, HTLX_TAG, HtlPin, Options, PIN_DEFAULT,
-        PathBuf, REPOSITORY, Result, dep_value, ffi_lib_rs, profile, resolve_target, rust_lib_rs,
-        rust_main_rs, script_mismatch, t_cargo, t_htl_toml, t_manifest, t_readme, target_names,
+        BuildTarget, Ctx, DEFAULT_TARGET, HTLX_REPOSITORY, HTLX_TAG, HtlPin, LUA_KEYWORDS, Options,
+        PIN_DEFAULT, PathBuf, REPOSITORY, RUST_KEYWORDS, Result, dep_value, ffi_lib_rs,
+        module_ident, profile, refuse_reserved_name, resolve_target, rust_lib_rs, rust_main_rs,
+        script_mismatch, t_cargo, t_htl_toml, t_manifest, t_readme, target_names,
     };
     use htl::build_target::Script;
 
@@ -1454,5 +1612,121 @@ mod tests {
             toml.contains("[lib]\ncrate-type = [\"rlib\", \"cdylib\", \"staticlib\"]\n"),
             "{toml}"
         );
+    }
+
+    /// The refusal, or the empty string when the name is taken. The name and its
+    /// identifier are what [`refuse_reserved_name`] is asked about, and `module_ident` is
+    /// the only thing that turns one into the other, so the tests below go through it
+    /// rather than spelling identifiers by hand.
+    fn refusal(name: &str, writes_cargo: bool) -> String {
+        match refuse_reserved_name(name, &module_ident(name), writes_cargo) {
+            Ok(()) => String::new(),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    /// A Rust keyword is a crate name cargo refuses, so a project with a target is
+    /// refused too, in cargo's own sentence — and a plain project, which rustc never
+    /// reads, keeps the name.
+    #[test]
+    fn a_rust_keyword_is_refused_by_a_target_and_taken_by_a_plain_project() {
+        let e = refusal("pub", true);
+        assert!(
+            e.starts_with("invalid project name `pub`: it is a Rust keyword"),
+            "{e}"
+        );
+        assert!(e.contains("`pub::preload`"), "what htl does with it:\n{e}");
+        assert!(e.contains("another name"), "the way out:\n{e}");
+        assert!(refusal("match", true).contains("it is a Rust keyword"));
+
+        // Neither is a Lua keyword, so the tree with no Rust in it is written.
+        assert_eq!(refusal("pub", false), "");
+        assert_eq!(refusal("match", false), "");
+    }
+
+    /// `gen` is the one name cargo's list does not hold and the 2024 edition does: the
+    /// crate compiles nowhere, so the scaffold refuses it with the edition as the reason.
+    #[test]
+    fn a_2024_keyword_cargo_still_accepts_is_refused() {
+        let e = refusal("gen", true);
+        assert!(e.contains("reserved by Rust's 2024 edition"), "{e}");
+        assert_eq!(refusal("gen", false), "");
+    }
+
+    /// The other half of what `cargo new` refuses: a leading digit and a character no
+    /// crate name can hold. A plain project takes both — `module_ident` makes an
+    /// identifier out of them, and nothing else reads the name.
+    #[test]
+    fn the_names_cargo_refuses_for_their_spelling_are_refused_too() {
+        assert!(
+            refusal("123abc", true).contains("the name cannot start with a digit"),
+            "{}",
+            refusal("123abc", true)
+        );
+        let e = refusal("my lib", true);
+        assert!(e.contains("invalid character ` `"), "{e}");
+        assert_eq!(refusal("123abc", false), "");
+        assert_eq!(refusal("my lib", false), "");
+    }
+
+    /// Every target writes `src/main.tl`'s `local <mod> = require("<mod>")`, so a Lua
+    /// keyword is refused whether or not there is a crate, and the message quotes the
+    /// line that would not have parsed.
+    #[test]
+    fn a_lua_keyword_is_refused_by_every_target() {
+        for name in ["end", "function", "local", "nil"] {
+            for writes_cargo in [false, true] {
+                let e = refusal(name, writes_cargo);
+                assert!(
+                    e.contains(&format!(
+                        "invalid project name `{name}`: it is a Lua keyword"
+                    )),
+                    "{e}"
+                );
+            }
+        }
+        let e = refusal("end", false);
+        assert!(e.contains("`local end = require(\"end\")`"), "{e}");
+    }
+
+    /// Teal's contextual words: the three that break the tree the scaffold writes are
+    /// refused, and the six that do not are taken. Which is which was measured with this
+    /// checkout's binary (the `TEAL_TYPE_WORDS` doc says how); this holds it in place.
+    #[test]
+    fn the_teal_words_refused_are_the_three_that_break_a_scaffolded_project() {
+        for name in ["record", "enum", "interface"] {
+            let e = refusal(name, false);
+            assert!(
+                e.contains(&format!(
+                    "invalid project name `{name}`: it is how Teal opens a type declaration"
+                )),
+                "{e}"
+            );
+        }
+        for name in ["type", "where", "is", "as", "global", "macroexp"] {
+            // `type` and `enum` are Rust keywords as well, and a crate is where that is
+            // answered; the Teal half takes them.
+            assert_eq!(refusal(name, false), "", "{name}");
+        }
+    }
+
+    /// A name a keyword is only part of, and one whose separator makes the identifier, are
+    /// names the scaffold has always written and still does — the refusals above are
+    /// exact matches, not substring searches.
+    #[test]
+    fn a_name_that_merely_contains_a_keyword_is_taken() {
+        for name in ["pubs", "my-lib", "matcher", "ending", "sample"] {
+            assert_eq!(refusal(name, true), "", "{name}");
+            assert_eq!(refusal(name, false), "", "{name}");
+        }
+    }
+
+    /// The two lists are copies of somebody else's set, and a copy is worth counting:
+    /// cargo's `is_keyword` holds 51 words and Lua 5.4 has 22. A word dropped by an edit
+    /// is a name that stops being refused, which no other test would notice.
+    #[test]
+    fn the_keyword_lists_are_the_size_of_the_sets_they_copy() {
+        assert_eq!(RUST_KEYWORDS.len(), 51);
+        assert_eq!(LUA_KEYWORDS.len(), 22);
     }
 }

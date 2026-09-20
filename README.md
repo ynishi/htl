@@ -1986,6 +1986,15 @@ The tag the scaffold pins is a constant in the scaffold, and `just e2e` scaffold
 project, installs it and runs a test against it, which is what the constant is allowed to
 move on.
 
+The name is the directory, the package, the module `require("<name>")` resolves, the
+record that module declares — and, when the project has a target, the crate in
+`Cargo.toml` and the path the host preloads through — so a name that cannot be all of
+those is refused before anything is written: the rules `cargo new` applies (a Rust
+keyword, a leading digit, a character outside `[A-Za-z0-9_-]`) for a project with a
+target, and, for every project, a Lua keyword or one of Teal's `record` / `enum` /
+`interface`. So `htl new pub --embed` and `htl new end` are refused by name, and `pubs`,
+`my-lib` and a plain (target-less) `htl new match` are not.
+
 ### Build targets (`--target <name>`)
 
 **A build target is what runs this project's output.** That is the axis `--target` names,

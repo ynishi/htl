@@ -1,8 +1,9 @@
 //! `htl new --embed` / `--target <name>` / `--htl <req>` through the real binary: what the
 //! Rust host it writes declares and does, what each pin puts in the manifest, how a target
-//! or a release that does not exist — or a target that does not fit `--lib` — is refused,
-//! what `htl build` does with the `[build] target` the scaffold recorded, and the
-//! `--format` help of the commands whose text form is a report.
+//! or a release that does not exist — or a target that does not fit `--lib`, or a name
+//! Rust or Teal cannot carry — is refused, what `htl build` does with the `[build] target`
+//! the scaffold recorded, and the `--format` help of the commands whose text form is a
+//! report.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -468,6 +469,117 @@ fn init_without_a_target_still_says_nothing_to_do() {
     let (ok, _, stderr) = htl(&["init"], &root.join("sample"));
     assert!(ok, "{stderr}");
     assert!(stderr.contains("nothing to do"), "{stderr}");
+}
+
+/// A Rust keyword is a crate cargo would refuse and rustc could not compile, so a project
+/// with a target is refused whichever target it is and whether or not it has an entry
+/// script — before the directory exists, like every other refusal `htl new` makes.
+#[test]
+fn a_rust_keyword_is_refused_by_every_target_that_writes_a_crate() {
+    let root = scratch("kw-rust");
+    for args in [
+        &["new", "pub", "--embed"][..],
+        &["new", "pub", "--embed", "--lib"][..],
+        &["new", "match", "--target", "bin"][..],
+        &["new", "match", "--lib", "--target", "cdylib"][..],
+    ] {
+        let (ok, _, stderr) = htl(args, &root);
+        assert!(!ok, "{args:?} was accepted:\n{stderr}");
+        assert!(
+            stderr.contains("it is a Rust keyword"),
+            "{args:?}:\n{stderr}"
+        );
+        assert!(stderr.contains("::preload`"), "{args:?}:\n{stderr}");
+        assert!(stderr.contains("another name"), "{args:?}:\n{stderr}");
+        assert!(!root.join(args[1]).exists(), "{args:?} wrote something");
+    }
+}
+
+/// Neither word is a Lua keyword, and a plain project has no crate, so the same names are
+/// taken there — and the project they write is one this binary checks.
+#[test]
+fn a_rust_keyword_is_a_plain_project_that_checks() {
+    let root = scratch("kw-rust-plain");
+    for name in ["pub", "match"] {
+        let (ok, _, stderr) = htl(&["new", name], &root);
+        assert!(ok, "{name}:\n{stderr}");
+        let (ok, _, stderr) = htl(&["check", "."], &root.join(name));
+        assert!(ok, "htl check on the {name} project:\n{stderr}");
+    }
+}
+
+/// `src/main.tl` binds the module to a local of the project's name and `src/<mod>/init.tl`
+/// declares a record called it, so a Lua keyword is refused whatever the target — the
+/// plain tree is the one that breaks first.
+#[test]
+fn a_lua_keyword_is_refused_by_every_target() {
+    let root = scratch("kw-lua");
+    for args in [
+        &["new", "end"][..],
+        &["new", "end", "--embed"][..],
+        &["new", "function"][..],
+        &["new", "function", "--lib", "--target", "cdylib"][..],
+    ] {
+        let (ok, _, stderr) = htl(args, &root);
+        assert!(!ok, "{args:?} was accepted:\n{stderr}");
+        assert!(
+            stderr.contains("it is a Lua keyword"),
+            "{args:?}:\n{stderr}"
+        );
+        assert!(!root.join(args[1]).exists(), "{args:?} wrote something");
+    }
+    // The line that would not have parsed is in the message.
+    let (_, _, stderr) = htl(&["new", "end"], &root);
+    assert!(stderr.contains("local end = require(\"end\")"), "{stderr}");
+}
+
+/// A leading digit is a crate name cargo refuses. A plain project has no crate and keeps
+/// what `module_ident` has always made of it — `_123abc`, the module directory the tree is
+/// written around — so this is a refusal about the Rust half and nothing else.
+#[test]
+fn a_leading_digit_is_refused_for_a_crate_and_still_written_plain() {
+    let root = scratch("kw-digit");
+    let (ok, _, stderr) = htl(&["new", "123abc", "--embed"], &root);
+    assert!(!ok, "{stderr}");
+    assert!(
+        stderr.contains("the name cannot start with a digit"),
+        "{stderr}"
+    );
+    assert!(!root.join("123abc").exists(), "{stderr}");
+
+    let (ok, _, stderr) = htl(&["new", "123abc"], &root);
+    assert!(ok, "{stderr}");
+    assert!(root.join("123abc/src/_123abc/init.tl").exists(), "{stderr}");
+}
+
+/// The refusals match a whole name: a name a keyword is part of, and one whose separator
+/// is what makes the identifier, are the names the scaffold has always written.
+#[test]
+fn a_name_a_keyword_is_only_part_of_is_still_scaffolded() {
+    let root = scratch("kw-near");
+    for name in ["pubs", "my-lib"] {
+        let (ok, _, stderr) = htl(&["new", name, "--embed"], &root);
+        assert!(ok, "{name}:\n{stderr}");
+        let cargo = std::fs::read_to_string(root.join(name).join("Cargo.toml")).unwrap();
+        assert!(cargo.contains(&format!("name = \"{name}\"")), "{cargo}");
+    }
+    assert!(root.join("my-lib/src/my_lib/init.tl").exists());
+}
+
+/// `htl init` takes the name from the directory it is filling, so the same refusal reaches
+/// it — and the directory it was pointed at is as empty afterwards as it was before.
+#[test]
+fn init_refuses_a_keyword_directory_and_leaves_it_empty() {
+    let root = scratch("kw-init");
+    let dir = root.join("pub");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (ok, _, stderr) = htl(&["init", "--embed"], &dir);
+    assert!(!ok, "{stderr}");
+    assert!(
+        stderr.contains("invalid project name `pub`: it is a Rust keyword"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "{stderr}");
 }
 
 #[test]
