@@ -1902,9 +1902,9 @@ with `src/<name>.tl`); htl resolves that form in the checker and in `TealResolve
 `mlua-pkg.toml` names one dependency from the start: `htlx`, the collections Lua does not
 have ([htl-x](https://github.com/ynishi/htl-x) — `htlx.list` / `tablex` / `seq` /
 `ordered`, pure Teal), pinned at an exact tag, so the README's first step is `htl pkg
-install`. `htl new --no-x` leaves the line out. It is written only under a pin that
-resolves a dependency at its `entry` (`main`, a checkout, releases from 0.5 on); under
-`0.4` it would install and then fail every `require("htlx.*")`, so `0.4` does not get it.
+install`. `htl new --no-x` leaves the line out. Every pin the scaffold supports resolves
+a dependency at its `entry` (releases from 0.5 on, `main`, a checkout), so the line is
+written under all of them.
 The tag the scaffold pins is a constant in the scaffold, and `just e2e` scaffolds a
 project, installs it and runs a test against it, which is what the constant is allowed to
 move on.
@@ -1933,9 +1933,10 @@ Rust side to a project that predates it and lists the files it kept rather than 
 them in silence.
 
 `[build] target` in `htl.toml` is the key that records what runs the output, read by every
-command that loads the file (absent means `hb`). `htl new --target <name>` writes it
-whenever the htl the project pins reads it — `main`, a checkout, a release from 0.5 on —
-and not under `0.4`, whose `include_tl!` would refuse the whole file over the unknown key.
+command that loads the file (absent means `hb`). `htl new --target <name>` writes it under
+every pin the scaffold supports — a release from 0.5 on, `main`, a checkout — each of
+which reads it; `0.4`, whose `include_tl!` would refuse the whole file over the unknown
+key, is no longer a pin the scaffold writes for.
 
 `htl build` is the first command that acts on what the key records. A bundle is the `hb`
 target, so in a `bin` or a `cdylib` project the build says which target the project is, who
