@@ -6,7 +6,8 @@
 # public, a publish is yanked and never replaced — and a name that says *when* is the one
 # thing a person can act on without reading the recipe. The parts they are assembled from
 # stay runnable on their own for when you already know which answer you want: `fmt`,
-# `check`, `build`, `e2e`, `e2e-scaffold-packaged`, `e2e-scaffold-unpatched`, `bench`.
+# `check`, `build`, `e2e`, `e2e-scaffold-packaged`, `bench`. `post-publish` is the one
+# recipe that runs *after* a moment rather than before it, and it is not part of any gate.
 #
 # These wrap what CONTRIBUTING.md already asks for, so that "did I run everything?" has one
 # answer instead of four commands to remember in the right order.
@@ -40,8 +41,8 @@ pre-push: check build e2e
 # or doc does not stop it, because neither would have reached a tarball either way. Running
 # it after everything cheaper means its minute is spent on a tree that has already answered
 # every question answerable without packaging.
-# Everything before a publish: `pre-push`, the release gate on the four tarballs, then the scaffold built against the published htl.
-pre-publish: pre-push e2e-scaffold-packaged e2e-scaffold-unpatched
+# Everything before a publish: `pre-push`, then the release gate on the four tarballs.
+pre-publish: pre-push e2e-scaffold-packaged
 
 # Format in place.
 fmt:
@@ -95,9 +96,11 @@ e2e:
     # Every target `--target` offers, scaffolded outside this repository and built against this
     # checkout. That was 87 lines of bash here; it is now three tests in the `e2e` member
     # crate, which `default-members` keeps out of `cargo test` and this line asks for by
-    # name. The crate finds the binary and the target directory itself and defaults every
-    # path to this checkout, so there is nothing to pass — `e2e-scaffold-packaged` below
-    # sets the five variables that point the same three tests somewhere else.
+    # name. The crate finds the binary and the target directory itself, and the binary —
+    # built from this checkout — pins this checkout in every project it writes, so there
+    # is nothing to pass and nothing to patch; `e2e-scaffold-packaged` below sets the five
+    # variables that point the same three tests at a tarball CLI and patch its version pin
+    # at the extracted trees.
     cargo test -p e2e
 
 # The release gate: the CLI suite and the same three host projects, run against the four
@@ -203,54 +206,48 @@ e2e-scaffold-packaged:
     HTL_PATCH_MACROS="$dir/htl-macros-$ver" \
       cargo test -p htl-cli -p e2e
 
-# What every other gate here cannot see: a scaffold built against the htl that is *on
-# crates.io*. `e2e` patches each project's pin at `crates/htl`, and `e2e-scaffold-packaged`
-# patches it at the extracted tarballs — both deliberately, because each is asking about
-# code that is not published yet. What a user meets first is `htl new`, then `cargo build`,
-# with nothing redirected, and that is what this asks.
+# After a publish, and only then: the CLI a user installs, writing the project a user gets,
+# built against the crate a user resolves — `cargo install htl-cli`, `htl new`, `cargo test`,
+# nothing redirected. Every other gate here runs before a publish and so patches something:
+# `e2e` builds against this checkout (a checkout CLI pins the checkout), and
+# `e2e-scaffold-packaged` patches the tarball CLI's version at the extracted tarballs. What
+# neither can see is whether the crate that reached crates.io builds what the CLI that
+# reached crates.io writes — an `include` that dropped a template, a version that resolved
+# to something else — and the one moment that has an answer is after both are up.
 #
-# A scaffold pins the htl its CLI was built with, where it is (`crates/htl-cli/build.rs`):
-# a CLI built from this checkout pins this checkout, so what it writes resolves nothing
-# from crates.io and there is nothing here to ask. Only a CLI whose default pin is a
-# version — one built from the crates.io tarball, or with `HTL_PIN_DEFAULT=release` — has
-# a manifest a registry answers, and that is the one case this runs for; every other
-# says why it did not and exits green. #197 (`[build] target` written a release early)
-# and #244 (a bundle host for a linker that named its entry `init`) were the failures of
-# a scaffold that wrote for a release it did not link, and a scaffold that writes only
-# for its own htl has no such release to be wrong about; the question left is whether the
-# published crate builds what the published CLI writes, which is a question for after a
-# publish and the CLI installed from it.
+# This was `e2e-scaffold-unpatched`, run in CI on every push, back when a checkout CLI
+# pinned a release by number and the question "does the published htl read what main's
+# scaffold writes" had a subject. A CLI writes for the htl it links now, so on a checkout
+# the question has none; the CI step is gone and this is what is left of it, for the
+# release flow (`release-plz.yml` publishes on the release PR's merge) to be followed by.
 #
 # `cargo test`, not `cargo build`: the library's test is the `require("<mod>")` through
-# preload that #244 failed, and a build was green through all of it. It needs the network:
-# the projects resolve and download `htl` from crates.io. That is why it is not in
-# `pre-push`, which is otherwise offline, and why CI runs it in the e2e job beside the
-# other two that reach out.
-# The scaffold, tested against the published htl with nothing patched — when the CLI pins one.
-e2e-scaffold-unpatched:
+# preload that #244 failed while a build stayed green. The version installed is this
+# checkout's, which after a release PR lands is the one just published; run it from `main`.
+# It needs the network twice — the install, then each project's resolve.
+# After a publish: install the published CLI, scaffold each target, test against the published htl.
+post-publish:
     #!/usr/bin/env bash
     set -euo pipefail
     root="$(pwd)"
-    # The same shape as the other scaffold gates use, and a directory of its own: these
-    # projects resolve `htl` from the registry, so their graph is not the one `e2e-scaffold`
-    # holds and sharing it would rebuild both halves on every switch.
-    target="${CARGO_TARGET_DIR:-$root/target}/e2e-scaffold-unpatched"
+    ver="$(cargo pkgid -p htl-cli | sed 's/.*[#@]//')"
+    target="${CARGO_TARGET_DIR:-$root/target}/post-publish"
     dir="$(mktemp -d)"
     trap 'rm -rf "$dir"' EXIT
-    # `cargo run` rather than a path assembled out of `target/debug`: cargo knows where it
-    # just put the binary, and a guess here is wrong under a `[build] target-dir` in
-    # .cargo/config.toml and under any `--target` — it would name a file that is missing,
-    # or worse, a stale one from an earlier layout.
-    cargo run -q -p htl-cli --bin htl -- new "$dir/bin-sample" --target bin
-    cargo run -q -p htl-cli --bin htl -- new "$dir/lib-sample" --target bin --lib
-    cargo run -q -p htl-cli --bin htl -- new "$dir/cdylib-sample" --target cdylib --lib
+    # The user's install, into a root of its own so the `htl` on PATH is untouched. No
+    # `--debug`: this is the binary a user gets, release profile included.
+    cargo install htl-cli --version "$ver" --root "$dir/cli"
+    "$dir/cli/bin/htl" new "$dir/bin-sample" --target bin
+    "$dir/cli/bin/htl" new "$dir/lib-sample" --target bin --lib
+    "$dir/cli/bin/htl" new "$dir/cdylib-sample" --target cdylib --lib
     pin="$(grep -m1 '^htl = ' "$dir/bin-sample/Cargo.toml")"
-    # A version, and nothing else on the line: the short form a release pin writes. A
-    # table (`{ path = … }`, `{ git = … }`) is a pin crates.io does not answer.
-    if [[ ! "$pin" =~ ^htl\ =\ \"[0-9]+\.[0-9]+\.[0-9]+\"$ ]]; then
-      echo "e2e-scaffold-unpatched: skipped — this CLI pins \`${pin#htl = }\`, which crates.io does not answer; a CLI built from the tarball (or with HTL_PIN_DEFAULT=release) pins a version, and that is what this tests"
-      exit 0
+    # A published CLI pins a version and nothing else on the line. Two or three numbers:
+    # from 0.7.0 the CLI writes its own three, and the 0.6.x CLIs on crates.io wrote two.
+    if [[ ! "$pin" =~ ^htl\ =\ \"[0-9]+\.[0-9]+(\.[0-9]+)?\"$ ]]; then
+      echo "post-publish: htl-cli $ver pins \`${pin#htl = }\`, not a version — a published CLI has to" >&2
+      exit 1
     fi
+    echo "post-publish: htl-cli $ver pins ${pin#htl = }"
     for project in bin-sample lib-sample cdylib-sample; do
       manifest="$(<"$dir/$project/Cargo.toml")"
       # The `unpatched_pin` invariant from e2e/tests/scaffold_targets.rs, in the shell: a
@@ -267,8 +264,6 @@ e2e-scaffold-unpatched:
         echo "$dir/$project/Cargo.toml: redirects its own pin, so this is not the manifest a user gets" >&2
         exit 1
       fi
-      # No `--config patch.crates-io…`, which is the entire point: what resolves here is
-      # what crates.io has.
       (cd "$dir/$project" && cargo test --target-dir "$target")
     done
 
