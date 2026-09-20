@@ -531,6 +531,31 @@ Neither line is a lint. They are this command reporting on its own job, so they 
 does not apply, and `htl check --format json` never carries one — a lint is a finding
 about your code, and these two are about files this command was asked to write.
 
+### Publishing a crate that embeds Teal
+
+A crate whose Teal has no dependency needs nothing said here: the `.tl` is in the package
+because `src/` is, and the macro reads it where cargo puts it. A crate whose
+`mlua-pkg.toml` names a dependency ships one thing more — the dependency itself, as a
+[patched copy](#patched-dependencies-htl-pkg-patch):
+
+```bash
+htl pkg patch htlx    # patches/htlx/ in the tree, patch_dir in mlua-pkg.toml
+git add patches/htlx mlua-pkg.toml mlua-pkg.lock
+```
+
+That is the whole recipe. `patches/<dep>/` is committed, so it is in the tarball; the
+manifest names it, so `require("<dep>.x")` resolves from it directly — no install, no
+link and no network, in a fresh clone and in the copy `cargo package` builds to verify
+alike. The copy plus the manifest naming it is the source of truth, the way `cargo
+vendor` and Go's `vendor/` have it, and its presence is what takes the network out of the
+build. Nothing else is written by hand: no `[check] paths` pointing at the copy, no
+`exclude` in `Cargo.toml`.
+
+`.htl/` is not part of any of this. `htl init` gitignores it, so no clone and no tarball
+has one, and nothing in a tarball needs one — reading a project under `target/` or a
+registry checkout [writes nothing at all](#caching), which is also what keeps cargo from
+refusing a tarball it has just built.
+
 ### `async fn` (feature `async`)
 
 A method may be `async`, in the same `impl` as the sync ones and with no annotation
@@ -1464,7 +1489,11 @@ somebody who wants the repository clones the repository.
 
 From there the directory is the project's code: edited, diffed, reviewed and committed
 with git like anything else in the tree. There is no patch file and nothing is applied —
-`htl pkg install` leaves the directory alone and resolves the dependency from it. This is
+`htl pkg install` leaves the directory alone and resolves the dependency from it — and so
+does everything else, without it: the copy's entry directory is on the search path
+because the manifest names it, so the dependency resolves in a clone that has never
+installed anything and in the copy `cargo package` verifies
+([Publishing a crate that embeds Teal](#publishing-a-crate-that-embeds-teal)). This is
 the shape of Cargo's `[patch]` with a `path` source, and of Go's `replace` pointing at a
 directory in the module tree. Removing `patch_dir` and the directory returns the
 dependency to its fetched form at the next install. What is copied is the package root

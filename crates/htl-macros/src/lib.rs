@@ -1395,6 +1395,48 @@ mod tests {
         assert!(matches!(inc.payload, Payload::Bytes(ref b) if !b.is_empty()));
     }
 
+    /// The copy `cargo package` verifies, expanded the way cargo expands it there.
+    ///
+    /// A crate that embeds its Teal ships `mlua-pkg.toml`, `mlua-pkg.lock` and the
+    /// `patches/<dep>/` it committed, and never `.htl/` — `htl init` gitignores that, so
+    /// no clone and no tarball has one. The `require` of the dependency must still
+    /// resolve, from the copy and the manifest naming it alone; #266 is what it did
+    /// instead, `module not found` inside `target/package/<crate>/`. And the expansion
+    /// must leave the tree as it found it, or cargo refuses the tarball it just built
+    /// (#267).
+    #[test]
+    fn include_resolves_a_patched_dep_in_the_copy_cargo_package_verifies() {
+        let root = scratch("packaged-patch").join("target/package/p-0.1.0");
+        write(
+            &root.join("mlua-pkg.toml"),
+            "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[deps.mathx]\n\
+             git = \"https://example.invalid/mathx\"\ntag = \"v1\"\npatch_dir = \"patches/mathx\"\n",
+        );
+        write(
+            &root.join("patches/mathx/src/mathx.tl"),
+            "local record mathx\nend\nfunction mathx.twice(n: number): number\n   return n * 2\nend\nreturn mathx\n",
+        );
+        write(
+            &root.join("src/main.tl"),
+            "local mathx = require(\"mathx\")\nprint(mathx.twice(21))\n",
+        );
+
+        let inc = resolve_include(&root, "src/main.tl", true)
+            .expect("the committed copy is the whole of what the require needs");
+        assert!(matches!(inc.payload, Payload::Bytes(ref b) if !b.is_empty()));
+        assert!(
+            inc.deps
+                .iter()
+                .any(|d| d.ends_with("patches/mathx/src/mathx.tl")),
+            "and the copy's file is tracked for rebuilds: {:?}",
+            inc.deps
+        );
+        assert!(
+            !root.join(".htl").exists(),
+            "nothing was written into the tree cargo is verifying"
+        );
+    }
+
     /// A flat package exposes its top-level module as `<name>/<name>.tl`.
     #[test]
     fn include_resolves_flat_package_module() {

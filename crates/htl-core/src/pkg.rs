@@ -441,7 +441,8 @@ pub struct Project {
 }
 
 /// A dependency the project took into its tree: the name the manifest declares it under,
-/// and the directory `patch_dir` points at, absolute.
+/// the directory `patch_dir` points at, and the directory inside it that `require` reads.
+/// Both paths absolute.
 ///
 /// The name is carried beside the directory because it is what a report says. htl's own
 /// layout puts mathx in `patches/mathx`, but the manifest may name any directory, and a
@@ -455,6 +456,80 @@ pub struct Patched {
     /// writes it relative; a walker asked whether it may enter a directory needs the
     /// absolute form.
     pub dir: PathBuf,
+    /// `<dir>/<entry>`: the dependency's own require root inside the copy, the same
+    /// directory `entries/<name>` is a link to. `require("<name>.x")` reads `x.tl` from
+    /// here. How it is arrived at is `patch_entry`'s to say, below; what goes on the
+    /// search path is [`search_dir`](Self::search_dir).
+    pub entry: PathBuf,
+}
+
+impl Patched {
+    /// The directory to put on the search path so that the copy answers to the
+    /// dependency's name.
+    ///
+    /// A directory on the path is consulted as `<dir>/<module>`, `<dir>/<module>/init`
+    /// and `<dir>/<module>/<module>` (the three templates `add_path` writes), with the
+    /// dots of the module name as separators. So the directory that resolves a
+    /// dependency exactly as `.htl/modules/entries` does is the one holding
+    /// [`entry`](Self::entry) *as a child named after the dependency* — which is what
+    /// the link `entries/<name>` is, made out of a name and a directory rather than
+    /// found as one.
+    ///
+    /// There is such a directory whenever the entry is named after the dependency:
+    /// `src/<name>` and `lua/<name>`, the layout most packages have, and the copy root
+    /// itself for a package whose entry is `.`, since `htl pkg patch` writes
+    /// `patches/<dep>`. Its parent is the answer, and every name then resolves to the
+    /// file an install would have resolved it to.
+    ///
+    /// A flat package — `entry = "src"` holding `<name>.tl` beside its other modules —
+    /// has no such directory anywhere, because nothing in the copy is named after the
+    /// dependency. The entry itself is the answer there: `require("<name>")` reads
+    /// `<entry>/<name>.tl`, which is the file the link resolves it to as well, and
+    /// `require("<name>.sub")` does not resolve, since the link reaches that at
+    /// `<entry>/sub.tl` and no directory on a path reaches it as `<name>/sub`. Such a
+    /// dependency needs its link, and an install is what writes one.
+    ///
+    /// Both go on the path before everything else, which puts them *last* in it
+    /// ([`Htl::apply_project`](crate::Htl::apply_project)): a name the copy answers is
+    /// one the project's own sources, the entry links and every other dependency have
+    /// already declined, so the flat case's extra names cannot shadow anything.
+    pub fn search_dir(&self) -> PathBuf {
+        match (self.entry.file_name(), self.entry.parent()) {
+            (Some(f), Some(up)) if f == std::ffi::OsStr::new(&self.name) => up.to_path_buf(),
+            _ => self.entry.clone(),
+        }
+    }
+}
+
+/// Which directory inside a patched copy `require` reads it from.
+///
+/// `over` is the entry somebody recorded for this dependency — the lockfile's when an
+/// install has run, else the `entry` the project's own `[deps.<name>]` overrides it with;
+/// mlua-pkg gives the dependency's manifest precedence to the consumer, and the lockfile
+/// is that decision already made. It is joined without asking whether the directory
+/// exists, because a search path lists what a name *would* resolve through, and a tarball
+/// is read before anything in it is built.
+///
+/// With nothing recorded — a fresh clone whose `mlua-pkg.lock` is not committed, or the
+/// copy `cargo package` verifies when it is not — the copy answers for itself: its own
+/// `mlua-pkg.toml` `[package].entry`, which `htl pkg patch` copied along with the sources,
+/// and failing that mlua-pkg's own fallback chain through [`mlua_pkg::resolve_entry`]
+/// (`src/`, then `lua/`, then the root). The chain is mlua-pkg's rule, called rather than
+/// restated, so the directory htl searches and the directory an install would have linked
+/// cannot drift apart. `resolve_entry` picks the first candidate that exists and errors
+/// when none do; a `patch_dir` naming a directory nobody wrote is that error, and the
+/// answer is the directory itself — a path on the search path that resolves nothing, which
+/// is what the situation is.
+fn patch_entry(dir: &Path, over: Option<&Path>) -> PathBuf {
+    if let Some(e) = over {
+        return mlua_pkg::lockfile::join_entry(dir, e);
+    }
+    if let Ok(m) = mlua_pkg::manifest::Manifest::from_path(dir.join(MANIFEST_NAME))
+        && let Some(e) = m.package.entry
+    {
+        return mlua_pkg::lockfile::join_entry(dir, &e);
+    }
+    mlua_pkg::resolve_entry(dir, None).unwrap_or_else(|_| dir.to_path_buf())
 }
 
 /// What [`Project::add`] did: mlua-pkg's own report, and what htl carried across it.
@@ -627,6 +702,15 @@ impl Project {
         let mut vendored_copies: Vec<PathBuf> = Vec::new();
         let mut patches: Vec<Patched> = Vec::new();
         if let Ok(m) = mlua_pkg::manifest::Manifest::from_path(&manifest) {
+            // The lockfile, and only for a manifest that patches something: it is the one
+            // place an `entry` is recorded once an install has run, and every other
+            // project would be paying a file read for an answer it has no question for.
+            let locked = m
+                .deps
+                .values()
+                .any(|d| d.patch_dir.is_some())
+                .then(|| mlua_pkg::lockfile::Lockfile::read(inner.lock_path()).ok())
+                .flatten();
             for (name, dep) in &m.deps {
                 if let Some(td) = &dep.target_dir {
                     let abs = root.join(td);
@@ -642,9 +726,17 @@ impl Project {
                     }
                 }
                 if let Some(pd) = &dep.patch_dir {
+                    let dir = root.join(pd);
+                    let over = locked
+                        .as_ref()
+                        .and_then(|l| l.pkg.iter().find(|p| &p.name == name))
+                        .map(|p| p.entry.clone())
+                        .or_else(|| dep.entry.clone());
+                    let entry = patch_entry(&dir, over.as_deref());
                     patches.push(Patched {
                         name: name.clone(),
-                        dir: root.join(pd),
+                        dir,
+                        entry,
                     });
                 }
             }
@@ -665,6 +757,18 @@ impl Project {
     /// Where the patched deps are, for a walker that only asks whether it may enter.
     pub fn patch_dirs(&self) -> Vec<PathBuf> {
         self.patches.iter().map(|p| p.dir.clone()).collect()
+    }
+
+    /// Where a `require` searches the patched deps: one directory per patch, at its
+    /// [`search_dir`](Patched::search_dir).
+    ///
+    /// The search path and the cache's probe list are the same list, and this is it
+    /// ([`Htl::apply_project`](crate::Htl::apply_project),
+    /// [`crate::dependency_dirs`]). Nothing here is asked to exist: a `patch_dir` the
+    /// manifest names and nobody has written yet is a directory a name resolves nothing
+    /// through, and the probe over it is what notices when it arrives.
+    pub fn patch_search_dirs(&self) -> Vec<PathBuf> {
+        self.patches.iter().map(Patched::search_dir).collect()
     }
 
     /// `true` once `mlua-pkg install` has produced the lockfile.
@@ -1380,6 +1484,23 @@ impl crate::Htl {
     /// The directory on the path is [`Project::entries`], where each dep is reached at its
     /// `entry`; the links are written first if the lockfile calls for any that are missing.
     ///
+    /// **A `patch_dir` dependency is on the path in its own right**, at
+    /// [`Project::patch_search_dirs`]. The copy is committed and the manifest names it,
+    /// so the two together are the whole of what a `require` of that dependency needs:
+    /// no install, no link, no network, and nothing that has to exist outside what a
+    /// clone or a tarball carries. That is the arrangement `cargo vendor` and Go's
+    /// `vendor/` settled on — the copy plus the manifest naming it is the source of
+    /// truth, and its presence is what turns the network off — and htl's reason for it
+    /// is the one #266 found: `.htl/` is gitignored, so the copy `cargo package`
+    /// verifies has the patch and the manifest and no links at all, and every `require`
+    /// of the dependency failed there with `module not found`.
+    ///
+    /// Those directories go on first and are therefore consulted last, after the links,
+    /// the `target_dir` copies and the project's own `src/`. A checkout that has
+    /// installed resolves exactly what it resolved before — the link and the copy are
+    /// the same files, and the link still answers first — so what this adds is an answer
+    /// where there was none.
+    ///
     /// Except under build scratch, where this writes nothing at all — the rule and the
     /// reason are [`crate::cache::scratch_root`]'s. What it does there it does read-only:
     /// the directories go on the search path whether or not they exist (a path that
@@ -1392,6 +1513,13 @@ impl crate::Htl {
         // a dependency nothing installed is one `require` cannot reach, and advice to use
         // it would be advice to fail a check.
         self.set_deps(&installed)?;
+        // First, which is to say last: `add_path` prepends, so what goes on here is what
+        // the path consults after everything below. A checkout that has installed
+        // resolves through its links exactly as it did before, and the copy answers where
+        // there are none — a tarball, a clone nobody has installed in yet.
+        for d in p.patch_search_dirs() {
+            self.add_path(&d)?;
+        }
         if crate::cache::scratch_root(&p.root).is_none() {
             let _ = std::fs::create_dir_all(&p.entries);
         }

@@ -289,6 +289,9 @@ fn origin_of(path: &Path, dir: &Path, project: Option<&crate::pkg::Project>) -> 
             });
         }
     }
+    // A patched copy, whichever way the search path reached it: its own entry directory,
+    // which `apply_project` puts on the path, or the link an install wrote at the same
+    // place — both canonicalise into the copy, and the dependency is the same one.
     for patch in &p.patches {
         if starts_with(path, &patch.dir) {
             return Some(Origin {
