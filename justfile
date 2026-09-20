@@ -254,7 +254,7 @@ e2e-scaffold-unpatched:
     # just put the binary, and a guess here is wrong under a `[build] target-dir` in
     # .cargo/config.toml and under any `--target` — it would name a file that is missing,
     # or worse, a stale one from an earlier layout.
-    for htl in 0.4 0.5; do
+    for htl in 0.4 0.5 0.6; do
       cargo run -q -p htl-cli --bin htl -- new "$dir/$htl/bin-sample" --target bin --htl "$htl"
       cargo run -q -p htl-cli --bin htl -- new "$dir/$htl/lib-sample" --target bin --lib --htl "$htl"
       cargo run -q -p htl-cli --bin htl -- new "$dir/$htl/cdylib-sample" --target cdylib --lib --htl "$htl"

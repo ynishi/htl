@@ -98,7 +98,7 @@ pub enum HtlPin {
 /// asks of every entry here, in CI — and an older one stays for as long as it keeps
 /// answering that question. The recipe's list is held to this one by
 /// `the_unpatched_gate_scaffolds_every_supported_release`.
-pub const SUPPORTED: &[&str] = &["0.4", "0.5"];
+pub const SUPPORTED: &[&str] = &["0.4", "0.5", "0.6"];
 
 /// The release a scaffold pins when `--htl` is not given: the newest in [`SUPPORTED`].
 ///
@@ -106,7 +106,7 @@ pub const SUPPORTED: &[&str] = &["0.4", "0.5"];
 /// on crates.io there is nothing for a scaffolded project to resolve, so this number lags
 /// `CARGO_PKG_VERSION` between a bump and a publish and never leads it — which the tests
 /// below assert, because the failure mode of leading it is a scaffold nobody can build.
-pub const DEFAULT_HTL: &str = "0.5";
+pub const DEFAULT_HTL: &str = "0.6";
 
 /// This repository, for the `main` pin's git dependency. Taken from the package metadata,
 /// which inherits `[workspace.package] repository`, so the URL is not written twice.

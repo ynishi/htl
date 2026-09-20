@@ -85,11 +85,14 @@ fn render(root: &Path) -> String {
     s
 }
 
-/// Pin the release the scaffold was written by, without pinning its number.
+/// Pin the release the scaffold was written by, without pinning its number — and the
+/// repository pin (`--htl main`) the same way, so that a tree written under `main` can
+/// share a snapshot with the default's. What each pin actually puts on that line is
+/// `scaffold_cli.rs`'s (`new_pins_the_default_release`, `new_htl_main_writes_a_git_pin`).
 fn normalise(body: &str) -> String {
     body.lines()
         .map(|l| {
-            if l.starts_with("htl = \"") {
+            if l.starts_with("htl = \"") || l.starts_with("htl = { git = ") {
                 "htl = \"{{htl}}\"".to_string()
             } else {
                 l.to_string()
@@ -181,15 +184,15 @@ fn new_embed_writes_the_rust_host() {
 
 /// The Rust host under a pin whose linker serves a bundle's entry by its module name:
 /// `include_bundle!` in `lib.rs`, `run_bundle` in `main.rs`, and no paragraph in the
-/// README about the dependency staying out of the binary. No release has that linker yet,
-/// so the default pin's `embed` snapshot is the one-file host and this is the only tree
-/// that pins the bundle shape byte for byte; the diff between the two files is exactly
-/// what the next minor changes in a scaffolded host.
+/// README about the dependency staying out of the binary. The default release is one of
+/// those now, so `main` writes the `embed` tree: sharing the snapshot is the assertion
+/// that the default and the repository agree on what a host looks like, and the pin line
+/// is the one thing the two differ in, normalised away above.
 #[test]
-fn new_embed_htl_main_writes_the_rust_host_around_a_bundle() {
+fn new_embed_htl_main_writes_what_the_default_writes() {
     let root = common::scratch("htl-cli-snapshot", "embed-main");
     htl(&["new", "sample", "--embed", "--htl", "main"], &root);
-    assert_tree("embed-main", &root.join("sample"));
+    assert_tree("embed", &root.join("sample"));
 }
 
 /// `--embed` is the shorthand for `--target bin`, and sharing the snapshot is what says
