@@ -77,10 +77,10 @@ fn patch_takes_the_package_root_into_the_tree_and_records_where_it_came_from() {
     let (url, sha) = remote("remote-take");
     let root = project("take", &url, &sha);
 
-    let report = Project::at(&root).patch("mathx", false).unwrap();
-    assert!(report.created, "{report:?}");
-    assert_eq!(report.base, sha);
-    assert_eq!(report.patch_dir, root.join("patches/mathx"));
+    let done = Project::at(&root).patch("mathx", false).unwrap();
+    assert!(done.report.created, "{done:?}");
+    assert_eq!(done.report.base, sha);
+    assert_eq!(done.report.patch_dir, root.join("patches/mathx"));
 
     assert!(root.join("patches/mathx/src/mathx.tl").is_file());
     assert!(
@@ -91,6 +91,11 @@ fn patch_takes_the_package_root_into_the_tree_and_records_where_it_came_from() {
         !root.join("patches/mathx/.git").exists(),
         "but not the repository it was checked out of: git would read that as an embedded \
          repository and commit a gitlink instead of the files"
+    );
+    assert_eq!(
+        done.dropped,
+        vec![".git"],
+        "which is the one dot-entry this repository has, and the caller is told"
     );
 
     let manifest = std::fs::read_to_string(root.join("mlua-pkg.toml")).unwrap();
@@ -161,8 +166,11 @@ fn a_copy_with_uncommitted_changes_is_not_overwritten() {
     git(&root, &["add", "."]);
     git(&root, &["commit", "-qm", "take mathx into the tree"]);
     let again = p.patch("mathx", false).unwrap();
-    assert!(!again.created, "the second one is a refresh: {again:?}");
-    assert_eq!(again.base, sha);
+    assert!(
+        !again.report.created,
+        "the second one is a refresh: {again:?}"
+    );
+    assert_eq!(again.report.base, sha);
 
     // An edit that is not committed stops it again, and says which file it is.
     let edited = "return { twice = function(n: number): number return n + n end }\n";
@@ -171,7 +179,7 @@ fn a_copy_with_uncommitted_changes_is_not_overwritten() {
     assert!(err.contains("patches/mathx/src/mathx.tl"), "{err}");
 
     let forced = p.patch("mathx", true).unwrap();
-    assert!(!forced.created, "{forced:?}");
+    assert!(!forced.report.created, "{forced:?}");
     assert_eq!(
         std::fs::read_to_string(root.join("patches/mathx/src/mathx.tl")).unwrap(),
         SOURCE,

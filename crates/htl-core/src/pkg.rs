@@ -473,6 +473,25 @@ pub struct AddDone {
     pub kept_patch_dir: Option<PathBuf>,
 }
 
+/// What [`Project::patch`] did: mlua-pkg's own report, and what htl took back out of the
+/// copy.
+///
+/// The copy is made from a checkout rather than from a published archive, so it arrives
+/// with the repository around the package. What was removed is named here rather than
+/// happening quietly: the directory is about to be committed, and a file the author of the
+/// dependency can see upstream and the patcher cannot find in `patches/<dep>` is a
+/// difference worth one line of output.
+#[derive(Debug, Clone)]
+pub struct PatchDone {
+    /// What mlua-pkg's own `patch` returned, passed through unchanged: where the copy is,
+    /// whether the directory was created or rebuilt, and the revision it came from.
+    pub report: mlua_pkg::ops::PatchReport,
+    /// The dot-entries removed from the copy's root, by name and sorted. Empty when the
+    /// repository had nothing of its own beside the package — which is most of the time,
+    /// and why the report says this only when there is something to say.
+    pub dropped: Vec<String>,
+}
+
 /// Where a patched dependency stands after an install: whether the copy is what the
 /// dependency resolves from, and the two revisions the answer rests on.
 ///
@@ -882,7 +901,9 @@ impl Project {
 
     /// Take a dependency's source into `patches/<dep>/`, where the project owns it.
     ///
-    /// The whole package root is copied, so the dep's `types/` comes with it, and
+    /// The whole package root is copied, so the dep's `types/` comes with it, minus the
+    /// dot-entries at its root, which are the repository the package was checked out of
+    /// rather than the package — [`PatchDone::dropped`] names the ones that were there.
     /// `patch_dir` on that dependency in the manifest says which dependency the directory
     /// stands in for. There is no patch file and nothing is applied: from here the
     /// directory is the project's code, edited and committed with git like the rest of the
@@ -896,7 +917,7 @@ impl Project {
     /// rather than merged — carrying the project's own change forward onto it is a merge
     /// git performs, and it can only do that if the change is committed — so a directory
     /// with uncommitted changes is refused unless `force`.
-    pub fn patch(&self, name: &str, force: bool) -> anyhow::Result<mlua_pkg::ops::PatchReport> {
+    pub fn patch(&self, name: &str, force: bool) -> anyhow::Result<PatchDone> {
         let manifest = mlua_pkg::manifest::Manifest::from_path(&self.manifest)?;
         let dep = manifest.deps.get(name).ok_or_else(|| {
             anyhow::anyhow!(
@@ -932,8 +953,8 @@ impl Project {
         };
         match mlua_pkg::ops::patch(&self.config(), opts) {
             Ok(report) => {
-                drop_dot_git(&report.patch_dir)?;
-                Ok(report)
+                let dropped = drop_dot_entries(&report.patch_dir)?;
+                Ok(PatchDone { report, dropped })
             }
             Err(e) => {
                 // A `patch_dir` naming a directory that was never written turns every
@@ -952,7 +973,7 @@ impl Project {
     /// and falls back to upstream when they differ; this reads the same two values
     /// afterwards so htl can say what happened in its own verbs — mlua-pkg's warning names
     /// `mlua-pkg patch --force`, which skips the question htl asks git and leaves the
-    /// dependency's `.git` in the copy.
+    /// upstream repository's dot-entries in the copy.
     pub fn patch_status(&self) -> Vec<PatchStatus> {
         let lock = mlua_pkg::lockfile::Lockfile::read(&self.lockfile).ok();
         self.patches
@@ -1035,26 +1056,66 @@ fn to_toml_path(p: &Path) -> String {
         .join("/")
 }
 
-/// Take the dependency's own `.git` out of the copy.
+/// Take the upstream repository's own dot-entries out of the copy's root, and name them.
 ///
-/// The copy is made from a checkout, so it arrives with the repository it was checked out
-/// of. Left in place, git reads `patches/<dep>` as an embedded repository and records it as
-/// a gitlink — a commit id pointing at a repository nobody else has, with none of the files
-/// in this project's history. What the patch is for is the opposite of that: ordinary
-/// files, committed here, diffed and reviewed here.
-fn drop_dot_git(dir: &Path) -> anyhow::Result<()> {
-    let dot_git = dir.join(".git");
-    let meta = match std::fs::symlink_metadata(&dot_git) {
-        Ok(m) => m,
-        Err(_) => return Ok(()),
-    };
-    if meta.is_dir() {
-        std::fs::remove_dir_all(&dot_git)
-    } else {
-        // A worktree checkout has a `.git` file pointing elsewhere.
-        std::fs::remove_file(&dot_git)
+/// The copy is made from a checkout rather than from a published archive, so it arrives
+/// with the repository around the package: `.git`, the CI workflows under `.github`, the
+/// ignore rules, whatever tool state (`.htl`, `.mlua-pkgs`) and OS litter (`.DS_Store`) the
+/// checkout happened to hold. None of it is the dependency's source, and each kind of it
+/// costs the project that is about to commit the directory something:
+///
+/// - `.git` — git reads `patches/<dep>` as an embedded repository and records it as a
+///   gitlink, a commit id pointing at a repository nobody else has, with none of the files
+///   in this project's history.
+/// - `.github` — a workflow under `patches/` is inert (GitHub only runs the ones at the
+///   repository root) but it is still a workflow file, and the gates that watch
+///   `.github/workflows/*` — review rules, secret scanners, branch protection — fire on it.
+/// - `.gitignore` — a second ignore file inside the tree, whose rules were written for a
+///   different repository, silently drops files from this project's own commits. That is
+///   not a hypothesis: it is what cargo's vendored copies do to their consumers
+///   (rust-lang/cargo#13607), and the lesson cargo draws is that a copy landing inside
+///   somebody else's repository must not carry ignore rules with it.
+/// - the rest — [`crate::is_skipped_dir`] already refuses to descend into a dot-directory,
+///   so anything else here would be committed, reviewed and never read.
+///
+/// Root level only. Below the copy's root a dot-entry belongs to the package the way any
+/// other file there does, and htl does not know which ones the dependency needs. The same
+/// reasoning keeps `htl.toml` and `mlua-pkg.toml`: they are the package's, they are what
+/// says where its entry is, and install reads them from the copy.
+///
+/// This is a denylist of one shape rather than an allowlist of names, which is the
+/// narrowest rule that closes the whole class — npm's named denylist has to grow a name
+/// every time an ecosystem invents a dotfile, and `.github` is still not on it. There is no
+/// flag to keep them: somebody who wants the repository clones the repository.
+fn drop_dot_entries(dir: &Path) -> anyhow::Result<Vec<String>> {
+    let mut dropped = Vec::new();
+    let entries = std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        // `file_type` here is the directory entry's, so a symlink is a symlink rather than
+        // what it points at — and a link is unlinked, never followed and emptied. (A
+        // worktree checkout's `.git` is a plain file pointing elsewhere; it goes the same
+        // way.)
+        let ft = entry
+            .file_type()
+            .with_context(|| format!("reading {}", path.display()))?;
+        if ft.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        }
+        .with_context(|| format!("removing {}", path.display()))?;
+        dropped.push(name);
     }
-    .with_context(|| format!("removing {}", dot_git.display()))
+    // read_dir's order is the filesystem's. What a report prints, and what a test asserts,
+    // is sorted.
+    dropped.sort();
+    Ok(dropped)
 }
 
 /// Refuse to overwrite a patched copy that git has not been told about.

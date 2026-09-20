@@ -1431,13 +1431,25 @@ switch.
 ## Patched dependencies (`htl pkg patch`)
 
 A dependency needs one line changed. `htl pkg patch mathx` copies its package root — the
-whole package, so its `types/` comes with it — out of the pinned revision and into
-`patches/mathx/`, writes `patch_dir = "patches/mathx"` onto that dependency in
-`mlua-pkg.toml`, and records the commit it was taken from as `patch_base` in the lockfile.
+whole package, so its `types/` comes with it, and none of the repository around it — out
+of the pinned revision and into `patches/mathx/`, writes `patch_dir = "patches/mathx"`
+onto that dependency in `mlua-pkg.toml`, and records the commit it was taken from as
+`patch_base` in the lockfile.
 
 ```text
   patched patches/mathx (mathx at 3f2a9c1)
+  dropped .git, .github, .gitignore (the repository's, not the package's)
 ```
+
+What is left out is the dot-entries at the root of the copy — the repository the package
+was checked out of, rather than the package. A `.git` there would make the directory an
+embedded repository git records as a gitlink; a workflow under `.github` is inert where it
+lands but still trips the gates that watch `.github/workflows/*`; and a second
+`.gitignore` inside the tree, written for another repository, silently drops files from
+this project's commits, which is the failure Cargo's vendored copies are known for. The
+package's own files all come through, both manifests among them, and a dotfile below the
+root is the package's business rather than htl's. There is no flag to keep the rest:
+somebody who wants the repository clones the repository.
 
 From there the directory is the project's code: edited, diffed, reviewed and committed
 with git like anything else in the tree. There is no patch file and nothing is applied —
