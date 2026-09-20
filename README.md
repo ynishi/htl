@@ -1902,9 +1902,7 @@ with `src/<name>.tl`); htl resolves that form in the checker and in `TealResolve
 `mlua-pkg.toml` names one dependency from the start: `htlx`, the collections Lua does not
 have ([htl-x](https://github.com/ynishi/htl-x) — `htlx.list` / `tablex` / `seq` /
 `ordered`, pure Teal), pinned at an exact tag, so the README's first step is `htl pkg
-install`. `htl new --no-x` leaves the line out. Every pin the scaffold supports resolves
-a dependency at its `entry` (releases from 0.5 on, `main`, a checkout), so the line is
-written under all of them.
+install`. `htl new --no-x` leaves the line out.
 The tag the scaffold pins is a constant in the scaffold, and `just e2e` scaffolds a
 project, installs it and runs a test against it, which is what the constant is allowed to
 move on.
@@ -1933,10 +1931,7 @@ Rust side to a project that predates it and lists the files it kept rather than 
 them in silence.
 
 `[build] target` in `htl.toml` is the key that records what runs the output, read by every
-command that loads the file (absent means `hb`). `htl new --target <name>` writes it under
-every pin the scaffold supports — a release from 0.5 on, `main`, a checkout — each of
-which reads it; `0.4`, whose `include_tl!` would refuse the whole file over the unknown
-key, is no longer a pin the scaffold writes for.
+command that loads the file (absent means `hb`). `htl new --target <name>` writes it.
 
 `htl build` is the first command that acts on what the key records. A bundle is the `hb`
 target, so in a `bin` or a `cdylib` project the build says which target the project is, who
@@ -1944,27 +1939,24 @@ runs that output and which command builds it — `cargo build` — and writes no
 record is a decision the project made rather than a note about itself; dropping
 `[build] target` from `htl.toml` is how a project with Rust in it asks for a bundle anyway.
 
-#### Which htl the project depends on (`--htl <req | main | path:<checkout>>`)
+#### Which htl the project depends on (`--htl <main | path:<checkout>>`)
 
-A target that writes Rust writes a `Cargo.toml`, and `--htl` is what that manifest pins.
-Without it a project pins the newest release the scaffold supports — `0.6` today — which is
-data in the scaffold rather than the version of the `htl` you happen to have installed:
-the two move at different moments, and this one moves when a release that understands
-everything the scaffold writes is on crates.io. A release the scaffold has not been asked
-about is refused, with the ones it has, before the directory is created.
+A target that writes Rust writes a `Cargo.toml`, and the `htl` that manifest pins is the
+one the `htl` binary was built with — the scaffold writes what that htl reads (`htl.toml`
+keys, the host's `include_bundle!`), so the two cannot disagree. Where that htl *is* is
+what changes with the binary: one installed from crates.io (`cargo install htl-cli`) pins
+its own version there, `htl = "0.6.0"`; one built from a checkout of this repository
+(`cargo run`, `cargo install --path`) pins that checkout, `htl = { path = ".../crates/htl" }`,
+so a project written by it builds against the tree that wrote it with nothing patched
+afterwards — and is tied to that tree, as a project written by a development build should
+be. One built by `cargo install --git` pins the repository's `main` branch.
 
-`--htl main` pins the repository's `main` branch and `--htl path:<checkout>` a clone of it
-(the checkout's *root* — the dependency written is the `crates/htl` inside it). Both exist
-for dogfooding an unreleased htl, and they replace adding a `[patch.crates-io]` section by
-hand afterwards; the C ABI target's `features = ["ffi"]` travels onto whichever form the
-pin takes.
-
-**A scaffold writes only what the htl it pins can read.** `htl.toml` is parsed inside
-`include_tl!` by the pinned crate, and unknown keys there are an error rather than
-something ignored — so a key this repository has added and no release carries yet is not
-written into a project pinned at a release that lacks it; under `main` or a checkout it
-can be. `just e2e-scaffold-unpatched` is that rule as a gate: it scaffolds under each
-release pin and runs each project's tests against crates.io with nothing patched.
+`--htl main` pins `main` by hand, and `--htl path:<checkout>` another clone (the
+checkout's *root* — the dependency written is the `crates/htl` inside it); the C ABI
+target's `features = ["ffi"]` travels onto whichever form the pin takes. A release by
+number is refused: a project for an older htl is written by that release's own CLI,
+`cargo install htl-cli --version <release>`, the way every generator that ships beside its
+library does it.
 
 #### The bin target (`--target bin`)
 

@@ -377,10 +377,11 @@ The cdylib target: https://github.com/ynishi/htl#the-cdylib-target---target-cdyl
         /// script, a thin src/main.rs
         #[arg(long, value_name = "NAME", value_parser = clap::builder::PossibleValuesParser::new(scaffold::target_names()))]
         target: Option<String>,
-        /// The htl the project depends on: a supported release (0.4), `main`, or
-        /// `path:<checkout>`
-        #[arg(long, value_name = "REQ", default_value = scaffold::DEFAULT_HTL)]
-        htl: String,
+        /// The htl the project depends on: `main`, or `path:<checkout>`. Without it, the
+        /// htl this binary was built with — its version on crates.io, or the checkout it
+        /// was built in
+        #[arg(long, value_name = "REQ")]
+        htl: Option<String>,
         /// Leave the htlx (htl-x collections) dependency out of mlua-pkg.toml
         #[arg(long)]
         no_x: bool,
@@ -396,10 +397,11 @@ The cdylib target: https://github.com/ynishi/htl#the-cdylib-target---target-cdyl
         /// Fill in this target's files, and report the ones that were already there
         #[arg(long, value_name = "NAME", value_parser = clap::builder::PossibleValuesParser::new(scaffold::target_names()))]
         target: Option<String>,
-        /// The htl the project depends on: a supported release (0.4), `main`, or
-        /// `path:<checkout>`
-        #[arg(long, value_name = "REQ", default_value = scaffold::DEFAULT_HTL)]
-        htl: String,
+        /// The htl the project depends on: `main`, or `path:<checkout>`. Without it, the
+        /// htl this binary was built with — its version on crates.io, or the checkout it
+        /// was built in
+        #[arg(long, value_name = "REQ")]
+        htl: Option<String>,
         /// Leave the htlx (htl-x collections) dependency out of mlua-pkg.toml
         #[arg(long)]
         no_x: bool,
@@ -707,7 +709,7 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
             target,
             htl,
             no_x,
-        } => cmd_new(&name, lib, embed, target.as_deref(), &htl, no_x),
+        } => cmd_new(&name, lib, embed, target.as_deref(), htl.as_deref(), no_x),
         Cmd::Init {
             dir,
             lib,
@@ -715,7 +717,14 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
             target,
             htl,
             no_x,
-        } => cmd_init(dir.as_deref(), lib, embed, target.as_deref(), &htl, no_x),
+        } => cmd_init(
+            dir.as_deref(),
+            lib,
+            embed,
+            target.as_deref(),
+            htl.as_deref(),
+            no_x,
+        ),
         Cmd::Gen { file, out } => cmd_gen(&file, out.as_deref()),
         Cmd::Run { file, args } => cmd_run(&file, &args),
         Cmd::Fix {
@@ -1024,7 +1033,7 @@ fn cmd_new(
     lib: bool,
     embed: bool,
     target: Option<&str>,
-    htl: &str,
+    htl: Option<&str>,
     no_x: bool,
 ) -> Result<ExitCode> {
     let dir = PathBuf::from(name);
@@ -1035,7 +1044,7 @@ fn cmd_new(
         .to_string();
     // Before the directory is touched: an unknown target, or one that disagrees with
     // --lib, fails here and leaves nothing behind. So does an htl this scaffold does not
-    // write for — the pin decides what goes into the files, so it is settled first too.
+    // write for — a release by number — so it is settled first too.
     let target = scaffold::resolve_target(target, embed, lib)?;
     let htl = scaffold::HtlPin::parse(htl)?;
     let opts = scaffold::Options {
@@ -1062,7 +1071,7 @@ fn cmd_init(
     lib: bool,
     embed: bool,
     target: Option<&str>,
-    htl: &str,
+    htl: Option<&str>,
     no_x: bool,
 ) -> Result<ExitCode> {
     let dir = match dir {

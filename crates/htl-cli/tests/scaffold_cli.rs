@@ -37,16 +37,29 @@ fn htl_line(manifest: &Path) -> String {
         .to_string()
 }
 
-/// With no `--htl`, a project pins the release the scaffold defaults to — a number written
-/// down in `scaffold.rs`, not this crate's version. The two are equal today and the reason
-/// they are separate is that they move at different moments: this one moves when a release
-/// that understands what the scaffold writes is on crates.io.
+/// With no `--htl`, a project pins the htl the binary was built with, where it is. The
+/// binary `cargo test` builds is a checkout's, so it pins this checkout's `crates/htl`;
+/// the packaged gate runs this suite against a CLI built from the tarball
+/// (`HTL_TEST_BIN`), and that one pins its own version. Either is the answer, and the
+/// unit test `the_default_pin_is_where_this_binary_was_built_from` holds each to its
+/// build.
 #[test]
-fn new_pins_the_default_release() {
+fn new_pins_the_htl_this_binary_was_built_with() {
     let root = scratch("dep");
     let (ok, _, stderr) = htl(&["new", "a", "--target", "bin"], &root);
     assert!(ok, "{stderr}");
-    assert_eq!(htl_line(&root.join("a/Cargo.toml")), "htl = \"0.6\"");
+    let line = htl_line(&root.join("a/Cargo.toml"));
+    let release = format!("htl = \"{}\"", env!("CARGO_PKG_VERSION"));
+    let checkout = std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .unwrap()
+        .display()
+        .to_string()
+        .replace('\\', "/");
+    let path = format!("htl = {{ path = \"{checkout}/crates/htl\" }}");
+    assert!(
+        line == release || line == path,
+        "{line}\n  is neither {release} nor {path}"
+    );
 }
 
 /// `--htl main` is the dogfood pin: the project builds against the repository rather than
@@ -80,15 +93,19 @@ fn new_htl_path_writes_a_path_pin() {
     );
 }
 
-/// A release the scaffold has no opinion about is refused with the ones it has, and — like
-/// an unknown target — before the directory exists, so a typo leaves nothing behind.
+/// A release by number is refused — this CLI writes for the htl it links, and the CLI
+/// that writes for another release is on crates.io beside it — and, like an unknown
+/// target, before the directory exists, so a typo leaves nothing behind.
 #[test]
-fn an_unsupported_htl_is_refused_before_writing() {
+fn a_release_by_number_is_refused_before_writing() {
     let root = scratch("bad-pin");
     let (ok, _, stderr) = htl(&["new", "d", "--htl", "0.3"], &root);
     assert!(!ok, "{stderr}");
     assert!(stderr.contains("unsupported htl `0.3`"), "{stderr}");
-    assert!(stderr.contains("0.5"), "the supported set:\n{stderr}");
+    assert!(
+        stderr.contains("cargo install htl-cli --version 0.3"),
+        "the way to that release:\n{stderr}"
+    );
     assert!(!root.join("d").exists(), "{stderr}");
 }
 
@@ -108,11 +125,11 @@ fn the_cdylib_pin_keeps_its_features_under_every_pin_kind() {
     assert!(line.contains("features = [\"ffi\"]"), "{line}");
 }
 
-/// `[build] target` is written whenever the project has a target: every release the
-/// scaffold supports reads the key (it was `0.4` that did not, and `0.4` is out of the
-/// set), so under the default release, `main` or a checkout alike it is recorded. The
-/// `main` case also runs `htl check` on the project it wrote, which is the assertion that
-/// matters: the file this scaffold produced is one an htl that carries the key accepts.
+/// `[build] target` is written whenever the project has a target, under the default,
+/// `main` or a checkout alike: the htl a project pins is the one this CLI links, and it
+/// reads the key. The `main` case also runs `htl check` on the project it wrote, which is
+/// the assertion that matters: the file this scaffold produced is one an htl that carries
+/// the key accepts.
 #[test]
 fn new_records_the_target_under_every_pin() {
     let root = scratch("build-target");
@@ -243,9 +260,6 @@ fn embed_scaffold_optimises_the_proc_macro_build() {
 /// `arg` the way `htl run` does before the entry runs — so the same `main.tl` runs
 /// unchanged both ways. The e2e `the_bin_target_builds_tests_and_greets` is where the
 /// argument actually crosses (`cargo run -- Ada`); this holds the shape that makes it.
-/// Under the default pin: the bundle is written only for a pin whose linker serves it,
-/// and 0.6 is the first release that does — a project pinned to `0.5` still runs the
-/// entry with `exec`.
 #[test]
 fn embed_scaffold_runs_main_as_a_bundle_that_fills_arg() {
     let root = scratch("arg");

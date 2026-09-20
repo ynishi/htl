@@ -12,10 +12,11 @@
 //! `HTL_UPDATE_SNAPSHOTS=1 cargo test -p htl-cli --test scaffold_snapshot` rewrites them;
 //! the rewritten files are the thing under review, so read the diff before committing it.
 //!
-//! One line moves on its own schedule: the `htl` dependency in `Cargo.toml`, which is what
-//! `--htl` picks and what `scaffold::DEFAULT_HTL` picks when it is not given. It is
-//! normalised to `htl = "{{htl}}"` here so that raising the default release rewrites one
-//! constant rather than six snapshots; what the line actually says, under each pin, is
+//! One line depends on where the binary under test was built: the `htl` dependency in
+//! `Cargo.toml`, which is what `--htl` picks and, when it is not given, the htl this CLI
+//! was built with — a version on crates.io for a published CLI, this checkout's path for
+//! the one `cargo test` builds. It is normalised to `htl = "{{htl}}"` here so the same
+//! snapshot holds for both; what the line actually says, under each pin, is
 //! `scaffold_cli.rs`'s. Every other byte of these trees is pinned exactly.
 
 use std::path::{Path, PathBuf};
@@ -85,14 +86,15 @@ fn render(root: &Path) -> String {
     s
 }
 
-/// Pin the release the scaffold was written by, without pinning its number — and the
-/// repository pin (`--htl main`) the same way, so that a tree written under `main` can
-/// share a snapshot with the default's. What each pin actually puts on that line is
-/// `scaffold_cli.rs`'s (`new_pins_the_default_release`, `new_htl_main_writes_a_git_pin`).
+/// Pin the htl the scaffold was written by, without pinning where it is: a version, the
+/// repository (`--htl main`) or a checkout's path (the default under `cargo test`, and
+/// `--htl path:`), with or without the features a target adds, all read as one line.
+/// What each pin actually puts on that line is `scaffold_cli.rs`'s
+/// (`new_pins_the_htl_this_binary_was_built_with`, `new_htl_main_writes_a_git_pin`).
 fn normalise(body: &str) -> String {
     body.lines()
         .map(|l| {
-            if l.starts_with("htl = \"") || l.starts_with("htl = { git = ") {
+            if l.starts_with("htl = ") {
                 "htl = \"{{htl}}\"".to_string()
             } else {
                 l.to_string()
@@ -146,11 +148,10 @@ fn new_writes_the_plain_tree() {
     assert_tree("plain", &root.join("sample"));
 }
 
-/// Under a pin that resolves a dependency at its entry (`main`, a checkout, 0.5 on) the
-/// manifest names `htlx` and the README's first step is the fetch. The default release is
-/// one of those now, so `main` writes the plain tree: the same snapshot is the assertion
-/// that the default and the repository agree on what a project starts with, and `plain`
-/// is where a change to the dependency line — the tag above all — is reviewed.
+/// The manifest names `htlx` and the README's first step is the fetch, under `main` as
+/// under the default: the same snapshot is the assertion that the pin has no say in what
+/// a project starts with, and `plain` is where a change to the dependency line — the tag
+/// above all — is reviewed.
 #[test]
 fn new_htl_main_writes_the_plain_tree() {
     let root = common::scratch("htl-cli-snapshot", "plain-main");
@@ -182,12 +183,9 @@ fn new_embed_writes_the_rust_host() {
     assert_tree("embed", &root.join("sample"));
 }
 
-/// The Rust host under a pin whose linker serves a bundle's entry by its module name:
-/// `include_bundle!` in `lib.rs`, `run_bundle` in `main.rs`, and no paragraph in the
-/// README about the dependency staying out of the binary. The default release is one of
-/// those now, so `main` writes the `embed` tree: sharing the snapshot is the assertion
-/// that the default and the repository agree on what a host looks like, and the pin line
-/// is the one thing the two differ in, normalised away above.
+/// `--htl main` writes the `embed` tree: the pin decides the `htl` line of `Cargo.toml`
+/// and nothing else, and sharing the snapshot is that assertion. The pin line is the one
+/// thing the two differ in, normalised away above.
 #[test]
 fn new_embed_htl_main_writes_what_the_default_writes() {
     let root = common::scratch("htl-cli-snapshot", "embed-main");
