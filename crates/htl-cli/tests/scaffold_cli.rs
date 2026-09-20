@@ -88,7 +88,7 @@ fn an_unsupported_htl_is_refused_before_writing() {
     let (ok, _, stderr) = htl(&["new", "d", "--htl", "0.3"], &root);
     assert!(!ok, "{stderr}");
     assert!(stderr.contains("unsupported htl `0.3`"), "{stderr}");
-    assert!(stderr.contains("0.4"), "the supported set:\n{stderr}");
+    assert!(stderr.contains("0.5"), "the supported set:\n{stderr}");
     assert!(!root.join("d").exists(), "{stderr}");
 }
 
@@ -108,19 +108,15 @@ fn the_cdylib_pin_keeps_its_features_under_every_pin_kind() {
     assert!(line.contains("features = [\"ffi\"]"), "{line}");
 }
 
-/// `[build] target` is written only when the pinned htl can read it. Under `0.4` the key
-/// does not exist, so the project that has a target gets the same `htl.toml` as one that
-/// has none; under the default release, `main` or a checkout it is recorded. The `main`
-/// case also runs `htl check` on the project it wrote, which is the assertion that matters:
-/// the file this scaffold produced is one an htl that carries the key accepts.
+/// `[build] target` is written whenever the project has a target: every release the
+/// scaffold supports reads the key (it was `0.4` that did not, and `0.4` is out of the
+/// set), so under the default release, `main` or a checkout alike it is recorded. The
+/// `main` case also runs `htl check` on the project it wrote, which is the assertion that
+/// matters: the file this scaffold produced is one an htl that carries the key accepts.
 #[test]
-fn new_records_the_target_when_the_pin_reads_it() {
+fn new_records_the_target_under_every_pin() {
     let root = scratch("build-target");
     let config = |name: &str| std::fs::read_to_string(root.join(name).join("htl.toml")).unwrap();
-
-    let (ok, _, stderr) = htl(&["new", "a", "--target", "bin", "--htl", "0.4"], &root);
-    assert!(ok, "{stderr}");
-    assert!(!config("a").contains("target ="), "{}", config("a"));
 
     let (ok, _, stderr) = htl(&["new", "a5", "--target", "bin"], &root);
     assert!(ok, "{stderr}");

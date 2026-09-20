@@ -230,7 +230,7 @@ e2e-scaffold-packaged:
 # an htl older than the keys the scaffold now writes. That is the same failure read from the
 # other end, and raising the constant is what fixes it.
 #
-# Every release in `scaffold::SUPPORTED` is scaffolded, not the default alone: `--htl 0.4`
+# Every release in `scaffold::SUPPORTED` is scaffolded, not the default alone: `--htl 0.5`
 # is a promise the scaffold makes by name, and the older shape has no other gate — its
 # snapshot says what is written, not that the release it names can run it. The list below
 # is held to `SUPPORTED` by a unit test in `scaffold.rs`.
@@ -254,7 +254,7 @@ e2e-scaffold-unpatched:
     # just put the binary, and a guess here is wrong under a `[build] target-dir` in
     # .cargo/config.toml and under any `--target` — it would name a file that is missing,
     # or worse, a stale one from an earlier layout.
-    for htl in 0.4 0.5 0.6; do
+    for htl in 0.5 0.6; do
       cargo run -q -p htl-cli --bin htl -- new "$dir/$htl/bin-sample" --target bin --htl "$htl"
       cargo run -q -p htl-cli --bin htl -- new "$dir/$htl/lib-sample" --target bin --lib --htl "$htl"
       cargo run -q -p htl-cli --bin htl -- new "$dir/$htl/cdylib-sample" --target cdylib --lib --htl "$htl"

@@ -35,7 +35,9 @@ impl Host {
 /// Teal module as `require("{{mod}}")`.
 pub fn preload(h: &Htl) -> anyhow::Result<()> {
     Host.htl_preload(h)?;
-{{std}}
+    // `std.*`: json, string, path and the rest, from mlua-batteries; typed in the checker
+    // the same way. Remove this line and the project has no native modules but `host`.
+    h.install_std()?;
 {{install}}
     Ok(())
 }
