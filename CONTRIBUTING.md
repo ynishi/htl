@@ -76,12 +76,12 @@ writes one in a second, so not having one is not a reason to skip this: "not
 verified on a dogfood project" is not a report this repository accepts. Say what
 was run — the project, the command, the arguments — and what came out.
 
-A change that has to be built against, and not only run by, an unreleased htl is
-`htl new … --htl path:<checkout>`, which pins the scaffold at this working copy;
-`just e2e-scaffold-unpatched` is the other end of that, scaffolding under each
-release pin and running each project's tests against the published release.
-A release pin gets what that release's `.0` reads and nothing newer: a change no
-release carries is written only for the next minor, and reached through `path:`.
+A project `htl new` writes pins the htl the binary was built with: a binary built
+from a checkout pins that checkout (`--htl path:<other-checkout>` names another),
+so a change that has to be built against, and not only run by, this working copy
+is one `htl new` and one `cargo build`, with nothing patched. Only a binary built
+from the crates.io tarball pins a version; the scaffold never writes for a release
+it does not link.
 
 `HTL_PROFILE=1` prints per-phase timings; a performance change quotes them,
 before and after, and says which build produced them.
