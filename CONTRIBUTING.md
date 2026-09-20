@@ -132,6 +132,16 @@ Refs #<issue>
   (`release-plz.toml` says how). The subject decides the size of the next release:
   a PR whose title starts with `feat:` makes it a minor, which on 0.x is the unit
   that changes what a scaffold or a release pin can know; anything else is a patch.
+- `feat:` is also what a change to a published crate's public API asks for — a
+  signature, a return type, a field on a public struct, whatever a consumer of
+  `htl-core`, `htl-macros` or `htl` could have written against. On 0.x cargo treats
+  the minor as the compatibility unit, so `0.6` resolves to the newest `0.6.z` and a
+  patch that changed an API breaks every consumer of the line on their next
+  `cargo update`. A minor is what tells them. A PR that changes an API and says
+  nothing else new is still `feat:`; the prose explains what moved. Between
+  releases such changes accumulate on `main` and the first `feat:` among them is
+  enough — release-plz reads every commit since the last tag. 0.6.3 shipped one
+  (`Project::patch`, `Patched`) as a patch; 0.7.0 is the release that says so.
 
 ## Pull requests
 
