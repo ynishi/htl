@@ -426,9 +426,9 @@ pub fn patched(paths: &[PathBuf]) -> Vec<PathBuf> {
 /// beside `htl.toml`, or in the working directory. A macro expands wherever cargo compiles
 /// the crate, which is not always somewhere a store belongs — the crate may not have opted
 /// into the layout at all (`htl init` / `htl new` write `htl.toml` and gitignore `.htl/`),
-/// or it may be building from the copy `cargo publish` verifies under `target/package/`,
-/// where a new file aborts the publish, or from a registry checkout, which nothing should
-/// write to.
+/// or it may be building in build scratch, which is [`cache::scratch_root`]'s to define
+/// and to explain: this is the store's half of a rule that covers the whole `.htl/`, the
+/// entry links included.
 pub fn store_refusal(root: &Path, has_config: bool) -> Option<String> {
     if !has_config {
         return Some("no htl.toml".to_string());

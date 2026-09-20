@@ -831,13 +831,31 @@ pub fn root_for(path: &Path) -> Option<PathBuf> {
         .map(|(file, _)| crate::parent_dir(&file))
 }
 
-/// Why a proc macro must not write a store under `root`, if it must not.
+/// Why nothing may be written under `root`, if nothing may — build scratch, named.
 ///
 /// A macro expands wherever cargo compiles the crate: in the checkout, but also in the
 /// copy `cargo publish` verifies under `target/package/<crate>/` — where a new file makes
 /// cargo abort with "Source directory was modified" — and in a registry checkout under
 /// `$CARGO_HOME/registry/src`, which nothing should write to. Both are recognisable by
-/// their path, and a store there would be nobody's to keep anyway.
+/// their path, and neither is anybody's tree to keep anything in.
+///
+/// **The rule is the whole `.htl/`, not the store.** Every write htl makes as a side
+/// effect of reading a project asks here first, and there are two: the run cache
+/// (`project::store_refusal`, which every reader of the store comes through) and the
+/// entry links ([`crate::pkg::Project::link_entries`], through
+/// [`Htl::apply_project`](crate::Htl::apply_project)). The link repair was outside the
+/// rule until #267, where it wrote `.htl/modules/entries/<dep>` into the tree `cargo
+/// package` had just built and cargo refused the tarball. A reader of a scratch tree
+/// reads it exactly as it was packaged.
+///
+/// **`target` is recognised by the path and nothing else.** cargo publishes no signal
+/// saying "this build is the verification step", so htl reads the convention instead: a
+/// path component named `target`. That has two costs, both accepted for having one rule
+/// in one function rather than one per writer. A `CARGO_TARGET_DIR` pointing outside the
+/// tree defeats it — the verify copy is then not under a `target` directory, and htl
+/// writes in it as it would in a checkout. And a project that keeps its own sources under
+/// a directory called `target` goes without a store it could have had; a miss costs a
+/// check, which is the cheaper way to be wrong.
 pub fn scratch_root(root: &Path) -> Option<&'static str> {
     if root.components().any(|c| c.as_os_str() == "target") {
         return Some("under a `target` directory");

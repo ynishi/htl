@@ -353,6 +353,15 @@ impl HtlConfig {
 
     /// Nearest `htl.toml` at or above `start` (a file or directory). `Ok(None)` when
     /// there is none; `Err` when one exists but does not parse.
+    ///
+    /// A `htl.toml` inside a directory an enclosing project declares as a dependency's —
+    /// a `patch_dir`, a `target_dir` — is passed over, and the walk goes on to the
+    /// project's own. `htl pkg patch` copies a dependency's package root whole, config
+    /// file included, and the copy is code the project owns rather than a project of its
+    /// own: one root, one store, one lint selection over the whole tree, the patched
+    /// directories with it. The question is `pkg::owning_project`'s, asked here and by
+    /// [`Project::find`](crate::pkg::Project::find) so that the manifest and the config
+    /// cannot disagree about where the root is.
     pub fn find(start: &Path) -> Result<Option<(PathBuf, Self)>> {
         let mut dir = if start.is_dir() {
             start.to_path_buf()
@@ -364,7 +373,7 @@ impl HtlConfig {
         }
         loop {
             let path = dir.join(CONFIG_NAME);
-            if path.is_file() {
+            if path.is_file() && crate::pkg::owning_project(&dir).is_none() {
                 let text = std::fs::read_to_string(&path)
                     .with_context(|| format!("reading {}", path.display()))?;
                 let cfg = Self::parse(&text).with_context(|| path.display().to_string())?;
