@@ -23,20 +23,25 @@
 //! # Two callers, one implementation
 //!
 //! The bash took five positional arguments because it had two callers. This takes five
-//! environment variables for the same reason, each defaulting to this checkout:
+//! environment variables for the same reason:
 //!
-//! | Variable | Default |
+//! | Variable | Unset |
 //! | --- | --- |
 //! | `HTL_TEST_BIN` | `cargo build -p htl-cli --bin htl`, whatever path that reports |
-//! | `HTL_PATCH_HTL` | `crates/htl` |
-//! | `HTL_PATCH_CORE` | `crates/htl-core` |
-//! | `HTL_PATCH_MACROS` | `crates/htl-macros` |
+//! | `HTL_PATCH_HTL` | no `[patch]`: the project builds against what its own manifest pins |
+//! | `HTL_PATCH_CORE` | likewise |
+//! | `HTL_PATCH_MACROS` | likewise |
 //! | `HTL_E2E_TARGET` | `<cargo's target directory>/e2e-scaffold` |
 //!
-//! `just e2e` sets none of them. `just e2e-scaffold-packaged` sets all five, at a CLI
-//! installed out of a `.crate` tarball and at the three extracted trees beside it, and that
-//! is the whole of the difference between the two gates — as it was when it was the
-//! difference between two argument lists.
+//! `just e2e` sets none of them: the CLI it builds is this checkout's, and a CLI built
+//! from a checkout pins that checkout (`crates/htl-cli/build.rs`), so the project it
+//! writes builds against this tree with nothing redirected — the manifest a contributor
+//! gets from `cargo run -- new`. `just e2e-scaffold-packaged` sets all five, at a CLI
+//! installed out of a `.crate` tarball and at the three extracted trees beside it: that
+//! CLI pins its version, which is not on crates.io while the gate runs, and the patch is
+//! what points the version at the tarballs. The three patch variables used to default to
+//! this checkout, back when a checkout CLI pinned a release by number and the patch was
+//! what made `e2e` build against the checkout at all.
 //!
 //! The binary is *located*, never assembled out of pieces. The recipe this replaces built
 //! the path as `"${CARGO_TARGET_DIR:-$root/target}/debug/htl"`, which is wrong under a
@@ -198,35 +203,31 @@ fn cargo_target_dir() -> &'static Path {
     })
 }
 
-/// One of the three trees the generated projects are built against: the variable when it is
-/// set, this checkout otherwise.
-fn patch_path(var: &str, crate_dir: &str) -> PathBuf {
-    std::env::var_os(var)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace_root().join(crate_dir))
-}
-
 /// The arguments every cargo command inside a scaffolded project takes.
 ///
-/// The patch is handed to cargo through `--config`, off to one side, so that a generated
-/// `Cargo.toml` stays byte for byte the one a user gets — which is what
-/// [`assert_unpatched_pin`] then checks.
+/// A patch, when the caller asked for one, is handed to cargo through `--config`, off to
+/// one side, so that a generated `Cargo.toml` stays byte for byte the one a user gets —
+/// which is what [`assert_unpatched_pin`] then checks. With no `HTL_PATCH_*` set there is
+/// no patch at all: the project builds against whatever its own manifest pins, which for
+/// a CLI built from this checkout is this checkout.
 fn scaffold_args() -> Vec<String> {
-    let patch =
-        |key: &str, path: PathBuf| format!("patch.crates-io.{key}.path='{}'", path.display());
-    vec![
-        "--config".into(),
-        patch("htl", patch_path("HTL_PATCH_HTL", "crates/htl")),
-        "--config".into(),
-        patch("htl-core", patch_path("HTL_PATCH_CORE", "crates/htl-core")),
-        "--config".into(),
-        patch(
-            "htl-macros",
-            patch_path("HTL_PATCH_MACROS", "crates/htl-macros"),
-        ),
-        "--target-dir".into(),
-        cargo_target_dir().display().to_string(),
-    ]
+    let mut args = Vec::new();
+    for (key, var) in [
+        ("htl", "HTL_PATCH_HTL"),
+        ("htl-core", "HTL_PATCH_CORE"),
+        ("htl-macros", "HTL_PATCH_MACROS"),
+    ] {
+        if let Some(path) = std::env::var_os(var) {
+            args.push("--config".to_string());
+            args.push(format!(
+                "patch.crates-io.{key}.path='{}'",
+                PathBuf::from(path).display()
+            ));
+        }
+    }
+    args.push("--target-dir".into());
+    args.push(cargo_target_dir().display().to_string());
+    args
 }
 
 // ---------------------------------------------------------------------------------------
