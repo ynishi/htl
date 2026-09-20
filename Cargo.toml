@@ -27,7 +27,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 authors = ["Yutaka Nishimura"]
 license = "MIT OR Apache-2.0"
@@ -39,9 +39,9 @@ rust-version = "1.88"
 
 [workspace.dependencies]
 # default-features off at the workspace level so members opt in (`features = [...]`).
-htl-core = { path = "crates/htl-core", version = "0.6.0", default-features = false }
-htl-macros = { path = "crates/htl-macros", version = "0.6.0" }
-htl = { path = "crates/htl", version = "0.6.0", default-features = false }
+htl-core = { path = "crates/htl-core", version = "0.6.1", default-features = false }
+htl-macros = { path = "crates/htl-macros", version = "0.6.1" }
+htl = { path = "crates/htl", version = "0.6.1", default-features = false }
 mlua = { version = "0.12.1", features = ["lua54", "vendored", "error-send"] }
 mlua-pkg = "0.11.0"
 anyhow = "1.0.104"
