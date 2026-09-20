@@ -547,8 +547,43 @@ pub fn pkgs_dir(root: &Path) -> mlua_pkg::PkgDir {
 /// `entry` — where `require` looks. See [`Project::entries`].
 pub const ENTRIES_DIR: &str = "entries";
 
+/// The project that owns `dir`, when `dir` is a dependency's directory rather than a
+/// project of its own.
+///
+/// Walks up from `dir` for a manifest that declares it — a `patch_dir` the project edits,
+/// or a `target_dir` copy install rewrites — and answers with that project's root, or
+/// with its owner in turn when the copy is itself inside another copy. `None` when
+/// nothing above claims it.
+///
+/// One question, asked by [`Project::find`] and by
+/// [`HtlConfig::find`](crate::config::HtlConfig::find), because a directory that is not a
+/// project must not become one for either of them: the enclosing manifest decides, and a
+/// manifest that came along in the copy does not.
+pub(crate) fn owning_project(dir: &Path) -> Option<PathBuf> {
+    let mut up = dir.to_path_buf();
+    while up.pop() {
+        if up.join(MANIFEST_NAME).is_file() && Project::at(&up).declares(dir) {
+            return Some(owning_project(&up).unwrap_or(up));
+        }
+    }
+    None
+}
+
 impl Project {
     /// Walk up from `start` (a file or directory) looking for `mlua-pkg.toml`.
+    ///
+    /// **The nearest manifest is not always the project.** `htl pkg patch` copies a
+    /// dependency's whole package root into `patches/<dep>/`, its own `mlua-pkg.toml`
+    /// among the files, so a file inside a patched dependency has a manifest above it
+    /// belonging to the dependency and another above that belonging to the project doing
+    /// the patching. The one that declared the copy is the project: the walk stops at the
+    /// first manifest but then asks `owning_project` whether anything above claims that
+    /// directory, and takes the answer. Nothing claims it and the first hit stands — a
+    /// dependency checked out on its own is its own project.
+    ///
+    /// Whoever the root is gets the `.htl/`: the store, the installed deps, the entry
+    /// links. A patch directory that was a root of its own collected a second one inside
+    /// the project's tree, which is the nested `.htl/` of #267.
     pub fn find(start: &Path) -> Option<Self> {
         let mut dir = if start.is_dir() {
             start.to_path_buf()
@@ -561,12 +596,24 @@ impl Project {
         loop {
             let manifest = dir.join(MANIFEST_NAME);
             if manifest.is_file() {
-                return Some(Self::at(&dir));
+                let root = owning_project(&dir).unwrap_or(dir);
+                return Some(Self::at(&root));
             }
             if !dir.pop() {
                 return None;
             }
         }
+    }
+
+    /// Is `dir` inside one of the dependency directories this project declares — a
+    /// `patch_dir` it owns, or a `target_dir` copy install writes? Canonical paths on both
+    /// sides: one comes from a manifest, the other from a walk.
+    fn declares(&self, dir: &Path) -> bool {
+        self.patches
+            .iter()
+            .map(|p| p.dir.clone())
+            .chain(self.vendored_copies.iter().cloned())
+            .any(|d| dir.starts_with(std::fs::canonicalize(&d).unwrap_or(d)))
     }
 
     /// Project rooted at `root` (must contain `mlua-pkg.toml`; not checked here).
@@ -629,9 +676,18 @@ impl Project {
     /// `VendoredResolver`), rooted at [`entries`](Self::entries) so a dep's `entry` is
     /// applied. Writes any link the lockfile calls for that is not there yet, and creates
     /// the directory if it does not exist.
+    ///
+    /// Under build scratch ([`crate::cache::scratch_root`]) it writes neither: a copy that
+    /// carries no `.htl/` has no directory to root a resolver at, and this is the
+    /// `InitError::RootNotFound` of a missing root rather than a write that would make
+    /// cargo refuse the tarball. Nothing on the checking path comes through here — the
+    /// checker and the macros take [`crate::Htl::apply_project`], which puts the same
+    /// directory on the search path and does not mind that it is absent.
     pub fn teal_resolver(&self) -> Result<TealResolver, InitError> {
         let _ = self.link_entries();
-        let _ = std::fs::create_dir_all(&self.entries);
+        if crate::cache::scratch_root(&self.root).is_none() {
+            let _ = std::fs::create_dir_all(&self.entries);
+        }
         TealResolver::new_symlink_aware(&self.entries)
     }
 
@@ -647,11 +703,20 @@ impl Project {
     /// The link is relative so that it follows `vendored/<name>` wherever install points
     /// that — at the cache, or at a `patch_dir` copy — rather than pinning a revision of
     /// its own. An entry of `"."` gets a link too, to the root: one layout, not two.
+    ///
+    /// **Under build scratch it repairs nothing**, and the reason it must not is
+    /// [`crate::cache::scratch_root`]'s to state. It still reads the lockfile and still
+    /// answers with the names, which is all the caller wanted from it there: the tarball
+    /// carries `mlua-pkg.lock` and no `.htl/`, so the names are known and the links are
+    /// not htl's to write into a tree cargo is verifying byte for byte (#267).
     pub fn link_entries(&self) -> anyhow::Result<Vec<String>> {
         if !self.installed() {
             return Ok(Vec::new());
         }
         let lock = mlua_pkg::lockfile::Lockfile::read(&self.lockfile)?;
+        if crate::cache::scratch_root(&self.root).is_some() {
+            return Ok(lock.pkg.iter().map(|p| p.name.clone()).collect());
+        }
         std::fs::create_dir_all(&self.entries)
             .with_context(|| format!("creating {}", self.entries.display()))?;
         let mut names = Vec::new();
@@ -1314,6 +1379,12 @@ impl crate::Htl {
     ///
     /// The directory on the path is [`Project::entries`], where each dep is reached at its
     /// `entry`; the links are written first if the lockfile calls for any that are missing.
+    ///
+    /// Except under build scratch, where this writes nothing at all — the rule and the
+    /// reason are [`crate::cache::scratch_root`]'s. What it does there it does read-only:
+    /// the directories go on the search path whether or not they exist (a path that
+    /// resolves nothing is what a tarball with no `.htl/` means, and the project's own
+    /// `src/` is still there), and the dependency names still come from the lockfile.
     pub fn apply_project(&self, p: &Project) -> anyhow::Result<()> {
         let installed = p.link_entries()?;
         // The names, for the rules that are about a library the project has rather than
@@ -1321,7 +1392,9 @@ impl crate::Htl {
         // a dependency nothing installed is one `require` cannot reach, and advice to use
         // it would be advice to fail a check.
         self.set_deps(&installed)?;
-        let _ = std::fs::create_dir_all(&p.entries);
+        if crate::cache::scratch_root(&p.root).is_none() {
+            let _ = std::fs::create_dir_all(&p.entries);
+        }
         self.add_path(&p.entries)?;
         for d in &p.target_dirs {
             self.add_path(d)?;

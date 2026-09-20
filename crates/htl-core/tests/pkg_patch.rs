@@ -57,6 +57,23 @@ fn remote(name: &str) -> (String, String) {
     (format!("file://{}", dir.display()), sha)
 }
 
+/// The same dependency, published as an mlua-pkg project itself — which is what a
+/// package that has dependencies of its own looks like, and what `patch` copies whole.
+fn remote_with_manifest(name: &str) -> (String, String) {
+    let dir = scratch(name);
+    write(
+        &dir.join("mlua-pkg.toml"),
+        "[package]\nname = \"mathx\"\nversion = \"0.1.0\"\nentry = \"src\"\n",
+    );
+    write(&dir.join("src/mathx.tl"), SOURCE);
+    write(&dir.join("types/mathx.d.tl"), DECL);
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "mathx"]);
+    let sha = git(&dir, &["rev-parse", "HEAD"]);
+    (format!("file://{}", dir.display()), sha)
+}
+
 /// A project depending on it, with a comment of its own in the manifest.
 fn project(name: &str, url: &str, sha: &str) -> PathBuf {
     let root = scratch(name);
@@ -255,4 +272,37 @@ fn a_copy_git_cannot_account_for_is_not_overwritten_either() {
     assert!(err.contains("cannot tell"), "{err}");
     assert!(err.contains("--force"), "{err}");
     assert!(p.patch("mathx", true).is_ok());
+}
+
+/// The copy carries the dependency's own `mlua-pkg.toml`, and that file does not make
+/// `patches/mathx` a project. Whoever the root is gets the `.htl/` — the store, the
+/// installed deps, the entry links — and a second one inside the project's tree is what
+/// #267 saw: `patches/<dep>/.htl/modules/entries` in the tarball cargo was verifying.
+#[test]
+fn the_dependencys_own_manifest_does_not_make_the_copy_a_project() {
+    let (url, sha) = remote_with_manifest("remote-own-manifest");
+    let root = project("own-manifest", &url, &sha);
+    Project::at(&root).patch("mathx", false).unwrap();
+    assert!(
+        root.join("patches/mathx/mlua-pkg.toml").is_file(),
+        "the whole package root is copied, manifest included"
+    );
+
+    let inside = root.join("patches/mathx/src/mathx.tl");
+    let found = Project::find(&inside).expect("a project above the copy");
+    assert_eq!(
+        found.root,
+        std::fs::canonicalize(&root).unwrap(),
+        "the project is the one that declared the patch_dir"
+    );
+
+    htl_core::Htl::new().unwrap().apply_project(&found).unwrap();
+    assert!(
+        !root.join("patches/mathx/.htl").exists(),
+        "so nothing puts a second .htl/ inside the copy"
+    );
+    assert!(
+        root.join(".htl/modules/entries").is_dir(),
+        "and the project's own is where it always was"
+    );
 }

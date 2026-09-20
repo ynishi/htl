@@ -187,7 +187,11 @@ one a cold build writes. `build` takes `--no-cache` and `--explain-cache` and is
 per-module; the macros keep a store only in a project with an `htl.toml`, and never under
 `target/` (the copy `cargo publish` verifies) or a registry checkout — `HTL_NO_CACHE=1`
 turns it off, `HTL_CACHE_DEBUG=1` has them say how much they replayed or why they did
-not. Only `htl check` bounds the store: a build or an expansion sees one closure and
+not. In those two places it is no store **and no link**: reading a project there writes
+nothing at all, the `.htl/modules/entries` repair included, so the tree `cargo package`
+built is the tree it verifies. `target/` is read off the path, which is convention and
+not a signal cargo gives — a `CARGO_TARGET_DIR` outside the tree is not recognised.
+Only `htl check` bounds the store: a build or an expansion sees one closure and
 would evict the rest of the project. On a 30-module, 16,000-line project (release CLI): a
 cold build 1.3 s; nothing edited 0.03 s; one leaf edited 0.7 s, `[30/32 cached]` — the
 leaf and the entry that requires it are generated, the rest replay; the module every
@@ -1456,7 +1460,10 @@ with git like anything else in the tree. There is no patch file and nothing is a
 `htl pkg install` leaves the directory alone and resolves the dependency from it. This is
 the shape of Cargo's `[patch]` with a `path` source, and of Go's `replace` pointing at a
 directory in the module tree. Removing `patch_dir` and the directory returns the
-dependency to its fetched form at the next install.
+dependency to its fetched form at the next install. What is copied is the package root
+whole, so a dependency that is a project itself brings its own `mlua-pkg.toml` and
+`htl.toml` along — and neither makes `patches/<dep>` a project: the root is the one whose
+manifest declared the `patch_dir`, and it keeps the only `.htl/`.
 
 **What is checked, and what is not.** The copy is committed, project-owned code whose
 errors are the project's to fix, so `htl check` walks it and names the dependency each

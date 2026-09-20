@@ -4,6 +4,7 @@
 //! The dependency is a git repository in a scratch directory, so these run offline and the
 //! revisions are real ones rather than fixtures.
 
+use htl_core::Htl;
 use htl_core::pkg::Project;
 use mlua_pkg::ops::{AddSpec, CleanReport, Placement, UpdateOpts, UpdateOutcome};
 use std::path::{Path, PathBuf};
@@ -128,6 +129,66 @@ fn install_places_packages_under_the_directory_htl_names() {
         std::fs::read_to_string(pkg.require_dir().join("mathx.tl")).unwrap(),
         SOURCE,
         "the entry below the package root is what require resolves through"
+    );
+}
+
+/// What a crate carrying an mlua-pkg project looks like once `cargo package` has copied
+/// it: the tracked files under `target/package/<crate>/`, which is the manifest, the
+/// lockfile and the sources, and never `.htl/`. Returns the copy's root.
+fn packaged_copy(name: &str, from: &Path) -> PathBuf {
+    let copy = scratch(name).join("target/package/p-0.1.0");
+    for f in ["mlua-pkg.toml", "mlua-pkg.lock"] {
+        std::fs::create_dir_all(&copy).unwrap();
+        std::fs::copy(from.join(f), copy.join(f)).unwrap();
+    }
+    write(&copy.join("src/main.tl"), "print(1)\n");
+    copy
+}
+
+/// Reading a project must not write in the tree `cargo package` is verifying. The copy
+/// under `target/package/` has no `.htl/` — it was never committed — and htl leaves it
+/// that way: the dependency names come out of the lockfile that did ship, the entry
+/// directory goes on the search path without being created, and cargo's "Source directory
+/// was modified" never fires. Repairing the links there is what made `cargo package`
+/// refuse the tarball it had just built (#267).
+#[test]
+fn nothing_is_written_into_the_copy_cargo_package_verifies() {
+    let (url, sha) = remote("remote-packaged");
+    let root = project("packaged", &url, &sha);
+    Project::at(&root).install().unwrap();
+    assert!(
+        std::fs::symlink_metadata(root.join(".htl/modules/entries/mathx")).is_ok(),
+        "the checkout is where install writes the links"
+    );
+
+    let copy = packaged_copy("verify", &root);
+    let p = Project::find(&copy.join("src/main.tl")).unwrap();
+    assert_eq!(p.root, std::fs::canonicalize(&copy).unwrap());
+    assert_eq!(
+        p.link_entries().unwrap(),
+        vec!["mathx".to_string()],
+        "the lockfile still says what the deps are, and saying so writes nothing"
+    );
+    Htl::new().unwrap().apply_project(&p).unwrap();
+    assert!(
+        !copy.join(".htl").exists(),
+        "and the tree is left exactly as it was packaged"
+    );
+
+    // The same copy anywhere else is an ordinary project, and the repair still runs: a
+    // checkout whose `.htl/` was never installed, or was installed by an htl too old to
+    // write the links, gets them from the next command that reads the project.
+    let elsewhere = scratch("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    for f in ["mlua-pkg.toml", "mlua-pkg.lock"] {
+        std::fs::copy(root.join(f), elsewhere.join(f)).unwrap();
+    }
+    write(&elsewhere.join("src/main.tl"), "print(1)\n");
+    let q = Project::find(&elsewhere.join("src/main.tl")).unwrap();
+    Htl::new().unwrap().apply_project(&q).unwrap();
+    assert!(
+        std::fs::symlink_metadata(elsewhere.join(".htl/modules/entries/mathx")).is_ok(),
+        "outside build scratch the link is written as it always was"
     );
 }
 

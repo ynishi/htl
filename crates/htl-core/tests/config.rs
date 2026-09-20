@@ -291,6 +291,58 @@ fn find_walks_up_from_a_file() {
     assert!(none.is_none());
 }
 
+/// `htl pkg patch` copies the dependency's package root whole, so its `htl.toml` lands
+/// in the tree too. It is not a project there: the nearest config for a file inside the
+/// copy is the patching project's, which is where the store goes. Otherwise a check or
+/// an expansion reaching into the copy opens a second `.htl/` inside the project (#267).
+#[test]
+fn a_patch_directory_is_not_a_project_of_its_own() {
+    let root = scratch("find-patched");
+    write(&root.join("htl.toml"), "[fmt]\nindent = 4\n");
+    write(
+        &root.join("mlua-pkg.toml"),
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n\
+         [deps.mathx]\ngit = \"https://example.invalid/mathx\"\nrev = \"aaaa\"\n\
+         patch_dir = \"patches/mathx\"\n",
+    );
+    write(&root.join("patches/mathx/htl.toml"), "[fmt]\nindent = 8\n");
+    write(
+        &root.join("patches/mathx/mlua-pkg.toml"),
+        "[package]\nname = \"mathx\"\nversion = \"0.1.0\"\n",
+    );
+    write(&root.join("patches/mathx/src/mathx.tl"), "return 1\n");
+
+    let file = root.join("patches/mathx/src/mathx.tl");
+    let (path, cfg) = HtlConfig::find(&file).unwrap().unwrap();
+    assert_eq!(
+        std::fs::canonicalize(htl_core::parent_dir(&path)).unwrap(),
+        std::fs::canonicalize(&root).unwrap(),
+        "the config found from inside the copy is the patching project's: {}",
+        path.display()
+    );
+    assert_eq!(cfg.fmt.indent, Some(4), "and so are its settings");
+
+    // The same rule for the manifest, which is what decides where `.htl/modules` goes.
+    assert_eq!(
+        htl_core::pkg::Project::find(&file).unwrap().root,
+        std::fs::canonicalize(&root).unwrap()
+    );
+
+    // A dependency checked out on its own, with nothing above declaring it, is its own
+    // project: the rule is "inside a patch directory", not "has a manifest above".
+    let alone = scratch("find-alone");
+    write(&alone.join("htl.toml"), "[fmt]\nindent = 8\n");
+    write(&alone.join("src/mathx.tl"), "return 1\n");
+    let (path, cfg) = HtlConfig::find(&alone.join("src/mathx.tl"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        std::fs::canonicalize(htl_core::parent_dir(&path)).unwrap(),
+        std::fs::canonicalize(&alone).unwrap()
+    );
+    assert_eq!(cfg.fmt.indent, Some(8));
+}
+
 #[test]
 fn contract_lint_flags_wrong_type_and_missing_field_only() {
     let (root, cfg) = project("lint");
