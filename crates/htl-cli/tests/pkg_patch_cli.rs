@@ -215,3 +215,48 @@ fn patch_reports_where_the_copy_is() {
         "{err}"
     );
 }
+
+/// A fresh clone of a project with a patched dependency: the manifest, the copy, and no
+/// `.htl/` at all — which is every clone, since `htl init` gitignores that directory, and
+/// the copy `cargo package` builds as well. The dependency resolves from the copy, with
+/// no install, no link and no network, because the manifest names the directory and the
+/// directory is committed (#266). Nothing has to be written by hand for it: no
+/// `[check] paths`, no `exclude`.
+#[test]
+fn a_clone_resolves_the_patched_dependency_from_the_copy_with_no_links() {
+    let root = patched_project("fresh-clone");
+    write(
+        &root.join("src/main.tl"),
+        "local mathx = require(\"mathx\")\nprint(mathx.twice(21))\n",
+    );
+    assert!(
+        !root.join(".htl").exists(),
+        "the shape under test is the one a clone has"
+    );
+
+    let (ok, _, err) = htl(&["check", "."], &root);
+    assert!(ok, "the require resolves with nothing installed: {err}");
+
+    let (ok, out, err) = htl(&["resolve", "mathx", "--format", "json"], &root);
+    assert!(ok, "{out}{err}");
+    // The project has no `htl.toml`, so there is no root to print relative to and the
+    // paths come out absolute; what this is about is the last three components of them.
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let read_path = v["read"].as_str().unwrap_or_default();
+    assert!(
+        read_path.ends_with("patches/mathx/src/mathx.tl"),
+        "the copy is what the name resolves to: {out}"
+    );
+    let read = v["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["status"] == "read")
+        .expect("the file that is read is a row");
+    assert!(
+        read["dir"].as_str().unwrap().ends_with("patches/mathx/src"),
+        "attributed to the copy's entry, which is on the path in its own right: {out}"
+    );
+    assert_eq!(read["origin"]["kind"], "patched", "{out}");
+    assert_eq!(read["origin"]["name"], "mathx", "{out}");
+}

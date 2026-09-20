@@ -306,3 +306,94 @@ fn the_dependencys_own_manifest_does_not_make_the_copy_a_project() {
         "and the project's own is where it always was"
     );
 }
+
+/// Where `require` reads the copy from, and what decides it.
+///
+/// The lockfile is the answer whenever there is one: it is the install's own record, and
+/// an `entry` the consumer overrode is already folded into it. A project whose lockfile
+/// is not committed — or the copy `cargo package` verifies when it is not — has the
+/// dependency's own `mlua-pkg.toml` instead, which `htl pkg patch` copied along with the
+/// sources, and then mlua-pkg's fallback chain. Three sources for one fact, so the
+/// directory htl searches and the directory an install would have linked cannot differ.
+#[test]
+fn the_entry_the_copy_is_required_from_comes_from_the_lockfile_then_the_copy() {
+    let root = installed_patch("entry-locked", &"a".repeat(40), None);
+    // The copy says `lib` and the lockfile says `src`. The lockfile wins: it is what an
+    // install resolved, and `entries/mathx` points there.
+    write(
+        &root.join("patches/mathx/mlua-pkg.toml"),
+        "[package]\nname = \"mathx\"\nversion = \"0.1.0\"\nentry = \"lib\"\n",
+    );
+    assert_eq!(
+        Project::at(&root).patches[0].entry,
+        root.join("patches/mathx/src")
+    );
+
+    // Without one — a clone that does not commit `mlua-pkg.lock` — the copy answers for
+    // itself, whether or not the directory it names has been written yet.
+    std::fs::remove_file(root.join("mlua-pkg.lock")).unwrap();
+    assert_eq!(
+        Project::at(&root).patches[0].entry,
+        root.join("patches/mathx/lib"),
+        "the copy's own [package].entry, which patch copied in with the sources"
+    );
+
+    // And with neither, mlua-pkg's chain: `src/`, then `lua/`, then the root.
+    std::fs::remove_file(root.join("patches/mathx/mlua-pkg.toml")).unwrap();
+    assert_eq!(
+        Project::at(&root).patches[0].entry,
+        root.join("patches/mathx/src")
+    );
+    std::fs::rename(
+        root.join("patches/mathx/src"),
+        root.join("patches/mathx/lua"),
+    )
+    .unwrap();
+    assert_eq!(
+        Project::at(&root).patches[0].entry,
+        root.join("patches/mathx/lua")
+    );
+}
+
+/// What goes on the search path is not the entry but the directory that holds it under
+/// the dependency's name — the link `entries/<name>` in the form a path can express. A
+/// package whose entry is named after it has one, and every name then resolves to the
+/// file the link resolves it to; a flat package has none anywhere in the copy, and gets
+/// the entry itself, which answers for the package's own module and not for what is
+/// below it.
+#[test]
+fn the_directory_on_the_path_is_the_one_holding_the_entry_under_the_dependencys_name() {
+    let root = installed_patch("search-named", &"a".repeat(40), None);
+    write(
+        &root.join("patches/mathx/mlua-pkg.toml"),
+        "[package]\nname = \"mathx\"\nversion = \"0.1.0\"\nentry = \"src/mathx\"\n",
+    );
+    std::fs::remove_file(root.join("mlua-pkg.lock")).unwrap();
+    let p = Project::at(&root);
+    assert_eq!(p.patches[0].entry, root.join("patches/mathx/src/mathx"));
+    assert_eq!(
+        p.patch_search_dirs(),
+        vec![root.join("patches/mathx/src")],
+        "so `mathx.sub` reads src/mathx/sub.tl, as entries/mathx -> src/mathx does"
+    );
+
+    let flat = installed_patch("search-flat", &"a".repeat(40), None);
+    assert_eq!(
+        Project::at(&flat).patch_search_dirs(),
+        vec![flat.join("patches/mathx/src")],
+        "a flat package has nothing named after it, and the entry is what is left"
+    );
+
+    // The copy root is named after the dependency, so a package whose entry is the root
+    // has one after all: `patches/`.
+    let rooted = installed_patch("search-root", &"a".repeat(40), None);
+    write(
+        &rooted.join("patches/mathx/mlua-pkg.toml"),
+        "[package]\nname = \"mathx\"\nversion = \"0.1.0\"\nentry = \".\"\n",
+    );
+    std::fs::remove_file(rooted.join("mlua-pkg.lock")).unwrap();
+    assert_eq!(
+        Project::at(&rooted).patch_search_dirs(),
+        vec![rooted.join("patches")]
+    );
+}

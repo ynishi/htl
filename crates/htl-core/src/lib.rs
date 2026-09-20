@@ -2195,15 +2195,23 @@ pub fn patched_dirs(_root: &Path) -> Vec<PathBuf> {
     Vec::new()
 }
 
-/// The directories a `require` in the project at `root` resolves installed deps from: the
-/// entry links under `.htl/modules` and the parents of `target_dir` copies — what
-/// [`Htl::apply_project`] puts on the path, listed whether or not they exist yet, for the
-/// cache's probes ([`cache::search_dirs`]).
+/// The directories a `require` in the project at `root` resolves its deps from: the
+/// search directory of each `patch_dir` copy, the entry links under `.htl/modules`, and
+/// the parents of `target_dir` copies — what [`Htl::apply_project`] puts on the path, in
+/// the same order, listed whether or not they exist yet, for the cache's probes
+/// ([`cache::search_dirs`]).
+///
+/// One list, read by the two that must agree. A patched dependency is the project's own
+/// code and a person edits it there, so an entry replayed from the store while the copy
+/// has moved on would be the wrong answer to a question the user just changed: the probe
+/// over its entry directory is what catches a module appearing in or leaving the copy, as
+/// the hash of a file the entry recorded catches a line changing inside one.
 #[cfg(feature = "pkg")]
 pub fn dependency_dirs(root: &Path) -> Vec<PathBuf> {
     match pkg::Project::find(root) {
         Some(p) => {
-            let mut out = vec![p.entries];
+            let mut out = p.patch_search_dirs();
+            out.push(p.entries);
             out.extend(p.target_dirs);
             out
         }
