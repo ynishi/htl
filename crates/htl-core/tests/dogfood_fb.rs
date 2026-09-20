@@ -275,3 +275,84 @@ fn user_message_strips_traceback_and_unwraps_host_errors() {
     assert!(msg.ends_with("s.lua:1: boom"), "{msg}");
     assert!(!msg.contains("traceback"), "{msg}");
 }
+
+/// A field named `where` on the first line of a record body is a bare "syntax error"
+/// from Teal, with a follow-on error pointing at the *next* field's line. Only the
+/// position is at fault -- the field loop has not started yet, and `where` is where a
+/// union variant's predicate goes -- so the message names both ways out and the
+/// follow-on error goes away with the cause.
+#[test]
+fn where_as_a_record_bodys_first_field_is_explained() {
+    let dir = scratch("where-first");
+    let file = dir.join("FindArgs.tl");
+    write(
+        &file,
+        "local record FindArgs\n   where: any\n   pkg: string\nend\nreturn FindArgs\n",
+    );
+    let h = Htl::new().unwrap();
+    let ci = h.check(&file).unwrap();
+    assert!(!ci.ok(), "precondition: Teal rejects the field");
+    assert_eq!(ci.errors.len(), 1, "follow-on dropped: {:?}", ci.errors);
+    let e = &ci.errors[0];
+    assert!(e.contains("FindArgs.tl:2:9:"), "{e}");
+    assert!(e.contains("'where' opens a union predicate"), "{e}");
+    assert!(e.contains("[\"where\"]: <type>"), "{e}");
+    assert!(e.contains("put another field first"), "{e}");
+    // `htl fix` recognises a file the parser rejected by this word, and the parse did fail.
+    assert!(e.contains("syntax error"), "{e}");
+}
+
+/// The same body with the field one line down: Teal's field loop has begun, `where` is
+/// an ordinary identifier, and nothing is wrong. Saying "`where` is reserved in a record
+/// body" would contradict this.
+#[test]
+fn where_after_the_first_field_type_checks() {
+    let dir = scratch("where-second");
+    let file = dir.join("FindArgs.tl");
+    write(
+        &file,
+        "local record FindArgs\n   pkg: string\n   where: any\nend\nreturn FindArgs\n",
+    );
+    let h = Htl::new().unwrap();
+    let ci = h.check(&file).unwrap();
+    assert!(ci.ok(), "{:?}", ci.errors);
+}
+
+/// The spelling the message offers, in the position that fails without it: the field
+/// loop's bracketed-string-literal branch takes any name, first line included.
+#[test]
+fn quoted_where_as_the_first_field_type_checks() {
+    let dir = scratch("where-quoted");
+    let file = dir.join("FindArgs.tl");
+    write(
+        &file,
+        "local record FindArgs\n   [\"where\"]: any\n   pkg: string\nend\nreturn FindArgs\n",
+    );
+    let h = Htl::new().unwrap();
+    let ci = h.check(&file).unwrap();
+    assert!(ci.ok(), "{:?}", ci.errors);
+}
+
+/// A different mistake on a first field's line keeps Teal's own text, follow-on error
+/// and all: the explanation is proved by re-parsing with `["where"]` in place, so a
+/// parse failure that rewrite does not cure never gets it.
+#[test]
+fn an_unrelated_first_field_syntax_error_is_untouched() {
+    let dir = scratch("where-unrelated");
+    let file = dir.join("FindArgs.tl");
+    write(
+        &file,
+        "local record FindArgs\n   pkg string\n   n: integer\nend\nreturn FindArgs\n",
+    );
+    let h = Htl::new().unwrap();
+    let ci = h.check(&file).unwrap();
+    assert!(!ci.ok(), "precondition: Teal rejects the field");
+    assert_eq!(ci.errors.len(), 2, "{:?}", ci.errors);
+    assert!(
+        ci.errors
+            .iter()
+            .all(|e| e.contains("expected ':' for an attribute") && !e.contains("union predicate")),
+        "{:?}",
+        ci.errors
+    );
+}
