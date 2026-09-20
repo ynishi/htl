@@ -464,8 +464,10 @@ dependencies = [
  "clap",
  "criterion",
  "htl",
+ "semver",
  "serde",
  "serde_json",
+ "toml",
 ]
 
 [[package]]

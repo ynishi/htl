@@ -72,7 +72,15 @@ impl htl::project::Output for Out {
 
 #[derive(Serialize, Debug)]
 pub struct CheckReport {
+    /// Every file the walk visited, a patched dependency's included — what it has always
+    /// counted, left alone so that a consumer reading it is not moved by `patched`
+    /// arriving beside it.
     pub files: usize,
+    /// How many of `files` came out of a `patch_dir` dependency: the project's committed
+    /// copy of somebody else's package, which a check reads and neither `htl fmt` nor
+    /// `htl test` touches. Subtract it from `files` for the project's own, which is how
+    /// the text summary prints the pair.
+    pub patched: usize,
     pub diagnostics: Vec<Diagnostic>,
     pub summary: CheckSummary,
 }

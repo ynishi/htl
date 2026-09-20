@@ -1,10 +1,15 @@
-//! `[toolchain] htl` through the real binary: a project says which `htl` command it
-//! expects, and one outside that requirement is refused before it reads anything.
+//! Which htl a project asks for, through the real binary — and what the command does when
+//! it is not that one.
 //!
-//! The unit of the feature is the refusal, so these run the command rather than the
-//! comparison — what a project gets is an exit code and a message, and both are here.
-//! The comparison itself, and what a malformed requirement does to parsing, are in
-//! `htl-core`'s `tests/config.rs`.
+//! Two pins, and the difference between them is the subject. `[toolchain] htl` in
+//! `htl.toml` names the *command*, and a command outside it is refused before it reads
+//! anything: a pin that can be ignored is not one. `htl` under `[dependencies]` in
+//! `Cargo.toml` names the *crate* a Rust host links, which is cargo's to enforce and not
+//! htl's — so a check that is not the version named there prints a line and carries on.
+//!
+//! The unit of either feature is what the person sees, so these run the command rather
+//! than the comparison. The comparison itself, and what a malformed requirement does to
+//! parsing, are in `htl-core`'s `tests/config.rs`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -202,4 +207,76 @@ fn a_scaffolded_project_checks_with_the_cli_that_wrote_it() {
 
     let (ok, err) = htl(&["check", ".", "--no-cache"], &dir);
     assert!(ok, "the scaffolded project did not check:\n{err}");
+}
+
+// ------------------------------------- the crate the host links (`Cargo.toml`)
+
+/// The line `htl check` prints when the crate and the command have come apart, as the
+/// message itself names it.
+const SPLIT: &str = "the crate and the CLI are meant to move together";
+
+/// A project of the shape above with a `Cargo.toml` around it: a Rust host whose Teal is
+/// checked by this binary. `dep` is the right-hand side of the `htl = ` line.
+fn host_project(name: &str, dep: &str) -> PathBuf {
+    let root = project(name, "[fmt]\nindent = 3\n");
+    std::fs::write(
+        root.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"host\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+             [dependencies]\nhtl = {dep}\n"
+        ),
+    )
+    .unwrap();
+    root
+}
+
+/// The warning, and that it is only a warning: the check still succeeded, and the count
+/// the summary reports is the checker's, which this is not part of.
+#[test]
+fn a_cargo_dependency_on_another_htl_is_said_and_not_fatal() {
+    let root = host_project("cargo-old", "\"0.1\"");
+    let (ok, err) = htl(&["check", ".", "--no-cache"], &root);
+    assert!(ok, "the warning failed the run:\n{err}");
+    assert!(
+        err.contains(&format!("htl {RUNNING}; Cargo.toml asks for htl 0.1")) && err.contains(SPLIT),
+        "the mismatch was not reported, or not with both versions:\n{err}"
+    );
+    assert!(
+        err.contains("cargo install htl-cli --version 0.1"),
+        "the message does not say how to get the other half:\n{err}"
+    );
+    assert!(
+        err.contains("0 warning(s)"),
+        "the line was counted as one of the checker's warnings:\n{err}"
+    );
+    assert_eq!(
+        err.matches(SPLIT).count(),
+        1,
+        "the line was printed more than once in a run:\n{err}"
+    );
+}
+
+/// A requirement this binary satisfies, a dependency that states no version, and no
+/// manifest at all: three ways for there to be nothing to say, and nothing is said.
+#[test]
+fn nothing_is_said_when_there_is_nothing_to_say() {
+    let satisfied = host_project("cargo-current", &format!("\"{}\"", satisfied_req()));
+    // What a checkout-built scaffold writes. There is no version requirement in a path
+    // dependency, so there is no comparison to make — and guessing at one would warn
+    // every time somebody develops against a working copy.
+    let by_path = host_project("cargo-path", "{ path = \"../crates/htl\" }");
+    let by_git = host_project(
+        "cargo-git",
+        "{ git = \"https://github.com/ynishi/htl\", branch = \"main\" }",
+    );
+    let no_manifest = project("cargo-none", "[fmt]\nindent = 3\n");
+
+    for root in [&satisfied, &by_path, &by_git, &no_manifest] {
+        let (ok, err) = htl(&["check", ".", "--no-cache"], root);
+        assert!(ok, "{err}");
+        assert!(
+            !err.contains(SPLIT),
+            "a project with nothing to answer for was told its halves had come apart:\n{err}"
+        );
+    }
 }
