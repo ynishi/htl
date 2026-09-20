@@ -155,6 +155,25 @@ fn patch_args() -> Vec<String> {
     args
 }
 
+/// A cargo invocation in the scratch project, with the `CARGO_*` environment of the test
+/// run stripped so the project's own configuration is what cargo reads. `CARGO_HOME` and
+/// `CARGO_TARGET_DIR` stay: the first says where the registry is, the second is honoured
+/// by the caller, which passes `--target-dir` after the subcommand (it is not a global
+/// flag).
+fn cargo_in(project: &Path) -> Command {
+    let mut cargo =
+        Command::new(std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo")));
+    for (key, _) in std::env::vars_os() {
+        let name = key.to_string_lossy();
+        let keep = name == "CARGO_HOME" || name == "CARGO_TARGET_DIR";
+        if name.starts_with("CARGO_") && !keep {
+            cargo.env_remove(&key);
+        }
+    }
+    cargo.current_dir(project);
+    cargo
+}
+
 /// The entry module, requiring the dependency the way the reporting project did: a
 /// `require` the proc macro has to resolve while cargo verifies the tarball.
 const ENTRY: &str = r#"local list = require("htlx.list")
@@ -232,29 +251,38 @@ fn a_crate_with_a_patched_dependency_packages_and_verifies_with_nothing_written_
         "nor a `[check] paths` line in htl.toml"
     );
 
-    git(&project, &["init", "-q"]);
-    git(&project, &["add", "-A"]);
-    git(&project, &["commit", "-qm", "a crate that embeds Teal"]);
-
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| workspace_root().join("target"))
         .join("e2e-scaffold");
-    let mut cargo =
-        Command::new(std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo")));
-    for (key, _) in std::env::vars_os() {
-        let name = key.to_string_lossy();
-        let keep = name == "CARGO_HOME" || name == "CARGO_TARGET_DIR";
-        if name.starts_with("CARGO_") && !keep {
-            cargo.env_remove(&key);
-        }
-    }
-    let out = cargo
+
+    // The lockfile the commit carries is resolved against the crates `cargo package` is
+    // about to build with — the same `--config` patch — so that packaging does not
+    // rewrite it and then refuse its own rewrite as an uncommitted change. `htl check`
+    // above already wrote one, against the path the scaffold pinned; that path is the
+    // patch's when the crates are this checkout, and is not when the packaged gate points
+    // the patch at extracted tarballs, which is where the difference first showed.
+    let out = cargo_in(&project)
+        .arg("generate-lockfile")
+        .args(patch_args())
+        .output()
+        .expect("cargo generate-lockfile could not be started");
+    assert!(
+        out.status.success(),
+        "cargo generate-lockfile: {}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    git(&project, &["init", "-q"]);
+    git(&project, &["add", "-A"]);
+    git(&project, &["commit", "-qm", "a crate that embeds Teal"]);
+
+    let out = cargo_in(&project)
         .arg("package")
         .args(patch_args())
         .arg("--target-dir")
         .arg(&target)
-        .current_dir(&project)
         .output()
         .expect("cargo package could not be started");
     let text = format!(
