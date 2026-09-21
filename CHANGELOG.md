@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/ynishi/htl/compare/v0.6.3...v0.7.0) - 2026-09-21
+
+### Added
+
+- the minor that 0.6.3's API change asks for is requested from inside htl-core, where release-plz reads it ([#284](https://github.com/ynishi/htl/pull/284))
+
 ## [0.6.3](https://github.com/ynishi/htl/compare/v0.6.2...v0.6.3) - 2026-09-20
 
 ### Other
