@@ -12,8 +12,9 @@
 # know, so a PR whose title starts with `feat:` asks for one; anything else is a patch.
 # A change to a published crate's public API asks for one too, for the reason cargo
 # gives: on 0.x the minor is the compatibility unit, and a patch that moved an API
-# breaks the line (CONTRIBUTING § Commits). `features_always_increment_minor` is what
-# makes `feat:` mean minor on 0.x.
+# breaks the line (CONTRIBUTING § Commits). The commits are read per package, by the
+# files they touch: a `feat:` outside every crate directory changes nothing here.
+# `features_always_increment_minor` is what makes `feat:` mean minor on 0.x.
 
 [workspace]
 semver_check = false

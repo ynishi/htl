@@ -556,6 +556,11 @@ pub struct AddDone {
 /// happening quietly: the directory is about to be committed, and a file the author of the
 /// dependency can see upstream and the patcher cannot find in `patches/<dep>` is a
 /// difference worth one line of output.
+///
+/// `Project::patch` returned mlua-pkg's `PatchReport` bare until 0.6.3, which shipped
+/// this type in its place as a patch release; 0.7.0 is the version that says an API
+/// moved, and the one a caller of the old shape should read `0.6` as stopping before.
+/// The same holds for [`Patched::entry`], which arrived in the same release.
 #[derive(Debug, Clone)]
 pub struct PatchDone {
     /// What mlua-pkg's own `patch` returned, passed through unchanged: where the copy is,
