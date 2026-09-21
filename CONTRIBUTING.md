@@ -139,9 +139,14 @@ Refs #<issue>
   patch that changed an API breaks every consumer of the line on their next
   `cargo update`. A minor is what tells them. A PR that changes an API and says
   nothing else new is still `feat:`; the prose explains what moved. Between
-  releases such changes accumulate on `main` and the first `feat:` among them is
-  enough — release-plz reads every commit since the last tag. 0.6.3 shipped one
-  (`Project::patch`, `Patched`) as a patch; 0.7.0 is the release that says so.
+  releases such changes accumulate on `main` and one `feat:` among them is enough
+  — but it has to touch a file of a crate. release-plz reads the commits since
+  the last tag *per package*, by the files they change, and a `feat:` that only
+  edits this file or the justfile is invisible to it (it answered "already up to
+  date" to exactly that). The four crates share one version, so one crate is
+  enough for all four. 0.6.3 shipped an API change (`Project::patch`, `Patched`)
+  as a patch; 0.7.0 is the release that says so, and the commit that asked for
+  it is a doc comment on the API that moved.
 
 ## Pull requests
 
