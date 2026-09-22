@@ -548,6 +548,82 @@ Neither line is a lint. They are this command reporting on its own job, so they 
 does not apply, and `htl check --format json` never carries one — a lint is a finding
 about your code, and these two are about files this command was asked to write.
 
+### Opening a window (`htl-mq`)
+
+`htl new --target bin` writes a host whose script runs to completion. A game wants the
+other shape — a window, a frame loop, input, drawing — and the part of that which is the
+same for every project is the `htl-mq` crate: macroquad's drawing and input as a host
+module `mq`, the loop that drives a Teal game table, and the declaration that `htl check`
+reads. The project keeps its engine and its rules in Teal, and its own `#[host_module]`
+beside `mq` for whatever wants the GPU.
+
+```toml
+[dependencies]
+htl = "0.7"
+htl-mq = "0.7"          # macroquad comes with it, which is why it is not a feature of `htl`
+```
+
+```rust
+use htl::bundle::Bundle;
+use htl::mlua::Table;
+use htl::{Htl, include_bundle};
+
+// `mq` is htl-mq's: its declaration is `types/htl-mq/mq.d.tl`, which `htl dts` writes.
+const MAIN: &[u8] = include_bundle!("src/main.tl", host = ["host", "game", "mq"], debug = true);
+
+fn main() -> anyhow::Result<()> {
+    let h = Htl::new()?;
+    game::preload(&h)?;                       // the project's own host module and Teal
+    htl_mq::Mq.htl_preload(&h)?;              // `require("mq")`
+    h.install_bundle(&Bundle::decode(MAIN)?)?;
+    let game: Table = h.lua().load("return require('main')").eval()?;
+    htl_mq::run(h, game, htl_mq::conf("game", 800, 600))
+}
+```
+
+The entry script returns the game: `update(dt)` says whether to go on, `draw()` draws,
+and `load()`, if there is one, runs once first. `run` calls them in that order around
+macroquad's `next_frame()` until `update` returns false or the window is closed.
+
+```lua
+local mq = require("mq")
+local x = 40.0
+
+return {
+   update = function(dt: number): boolean
+      x = x + 120 * dt
+      return not mq:is_key_pressed("Escape")
+   end,
+   draw = function()
+      mq:clear_background({r = 0.08, g = 0.08, b = 0.12, a = 1})
+      mq:draw_circle(x, 300, 24, {r = 1, g = 0.6, b = 0.2, a = 1})
+      mq:draw_text("fps " .. mq:fps(), 16, 32, 28, {r = 1, g = 1, b = 1, a = 1})
+   end,
+}
+```
+
+`mq.Key` and `mq.MouseButton` are enums, so the name of a key is checked where it is
+written: `mq:is_key_pressed("spce")` is `string "spce" is not a member of Key` from
+`htl check`, and a string that reaches the host at run time is refused with the list of
+what it accepts. `mq.Color` and `mq.Vec2` are records, and a table literal with the
+right fields is one.
+
+`htl test` runs without a display: `require("mq")` resolves to the declaration, which
+declares and does nothing, so an engine module that takes what it needs as arguments is
+testable headless, and `main.tl` — the one file that calls `mq` — is not what a test
+requires. Every `mq` method calls macroquad and panics without a window, which is the
+other reason to keep the loop out of the engine.
+
+Two environment variables make a run answerable from a script: `HTL_MQ_FRAMES=60` stops
+after sixty frames, and `HTL_MQ_SHOT=out.png` writes the last frame drawn as a PNG when
+the loop ends, for either reason. `run` reads them; `run_with` takes a `Hooks` instead,
+and `Hooks::NONE` turns them off for a host that has its own idea. A machine with no
+display fails before the first frame (`XOpenDisplay() failed!` on Linux); `xvfb-run`
+is enough to get the PNG out of one.
+
+Not in `htl-mq`: textures and audio (they need asset paths, which is a host decision),
+and the web target (macroquad's wasm path and mlua's are different targets).
+
 ### Publishing a crate that embeds Teal
 
 A crate whose Teal has no dependency needs nothing said here: the `.tl` is in the package
