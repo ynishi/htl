@@ -152,6 +152,11 @@ impl TealResolver {
     /// Let the Teal checker also search `dir` when resolving `require`s inside served
     /// modules (and the module named by `expect_type`). The sandbox root is always
     /// searched; add the project `src/` here when `defs.tl` lives there.
+    ///
+    /// A directory already on the checker's search path is not moved — neither `dir` nor
+    /// the root. A host that chains a resolver per directory tier therefore states the
+    /// order once, with [`Htl::add_search_paths`](crate::Htl::add_search_paths), before
+    /// the first `require`; without that the order is whichever resolver answered first.
     pub fn with_checker_path(mut self, dir: impl Into<PathBuf>) -> Self {
         self.checker_paths.push(dir.into());
         self
@@ -288,10 +293,29 @@ impl TealResolver {
         );
         // Fresh checker env per stub: several resolvers may serve a module of the same
         // name (one per contract dir) and must not share a cached type for it.
+        //
+        // And the root goes in front of the search path for the length of the check, for
+        // the same reason: the stub says `require("<name>")`, so what it types is whatever
+        // directory on the path answers first, while what is being served — and what the
+        // contract is about — is this resolver's file. With a contract over `sites/*` both
+        // dirs are on the path and the one in front would decide, whichever of the two is
+        // serving. The path is put back afterwards, so this states nothing about the
+        // search order the host chose.
         let check: Function = h.get("check_stub")?;
-        let errors: Table =
-            check.call((stub.as_str(), format!("<expect {tp} for module '{name}'>")))?;
-        let msgs: Vec<String> = errors
+        let saved: Option<String> = match &self.root {
+            Some(root) => {
+                let f: Function = h.get("push_path_front")?;
+                Some(f.call::<String>(root.to_string_lossy().as_ref())?)
+            }
+            None => None,
+        };
+        let errors =
+            check.call::<Table>((stub.as_str(), format!("<expect {tp} for module '{name}'>")));
+        if let Some(saved) = saved {
+            let f: Function = h.get("set_path")?;
+            f.call::<()>(saved)?;
+        }
+        let msgs: Vec<String> = errors?
             .sequence_values::<String>()
             .collect::<mlua::Result<_>>()?;
         Ok(if msgs.is_empty() { None } else { Some(msgs) })
@@ -320,6 +344,11 @@ impl TealResolver {
         // Back to front: `add_path` prepends, so this leaves the sandbox root consulted
         // first (a module resolving its siblings) and the project's paths behind it, in
         // the order `search_paths` states. Adding them front to back reversed both.
+        //
+        // A directory already on the path is left where it is (`add_path` is idempotent),
+        // so none of this displaces an order the host stated with `add_search_paths` —
+        // including the root's place in it. The root goes first only where nobody else
+        // put it, which is the single-resolver case the paragraph above describes.
         for p in self.checker_paths.iter().rev() {
             if p.is_dir() {
                 f.call::<()>(p.to_string_lossy().as_ref())?;
