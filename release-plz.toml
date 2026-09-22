@@ -49,4 +49,10 @@ name = "htl-cli"
 git_tag_enable = true
 changelog_update = true
 changelog_path = "./CHANGELOG.md"
-changelog_include = ["htl-core", "htl-macros", "htl", "htl-mq"]
+# htl-mq is not here until it is on crates.io: an unpublished package has no last release
+# to count from, so release-plz reads its whole history (max_analyze_commits, 1000) and
+# this fold would put every commit since 0.1.0 under the next version — 127 entries in
+# the first 0.8.0 release PR. Its two PRs so far touch the other crates' files and are
+# listed through them; after the first publish it goes back in, with `publish = false`
+# coming out.
+changelog_include = ["htl-core", "htl-macros", "htl"]
