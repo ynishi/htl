@@ -53,7 +53,7 @@ jobs:
             gh pr merge "$n" --auto --squash
           done
 
-  # Publishes the four crates and pushes the v<version> tag when the release PR
+  # Publishes the five crates and pushes the v<version> tag when the release PR
   # lands on main (release_always = false). The tag push fires release.yml (dist).
   # crates.io is reached through Trusted Publishing: with no registry token in the
   # environment, release-plz exchanges this job's OIDC token for a short-lived one.

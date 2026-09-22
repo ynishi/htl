@@ -4,7 +4,7 @@ Conventions for changes to this repository, for people and coding agents alike.
 The disclosure and public-artifact policy in
 [PUBLIC_DEVELOPMENT.md](PUBLIC_DEVELOPMENT.md) outranks this file.
 
-htl is small — four published crates and two examples in one workspace — so the
+htl is small — five published crates and two examples in one workspace — so the
 rules are few; the ones here exist because skipping them has cost something at
 least once.
 
@@ -143,8 +143,8 @@ Refs #<issue>
   — but it has to touch a file of a crate. release-plz reads the commits since
   the last tag *per package*, by the files they change, and a `feat:` that only
   edits this file or the justfile is invisible to it (it answered "already up to
-  date" to exactly that). The four crates share one version, so one crate is
-  enough for all four. 0.6.3 shipped an API change (`Project::patch`, `Patched`)
+  date" to exactly that). The five crates share one version, so one crate is
+  enough for all five. 0.6.3 shipped an API change (`Project::patch`, `Patched`)
   as a patch; 0.7.0 is the release that says so, and the commit that asked for
   it is a doc comment on the API that moved.
 

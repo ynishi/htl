@@ -2,7 +2,7 @@
 #
 # A release is cut in two steps, neither of them a local command. A dispatch of
 # `Release-plz` (.github/workflows/release-plz.yml) opens a release PR at the current
-# main: the version bump and the CHANGELOG. Merging that PR publishes the four crates
+# main: the version bump and the CHANGELOG. Merging that PR publishes the five crates
 # in dependency order and pushes the `v<version>` tag, and that tag is what
 # `Release` (cargo-dist) builds binaries for.
 #
@@ -31,9 +31,9 @@ git_tag_name = "v{{ version }}"
 release_always = false
 pr_labels = ["release"]
 
-# The four crates move in lockstep through `[workspace.package] version`, so one crate
+# The five crates move in lockstep through `[workspace.package] version`, so one crate
 # is enough to tag and to keep the single root CHANGELOG. `htl-cli` is that crate; the
-# other three fold their commits into its changelog.
+# other four fold their commits into its changelog.
 [[package]]
 name = "htl-cli"
 git_tag_enable = true

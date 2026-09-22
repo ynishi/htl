@@ -37,11 +37,11 @@ pre-push: check build e2e
 
 # The gate goes last, and not only because it is the slowest thing here. It asks git what
 # belongs in a tarball, so it is the one recipe that an uncommitted change can stop — a
-# change to a file one of the four crates ships, that is, which it names; a dirty justfile
+# change to a file one of the five crates ships, that is, which it names; a dirty justfile
 # or doc does not stop it, because neither would have reached a tarball either way. Running
 # it after everything cheaper means its minute is spent on a tree that has already answered
 # every question answerable without packaging.
-# Everything before a publish: `pre-push`, then the release gate on the four tarballs.
+# Everything before a publish: `pre-push`, then the release gate on the five tarballs.
 pre-publish: pre-push e2e-scaffold-packaged
 
 # Format in place.
@@ -50,7 +50,7 @@ fmt:
 
 # `cargo test` and not `cargo test --workspace`, and the two are no longer the same thing:
 # `e2e` is a workspace member that `default-members` leaves out, so the bare form runs every
-# test in the repository except the three that scaffold a Cargo project and build it from
+# test in the repository except the four that scaffold a Cargo project and build it from
 # nothing. Those are minutes, they are what `just e2e` is for, and putting them here would
 # put them in front of every commit and in both toolchains of the check job.
 #
@@ -73,10 +73,10 @@ build:
     cargo build --workspace --all-targets
 
 # What is left here is what `cargo test` will not run on its own: a binary crate embedding
-# htl, and three Cargo projects scaffolded from nothing and built. Neither is a claim about
+# htl, and four Cargo projects scaffolded from nothing and built. Neither is a claim about
 # this workspace, and both are minutes. The CLI's own behaviour on files — check, test, the
 # run cache, `cache status`, and the two suites meant to fail — moved to
-# `crates/htl-cli/tests/sample_project.rs`, and the three scaffolded projects to `e2e/`,
+# `crates/htl-cli/tests/sample_project.rs`, and the four scaffolded projects to `e2e/`,
 # where a failure names a file, a line and what it saw instead of reporting that a `grep`
 # exited 1. `just check` runs the first of those; this runs the second, by package name.
 # The embedding example and every target `--target` offers, end to end.
@@ -101,16 +101,16 @@ e2e:
       exit 1
     fi
     # Every target `--target` offers, scaffolded outside this repository and built against this
-    # checkout. That was 87 lines of bash here; it is now three tests in the `e2e` member
+    # checkout. That was 87 lines of bash here; it is now four tests in the `e2e` member
     # crate, which `default-members` keeps out of `cargo test` and this line asks for by
     # name. The crate finds the binary and the target directory itself, and the binary —
     # built from this checkout — pins this checkout in every project it writes, so there
-    # is nothing to pass and nothing to patch; `e2e-scaffold-packaged` below sets the five
-    # variables that point the same three tests at a tarball CLI and patch its version pin
+    # is nothing to pass and nothing to patch; `e2e-scaffold-packaged` below sets the six
+    # variables that point the same four tests at a tarball CLI and patch its version pin
     # at the extracted trees.
     cargo test -p e2e
 
-# The release gate: the CLI suite and the same three host projects, run against the four
+# The release gate: the CLI suite and the same four host projects, run against the five
 # `.crate` files `cargo publish` would upload rather than against this checkout. Everything
 # the scaffold case of `e2e` cannot see lives in the difference between the two —
 # `include` / `exclude` deciding which files reach the tarball, an `include_str!` target
@@ -132,7 +132,7 @@ e2e:
 # last thing asked before the first `cargo publish`: a version on crates.io is yanked and
 # superseded, never replaced, so this is the last step whose answer can still change what
 # goes out.
-# The release gate: the CLI suite and three scaffolded hosts, asked of the four tarballs a publish would upload.
+# The release gate: the CLI suite and four scaffolded hosts, asked of the five tarballs a publish would upload.
 e2e-scaffold-packaged:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -148,7 +148,7 @@ e2e-scaffold-packaged:
     # uploaded — and a clean worktree is also what puts .cargo_vcs_info.json inside it.
     # Cargo scopes that to the files it is about to ship, which is the right scope and
     # narrower than it sounds: an uncommitted README or justfile is not refused here,
-    # because neither is in any of the four tarballs.
+    # because neither is in any of the five tarballs.
     cargo package --target-dir "$target" -p htl-core -p htl-macros -p htl -p htl-cli -p htl-mq
     ver="$(cargo pkgid -p htl-core | sed 's/.*[#@]//')"
     dir="$(mktemp -d)"
@@ -173,26 +173,28 @@ e2e-scaffold-packaged:
     # patch as unused here and is right to: the CLI takes `htl` with default features off,
     # so the proc macros are not in its graph. It is passed anyway, because the alternative
     # to patching a crate that is not published is resolving it, and if this dependency ever
-    # arrives the failure should not be a resolution error about crates.io.
+    # arrives the failure should not be a resolution error about crates.io. htl-mq is not
+    # among the three and needs no `--config` line here: the CLI does not depend on it, only
+    # the window project it writes does — which is what `HTL_PATCH_MQ` below is for.
     cargo install --locked --debug --path "$dir/htl-cli-$ver" --root "$dir/cli" \
       --target-dir "$target" \
       --config "patch.crates-io.htl.path='$dir/htl-$ver'" \
       --config "patch.crates-io.htl-core.path='$dir/htl-core-$ver'" \
       --config "patch.crates-io.htl-macros.path='$dir/htl-macros-$ver'"
-    # Two packages, pointed at the CLI just installed and at the three extracted trees
-    # instead of at this checkout. `e2e` is the same three tests `e2e` runs; `htl-cli` is
+    # Two packages, pointed at the CLI just installed and at the four extracted trees
+    # instead of at this checkout. `e2e` is the same four tests `e2e` runs; `htl-cli` is
     # its whole integration suite — 206 tests across 34 files that spawn `htl_bin()`, which
-    # is `HTL_TEST_BIN` when it is set. Five variables are the whole of the difference
+    # is `HTL_TEST_BIN` when it is set. Six variables are the whole of the difference
     # between the two gates, as five positional arguments were when this was a shared bash
     # recipe — a release gate that checked less than the loop running on every commit would
     # be the wrong way round, and one implementation is how that stays true.
     #
     # What the second package adds is not the file set. `cargo package` verifies each
     # tarball by building it, so an `include_str!` target left out of one fails above,
-    # before this line runs, and every file these four crates ship is read that way. What
+    # before this line runs, and every file these five crates ship is read that way. What
     # is left is everything the shipped binary *does* that compiling it does not ask:
     # the bytes `htl new` writes for each host profile, what `fmt` writes, which lints
-    # fire, what the run cache reports. The three scaffold tests see one corner of that —
+    # fire, what the run cache reports. The four scaffold tests see one corner of that —
     # they build what `htl new` wrote, so a template can differ from this checkout's copy
     # in any way that still compiles and they stay green.
     #
@@ -211,6 +213,7 @@ e2e-scaffold-packaged:
     HTL_PATCH_HTL="$dir/htl-$ver" \
     HTL_PATCH_CORE="$dir/htl-core-$ver" \
     HTL_PATCH_MACROS="$dir/htl-macros-$ver" \
+    HTL_PATCH_MQ="$dir/htl-mq-$ver" \
       cargo test -p htl-cli -p e2e
 
 # After a publish, and only then: the CLI a user installs, writing the project a user gets,

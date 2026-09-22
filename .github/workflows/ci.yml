@@ -28,7 +28,7 @@ jobs:
       # mlua builds its vendored Lua 5.4; no system Lua or Teal needed.
       - run: cargo build --workspace --all-targets
       # `cargo test`, not `cargo test --workspace`: the `e2e` member is left out of
-      # `default-members` because its three tests scaffold a Cargo project each and build it
+      # `default-members` because its four tests scaffold a Cargo project each and build it
       # from nothing. `--workspace` here would run those minutes twice over, once per
       # toolchain, to repeat what the job below already does once. The build and clippy
       # steps keep `--workspace`, so the crate is still compiled and linted on both

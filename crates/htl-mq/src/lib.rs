@@ -5,12 +5,21 @@
 //! `load`, `update(dt): boolean`, and `draw` methods) through the frame loop.
 //! [`Hooks`] provides the two environment hooks a run without a person at the window
 //! needs. The declaration file `dts/mq.d.tl` is written by the `#[host_module]` macro
-//! at build time and shipped through `[package.metadata.htl] dts`.
+//! at build time and shipped through `[package.metadata.htl] dts`. [`macroquad`] is
+//! re-exported, so a project that draws on its own side reaches it through this crate
+//! rather than naming a version of its own.
 
 use htl::mlua::{Function, Table};
 use htl::{Htl, TealRecord, host_module};
 use std::cell::RefCell;
 use std::rc::Rc;
+
+/// The macroquad this window was opened with. A project's own host module — `fx` in what
+/// `htl new --target window` writes — draws into the same frame as [`Mq`] does, and two
+/// macroquads in one binary are two sets of process-global state; taking it from here is
+/// what makes it the same one, and it costs the project no version of its own to keep in
+/// step with this crate's.
+pub use macroquad;
 
 /// Channels 0.0..=1.0, as macroquad's.
 #[derive(TealRecord, Clone, Copy, Debug, PartialEq)]

@@ -1062,7 +1062,16 @@ fn cmd_new(
     } else {
         ""
     };
-    eprintln!("next: cd {} && {fetch}htl test", dir.display());
+    // The window target's first build needs two files nothing has written yet: `htl check`
+    // materialises the dependency's declaration as `types/htl-mq/mq.d.tl` (from its
+    // `[package.metadata.htl] dts`) and writes `src/fx.d.tl` from the host module, and
+    // `cargo build` reads the first of them when `include_bundle!` links `mq`. So the
+    // check comes before the run rather than after it.
+    let then = match opts.target.map(|t| t.target) {
+        Some(BuildTarget::Window) => "htl check . && cargo run",
+        _ => "htl test",
+    };
+    eprintln!("next: cd {} && {fetch}{then}", dir.display());
     Ok(ExitCode::SUCCESS)
 }
 
