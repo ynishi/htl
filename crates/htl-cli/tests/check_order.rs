@@ -115,3 +115,47 @@ fn a_test_file_still_sees_the_project_root_and_src() {
         "a file under tests/ resolves modules from src/: {d:?}"
     );
 }
+
+/// A module that declares a `global` is the second channel of order dependence, and an
+/// independent one: the search path is the same for every file here, and the answer still
+/// moved. The checked-module store served the declaration's checked result to every
+/// environment after the first, and replaying a result is not walking a file — only the
+/// walk registers a global into the environment it happens in.
+///
+/// The shape is a project's: the host's names in one declaration file under `types/`, and
+/// modules under `lib/` that require it.
+fn globals_project() -> PathBuf {
+    let root = scratch("globals");
+    write(&root.join("htl.toml"), "[check]\npaths = [\"lib\"]\n");
+    write(
+        &root.join("types/host_globals.d.tl"),
+        "global record std\n   record Json\n      encode: function(any): string\n      decode: function(string): any\n   end\n   json: Json\nend\nglobal VERSION: string\nglobal host_log: function(string)\n",
+    );
+    for n in 1..=2 {
+        write(
+            &root.join(format!("lib/m{n}/init.tl")),
+            &format!(
+                "require(\"host_globals\")\n\nlocal record m{n}\nend\n\nfunction m{n}.run(): string\n   host_log(VERSION)\n   return std.json.encode({{ a = {n} }})\nend\n\nreturn m{n}\n"
+            ),
+        );
+    }
+    root
+}
+
+#[test]
+fn a_global_from_a_required_module_reaches_every_file_whatever_the_order() {
+    let root = globals_project();
+    let forward = diagnostics(&["--strict", "lib/m1", "lib/m2"], &root);
+    let backward = diagnostics(&["--strict", "lib/m2", "lib/m1"], &root);
+    let whole = diagnostics(&["--strict", "lib"], &root);
+
+    assert!(
+        forward.is_empty(),
+        "both modules require the file that declares std, VERSION and host_log: {forward:?}"
+    );
+    assert_eq!(
+        forward, backward,
+        "the order the files are given in decides nothing"
+    );
+    assert_eq!(forward, whole, "a walk is the files it visits");
+}
