@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/ynishi/htl/compare/v0.7.0...v0.8.0) - 2026-09-22
+
+### Added
+
+- the window target: htl new --target window writes a windowed host on htl-mq, the first target that requires an entry script, and the fourth scaffolded host in e2e ([#290](https://github.com/ynishi/htl/pull/290))
+- htl-mq, a macroquad window for an htl program — the mq host module, the loop, and the declaration it ships ([#289](https://github.com/ynishi/htl/pull/289))
+- htl new writes mise.toml, the command's pin beside the crate's, and README says how mise carries htl ([#287](https://github.com/ynishi/htl/pull/287))
+
 ## [0.7.0](https://github.com/ynishi/htl/compare/v0.6.3...v0.7.0) - 2026-09-21
 
 ### Added
