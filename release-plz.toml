@@ -34,25 +34,15 @@ pr_labels = ["release"]
 # The five crates move in lockstep through `[workspace.package] version`, so one crate
 # is enough to tag and to keep the single root CHANGELOG. `htl-cli` is that crate; the
 # other four fold their commits into its changelog.
-# htl-mq's first release is published by hand. crates.io's Trusted Publishing is
-# configured on a crate that exists, so the OIDC publish this workflow does cannot create
-# one: 0.8.0 of the other four goes out through the job, then `cargo publish -p htl-mq`
-# with a token from the same commit (its `htl = "0.8.0"` is on crates.io by then), then
-# the trusted publisher is added to the new crate, and this entry comes out. The version
-# still moves with the workspace and the changelog still folds it in.
-[[package]]
-name = "htl-mq"
-publish = false
-
 [[package]]
 name = "htl-cli"
 git_tag_enable = true
 changelog_update = true
 changelog_path = "./CHANGELOG.md"
-# htl-mq is not here until it is on crates.io: an unpublished package has no last release
-# to count from, so release-plz reads its whole history (max_analyze_commits, 1000) and
-# this fold would put every commit since 0.1.0 under the next version — 127 entries in
-# the first 0.8.0 release PR. Its two PRs so far touch the other crates' files and are
-# listed through them; after the first publish it goes back in, with `publish = false`
-# coming out.
-changelog_include = ["htl-core", "htl-macros", "htl"]
+# A package goes in here once it is on crates.io, not before: an unpublished package has
+# no last release for release-plz to count from, so it reads the whole history
+# (max_analyze_commits, 1000), and the fold put 127 entries under 0.8.0 the first time
+# htl-mq was listed. The same goes for `publish`: Trusted Publishing is configured on a
+# crate that exists, so a new crate's first version is `cargo publish` by hand with
+# `publish = false` here until then (htl-mq 0.8.0 went out that way).
+changelog_include = ["htl-core", "htl-macros", "htl", "htl-mq"]

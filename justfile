@@ -250,6 +250,11 @@ post-publish:
     "$dir/cli/bin/htl" new "$dir/bin-sample" --target bin
     "$dir/cli/bin/htl" new "$dir/lib-sample" --target bin --lib
     "$dir/cli/bin/htl" new "$dir/cdylib-sample" --target cdylib --lib
+    "$dir/cli/bin/htl" new "$dir/window-sample" --target window
+    # The window project's first build reads `types/htl-mq/mq.d.tl`, which `htl check`
+    # copies out of the htl-mq this CLI's pin resolves — the published one, which is the
+    # question this recipe asks — so the check runs here before that project's cargo does.
+    "$dir/cli/bin/htl" check "$dir/window-sample"
     pin="$(grep -m1 '^htl = ' "$dir/bin-sample/Cargo.toml")"
     # A published CLI pins a version and nothing else on the line. Two or three numbers:
     # from 0.7.0 the CLI writes its own three, and the 0.6.x CLIs on crates.io wrote two.
@@ -258,7 +263,14 @@ post-publish:
       exit 1
     fi
     echo "post-publish: htl-cli $ver pins ${pin#htl = }"
-    for project in bin-sample lib-sample cdylib-sample; do
+    # The window project pins htl-mq beside htl, and a published CLI writes the same bare
+    # version on both lines.
+    mq="$(grep -m1 '^htl-mq = ' "$dir/window-sample/Cargo.toml")"
+    if [[ "${mq#htl-mq = }" != "${pin#htl = }" ]]; then
+      echo "post-publish: window-sample pins htl-mq as \`${mq#htl-mq = }\` beside htl ${pin#htl = }" >&2
+      exit 1
+    fi
+    for project in bin-sample lib-sample cdylib-sample window-sample; do
       manifest="$(<"$dir/$project/Cargo.toml")"
       # The `unpatched_pin` invariant from e2e/tests/scaffold_targets.rs, in the shell: a
       # released htl to build against, and nothing redirecting it. Two `if`s over bash's
