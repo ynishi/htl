@@ -1,0 +1,25 @@
+[package]
+name = "htl-mq"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "A macroquad window for an htl program: the frame loop, drawing and input as a `mq` host module, and the declaration a project's `htl check` reads"
+readme = "../../README.md"
+documentation = "https://docs.rs/htl-mq"
+keywords = ["lua", "teal", "macroquad", "game", "window"]
+categories = ["game-development", "development-tools"]
+
+# The declaration `#[host_module(dts = "dts/mq.d.tl")]` writes at expansion, shipped in the
+# tarball and materialised by a depending project's `htl dts` as `types/htl-mq/mq.d.tl`
+# (README "Shipping the declaration to your users").
+[package.metadata.htl]
+dts = ["dts/mq.d.tl"]
+
+[dependencies]
+htl = { workspace = true, features = ["macros"] }
+macroquad = "0.4.16"
+anyhow = { workspace = true }

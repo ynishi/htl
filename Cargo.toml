@@ -5,6 +5,7 @@ members = [
     "crates/htl-macros",
     "crates/htl",
     "crates/htl-cli",
+    "crates/htl-mq",
     "examples/embed",
     "examples/resolver",
     "e2e",
@@ -22,6 +23,7 @@ default-members = [
     "crates/htl-macros",
     "crates/htl",
     "crates/htl-cli",
+    "crates/htl-mq",
     "examples/embed",
     "examples/resolver",
 ]
