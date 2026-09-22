@@ -343,6 +343,11 @@ impl Htl {
     /// It decides one thing: which of two declarations of the same module is read. A
     /// `.tl` source beats a `.d.tl` wherever the two sit, so until neither is a source
     /// the order is invisible.
+    ///
+    /// The order stated here stands: a directory already on the path is not moved by a
+    /// later [`add_path`](Self::add_path), nor by a [`TealResolver`](pkg::TealResolver)
+    /// putting its root there on its first resolve. A host that chains a resolver per
+    /// directory tier says this once, before the first `require`.
     pub fn add_search_paths(&self, dirs: &[PathBuf]) -> Result<()> {
         for p in dirs.iter().rev() {
             self.add_path(p)?;
@@ -924,13 +929,22 @@ function R.preload_generated(module_name, code, filename)
    package.preload[module_name] = function(modname) return chunk(modname, filename) end
 end
 
+-- Idempotent, as the checker prelude's H.add_path is and for the same reason: a
+-- directory already on the path keeps the place whoever put it there gave it, and
+-- `Htl::add_path` calls both states, so the two must agree on the order they produce.
 function R.add_path(dir)
    local templates = dir .. "/?.lua;" .. dir .. "/?/init.lua;" .. dir .. "/?/?.lua"
    if package.path == nil or package.path == "" then
       package.path = templates
-   else
-      package.path = templates .. ";" .. package.path
+      return
    end
+   local first = dir .. "/?.lua"
+   for entry in package.path:gmatch("[^;]+") do
+      if entry == first then
+         return
+      end
+   end
+   package.path = templates .. ";" .. package.path
 end
 
 function R.reset_path()

@@ -1810,13 +1810,47 @@ end
 -- ".tl" / ".d.tl" / ".lua" in turn, so templates must end in ".lua".
 -- `?/?.lua` lets a flat package expose its top-level module as `<name>/<name>.tl`
 -- (mlua-pkg's entry is a directory; without init.tl this is how a flat layout resolves).
+--
+-- A directory already on the path keeps the place it has. Whoever put it there said
+-- where it goes -- a host stating its order once with add_search_paths, or an earlier
+-- add_path -- and moving it to the front would make the search order depend on who
+-- called last: a resolver that puts its own root in front on its first resolve would
+-- override the host for every module checked after it. Absent from the path, the
+-- directory is still prepended, so the only source of a root is still consulted first.
 function H.add_path(dir)
    local templates = dir .. "/?.lua;" .. dir .. "/?/init.lua;" .. dir .. "/?/?.lua"
    if package.path == nil or package.path == "" then
       package.path = templates
-   else
-      package.path = templates .. ";" .. package.path
+      return
    end
+   -- Whole entries, not a substring: "/a/?.lua" must not match "/other/a/?.lua". The
+   -- first template stands for the three, which are only ever written together here.
+   local first = dir .. "/?.lua"
+   for entry in package.path:gmatch("[^;]+") do
+      if entry == first then
+         return
+      end
+   end
+   package.path = templates .. ";" .. package.path
+end
+
+-- Put `dir` in front of the path for the length of one check, whatever else is on it,
+-- and return the path it replaced so the caller can put it back with H.set_path.
+--
+-- Unlike add_path this does move a directory already on the path, and that is the point:
+-- the caller is not stating a search order, it is naming the one directory whose copy of
+-- a module the next check is about. `TealResolver`'s expect_type stub is the caller --
+-- it resolves the served module by name, and a second contract directory holding a module
+-- of the same name would otherwise decide which file the contract is checked against.
+function H.push_path_front(dir)
+   local saved = package.path
+   local templates = dir .. "/?.lua;" .. dir .. "/?/init.lua;" .. dir .. "/?/?.lua"
+   if saved == nil or saved == "" then
+      package.path = templates
+   else
+      package.path = templates .. ";" .. saved
+   end
+   return saved
 end
 
 -- Drop Lua's default search path (`./?.lua` etc., i.e. cwd-relative resolution) so only
