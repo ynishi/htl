@@ -5,7 +5,7 @@
 # It is a workspace member so that `cargo build --workspace --all-targets` compiles it and
 # `cargo clippy --workspace --all-targets` lints it — that is what stops it rotting — and it
 # is kept out of `default-members` so that a bare `cargo test` does not spend minutes
-# compiling three Cargo projects from scratch. `just e2e` and `just e2e-scaffold-packaged`
+# compiling four Cargo projects from scratch. `just e2e` and `just e2e-scaffold-packaged`
 # are what run it, by name: `cargo test -p e2e`.
 #
 # There is no library and no binary here, only the test target. Nothing else would have a
