@@ -2598,12 +2598,12 @@ fn cmd_gen(file: &Path, out: Option<&Path>) -> Result<ExitCode> {
     h.install_std()?;
     let (code, c) = h.gen_lua(file)?;
     text_sink().checkinfo(&c);
-    let Some(mut code) = code else {
+    let Some(code) = code else {
         return Ok(ExitCode::FAILURE);
     };
-    if !code.ends_with('\n') {
-        code.push('\n');
-    }
+    // Written as it came back. This command used to append the final newline itself, which
+    // made it the one consumer of `gen_lua` whose output was a whole file; the generator
+    // does it for all of them now (`H.gen` in `prelude.lua` says why).
     match out {
         Some(p) => fs::write(p, code).with_context(|| format!("writing {}", p.display()))?,
         None => print!("{code}"),

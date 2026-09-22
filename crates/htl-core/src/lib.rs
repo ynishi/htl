@@ -1231,6 +1231,12 @@ impl Htl {
     }
 
     /// Type-check and generate Lua source. `None` code means errors (see `CheckInfo`).
+    ///
+    /// The code is a whole file: it ends with exactly one newline, whether or not the `.tl`
+    /// it came from did. `tl.generate` writes no terminator after its last line, and every
+    /// caller here — `htl gen`, `include_tl!`, a `--source` bundle payload, the run cache —
+    /// hands the string on as a Lua file, so it is terminated once at the generator rather
+    /// than by whichever of them remembered to.
     pub fn gen_lua(&self, file: &Path) -> Result<(Option<String>, CheckInfo)> {
         let f: Function = self.h.get("gen")?;
         let (code, t): (Option<String>, Table) = f.call(path_str(file))?;
