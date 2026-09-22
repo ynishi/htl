@@ -550,6 +550,8 @@ about your code, and these two are about files this command was asked to write.
 
 ### Opening a window (`htl-mq`)
 
+`htl new --target window` writes all of the below; this is what it writes, and why.
+
 `htl new --target bin` writes a host whose script runs to completion. A game wants the
 other shape — a window, a frame loop, input, drawing — and the part of that which is the
 same for every project is the `htl-mq` crate: macroquad's drawing and input as a host
@@ -1306,7 +1308,7 @@ paths = ["mods", "~/.cache/tsk/sdk"]   # extra dirs require() resolves from whil
 
 [build]
 target = "bin"            # what runs this project's output: hb (the default when absent),
-                          # bin, cdylib (see "Build targets")
+                          # bin, cdylib, window (see "Build targets")
 
 [[contract]]              # where this project accepts modules written outside it
 dir = "mods"              # relative to htl.toml; "sites/*" = every subdirectory of sites/
@@ -2102,15 +2104,16 @@ and it is the only thing the entries differ about:
 | `hb` (the default) — plain `htl new`, then `htl build` | the `htl` binary, `htl run app.hb` | a `.hb` bundle | no |
 | `bin` | the OS, as a binary | a binary (library + a six-line `main.rs`) | the user's crate |
 | `cdylib` | a C / Python / Unity caller | `cdylib` + `staticlib` + a header | the user's crate |
+| `window` | the OS, as a window | a binary that opens a window (library + `main.rs` calling `htl_mq::run`) | the user's crate, plus `htl-mq` |
 
 *Host* is the other axis: the Rust side that embeds the Lua state, what `[build] host` and
 `htl build --host` name the modules of. Both words are defined where the target is, in
 `BuildTarget`'s doc comment in
 [`crates/htl-core/src/build_target.rs`](crates/htl-core/src/build_target.rs).
 
-`--target` names an entry in that registry rather than adding a flag per kind: `bin` and
-`cdylib` are the two the scaffold writes today, and the flag reports the rest as they
-arrive. A name that is not registered is refused with the ones that are, before the
+`--target` names an entry in that registry rather than adding a flag per kind: `bin`,
+`cdylib` and `window` are the three the scaffold writes today, and the flag reports the
+rest as they arrive. A name that is not registered is refused with the ones that are, before the
 directory is created, so a typo leaves nothing behind. `htl init --target bin` adds the
 Rust side to a project that predates it and lists the files it kept rather than skipping
 them in silence.
@@ -2194,6 +2197,38 @@ point of its own, so there is no `src/main.tl` for a binary to run. What the cal
 have is a Lua `error()` and a Rust `Err` to handle — the generated `greet` refuses an empty
 name in Teal and `reset` refuses a no-op in Rust — so both error paths are in front of the
 reader rather than described.
+
+#### The window target (`--target window`)
+
+`htl new --target window <name>` is the `bin` shape with the window on it: the same
+library and thin binary, plus [`htl-mq`](#opening-a-window-htl-mq) for macroquad's
+drawing and input.
+
+```text
+├── Cargo.toml             htl + htl-mq (under the same pin) + anyhow
+├── src/lib.rs             #[host_module] Fx — the project's own GPU side — the embedded
+│                          engine, and preload registering it, `fx` and htl-mq's `mq`
+├── src/fx.d.tl            generated from src/lib.rs by cargo build / htl dts / htl check
+├── src/<mod>/init.tl      the engine: balls in a box, pure rules, no window
+├── src/main.tl            the game table htl_mq::run drives: update(dt), draw()
+├── src/main.rs            the binary: preload, then htl_mq::run
+└── types/htl-mq/mq.d.tl   the dependency's declaration, copied in by htl check
+```
+
+Both generated declarations are committed, and the first command in a fresh clone is
+`htl check .`: it writes `src/fx.d.tl` and copies `types/htl-mq/mq.d.tl` out of the
+dependency, and `cargo build` reads the second of them when `include_bundle!` links `mq`.
+
+`--target window` refuses `--lib`: the frame loop is handed a game table and that table is
+what `src/main.tl` returns, so a window project with no entry script is a loop with
+nothing to drive. It is the first target to say so, and the refusal — like `cdylib`'s
+opposite one — happens before the directory is created.
+
+`htl test` runs the engine with no display, because the engine is Teal that takes its
+world as arguments and `require("mq")` resolves to the declaration. For the window itself,
+`HTL_MQ_FRAMES=60 HTL_MQ_SHOT=out.png cargo run` stops after sixty frames and writes the
+last one as a PNG, which is how a run nobody is watching — CI, or `xvfb-run` on a machine
+with no display — answers for itself.
 
 ## Unions of records (`where`)
 

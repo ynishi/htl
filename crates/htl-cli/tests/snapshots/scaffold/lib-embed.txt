@@ -99,7 +99,7 @@ indent = 3
 
 [build]
 # What runs this project's output: hb (the htl binary, the default when absent), bin,
-# cdylib. Written by htl new --target; see README "Build targets".
+# cdylib, window. Written by htl new --target; see README "Build targets".
 target = "bin"
 ===== mlua-pkg.toml =====
 [package]

@@ -253,13 +253,15 @@ fn toolchain_requirement_is_matched_by_cargos_rules() {
 }
 
 /// `[build] target` is the build target as a string, and the string is the only spelling:
-/// a name that is not one is refused where it is written, with the three that are. Absent
+/// a name that is not one is refused where it is written, with the ones that are. Absent
 /// is the `hb` project every scaffold without a target writes, so it stays `None` rather
 /// than being defaulted into something the file does not say.
 #[test]
 fn a_build_target_is_named_and_a_name_that_is_not_one_is_refused() {
     let cfg = HtlConfig::parse("[build]\ntarget = \"cdylib\"\n").unwrap();
     assert_eq!(cfg.build.target, Some(BuildTarget::Cdylib));
+    let cfg = HtlConfig::parse("[build]\ntarget = \"window\"\n").unwrap();
+    assert_eq!(cfg.build.target, Some(BuildTarget::Window));
     assert!(
         HtlConfig::parse("[fmt]\nindent = 3\n")
             .unwrap()
@@ -274,7 +276,7 @@ fn a_build_target_is_named_and_a_name_that_is_not_one_is_refused() {
             .expect_err("a target that is not one should not parse")
     );
     assert!(err.contains("unknown target `nope`"), "{err}");
-    assert!(err.contains("hb, bin, cdylib"), "{err}");
+    assert!(err.contains("hb, bin, cdylib, window"), "{err}");
 }
 
 #[test]

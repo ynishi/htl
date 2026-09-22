@@ -12,11 +12,14 @@
 //! `HTL_UPDATE_SNAPSHOTS=1 cargo test -p htl-cli --test scaffold_snapshot` rewrites them;
 //! the rewritten files are the thing under review, so read the diff before committing it.
 //!
-//! One line and one file depend on where the binary under test was built. The line is the
-//! `htl` dependency in `Cargo.toml`, which is what `--htl` picks and, when it is not
-//! given, the htl this CLI was built with — a version on crates.io for a published CLI,
-//! this checkout's path for the one `cargo test` builds. It is normalised to
-//! `htl = "{{htl}}"` here so the same snapshot holds for both. The file is `mise.toml`,
+//! One kind of line and one file depend on where the binary under test was built. The
+//! line is a dependency on a crate of this repository in `Cargo.toml` — `htl`, and
+//! `htl-mq` in a window project — which is what `--htl` picks and, when it is not given,
+//! the htl this CLI was built with: a version on crates.io for a published CLI, this
+//! checkout's path for the one `cargo test` builds. Each is normalised to
+//! `<name> = "{{htl}}"` here so the same snapshot holds for both, and both are normalised
+//! the same way, because the thing a window project has to get right is that the two name
+//! one tree. The file is `mise.toml`,
 //! the same pin as the command: written by a CLI that pins a release and not by one that
 //! pins a checkout, so it is left out of the tree here rather than normalised. What the
 //! line actually says under each pin, and that the file is there exactly under a release,
@@ -93,18 +96,26 @@ fn render(root: &Path) -> String {
     s
 }
 
+/// The crates of this repository a scaffolded project may depend on, as the left-hand side
+/// of the manifest line each gets. Every one of them is pinned by the same `HtlPin`, so
+/// every one of them is normalised the same way.
+const PINNED_DEPS: &[&str] = &["htl", "htl-mq"];
+
 /// Pin the htl the scaffold was written by, without pinning where it is: a version, the
 /// repository (`--htl main`) or a checkout's path (the default under `cargo test`, and
-/// `--htl path:`), with or without the features a target adds, all read as one line.
-/// What each pin actually puts on that line is `scaffold_cli.rs`'s
-/// (`new_pins_the_htl_this_binary_was_built_with`, `new_htl_main_writes_a_git_pin`).
+/// `--htl path:`), with or without the features a target adds, all read as one line — and
+/// the same for a sibling crate under that pin. What each pin actually puts on those lines
+/// is `scaffold_cli.rs`'s (`new_pins_the_htl_this_binary_was_built_with`,
+/// `new_htl_main_writes_a_git_pin`, `the_window_targets_htl_mq_line_follows_the_pin`).
 fn normalise(body: &str) -> String {
     body.lines()
         .map(|l| {
-            if l.starts_with("htl = ") {
-                "htl = \"{{htl}}\"".to_string()
-            } else {
-                l.to_string()
+            match PINNED_DEPS
+                .iter()
+                .find(|d| l.starts_with(&format!("{d} = ")))
+            {
+                Some(d) => format!("{d} = \"{{{{htl}}}}\""),
+                None => l.to_string(),
             }
         })
         .collect::<Vec<_>>()
@@ -225,6 +236,17 @@ fn new_lib_target_cdylib_writes_the_c_abi_library_and_its_callers() {
     let root = common::scratch("htl-cli-snapshot", "cdylib");
     htl(&["new", "sample", "--lib", "--target", "cdylib"], &root);
     assert_tree("cdylib", &root.join("sample"));
+}
+
+/// The window target: the library with the project's own `fx` host module beside htl-mq's
+/// `mq`, the binary that opens the window, the Teal engine and the game table it drives.
+/// Every byte pinned, because what this target writes is mostly prose and Teal — the two
+/// halves a compiler does not check until somebody runs the project.
+#[test]
+fn new_target_window_writes_the_window_host() {
+    let root = common::scratch("htl-cli-snapshot", "window");
+    htl(&["new", "sample", "--target", "window"], &root);
+    assert_tree("window", &root.join("sample"));
 }
 
 /// `htl init` in an empty directory is `htl new` — the same plan, only the name comes

@@ -30,11 +30,17 @@ fn htl(args: &[&str], cwd: &Path) -> (bool, String, String) {
 /// The `htl` line of a project's manifest, so that a failure prints the line rather than
 /// the file.
 fn htl_line(manifest: &Path) -> String {
+    dep_line(manifest, "htl")
+}
+
+/// The same for any dependency of this repository's: `htl`, or the `htl-mq` a window
+/// project gets under the same pin.
+fn dep_line(manifest: &Path, name: &str) -> String {
     let cargo = std::fs::read_to_string(manifest).unwrap();
     cargo
         .lines()
-        .find(|l| l.starts_with("htl = "))
-        .unwrap_or_else(|| panic!("no htl dependency in:\n{cargo}"))
+        .find(|l| l.starts_with(&format!("{name} = ")))
+        .unwrap_or_else(|| panic!("no {name} dependency in:\n{cargo}"))
         .to_string()
 }
 
@@ -160,6 +166,55 @@ fn the_cdylib_pin_keeps_its_features_under_every_pin_kind() {
     let line = htl_line(&root.join("e/Cargo.toml"));
     assert!(line.contains("branch = \"main\""), "{line}");
     assert!(line.contains("features = [\"ffi\"]"), "{line}");
+}
+
+/// `htl-mq` is a crate of this repository, so the window target's manifest pins it where it
+/// pins `htl`: `--htl main` names the same branch of the same repository for both, and the
+/// default — a CLI built from this checkout — names `crates/htl-mq` beside `crates/htl` in
+/// it. One tree, two crates; two trees would be two htls in one binary.
+#[test]
+fn the_window_targets_htl_mq_line_follows_the_pin() {
+    let root = scratch("window-pin");
+
+    let (ok, _, stderr) = htl(&["new", "w", "--target", "window", "--htl", "main"], &root);
+    assert!(ok, "{stderr}");
+    let line = dep_line(&root.join("w/Cargo.toml"), "htl-mq");
+    assert!(line.contains("git = "), "{line}");
+    assert!(line.contains("branch = \"main\""), "{line}");
+    assert!(!line.contains("version ="), "{line}");
+
+    // The default: whatever the binary under test pins `htl` at, with the crate name
+    // swapped. A checkout CLI writes a path; the packaged gate's CLI writes its version.
+    let (ok, _, stderr) = htl(&["new", "d", "--target", "window"], &root);
+    assert!(ok, "{stderr}");
+    let manifest = root.join("d/Cargo.toml");
+    let htl = htl_line(&manifest);
+    let mq = dep_line(&manifest, "htl-mq");
+    assert_eq!(
+        mq,
+        htl.replacen("htl = ", "htl-mq = ", 1)
+            .replace("/crates/htl\"", "/crates/htl-mq\""),
+        "htl: {htl}"
+    );
+}
+
+/// The frame loop is handed the table `src/main.tl` returns, so the window target refuses
+/// `--lib` — the mirror of the `cdylib` refusal above — and, like it, before the directory
+/// exists.
+#[test]
+fn the_window_target_needs_an_entry_script_and_refuses_lib() {
+    let root = scratch("window-needs-script");
+    let (ok, _, stderr) = htl(&["new", "sample", "--target", "window", "--lib"], &root);
+    assert!(!ok, "{stderr}");
+    assert!(
+        stderr.contains("the `window` target runs an entry script, which --lib leaves out"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("targets that work with --lib: bin, cdylib"),
+        "the targets that take the flag:\n{stderr}"
+    );
+    assert!(!root.join("sample").exists(), "{stderr}");
 }
 
 /// `[build] target` is written whenever the project has a target, under the default,
@@ -440,7 +495,7 @@ fn target_help_lists_every_registered_target_and_never_the_old_flag() {
         let (ok, stdout, _) = htl(cmd, &root);
         assert!(ok);
         assert!(
-            stdout.contains("[possible values: bin, cdylib]"),
+            stdout.contains("[possible values: bin, cdylib, window]"),
             "{cmd:?}:\n{stdout}"
         );
         assert!(!stdout.contains("--host"), "{cmd:?}:\n{stdout}");

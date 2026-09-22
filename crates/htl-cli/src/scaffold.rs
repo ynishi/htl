@@ -21,7 +21,9 @@
 //!
 //! A target may add to that: the `cdylib` one writes `examples/c/` and `examples/python/`
 //! beside the library, because a C ABI whose reference caller nobody wrote is a C ABI
-//! every caller gets wrong in the same three ways.
+//! every caller gets wrong in the same three ways. A target may also dictate what the
+//! files *say*: the `window` one writes a second host module beside the dependency's `mq`,
+//! and an entry script that is a game table rather than a program.
 //!
 //! # The target is a [`BuildTarget`]; the profile is what the scaffold writes for it
 //!
@@ -184,6 +186,15 @@ impl HtlPin {
     /// them ([`DepLine`]), and keeping the two apart until [`dep_value`] is what stops the
     /// `cdylib` line from being right under one pin kind and wrong under the others.
     fn keys(&self) -> Vec<(&'static str, String)> {
+        self.keys_for("htl")
+    }
+
+    /// The same for any crate of this repository ([`Dep::Sibling`]). The pin names a
+    /// *tree* — a release of the workspace, a branch of it, a checkout of it — and every
+    /// crate in that tree is at the same place in it, so only the last path segment
+    /// changes. A release and a branch do not even change that: the version and the branch
+    /// are the workspace's, and the crate name is the key on the left of the line.
+    fn keys_for(&self, crate_name: &str) -> Vec<(&'static str, String)> {
         match self {
             HtlPin::Release(v) => vec![("version", v.clone())],
             HtlPin::Main => vec![
@@ -196,7 +207,7 @@ impl HtlPin {
             HtlPin::Path(root) => vec![(
                 "path",
                 format!(
-                    "{}/crates/htl",
+                    "{}/crates/{crate_name}",
                     root.display()
                         .to_string()
                         .replace('\\', "/")
@@ -281,6 +292,11 @@ impl DepLine {
 pub enum Dep {
     /// The htl the pin names (see [`HtlPin`]).
     Htl,
+    /// Another crate of this repository, under the same pin as `htl`: the release at this
+    /// version, the same branch of the same git URL, or the checkout's `crates/<name>`.
+    /// The four crates share one version and one tree, so a project that pins `htl` at a
+    /// checkout and `htl-mq` at a release would be pinning two htls.
+    Sibling(&'static str),
     /// A literal requirement.
     Version(&'static str),
 }
@@ -424,10 +440,47 @@ const CDYLIB: TargetProfile = TargetProfile {
     readme_prose: ffi_readme_prose,
 };
 
+/// The window target: the OS runs the output as a windowed app. The same library and thin
+/// binary as [`BIN`], plus `htl-mq` — macroquad's drawing and input as the host module
+/// `mq`, and the frame loop `src/main.rs` hands a game table to.
+///
+/// Two host modules, not one: `mq` is the dependency's, and `fx` is the project's own, for
+/// the per-pixel work the engine only asks for. That is the shape the target exists to
+/// write down, because it is the one a game gets wrong by putting the loop in the engine:
+/// the engine here is Teal, takes its world as arguments, and is what `htl test` runs with
+/// no display, while `src/main.tl` — the one script that calls `mq` — is the game table and
+/// nothing else. Hence [`Script::Requires`](htl::build_target::Script::Requires): a loop
+/// with no table to drive is not a project this scaffold can write.
+const WINDOW: TargetProfile = TargetProfile {
+    target: BuildTarget::Window,
+    deps: &[
+        DepLine::plain("htl", Dep::Htl),
+        // Under the same pin as `htl`: they are two crates of one tree, and one version.
+        DepLine::plain("htl-mq", Dep::Sibling("htl-mq")),
+        DepLine::plain("anyhow", Dep::Version("1")),
+    ],
+    lib: ScaffoldFile {
+        path: "src/lib.rs",
+        body: window_lib_rs,
+    },
+    main: Some(ScaffoldFile {
+        path: "src/main.rs",
+        body: window_main_rs,
+    }),
+    extra: &[],
+    ignore: &["/target"],
+    teal: TealSample {
+        module: window_teal_module,
+        test: window_teal_test,
+        main: window_main_tl,
+    },
+    readme_commands: window_readme_commands,
+    readme_prose: window_readme_prose,
+};
+
 /// Every target the scaffold writes Rust for. [`BuildTarget::Hb`] is not among them: it is
-/// what plain `htl new` writes, which is the tree without a `Cargo.toml` at all. #104 (a
-/// macroquad window) is one more entry.
-pub static PROFILES: &[TargetProfile] = &[BIN, CDYLIB];
+/// what plain `htl new` writes, which is the tree without a `Cargo.toml` at all.
+pub static PROFILES: &[TargetProfile] = &[BIN, CDYLIB, WINDOW];
 
 /// The target `--embed` is shorthand for.
 pub const DEFAULT_TARGET: BuildTarget = BuildTarget::Bin;
@@ -452,6 +505,11 @@ const T_FFI_TEAL_TEST: &str = include_str!("../templates/ffi/test.tl");
 const T_FFI_MAIN_C: &str = include_str!("../templates/ffi/main.c");
 const T_FFI_MAKEFILE: &str = include_str!("../templates/ffi/Makefile");
 const T_FFI_RUN_PY: &str = include_str!("../templates/ffi/run.py");
+const T_WINDOW_LIB_RS: &str = include_str!("../templates/window/lib.rs");
+const T_WINDOW_MAIN_RS: &str = include_str!("../templates/window/main.rs");
+const T_WINDOW_TEAL_MODULE: &str = include_str!("../templates/window/init.tl");
+const T_WINDOW_TEAL_TEST: &str = include_str!("../templates/window/test.tl");
+const T_WINDOW_MAIN_TL: &str = include_str!("../templates/window/main.tl");
 
 /// Teal identifier for a package name (`my-pkg` -> `my_pkg`).
 pub fn module_ident(name: &str) -> String {
@@ -676,8 +734,6 @@ fn script_mismatch(p: &TargetProfile, lib: bool) -> String {
         fits.join(", ")
     };
     if lib {
-        // No target answers `Script::Requires` yet — #104's window loop is the one that
-        // will — so `resolve_target` cannot reach this half today.
         format!(
             "the `{}` target runs an entry script, which --lib leaves out; targets that work with --lib: {fits}",
             p.target
@@ -875,6 +931,26 @@ fn ffi_example_py(ctx: &Ctx<'_>) -> String {
     fill(T_FFI_RUN_PY, ctx)
 }
 
+fn window_lib_rs(ctx: &Ctx<'_>) -> String {
+    fill(T_WINDOW_LIB_RS, ctx)
+}
+
+fn window_main_rs(ctx: &Ctx<'_>) -> String {
+    fill(T_WINDOW_MAIN_RS, ctx)
+}
+
+fn window_teal_module(ctx: &Ctx<'_>) -> String {
+    fill(T_WINDOW_TEAL_MODULE, ctx)
+}
+
+fn window_teal_test(ctx: &Ctx<'_>) -> String {
+    fill(T_WINDOW_TEAL_TEST, ctx)
+}
+
+fn window_main_tl(ctx: &Ctx<'_>) -> String {
+    fill(T_WINDOW_MAIN_TL, ctx)
+}
+
 fn t_types_readme() -> String {
     "# types/\n\n\
      Hand-written `.d.tl` declarations for modules the host provides at run time and\n\
@@ -963,7 +1039,7 @@ fn t_htl_toml(target: Option<BuildTarget>) -> String {
         s.push_str(&format!(
             "\n[build]\n\
              # What runs this project's output: hb (the htl binary, the default when absent), bin,\n\
-             # cdylib. Written by htl new --target; see README \"Build targets\".\n\
+             # cdylib, window. Written by htl new --target; see README \"Build targets\".\n\
              target = \"{t}\"\n"
         ));
     }
@@ -1137,13 +1213,52 @@ fn ffi_readme_prose(ctx: &Ctx<'_>) -> String {
     s
 }
 
+/// What a window project is told to run, in the order a fresh clone has to run it:
+/// `htl check` before `cargo build`, because the first is what writes the declarations the
+/// second links against.
+fn window_readme_commands(_ctx: &Ctx<'_>) -> String {
+    String::from(
+        "cargo run              # the window; Esc quits\n\
+         HTL_MQ_FRAMES=60 HTL_MQ_SHOT=out.png cargo run   # sixty frames, then a PNG\n\
+         cargo test             # the engine's Rust test: the module loaded through preload\n",
+    )
+}
+
+fn window_readme_prose(ctx: &Ctx<'_>) -> String {
+    let m = ctx.module;
+    let mut s = format!(
+        "This project is a library, a binary and an engine:\n\
+         `src/lib.rs` holds `fx` — the project's own `#[host_module]`, for what wants the GPU —\n\
+         embeds the Teal engine, and registers both (plus htl-mq's `mq`) in `preload(&Htl)`.\n\
+         `src/main.rs` opens the window and hands `htl_mq::run` the game table, and `src/main.tl`\n\
+         is that table: `update(dt)` says whether to go on, `draw()` draws.\n\n\
+         `src/{m}/init.tl` is the engine, and it is where the game goes. It takes its world as\n\
+         arguments and never opens anything, so `htl test` runs it with no display: `require(\"mq\")`\n\
+         resolves to the declaration, which declares and does nothing. `render` is the one function\n\
+         that draws, and nothing in the engine calls it — the loop does.\n\n\
+         Effects go into `fx`, beside `mq` rather than inside the engine: `mq` is macroquad's\n\
+         drawing and input as htl-mq ships it, and `fx` is this project's, drawing with the same\n\
+         macroquad through `htl_mq::macroquad`. A new one is a method on `Fx` and a line in\n\
+         `render`.\n\n"
+    );
+    s.push_str(
+        "`src/fx.d.tl` is generated from `#[host_module]` in `src/lib.rs`: `cargo build` writes it,\n\
+         and so does `htl dts` / `htl check` without building, so the Teal side always sees the\n\
+         current Rust signatures. `types/htl-mq/mq.d.tl` is the same file for the dependency's `mq`,\n\
+         copied in from the crate by `htl check`. Commit both; the next run writes them again.\n\n\
+         `cargo build` reads `types/htl-mq/mq.d.tl` — `include_bundle!` links `mq` against it — so\n\
+         `htl check .` comes first in a fresh clone.\n",
+    );
+    s
+}
+
 /// One dependency's right-hand side: the short `"req"` form where cargo accepts it, the
 /// table where it does not.
 ///
 /// A bare version with no features is the only thing the short form can say, so a git or a
 /// path pin, or anything with features on it, is the table — and the features are appended
 /// *here*, once, rather than beside each way of spelling the requirement. That is the whole
-/// reason [`HtlPin::keys`] hands back pairs instead of a finished line: the `cdylib`
+/// reason [`HtlPin::keys_for`] hands back pairs instead of a finished line: the `cdylib`
 /// target's `features = ["ffi"]` has to survive all three pin kinds, and the way to be sure
 /// it does is for there to be one place it is written.
 fn dep_value(keys: &[(&str, String)], features: &[&str]) -> String {
@@ -1178,7 +1293,8 @@ fn t_cargo(name: &str, target: &TargetProfile, htl: &HtlPin) -> String {
     s.push_str("[dependencies]\n");
     for d in target.deps {
         let keys = match d.req {
-            Dep::Htl => htl.keys(),
+            Dep::Htl => htl.keys_for("htl"),
+            Dep::Sibling(n) => htl.keys_for(n),
             Dep::Version(v) => vec![("version", v.to_string())],
         };
         s.push_str(&format!("{} = {}\n", d.name, dep_value(&keys, d.features)));
@@ -1198,7 +1314,7 @@ mod tests {
         PIN_DEFAULT, Path, PathBuf, REPOSITORY, RUST_KEYWORDS, Result, dep_value, ffi_lib_rs,
         module_ident, plan, profile, refuse_reserved_name, resolve_target, rust_lib_rs,
         rust_main_rs, script_mismatch, t_cargo, t_htl_toml, t_manifest, t_mise, t_readme,
-        target_names,
+        target_names, window_lib_rs, window_main_rs,
     };
     use htl::build_target::Script;
 
@@ -1444,7 +1560,7 @@ mod tests {
             format!(
                 "\n[build]\n\
                  # What runs this project's output: hb (the htl binary, the default when absent), bin,\n\
-                 # cdylib. Written by htl new --target; see README \"Build targets\".\n\
+                 # cdylib, window. Written by htl new --target; see README \"Build targets\".\n\
                  target = \"{name}\"\n"
             )
         };
@@ -1456,6 +1572,9 @@ mod tests {
 
         let cdylib = t_htl_toml(Some(BuildTarget::Cdylib));
         assert_eq!(cdylib, format!("{plain}{}", block("cdylib")));
+
+        let window = t_htl_toml(Some(BuildTarget::Window));
+        assert_eq!(window, format!("{plain}{}", block("window")));
     }
 
     /// `--embed` resolves through the registry, so a missing entry is a panic at the
@@ -1481,7 +1600,10 @@ mod tests {
             e.contains("the `hb` target is what plain `htl new` writes"),
             "{e}"
         );
-        assert!(e.contains("targets that scaffold: bin, cdylib"), "{e}");
+        assert!(
+            e.contains("targets that scaffold: bin, cdylib, window"),
+            "{e}"
+        );
     }
 
     /// The refusal, as a string. A plain `unwrap_err()` would ask `&TargetProfile` for
@@ -1519,14 +1641,11 @@ mod tests {
         );
     }
 
-    /// The half of the matrix hole a registered target reaches, with the message that
-    /// names a way out: `cdylib` answers [`Script::Forbids`], so `--lib` is what it needs.
-    ///
-    /// The other half — a target that *requires* a script, which #104's window loop will
-    /// be — has no arm of [`BuildTarget`] to answer it now that the rule is derived from
-    /// the target rather than stored beside it, so it cannot be built out of a probe
-    /// profile any more. What is left to assert about it is [`Script::accepts`] itself,
-    /// which `htl-core` tests, and this line.
+    /// Both halves of the matrix hole, with the message that names a way out: `cdylib`
+    /// answers [`Script::Forbids`], so `--lib` is what it needs, and `window` answers
+    /// [`Script::Requires`], so `--lib` is what it cannot have. Each refusal lists the
+    /// targets that would have fitted the flag as given, which is the half of the registry
+    /// the other one is not in.
     #[test]
     fn a_target_that_disagrees_with_lib_names_the_targets_that_do_not() {
         assert!(Script::Requires.accepts(false) && !Script::Requires.accepts(true));
@@ -1536,7 +1655,17 @@ mod tests {
             msg.contains("the `cdylib` target writes no entry script"),
             "{msg}"
         );
-        assert!(msg.contains("targets that write one: bin"), "{msg}");
+        assert!(msg.contains("targets that write one: bin, window"), "{msg}");
+
+        let msg = script_mismatch(profile(BuildTarget::Window).unwrap(), true);
+        assert!(
+            msg.contains("the `window` target runs an entry script, which --lib leaves out"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("targets that work with --lib: bin, cdylib"),
+            "{msg}"
+        );
     }
 
     /// A C ABI library is not a project with an entry script, and the two are reconciled
@@ -1606,6 +1735,112 @@ mod tests {
         );
     }
 
+    /// A crate of this repository beside `htl` follows the same pin, whatever kind it is:
+    /// a release version, the same branch of the same git URL, the checkout's own
+    /// `crates/htl-mq`. The two lines are compared key for key rather than asserted
+    /// separately, because the failure this guards is one line being right and the other
+    /// naming a different tree — two htls in one build, which cargo resolves and the
+    /// linker does not.
+    #[test]
+    fn a_sibling_crate_follows_the_htl_pin() {
+        let window = profile(BuildTarget::Window).unwrap();
+        for pin in [
+            HtlPin::Release("0.7.0".into()),
+            HtlPin::Main,
+            HtlPin::Path(PathBuf::from("../co")),
+        ] {
+            let toml = t_cargo("sample", window, &pin);
+            let line = |name: &str| -> String {
+                toml.lines()
+                    .find(|l| l.starts_with(&format!("{name} = ")))
+                    .unwrap_or_else(|| panic!("no `{name}` dependency in:\n{toml}"))
+                    .to_string()
+            };
+            let htl = line("htl");
+            let mq = line("htl-mq");
+            let want = match &pin {
+                HtlPin::Release(v) => (format!("htl = \"{v}\""), format!("htl-mq = \"{v}\"")),
+                HtlPin::Main => (
+                    format!("htl = {{ git = \"{REPOSITORY}\", branch = \"main\" }}"),
+                    format!("htl-mq = {{ git = \"{REPOSITORY}\", branch = \"main\" }}"),
+                ),
+                HtlPin::Path(_) => (
+                    "htl = { path = \"../co/crates/htl\" }".to_string(),
+                    "htl-mq = { path = \"../co/crates/htl-mq\" }".to_string(),
+                ),
+            };
+            assert_eq!(
+                (htl.as_str(), mq.as_str()),
+                (want.0.as_str(), want.1.as_str())
+            );
+        }
+    }
+
+    /// The window target is a binary with a window on it: no `[lib]` section, an
+    /// `src/main.rs`, and the two host modules the templates name — the dependency's `mq`
+    /// and the project's own `fx` — registered in one `preload`.
+    #[test]
+    fn the_window_target_is_a_binary_with_two_host_modules() {
+        let window = resolve_target(Some("window"), false, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(window.target, BuildTarget::Window);
+        assert_eq!(window.main.as_ref().unwrap().path, "src/main.rs");
+        assert!(window.extra.is_empty());
+
+        let release = HtlPin::Release(env!("CARGO_PKG_VERSION").into());
+        let toml = t_cargo("sample", window, &release);
+        assert!(!toml.contains("[lib]"), "{toml}");
+        assert!(toml.contains("anyhow = \"1\"\n"), "{toml}");
+
+        let ctx = Ctx {
+            name: "sample",
+            module: "sample",
+            script: true,
+            htlx: false,
+        };
+        let lib = window_lib_rs(&ctx);
+        assert!(
+            lib.contains("#[host_module(name = \"fx\", dts = \"src/fx.d.tl\""),
+            "{lib}"
+        );
+        assert!(
+            lib.contains("htl::include_bundle!(\"src/sample/init.tl\", host = [\"fx\", \"mq\"])"),
+            "{lib}"
+        );
+        assert!(
+            lib.contains("Fx.htl_preload(h)?;") && lib.contains("htl_mq::Mq.htl_preload(h)?;"),
+            "{lib}"
+        );
+        assert!(!lib.contains("{{"), "{lib}");
+
+        // The binary opens the window and drives the entry script's table; it holds no
+        // logic of its own, and the engine it links is the library's.
+        let main = window_main_rs(&ctx);
+        assert!(
+            main.contains(
+                "include_bundle!(\"src/main.tl\", host = [\"fx\", \"mq\", \"sample\"], debug = true)"
+            ),
+            "{main}"
+        );
+        assert!(
+            main.contains("htl_mq::run(h, game, htl_mq::conf(\"sample\", 800, 600))"),
+            "{main}"
+        );
+        assert!(!main.contains("{{"), "{main}");
+    }
+
+    /// The frame loop is handed the table `src/main.tl` returns, so `--lib` — which is
+    /// "no entry script" — is refused, and before anything is written.
+    #[test]
+    fn the_window_target_is_refused_with_lib() {
+        let e = err(resolve_target(Some("window"), false, true));
+        assert!(
+            e.contains("the `window` target runs an entry script, which --lib leaves out"),
+            "{e}"
+        );
+    }
+
     /// What the reader is told to run follows the project rather than the target's name:
     /// the C ABI target points at the two reference callers, and the default target at the
     /// binary it writes only when there is a script to run.
@@ -1625,6 +1860,15 @@ mod tests {
         assert!(ffi.contains("make -C examples/c run"), "{ffi}");
         assert!(ffi.contains("python3 examples/python/run.py"), "{ffi}");
         assert!(ffi.contains("include/sample.h"), "{ffi}");
+
+        // The window target has an entry script by construction, and the run that writes a
+        // PNG is the one a script can check.
+        let win = (profile(BuildTarget::Window).unwrap().readme_commands)(&ctx(true));
+        assert!(win.contains("cargo run              # the window"), "{win}");
+        assert!(
+            win.contains("HTL_MQ_FRAMES=60 HTL_MQ_SHOT=out.png cargo run"),
+            "{win}"
+        );
     }
 
     /// A crate whose only shape is the default `rlib` has no `[lib]` section; a target

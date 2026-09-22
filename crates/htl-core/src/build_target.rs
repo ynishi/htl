@@ -1,6 +1,6 @@
 //! [`BuildTarget`]: what runs the output of an htl project.
 //!
-//! One enum, three entries, and everything else about a target derived from it: the crate
+//! One enum, four entries, and everything else about a target derived from it: the crate
 //! types cargo is told to build ([`BuildTarget::crate_types`]), whether the project has an
 //! entry script ([`BuildTarget::entry`]), and the sentence that names the thing on the far
 //! end ([`BuildTarget::runs_it`]). `htl.toml` records the choice as `[build] target`, and
@@ -32,7 +32,7 @@ use std::str::FromStr;
 ///
 /// # Why it is not called a host
 ///
-/// Two of the three entries happen to be Rust crates, which is why this used to be called
+/// Three of the four entries happen to be Rust crates, which is why this used to be called
 /// a host; an output nothing Rust runs — a `.love` bundle, say — is the entry that makes
 /// that word plainly wrong.
 ///
@@ -51,12 +51,23 @@ pub enum BuildTarget {
     Bin,
     /// A C ABI library, loaded by a caller that is not written in Rust.
     Cdylib,
+    /// A native binary the OS runs as a windowed app: the same library-plus-thin-binary
+    /// shape as [`Bin`](BuildTarget::Bin), with the window and the frame loop coming from
+    /// `htl-mq`. That crate is the backend today and the target does not name it: a second
+    /// backend would be a second crate behind this entry, because what runs the output —
+    /// the OS, as a window — is what the enum is over, and that does not change with the
+    /// crate that opens the window.
+    Window,
 }
 
 impl BuildTarget {
     /// Every target there is, in the order they are offered and reported.
-    pub const ALL: &'static [BuildTarget] =
-        &[BuildTarget::Hb, BuildTarget::Bin, BuildTarget::Cdylib];
+    pub const ALL: &'static [BuildTarget] = &[
+        BuildTarget::Hb,
+        BuildTarget::Bin,
+        BuildTarget::Cdylib,
+        BuildTarget::Window,
+    ];
 
     /// How it is spelled on the command line (`--target <name>`) and in `htl.toml`.
     pub fn name(&self) -> &'static str {
@@ -64,6 +75,7 @@ impl BuildTarget {
             BuildTarget::Hb => "hb",
             BuildTarget::Bin => "bin",
             BuildTarget::Cdylib => "cdylib",
+            BuildTarget::Window => "window",
         }
     }
 
@@ -85,6 +97,9 @@ impl BuildTarget {
             // The shared object a caller loads, and the static library Unity on iOS links;
             // the second costs one more artefact and nothing else.
             BuildTarget::Cdylib => &["rlib", "cdylib", "staticlib"],
+            // The default `rlib` and the binary from `src/main.rs`, as `Bin`: the window
+            // is a dependency's doing, not a crate shape.
+            BuildTarget::Window => &[],
         }
     }
 
@@ -96,6 +111,9 @@ impl BuildTarget {
             // A `cdylib` has no entry point of its own, and the caller that loads it brings
             // its own `main`.
             BuildTarget::Cdylib => Script::Forbids,
+            // The frame loop is handed a game table, and that table is what `src/main.tl`
+            // returns; without the script there is nothing for the loop to drive.
+            BuildTarget::Window => Script::Requires,
         }
     }
 
@@ -105,6 +123,7 @@ impl BuildTarget {
             BuildTarget::Hb => "the htl binary",
             BuildTarget::Bin => "the OS, as a binary",
             BuildTarget::Cdylib => "a C / Python / Unity caller",
+            BuildTarget::Window => "the OS, as a window",
         }
     }
 }
@@ -145,8 +164,6 @@ impl<'de> Deserialize<'de> for BuildTarget {
 /// What a target has to say about `src/main.tl`. `--lib` is the user's side of the same
 /// question, and the two are reconciled once, where the scaffold resolves a target, before
 /// anything is written.
-// `Requires` is the half no target has yet — #104's window loop is the one that will — so
-// until then the code that reads it is exercised by this module's tests.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Script {
     /// The target runs an entry script and cannot be built without one (a window loop).
@@ -180,13 +197,13 @@ mod tests {
             assert_eq!(t.name().parse::<BuildTarget>().unwrap(), *t);
             assert_eq!(t.to_string(), t.name());
         }
-        assert_eq!(BuildTarget::names(), vec!["hb", "bin", "cdylib"]);
+        assert_eq!(BuildTarget::names(), vec!["hb", "bin", "cdylib", "window"]);
     }
 
     /// A name that is not one is answered with the ones that are — the same sentence
     /// whether it arrived on the command line or in `htl.toml`.
     #[test]
-    fn an_unknown_name_is_refused_with_all_three() {
+    fn an_unknown_name_is_refused_with_every_registered_one() {
         let e = "rust".parse::<BuildTarget>().unwrap_err();
         assert!(e.contains("unknown target `rust`"), "{e}");
         for n in BuildTarget::names() {
@@ -195,24 +212,27 @@ mod tests {
     }
 
     /// The crate shape follows from what loads the output: only the C ABI target needs a
-    /// `[lib]` section, and it needs all three of those types.
+    /// `[lib]` section, and it needs all three of those types. A window is a binary like
+    /// any other — what opens it is a dependency, not a crate type.
     #[test]
     fn crate_types_are_derived_from_the_target() {
         assert!(BuildTarget::Hb.crate_types().is_empty());
         assert!(BuildTarget::Bin.crate_types().is_empty());
+        assert!(BuildTarget::Window.crate_types().is_empty());
         assert_eq!(
             BuildTarget::Cdylib.crate_types(),
             ["rlib", "cdylib", "staticlib"]
         );
     }
 
-    /// So does the entry-script rule: a `cdylib` refuses one, and the other two leave the
-    /// question to `--lib`.
+    /// So does the entry-script rule: a `cdylib` refuses one, a `window` cannot run without
+    /// one, and the other two leave the question to `--lib`.
     #[test]
     fn the_entry_rule_is_derived_from_the_target() {
         assert_eq!(BuildTarget::Hb.entry(), Script::Either);
         assert_eq!(BuildTarget::Bin.entry(), Script::Either);
         assert_eq!(BuildTarget::Cdylib.entry(), Script::Forbids);
+        assert_eq!(BuildTarget::Window.entry(), Script::Requires);
 
         assert!(Script::Requires.accepts(false) && !Script::Requires.accepts(true));
         assert!(Script::Forbids.accepts(true) && !Script::Forbids.accepts(false));

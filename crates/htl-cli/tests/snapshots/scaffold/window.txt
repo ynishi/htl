@@ -1,0 +1,334 @@
+===== files =====
+.gitignore
+Cargo.toml
+README.md
+htl.toml
+mlua-pkg.toml
+src/lib.rs
+src/main.rs
+src/main.tl
+src/sample/init.tl
+tests/sample_test.tl
+types/README.md
+===== .gitignore =====
+.htl/
+*.hb
+/target
+===== Cargo.toml =====
+[package]
+name = "sample"
+version = "0.1.0"
+edition = "2024"
+# authors / license / repository: fill in yourself
+
+[dependencies]
+htl = "{{htl}}"
+htl-mq = "{{htl}}"
+anyhow = "1"
+
+# The Teal checker runs inside htl's proc macros; the dev profile would build it
+# unoptimised and make every `cargo build` that touches a .tl about 3x slower.
+[profile.dev.build-override]
+opt-level = 3
+===== README.md =====
+# sample
+
+Teal project managed with [htl](https://github.com/ynishi/htl).
+
+```sh
+htl pkg install        # fetch [deps] from mlua-pkg.toml — first, htlx is one of them
+htl check .            # type-check + lints
+htl test               # tests/*_test.tl via htl.test
+htl fmt .              # whitespace formatter
+cargo run              # the window; Esc quits
+HTL_MQ_FRAMES=60 HTL_MQ_SHOT=out.png cargo run   # sixty frames, then a PNG
+cargo test             # the engine's Rust test: the module loaded through preload
+```
+
+Module: `src/sample/init.tl` (`require("sample")` from `src/` and `tests/`).
+
+`htlx` ([htl-x](https://github.com/ynishi/htl-x) v0.1.0) is a dependency from the start: the collections
+Lua does not have — `htlx.list` over arrays, `htlx.tablex` over maps, `htlx.seq` over
+iterators, `htlx.ordered` for insertion-ordered maps and sets — as `require("htlx.list")`
+and the rest, once `htl pkg install` has run. Drop the line from `mlua-pkg.toml` if it
+is not wanted (`htl new --no-x` writes the project without it).
+
+`mlua-pkg.toml` `entry = "src/sample"` only matters to *consumers* that depend on this
+package through mlua-pkg: they get it as `require("sample")`. This project is a library, a binary and an engine:
+`src/lib.rs` holds `fx` — the project's own `#[host_module]`, for what wants the GPU —
+embeds the Teal engine, and registers both (plus htl-mq's `mq`) in `preload(&Htl)`.
+`src/main.rs` opens the window and hands `htl_mq::run` the game table, and `src/main.tl`
+is that table: `update(dt)` says whether to go on, `draw()` draws.
+
+`src/sample/init.tl` is the engine, and it is where the game goes. It takes its world as
+arguments and never opens anything, so `htl test` runs it with no display: `require("mq")`
+resolves to the declaration, which declares and does nothing. `render` is the one function
+that draws, and nothing in the engine calls it — the loop does.
+
+Effects go into `fx`, beside `mq` rather than inside the engine: `mq` is macroquad's
+drawing and input as htl-mq ships it, and `fx` is this project's, drawing with the same
+macroquad through `htl_mq::macroquad`. A new one is a method on `Fx` and a line in
+`render`.
+
+`src/fx.d.tl` is generated from `#[host_module]` in `src/lib.rs`: `cargo build` writes it,
+and so does `htl dts` / `htl check` without building, so the Teal side always sees the
+current Rust signatures. `types/htl-mq/mq.d.tl` is the same file for the dependency's `mq`,
+copied in from the crate by `htl check`. Commit both; the next run writes them again.
+
+`cargo build` reads `types/htl-mq/mq.d.tl` — `include_bundle!` links `mq` against it — so
+`htl check .` comes first in a fresh clone.
+===== htl.toml =====
+# htl project settings (htl check / htl test / htl fmt / include_tl! all read this).
+# Command-line flags and HTL_LINTS / HTL_LINT override it.
+
+[lint]
+# strict = true   # warnings and lints fail htl check (not htl test); lints fail
+#                   include_tl!; false makes the macro advisory
+
+# Per rule: htl check --list-lints names every rule with the level it has by
+# default, and the README's "Lints" section says how to change one.
+
+[fmt]
+indent = 3
+
+[check]
+# paths = ["mods"]   # extra dirs require() resolves from while checking
+# (src/ and types/ are always searched; hand-written .d.tl go under types/)
+
+# Where this project accepts modules written outside it:
+# [[contract]]
+# dir = "mods"             # relative to this file; "sites/*" = each subdirectory
+# module = "Site"          # optional: only this module name in each dir
+#
+# The shape those modules must have is declared on the record itself, so the two
+# cannot drift apart:
+#
+#   local record defs
+#      record Mod              ---@contract     -- inherits `dir` above;
+#         name: string         ---@required     -- ---@contract("other") overrides it
+#         monsters: {Monster}  ---@required
+#         factions: {Faction}                   -- unmarked: for the mods that want it
+#      end
+#   end
+#
+# The host must enforce it too: htl::pkg::contract_resolvers(root, &config).
+# `htl check` reports `contract-unenforced` when that call is not in the Rust sources.
+# enforced_by = "mods/_validate.lua"   # ...or name where it is enforced instead,
+#                          # for a Lua-side validator, a sibling crate, generated
+#                          # code. The file has to exist; a missing one is reported.
+
+[build]
+# What runs this project's output: hb (the htl binary, the default when absent), bin,
+# cdylib, window. Written by htl new --target; see README "Build targets".
+target = "window"
+===== mlua-pkg.toml =====
+[package]
+name = "sample"
+version = "0.1.0"
+# Consumers `require("sample")` -> this directory's init.tl
+entry = "src/sample"
+
+[deps]
+htlx = { git = "https://github.com/ynishi/htl-x", tag = "v0.1.0" }
+# lshape = { git = "https://github.com/ynishi/lshape", tag = "v0.1" }
+===== src/lib.rs =====
+//! The project as a library: the `fx` host module (what wants the GPU), the Teal engine
+//! embedded beside it, and `preload`, which hands both — and htl-mq's `mq` — to an `Htl`.
+//! The window loop is `htl_mq::run`, called from `src/main.rs`; nothing here opens one,
+//! which is what keeps the engine testable with no display.
+
+use htl::{Htl, TealRecord, host_module};
+
+/// Channels 0.0..=1.0, the way `mq` spells them. Declared here as well because a record
+/// nested in another module's declaration cannot be named from this one; both cross as a
+/// plain table, so `{ r = 1, g = 0.6, b = 0.2, a = 1 }` is either.
+#[derive(TealRecord, Clone, Copy)]
+pub struct Color {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32,
+}
+
+pub struct Fx;
+
+/// The project's own effects, exposed to Teal as `require("fx")` beside `mq`. Declared
+/// into `src/fx.d.tl` by this macro at build time (and by `htl dts` / `htl check`).
+#[host_module(name = "fx", dts = "src/fx.d.tl", records = [Color])]
+impl Fx {
+    /// A soft glow: three circles of falling alpha. The kind of thing that belongs on this
+    /// side of the boundary — per-pixel work the engine only asks for.
+    pub fn draw_glow(&self, x: f32, y: f32, r: f32, color: Color) {
+        // htl-mq's macroquad, not one this crate names: the window was opened with that
+        // one, and a second copy would be a second set of process-global state.
+        use htl_mq::macroquad::{color::Color as C, shapes::draw_circle};
+        for (k, a) in [(2.2, 0.08), (1.6, 0.18), (1.0, 1.0)] {
+            draw_circle(x, y, r * k, C::new(color.r, color.g, color.b, color.a * a));
+        }
+    }
+}
+
+const BUNDLE: &[u8] = htl::include_bundle!("src/sample/init.tl", host = ["fx", "mq"]);
+
+/// Register what this crate provides on a fresh `Htl`: `fx`, htl-mq's `mq`, `std.*`, then
+/// the engine as `require("sample")`.
+pub fn preload(h: &Htl) -> anyhow::Result<()> {
+    Fx.htl_preload(h)?;
+    htl_mq::Mq.htl_preload(h)?;
+    h.install_std()?;
+    h.install_bundle(&htl::bundle::Bundle::decode(BUNDLE)?)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preload;
+    use htl::Htl;
+
+    /// The engine, exercised the way the binary reaches it: through `preload`, with no
+    /// window — `step` moves a ball and never touches `mq`.
+    #[test]
+    fn a_ball_moves_through_preload() -> anyhow::Result<()> {
+        let h = Htl::new()?;
+        preload(&h)?;
+        let x: f64 = h
+            .lua()
+            .load("local e = require('sample'); local s = e.new_scene(1, 800, 600); e.step(s, 0.5, 800, 600); return s.balls[1].x")
+            .eval()?;
+        assert!(x != 400.0, "x = {x}");
+        Ok(())
+    }
+}
+===== src/main.rs =====
+//! The binary: the library holds `fx` and the engine, so this only opens the window and
+//! hands the entry script's game table to htl-mq's loop.
+
+use htl::bundle::Bundle;
+use htl::mlua::Table;
+use htl::{Htl, include_bundle};
+
+// `mq` is htl-mq's: its declaration is `types/htl-mq/mq.d.tl`, which `htl check` writes.
+const MAIN: &[u8] = include_bundle!("src/main.tl", host = ["fx", "mq", "sample"], debug = true);
+
+fn main() -> anyhow::Result<()> {
+    let h = Htl::new()?;
+    sample::preload(&h)?;
+    h.install_bundle(&Bundle::decode(MAIN)?)?;
+    let game: Table = h.lua().load("return require('main')").eval()?;
+    // `HTL_MQ_FRAMES=60 HTL_MQ_SHOT=out.png cargo run` stops after sixty frames and writes
+    // the last one, for a run nobody is watching.
+    htl_mq::run(h, game, htl_mq::conf("sample", 800, 600))
+}
+===== src/main.tl =====
+local mq = require("mq")
+local sample = require("sample")
+
+local scene = sample.new_scene(8, 800, 600)
+
+return {
+   update = function(dt: number): boolean
+      if mq:is_key_pressed("Space") then
+         local more = sample.new_scene(4, mq:screen_width(), mq:screen_height())
+         for _, b in ipairs(more.balls) do table.insert(scene.balls, b) end
+      end
+      sample.step(scene, dt, mq:screen_width(), mq:screen_height())
+      return not mq:is_key_pressed("Escape")
+   end,
+   draw = function()
+      sample.render(scene)
+   end,
+}
+===== src/sample/init.tl =====
+--- The engine: balls in a box. Pure data and rules, so `htl test` runs it with no window;
+--- only `render` talks to `mq` and `fx`, and nothing here calls it.
+local mq = require("mq")
+local fx = require("fx")
+
+local record sample
+   record Ball
+      x: number
+      y: number
+      vx: number
+      vy: number
+      r: number
+   end
+   record Scene
+      balls: {Ball}
+   end
+end
+
+--- `n` balls at the centre of a `w` by `h` box, fanned out.
+function sample.new_scene(n: integer, w: number, h: number): sample.Scene
+   local balls: {sample.Ball} = {}
+   for i = 1, n do
+      local a = (i / n) * 2 * math.pi
+      balls[i] = { x = w / 2, y = h / 2, vx = 160 * math.cos(a), vy = 160 * math.sin(a), r = 14 }
+   end
+   return { balls = balls }
+end
+
+--- Advance every ball by `dt` seconds, bouncing off the walls of a `w` by `h` box.
+function sample.step(s: sample.Scene, dt: number, w: number, h: number)
+   for _, b in ipairs(s.balls) do
+      b.x = b.x + b.vx * dt
+      b.y = b.y + b.vy * dt
+      if b.x < b.r then b.x = b.r; b.vx = -b.vx end
+      if b.x > w - b.r then b.x = w - b.r; b.vx = -b.vx end
+      if b.y < b.r then b.y = b.r; b.vy = -b.vy end
+      if b.y > h - b.r then b.y = h - b.r; b.vy = -b.vy end
+   end
+end
+
+--- Draw the scene: the glow is `fx`'s, the rest is `mq`'s.
+function sample.render(s: sample.Scene)
+   mq:clear_background({ r = 0.08, g = 0.08, b = 0.12, a = 1 })
+   for _, b in ipairs(s.balls) do
+      fx:draw_glow(b.x, b.y, b.r, { r = 1, g = 0.6, b = 0.2, a = 1 })
+   end
+   mq:draw_text("fps " .. mq:fps() .. "  space: spawn  esc: quit", 16, 32, 24, { r = 1, g = 1, b = 1, a = 1 })
+end
+
+return sample
+===== tests/sample_test.tl =====
+local t = require("htl.test")
+local sample = require("sample")
+
+t.describe("sample", function()
+   t.it("a ball moves and bounces", function()
+      -- One ball starts at the centre going right at 160/s, so half a second is +80.
+      local s = sample.new_scene(1, 200, 200)
+      sample.step(s, 0.5, 200, 200)
+      local b = s.balls[1]
+      t.expect(b.x):to_be_close(180)
+      -- Another +80 would be past the wall at 200 - r, so it is put on the wall instead
+      -- and turned round; the step after that carries it back into the box.
+      sample.step(s, 0.5, 200, 200)
+      t.expect(b.x):to_be_close(186)
+      t.expect(b.vx):to_be_less_than(0)
+      sample.step(s, 0.5, 200, 200)
+      t.expect(b.x):to_be_close(106)
+   end)
+
+   t.it("the scene has the balls it was asked for", function()
+      t.expect(#sample.new_scene(3, 800, 600).balls):to_equal(3)
+   end)
+end)
+===== types/README.md =====
+# types/
+
+Hand-written `.d.tl` declarations for modules the host provides at run time and
+that ship no declaration of their own (a Rust crate re-exported to Lua, a runtime
+SDK): `xlib.d.tl` here makes `require("xlib")` typed in `htl check`, `htl test` and
+`include_tl!`. Consulted after the project root and `src/`, before `[check] paths`;
+a `.tl` source anywhere on the path beats a declaration, so nothing here can shadow
+an implementation, and a second declaration of the same module is reported
+(`duplicate-declaration`) rather than silently losing to one of them.
+
+Files htl writes here are the ones the project *publishes*: the module a
+`---@contract` type is declared in, for the authors of the modules that contract
+holds. Declarations generated from this crate's own Rust (`#[host_module]`) are
+written next to the scripts, not here. Both are committed.
+
+So is `<crate>/`, when there is one: a dependency that names its declarations in
+`[package.metadata.htl] dts` has them copied there by `htl dts` (and by check / run
+/ test). Edit the crate, not the copy — the next run writes it again.
