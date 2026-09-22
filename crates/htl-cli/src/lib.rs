@@ -2581,9 +2581,20 @@ fn report_check(
 
 fn cmd_gen(file: &Path, out: Option<&Path>) -> Result<ExitCode> {
     let h = Htl::new()?;
-    h.add_layout_paths(file)?;
     auto_dts(file)?;
     apply_project(&h, file)?;
+    // The search path `htl check` gives this file, so `htl gen` resolves what `htl check`
+    // resolved: a module under a `[check] paths` directory or under `types/` is on the
+    // path here too, and a file the checker accepts is one this command can emit. Same
+    // call, same position, as `cmd_build`. Only the path gains entries — a `.tl` source
+    // anywhere on it still beats a `.d.tl`.
+    let cfg = load_config(file)?;
+    if let Some((root, _, c)) = &cfg {
+        h.apply_config(root, c)?;
+    }
+    // After the config, as `htl check` does per file: `add_path` prepends, so this leaves
+    // the file's own directory consulted first and the project's directories behind it.
+    h.add_layout_paths(file)?;
     h.install_std()?;
     let (code, c) = h.gen_lua(file)?;
     text_sink().checkinfo(&c);
@@ -2605,6 +2616,14 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
     let h = Htl::new()?;
     auto_dts(file)?;
     apply_project(&h, file)?;
+    // The search path `htl check` gives this file, so `htl run` resolves what `htl check`
+    // resolved rather than failing on a `require` the checker was happy with. Same call,
+    // same position, as `cmd_build`; it runs before the bundle branch because a bundle
+    // carries its own modules and gains nothing from it either way.
+    let cfg = load_config(file)?;
+    if let Some((root, _, c)) = &cfg {
+        h.apply_config(root, c)?;
+    }
     h.install_test_lib()?;
     h.install_std()?;
     if Bundle::is_bundle(&bytes) {
