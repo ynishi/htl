@@ -57,9 +57,16 @@ fmt:
 # clippy keeps `--workspace --all-targets`, which is what stops `e2e` rotting: it is
 # compiled and linted by this recipe and by CI, and only ever run by `e2e` below.
 # Green: the whole workspace, tests and lints. What CI runs.
+#
+# The third line is the one build nothing in this workspace asks for: `htl-core` with
+# `pkg` off. `htl` turns it on by default and the CLI names it, so an unguarded
+# `crate::pkg::` compiles here and fails in the first consumer that wants the macros
+# and not the package manager (#288). A `check`, not a test: what it guards is that the
+# feature-less crate exists, and its graph is a subset of what `cargo test` just built.
 check:
     cargo test
     cargo clippy --workspace --all-targets
+    cargo check -p htl-core --no-default-features
 
 # Compile everything, including tests and benches, without running any of it.
 build:
@@ -142,7 +149,7 @@ e2e-scaffold-packaged:
     # Cargo scopes that to the files it is about to ship, which is the right scope and
     # narrower than it sounds: an uncommitted README or justfile is not refused here,
     # because neither is in any of the four tarballs.
-    cargo package --target-dir "$target" -p htl-core -p htl-macros -p htl -p htl-cli
+    cargo package --target-dir "$target" -p htl-core -p htl-macros -p htl -p htl-cli -p htl-mq
     ver="$(cargo pkgid -p htl-core | sed 's/.*[#@]//')"
     dir="$(mktemp -d)"
     trap 'rm -rf "$dir"' EXIT
@@ -152,7 +159,7 @@ e2e-scaffold-packaged:
     # unpack sits under this workspace root with `[workspace]` stripped from its manifest,
     # which is precisely the arrangement cargo refuses to build: it walks up, finds this
     # workspace, and reports a package that believes it is not in one.
-    for crate in htl-core htl-macros htl htl-cli; do
+    for crate in htl-core htl-macros htl htl-cli htl-mq; do
       tar -xzf "$target/package/$crate-$ver.crate" -C "$dir"
     done
     # The binary that writes the scaffolds below, built from the extracted tree, so that

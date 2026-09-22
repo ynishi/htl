@@ -373,7 +373,14 @@ impl HtlConfig {
         }
         loop {
             let path = dir.join(CONFIG_NAME);
-            if path.is_file() && crate::pkg::owning_project(&dir).is_none() {
+            // Without `pkg` there is no manifest to read and no `patch_dir` to respect,
+            // so the nearest `htl.toml` is the whole answer — what this was before #275,
+            // for a build that has no projects (#288).
+            #[cfg(feature = "pkg")]
+            let owned_by_a_project = crate::pkg::owning_project(&dir).is_some();
+            #[cfg(not(feature = "pkg"))]
+            let owned_by_a_project = false;
+            if path.is_file() && !owned_by_a_project {
                 let text = std::fs::read_to_string(&path)
                     .with_context(|| format!("reading {}", path.display()))?;
                 let cfg = Self::parse(&text).with_context(|| path.display().to_string())?;
