@@ -31,6 +31,23 @@ brew install ynishi/tap/htl-cli
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/ynishi/htl/releases/latest/download/htl-cli-installer.ps1 | iex"
 ```
 
+Those put one `htl` on a machine. Two projects asking for two — which `[toolchain] htl`
+(see `htl.toml`) refuses by design, naming `cargo install htl-cli --version` as the way
+out, a swap for the second project — hand the per-directory part to a version manager.
+[mise](https://mise.jdx.dev) needs nothing from htl: its `cargo:` backend installs from
+crates.io (the prebuilt binary when `cargo-binstall` is present), `github:` takes the
+release asset, and either writes the pin into the project's `mise.toml` and switches on
+`cd`:
+
+```sh
+mise use cargo:htl-cli@0.7.0          # mise.toml: "cargo:htl-cli" = "0.7.0"
+mise use github:ynishi/htl@v0.7.0     # the prebuilt binary from the release
+```
+
+`htl new` writes that `mise.toml` (the `cargo:` form, at the version that wrote the
+project) when the CLI is a published release, so a scaffolded project carries its pin
+from the start; the file is inert without mise, delete it if that is not in use.
+
 ```toml
 [dependencies]
 htl = "0.6"                    # embedding: engine + proc macros in one import
@@ -1228,10 +1245,12 @@ three new things under the release after — on unchanged sources, and fatally i
 `--strict`. Written down, that arrives as a version the
 project moved to rather than as a difference between two machines. A command outside
 the requirement is refused before anything is read, naming both versions and this file;
-htl installs nothing, so the answer is `cargo install htl-cli`. Leave the key out and any
-command runs the project, as before — which is what `htl new` currently writes, because a
-scaffolded Rust host builds against the released `htl` crate and that crate rejects a key
-newer than itself. Add it by hand to pin a project whose htl already knows it.
+htl installs nothing, so the answer is `cargo install htl-cli` — or, when another project
+on the same machine needs another `htl`, a version manager (see Install). Leave the key
+out and any command runs the project, as before — which is what `htl new` currently
+writes, because a scaffolded Rust host builds against the released `htl` crate and that
+crate rejects a key newer than itself. Add it by hand to pin a project whose htl already
+knows it.
 
 The two halves are still released together, so `htl check` prints one line when the
 `htl = "0.6"` in the project's `Cargo.toml` does not admit the command running — `htl
@@ -1965,6 +1984,8 @@ see, and a rule that fires on them is a rule nobody can act on.
 <name>/
 ├── mlua-pkg.toml          [package] entry = "src/<mod>"  → consumers require("<name>")
 ├── htl.toml               [toolchain] / [lint] / [fmt] / [[contract]], read by CLI and macro
+├── mise.toml              "cargo:htl-cli" = "<this CLI>": the command, for mise
+│                          (written by a released CLI, not by a checkout build)
 ├── src/<mod>/init.tl      the module (require("<mod>") from src/ and tests/)
 ├── types/                 .d.tl the project consumes (hand-written, and <crate>/ copied
 │                          from a dependency) and publishes (a ---@contract type)
@@ -2038,6 +2059,10 @@ its own version there, `htl = "0.6.0"`; one built from a checkout of this reposi
 so a project written by it builds against the tree that wrote it with nothing patched
 afterwards — and is tied to that tree, as a project written by a development build should
 be. One built by `cargo install --git` pins the repository's `main` branch.
+
+The same release, as the *command*, goes into `mise.toml` — `"cargo:htl-cli" = "0.6.0"` —
+so a version manager can hold the project to the `htl` that wrote it (see Install). A
+checkout or `main` pin names a tree rather than a release, and writes no such file.
 
 `--htl main` pins `main` by hand, and `--htl path:<checkout>` another clone (the
 checkout's *root* — the dependency written is the `crates/htl` inside it); the C ABI
