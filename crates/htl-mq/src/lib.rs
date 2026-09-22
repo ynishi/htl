@@ -8,7 +8,7 @@
 //! at build time and shipped through `[package.metadata.htl] dts`.
 
 use htl::mlua::{Function, Table};
-use htl::{host_module, Htl, TealRecord};
+use htl::{Htl, TealRecord, host_module};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -269,7 +269,15 @@ impl Mq {
     }
 
     /// Draws a rectangle outline.
-    pub fn draw_rectangle_lines(&self, x: f32, y: f32, w: f32, h: f32, thickness: f32, color: Color) {
+    pub fn draw_rectangle_lines(
+        &self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        thickness: f32,
+        color: Color,
+    ) {
         macroquad::shapes::draw_rectangle_lines(x, y, w, h, thickness, color.into());
     }
 
@@ -355,9 +363,9 @@ impl Hooks {
         let frames = match frames {
             None | Some("") => None,
             Some(s) => {
-                let n: u64 = s
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("HTL_MQ_FRAMES: expected a frame count of 1 or more, got `{s}`"))?;
+                let n: u64 = s.parse().map_err(|_| {
+                    anyhow::anyhow!("HTL_MQ_FRAMES: expected a frame count of 1 or more, got `{s}`")
+                })?;
                 if n == 0 {
                     anyhow::bail!("HTL_MQ_FRAMES: expected a frame count of 1 or more, got `{s}`");
                 }
@@ -420,18 +428,15 @@ pub fn run_with(
 ) -> anyhow::Result<()> {
     let game = game_of(&game)?;
     let failed: Rc<RefCell<Option<anyhow::Error>>> = Rc::new(RefCell::new(None));
-    macroquad::Window::from_config(
-        conf,
-        {
-            let failed = Rc::clone(&failed);
-            async move {
-                let _h = h;
-                if let Err(e) = frames(game, hooks).await {
-                    *failed.borrow_mut() = Some(e);
-                }
+    macroquad::Window::from_config(conf, {
+        let failed = Rc::clone(&failed);
+        async move {
+            let _h = h;
+            if let Err(e) = frames(game, hooks).await {
+                *failed.borrow_mut() = Some(e);
             }
-        },
-    );
+        }
+    });
     match failed.borrow_mut().take() {
         Some(e) => Err(e),
         None => Ok(()),
