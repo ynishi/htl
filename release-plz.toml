@@ -39,4 +39,4 @@ name = "htl-cli"
 git_tag_enable = true
 changelog_update = true
 changelog_path = "./CHANGELOG.md"
-changelog_include = ["htl-core", "htl-macros", "htl"]
+changelog_include = ["htl-core", "htl-macros", "htl", "htl-mq"]

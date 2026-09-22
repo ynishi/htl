@@ -834,7 +834,9 @@ pub struct Htl {
 }
 
 /// Checker prelude of another state, kept in a runtime state's app data so the
-/// mlua-pkg resolvers find their checker (`Htl::with_checker`).
+/// mlua-pkg resolvers find their checker (`Htl::with_checker`). The one reader is in
+/// `pkg`; without that feature the handle is stored and never read.
+#[cfg_attr(not(feature = "pkg"), allow(dead_code))]
 pub(crate) struct CheckerHandle(pub(crate) Table);
 
 const RUNTIME_REGISTRY_KEY: &str = "htl.runtime";
@@ -2168,6 +2170,7 @@ pub fn project_skip_dirs(root: &Path) -> Vec<PathBuf> {
     }
 }
 
+/// Without `pkg` there are no projects, so there is nothing to skip.
 #[cfg(not(feature = "pkg"))]
 pub fn project_skip_dirs(_root: &Path) -> Vec<PathBuf> {
     Vec::new()
@@ -2190,6 +2193,7 @@ pub fn patched_dirs(root: &Path) -> Vec<PathBuf> {
     }
 }
 
+/// Without `pkg` there are no projects, so no `patch_dir` copies either.
 #[cfg(not(feature = "pkg"))]
 pub fn patched_dirs(_root: &Path) -> Vec<PathBuf> {
     Vec::new()
@@ -2219,6 +2223,7 @@ pub fn dependency_dirs(root: &Path) -> Vec<PathBuf> {
     }
 }
 
+/// Without `pkg` there are no projects, so a `require` has no dependency directories.
 #[cfg(not(feature = "pkg"))]
 pub fn dependency_dirs(_root: &Path) -> Vec<PathBuf> {
     Vec::new()
