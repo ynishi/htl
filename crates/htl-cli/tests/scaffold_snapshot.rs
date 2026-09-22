@@ -12,12 +12,17 @@
 //! `HTL_UPDATE_SNAPSHOTS=1 cargo test -p htl-cli --test scaffold_snapshot` rewrites them;
 //! the rewritten files are the thing under review, so read the diff before committing it.
 //!
-//! One line depends on where the binary under test was built: the `htl` dependency in
-//! `Cargo.toml`, which is what `--htl` picks and, when it is not given, the htl this CLI
-//! was built with — a version on crates.io for a published CLI, this checkout's path for
-//! the one `cargo test` builds. It is normalised to `htl = "{{htl}}"` here so the same
-//! snapshot holds for both; what the line actually says, under each pin, is
-//! `scaffold_cli.rs`'s. Every other byte of these trees is pinned exactly.
+//! One line and one file depend on where the binary under test was built. The line is the
+//! `htl` dependency in `Cargo.toml`, which is what `--htl` picks and, when it is not
+//! given, the htl this CLI was built with — a version on crates.io for a published CLI,
+//! this checkout's path for the one `cargo test` builds. It is normalised to
+//! `htl = "{{htl}}"` here so the same snapshot holds for both. The file is `mise.toml`,
+//! the same pin as the command: written by a CLI that pins a release and not by one that
+//! pins a checkout, so it is left out of the tree here rather than normalised. What the
+//! line actually says under each pin, and that the file is there exactly under a release,
+//! is `scaffold_cli.rs`'s; the packaged gate runs both suites against a tarball CLI
+//! (`HTL_TEST_BIN`), which is how the release side of each is exercised. Every other byte
+//! of these trees is pinned exactly.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -44,10 +49,12 @@ fn snapshot_path(case: &str) -> PathBuf {
 }
 
 /// Relative paths of every file under `root`, sorted, with `/` separators whatever the
-/// platform uses.
+/// platform uses — less `mise.toml`, the one file whose presence is the pin's (see the
+/// module doc).
 fn paths(root: &Path) -> Vec<String> {
     let mut out = Vec::new();
     collect(root, root, &mut out);
+    out.retain(|p| p != "mise.toml");
     out.sort();
     out
 }

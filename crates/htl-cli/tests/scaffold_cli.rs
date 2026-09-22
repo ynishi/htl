@@ -63,6 +63,42 @@ fn new_pins_the_htl_this_binary_was_built_with() {
     );
 }
 
+/// The command's pin follows the crate's. A binary that pins a release — the tarball CLI
+/// the packaged gate points `HTL_TEST_BIN` at — writes `mise.toml` naming that release;
+/// one that pins a checkout, which is what `cargo test` builds, writes no such file, since
+/// a checkout is not something mise installs. The snapshot suite leaves the file out of
+/// its trees for the same reason it normalises the `htl = ` line; this is where its
+/// presence is held to the pin, under whichever binary is running.
+#[test]
+fn new_writes_mise_toml_exactly_when_it_pins_a_release() {
+    let root = scratch("mise");
+    let (ok, _, stderr) = htl(&["new", "a", "--target", "bin"], &root);
+    assert!(ok, "{stderr}");
+    let line = htl_line(&root.join("a/Cargo.toml"));
+    let mise = root.join("a/mise.toml");
+    if line == format!("htl = \"{}\"", env!("CARGO_PKG_VERSION")) {
+        let body = std::fs::read_to_string(&mise)
+            .unwrap_or_else(|e| panic!("{line}, yet {}: {e}", mise.display()));
+        let pin = format!(
+            "[tools]\n\"cargo:htl-cli\" = \"{}\"\n",
+            env!("CARGO_PKG_VERSION")
+        );
+        assert!(body.ends_with(&pin), "{body}");
+    } else {
+        assert!(
+            !mise.exists(),
+            "{line}\n  pins no release, yet mise.toml was written"
+        );
+    }
+    // `--htl main` names a tree whatever this binary pins, so nothing is written for it.
+    let (ok, _, stderr) = htl(&["new", "b", "--htl", "main"], &root);
+    assert!(ok, "{stderr}");
+    assert!(
+        !root.join("b/mise.toml").exists(),
+        "--htl main wrote mise.toml"
+    );
+}
+
 /// `--htl main` is the dogfood pin: the project builds against the repository rather than
 /// against anything published, and there is no version key left for cargo to reconcile
 /// with the branch.

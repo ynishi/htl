@@ -11,6 +11,7 @@
 //! ├── tests/<mod>_test.tl    htl.test sample
 //! ├── .gitignore
 //! ├── README.md
+//! ├── mise.toml              the htl command that wrote it, for mise (release builds only)
 //! └── Cargo.toml + src/lib.rs    Rust host (only with a target): #[host_module] exposing
 //!     + src/main.rs               `host` to Teal (declaration -> src/host.d.tl), the
 //!                                 module and its require closure embedded with
@@ -222,8 +223,8 @@ pub struct Options {
     pub target: Option<&'static TargetProfile>,
     /// The htl the scaffolded project depends on, already read from `--htl` by
     /// [`HtlPin::parse`] — so, like the target, a refusal happens before the first file.
-    /// It decides the `htl` line of `Cargo.toml` and nothing else: every template is the
-    /// one this CLI's own htl reads.
+    /// It decides the `htl` line of `Cargo.toml` and whether `mise.toml` is written
+    /// ([`t_mise`]), and nothing else: every template is the one this CLI's own htl reads.
     pub htl: HtlPin,
     /// `--no-x`: leave the `htlx` dependency out of the manifest whatever the pin. For a
     /// project that wants no dependency at all, or one that will name its own.
@@ -716,6 +717,11 @@ fn plan(dir: &Path, name: &str, module: &str, opts: &Options) -> Vec<(PathBuf, S
         (dir.join(".gitignore"), t_gitignore(target, &ctx)),
         (dir.join("README.md"), t_readme(&ctx, target)),
     ];
+    // The command's pin beside the crate's. Under a release pin only: a tree is not
+    // something mise can install (see [`t_mise`]).
+    if let Some(m) = t_mise(&opts.htl) {
+        files.push((dir.join("mise.toml"), m));
+    }
     // `--lib` is what "no entry script" means, and a target that disagrees with it was
     // already refused, so the question is answered here for every project alike.
     if !opts.lib {
@@ -963,6 +969,35 @@ fn t_htl_toml(target: Option<BuildTarget>) -> String {
     }
     s
 }
+/// `mise.toml`: the htl *command* this project was written by, for a version manager to
+/// hold it to — the same number `Cargo.toml` pins for the crate, in the file mise
+/// (<https://mise.jdx.dev>) reads. `Some` under a release pin only. `main` and a checkout
+/// name a tree, and a tree is not something mise installs; a project written by a
+/// development build is tied to that tree anyway, and the person who built it has it.
+///
+/// Why the scaffold writes it at all: `[toolchain] htl` refuses a command outside its
+/// requirement and names `cargo install htl-cli` as the way out, which is one binary in
+/// `$CARGO_HOME/bin` — right for one project, a swap for two. A per-directory pin is what
+/// every other toolchain hands to a version manager (`.ruby-version`, `.nvmrc`,
+/// `rust-toolchain.toml`), and mise carries htl with nothing registered: its `cargo:`
+/// backend installs any crates.io crate. Written unconditionally rather than behind a
+/// flag, the way Rails writes `.ruby-version`: the reader who would pass the flag already
+/// knows to run `mise use`, and the file is four lines and inert without mise.
+///
+/// `cargo:` rather than `github:`, so the command is pinned in the same registry as the
+/// crate; mise takes the prebuilt release binary through that backend anyway when
+/// `cargo-binstall` is installed, since cargo-dist's asset names are binstall's defaults.
+fn t_mise(pin: &HtlPin) -> Option<String> {
+    let HtlPin::Release(v) = pin else {
+        return None;
+    };
+    Some(format!(
+        "# The htl this project was written by. mise (https://mise.jdx.dev) reads this file:\n\
+         # `mise install` puts that release on PATH here, whatever `htl` is elsewhere.\n\
+         [tools]\n\
+         \"cargo:htl-cli\" = \"{v}\"\n"
+    ))
+}
 
 fn t_gitignore(target: Option<&'static TargetProfile>, ctx: &Ctx<'_>) -> String {
     // `.htl/` holds the run cache and the installed deps: generated, machine-local, and
@@ -1160,9 +1195,10 @@ fn t_cargo(name: &str, target: &TargetProfile, htl: &HtlPin) -> String {
 mod tests {
     use super::{
         BuildTarget, Ctx, DEFAULT_TARGET, HTLX_REPOSITORY, HTLX_TAG, HtlPin, LUA_KEYWORDS, Options,
-        PIN_DEFAULT, PathBuf, REPOSITORY, RUST_KEYWORDS, Result, dep_value, ffi_lib_rs,
-        module_ident, profile, refuse_reserved_name, resolve_target, rust_lib_rs, rust_main_rs,
-        script_mismatch, t_cargo, t_htl_toml, t_manifest, t_readme, target_names,
+        PIN_DEFAULT, Path, PathBuf, REPOSITORY, RUST_KEYWORDS, Result, dep_value, ffi_lib_rs,
+        module_ident, plan, profile, refuse_reserved_name, resolve_target, rust_lib_rs,
+        rust_main_rs, script_mismatch, t_cargo, t_htl_toml, t_manifest, t_mise, t_readme,
+        target_names,
     };
     use htl::build_target::Script;
 
@@ -1728,5 +1764,47 @@ mod tests {
     fn the_keyword_lists_are_the_size_of_the_sets_they_copy() {
         assert_eq!(RUST_KEYWORDS.len(), 51);
         assert_eq!(LUA_KEYWORDS.len(), 22);
+    }
+
+    /// `mise.toml` is the command's pin the way `Cargo.toml`'s `htl = ` is the crate's, so
+    /// it is written under the one pin kind that names a release, byte for byte, and not
+    /// under the two that name a tree.
+    #[test]
+    fn mise_toml_pins_the_command_under_a_release_and_is_absent_otherwise() {
+        assert_eq!(
+            t_mise(&HtlPin::Release("0.7.0".into())).as_deref(),
+            Some(
+                "# The htl this project was written by. mise (https://mise.jdx.dev) reads this file:\n\
+                 # `mise install` puts that release on PATH here, whatever `htl` is elsewhere.\n\
+                 [tools]\n\
+                 \"cargo:htl-cli\" = \"0.7.0\"\n"
+            )
+        );
+        assert_eq!(t_mise(&HtlPin::Main), None);
+        assert_eq!(t_mise(&HtlPin::Path(PathBuf::from("../co"))), None);
+    }
+
+    /// The plan is where the file joins the tree, for every target alike: a plain project
+    /// under a release pin has it, the same project under this checkout's pin does not —
+    /// which is also why the scaffold snapshots, taken from a checkout build, never see it.
+    #[test]
+    fn the_plan_carries_mise_toml_exactly_when_the_pin_is_a_release() {
+        let planned = |htl: HtlPin| -> Vec<String> {
+            let opts = Options {
+                lib: false,
+                target: None,
+                htl,
+                no_x: false,
+            };
+            plan(Path::new("p"), "sample", "sample", &opts)
+                .into_iter()
+                .map(|(path, _)| path.display().to_string().replace('\\', "/"))
+                .collect()
+        };
+        assert!(planned(HtlPin::Release("0.7.0".into())).contains(&"p/mise.toml".to_string()));
+        assert!(!planned(HtlPin::Main).contains(&"p/mise.toml".to_string()));
+        assert!(
+            !planned(HtlPin::Path(PathBuf::from("../co"))).contains(&"p/mise.toml".to_string())
+        );
     }
 }
