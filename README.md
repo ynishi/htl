@@ -1282,9 +1282,10 @@ what an entry maps to is not something a fix can invent.
 
 ## Project config (`htl.toml`)
 
-`htl check` / `htl test` / `htl fmt` / `include_tl!` all read the nearest `htl.toml`
-above the file, so the CLI and the build agree. Flags and `HTL_LINTS` / `HTL_LINT`
-override it (`htl new` writes a commented one).
+`htl check` / `htl test` / `htl fmt` / `htl fix` / `htl resolve` / `htl gen` / `htl run` /
+`htl build` / `include_tl!` all read the nearest `htl.toml` above the file, so the CLI
+and the build agree. Flags and `HTL_LINTS` / `HTL_LINT` override it (`htl new` writes a
+commented one).
 
 ```toml
 [toolchain]
