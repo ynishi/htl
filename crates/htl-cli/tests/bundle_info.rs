@@ -171,3 +171,51 @@ fn not_a_bundle_is_refused() {
     assert!(!ok);
     assert!(stderr.contains("not an htl bundle"), "{stderr}");
 }
+
+/// A source bundle's payload is the generated Lua verbatim, so it is where the exact
+/// bytes of that string are observable without a `cargo build` — and the only place in
+/// the suite that pins them rather than searching them for a substring.
+///
+/// One module, counted to the byte. The generator used to hand back a string ending at
+/// `return M`, which made this bundle 71 bytes with a 24-byte payload; it terminates the
+/// string now, so the payload is 25 and the file is 72. The numbers are written out
+/// because the point of the case is the single byte between them: a `> 0` assertion, which
+/// is all this file had, holds equally either way.
+#[test]
+fn a_source_payload_is_terminated_lua_counted_to_the_byte() {
+    let root = scratch("source-bytes");
+    write(
+        &root.join("src/mod1.tl"),
+        "local record M\n   x: integer\nend\n\nreturn M\n",
+    );
+    let (ok, _, stderr) = htl(
+        &["build", "src", "--source", "-o", "b.hb", "-m", "mod1"],
+        &root,
+    );
+    assert!(ok, "{stderr}");
+    assert!(
+        stderr.contains("1 module(s) -> b.hb (72 bytes)"),
+        "one byte per module more than the 71 an unterminated payload made: {stderr}"
+    );
+
+    let bytes = std::fs::read(root.join("b.hb")).unwrap();
+    let b = htl::bundle::Bundle::decode(&bytes).unwrap();
+    let m = b.module("mod1").unwrap();
+    assert_eq!(m.kind, htl::bundle::Kind::Source);
+    assert_eq!(
+        m.payload.len(),
+        25,
+        "the length field the encoder writes: {:?}",
+        String::from_utf8_lossy(&m.payload)
+    );
+    assert!(
+        m.payload.ends_with(b"\n"),
+        "the payload is a Lua file, terminated: {:?}",
+        String::from_utf8_lossy(&m.payload)
+    );
+    assert!(
+        !m.payload.ends_with(b"\n\n"),
+        "terminated once, not twice: {:?}",
+        String::from_utf8_lossy(&m.payload)
+    );
+}

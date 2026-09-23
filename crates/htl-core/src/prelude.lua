@@ -1373,6 +1373,13 @@ function H.gen(filename, opts)
    local t0 = os.clock()
    local code, gerr = tl.generate(c.result.ast, H.GEN_TARGET)
    prof("generate", filename, t0)
+   -- Terminated here, at the producer. `tl.generate` joins one output line per input line
+   -- and writes nothing after the last, and five consumers read what it returns (`htl gen`,
+   -- `include_tl!`, `--source` bundles, the run cache, the mlua-pkg resolver) of which only
+   -- the CLI used to append the byte, so one generator emitted two shapes. A file ends with
+   -- exactly one newline: that is what POSIX means by a line, and every one of the five
+   -- hands the string on as a file. Before the caching below, so a replay carries it too.
+   if code and code:sub(-1) ~= "\n" then code = code .. "\n" end
    if code then c.result.htl_code = code end
    if not code then
       c.ok = false
@@ -1398,6 +1405,9 @@ function H.gen_string(src, filename)
       c.errors = { filename .. ": generate failed: " .. tostring(gerr) }
       return nil, c
    end
+   -- Terminated as `H.gen` terminates it, for the reason given there: the resolver's
+   -- caller is one of the five, and a second shape would be a second answer.
+   if code:sub(-1) ~= "\n" then code = code .. "\n" end
    return code, c
 end
 

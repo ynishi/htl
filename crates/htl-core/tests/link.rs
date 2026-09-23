@@ -387,6 +387,18 @@ fn source_bundles_carry_no_fingerprint_and_run() {
         src.contains("mathx.double"),
         "generated Lua, readable: {src}"
     );
+    // The shape of the string every embedder gets, not only the one `htl gen` writes: a
+    // source payload is an ordinary Lua file, and a file ends with exactly one newline.
+    // `tl.generate` writes none, so this fails on anything that normalizes in the CLI
+    // instead of at the producer; the second half fails if both do it.
+    assert!(
+        src.ends_with('\n'),
+        "a source payload is terminated: {src:?}"
+    );
+    assert!(
+        !src.ends_with("\n\n"),
+        "terminated once, not twice: {src:?}"
+    );
     let r = Htl::new().unwrap();
     let t = r.lua().create_table().unwrap();
     t.set("base", r.lua().create_function(|_, ()| Ok(1)).unwrap())

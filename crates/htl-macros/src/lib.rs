@@ -1369,7 +1369,20 @@ mod tests {
             inc.deps
         );
         match inc.payload {
-            Payload::Source(code) => assert!(code.contains("require(\"mathx\")")),
+            Payload::Source(code) => {
+                assert!(code.contains("require(\"mathx\")"));
+                // What `include_tl!` embeds is Lua source, and a host that writes it back
+                // out as a file wants the terminator a file has. The producer appends it,
+                // so exactly one is here however the code got generated.
+                assert!(
+                    code.ends_with('\n'),
+                    "source payload is terminated: {code:?}"
+                );
+                assert!(
+                    !code.ends_with("\n\n"),
+                    "terminated once, not twice: {code:?}"
+                );
+            }
             Payload::Bytes(_) => panic!("expected source"),
         }
     }

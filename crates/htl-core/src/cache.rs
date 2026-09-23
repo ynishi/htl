@@ -75,6 +75,12 @@ use crate::{CheckInfo, DependencyError, Fix, RequireSite};
 /// else about the binary (#100), so the proc macros — whose `current_exe` is rustc, which
 /// does not change when htl does — still miss on a checker that no longer exists, and
 /// the CLI and the macros read each other's module entries.
+///
+/// A change to the Lua a `module` entry carries needs no bump: the stamp's `checker` is a
+/// hash of `prelude.lua` among the rest ([`crate::checker_identity`]), so a generator that
+/// emits different text is a different checker and every warm entry misses on its own.
+/// What this number is for is a change to the shape of what is stored — a field, a key, a
+/// meaning — which the hash cannot see.
 const FORMAT: u32 = 6;
 
 /// Where the store lives under the project root. Generated, and `htl init` puts it in
