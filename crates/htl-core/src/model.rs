@@ -596,11 +596,15 @@ impl Project {
 }
 
 impl crate::Htl {
-    /// Set this checker up for `project`, as `view` sees it: its installed dependencies
+    /// Set this checker up for `project`, as `view` sees it: the working directory off the
+    /// path ([`drop_cwd_search_path`](crate::Htl::drop_cwd_search_path)), its installed dependencies
     /// made reachable ([`prepare_deps`](crate::Htl::prepare_deps), when the project has an
     /// `mlua-pkg.toml`), then the model's directories on the search path in the order they
     /// are consulted ([`Project::search_dirs`]).
     pub fn apply_model(&self, project: &Project, view: View) -> Result<()> {
+        // The names come from the project's roots, so the working directory is not one of
+        // the places they are looked for.
+        self.drop_cwd_search_path()?;
         if project.root.join(pkg::MANIFEST_NAME).is_file() {
             self.prepare_deps(&pkg::MluaProject::at(&project.root))?;
         }

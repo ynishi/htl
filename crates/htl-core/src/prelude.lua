@@ -1886,6 +1886,18 @@ end
 -- Drop Lua's default search path (`./?.lua` etc., i.e. cwd-relative resolution) so only
 -- directories given to add_path are consulted. Used by the proc macros, where the cwd
 -- is cargo's and has nothing to do with the script being embedded.
+-- Drop the entries of package.path that are relative to the working directory (Lua's own
+-- `./?.lua;./?/init.lua`), keeping the rest in order.
+function H.drop_cwd_path()
+   local kept = {}
+   for entry in (package.path or ""):gmatch("[^;]+") do
+      if entry:sub(1, 2) ~= "./" and entry:sub(1, 1) ~= "?" then
+         kept[#kept + 1] = entry
+      end
+   end
+   package.path = table.concat(kept, ";")
+end
+
 function H.reset_path()
    package.path = ""
 end

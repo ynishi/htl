@@ -721,7 +721,7 @@ pub fn check_one<O: Output>(
 /// In a project that is the test root, for a file the model places under it: a test may
 /// `require` a helper beside it, the sources may not. Outside a project there is no model
 /// to ask, and a file given on its own resolves its `require`s in its own directory — the
-/// one place a single file names by itself.
+/// one place a single file names by itself — and not in the working directory.
 pub fn file_view(h: &Htl, model: Option<&crate::model::Project>, f: &Path) -> Result<()> {
     match model {
         Some(m) => {
@@ -733,7 +733,11 @@ pub fn file_view(h: &Htl, model: Option<&crate::model::Project>, f: &Path) -> Re
             }
             Ok(())
         }
-        None => h.add_path(&crate::parent_dir(f)),
+        None => {
+            // Beside the file, not beside wherever the command ran.
+            h.drop_cwd_search_path()?;
+            h.add_path(&crate::parent_dir(f))
+        }
     }
 }
 

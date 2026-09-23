@@ -958,6 +958,18 @@ function R.add_path(dir)
    package.path = templates .. ";" .. package.path
 end
 
+-- Drop the entries of package.path that are relative to the working directory (Lua's own
+-- `./?.lua;./?/init.lua`), keeping the rest in order.
+function R.drop_cwd_path()
+   local kept = {}
+   for entry in (package.path or ""):gmatch("[^;]+") do
+      if entry:sub(1, 2) ~= "./" and entry:sub(1, 1) ~= "?" then
+         kept[#kept + 1] = entry
+      end
+   end
+   package.path = table.concat(kept, ";")
+end
+
 function R.reset_path()
    package.path = ""
 end
@@ -1339,6 +1351,25 @@ impl Htl {
         f.call::<()>(())?;
         if self.split {
             let f: Function = self.runtime()?.get("reset_path")?;
+            f.call::<()>(())?;
+        }
+        Ok(())
+    }
+
+    /// Drop the entries of Lua's default search path that are relative to the working
+    /// directory (`./?.lua`, `./?/init.lua`), keeping the rest.
+    ///
+    /// What a name means must not depend on where the command was run. A checker set up
+    /// from a project's model (`model::Project`, with the `pkg` and `dts` features) calls this: the names come from the
+    /// project's roots, and the working directory is none of them. What stays are the
+    /// directories Lua itself was built to search (`/usr/local/share/lua/5.4/…`), where a
+    /// library installed for the machine is found at run time. A host that builds its own
+    /// path from nothing calls [`reset_search_path`](Self::reset_search_path) instead.
+    pub fn drop_cwd_search_path(&self) -> Result<()> {
+        let f: Function = self.h.get("drop_cwd_path")?;
+        f.call::<()>(())?;
+        if self.split {
+            let f: Function = self.runtime()?.get("drop_cwd_path")?;
             f.call::<()>(())?;
         }
         Ok(())

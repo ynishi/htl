@@ -553,7 +553,10 @@ fn run_in(h: &Htl, path: &Path, r: RunIn<'_>, out_code: &mut Option<String>) -> 
     #[cfg(all(feature = "pkg", feature = "dts"))]
     match project {
         Some(m) => h.apply_model(m, crate::model::View::Test)?,
-        None => h.add_path(&parent_dir(path))?,
+        None => {
+            h.drop_cwd_search_path()?;
+            h.add_path(&parent_dir(path))?
+        }
     }
     #[cfg(not(all(feature = "pkg", feature = "dts")))]
     {

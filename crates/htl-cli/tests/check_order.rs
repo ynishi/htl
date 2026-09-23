@@ -162,3 +162,24 @@ fn a_global_from_a_required_module_reaches_every_file_whatever_the_order() {
     );
     assert_eq!(forward, whole, "a walk is the files it visits");
 }
+
+/// What a name means does not depend on where the command ran. A module that happens to
+/// sit in the working directory is not one of the project's, and a project that requires
+/// it without having it is told so from anywhere.
+#[test]
+fn the_working_directory_is_not_searched() {
+    let root = scratch("cwd-not-searched");
+    let project = root.join("project");
+    write(&project.join("htl.toml"), "");
+    write(
+        &project.join("src/main.tl"),
+        "local util = require(\"util\")\nprint(util)\n",
+    );
+    // Beside the command, not in the project.
+    write(&root.join("util.tl"), "return {}\n");
+    let d = diagnostics(&["project"], &root);
+    assert!(
+        d.iter().any(|l| l.contains("module not found: 'util'")),
+        "the util.tl in the working directory is not the project's: {d:?}"
+    );
+}
