@@ -1375,7 +1375,8 @@ does not search the `htl.toml` directory itself: a `.tl` there is the project's 
 declarations the module's author did not ship), searched without any configuration;
 `htl new` creates it.
 
-Four kinds arrive there. The ones written by hand; the ones a Rust dependency ships; the
+Four kinds arrive there, and `types/` below means the declaration root wherever
+`[layout] types` puts it: every one of them is written there. The ones written by hand; the ones a Rust dependency ships; the
 ones a Lua dependency published; and the ones for a library that published none of its
 own. Only the first are anyone's to edit — the rest are copies, and a change to one
 belongs in the crate or package it came from.

@@ -84,7 +84,7 @@ fn teal_types_checkout(name: &str) -> PathBuf {
 #[test]
 fn a_deps_published_declarations_land_in_types() {
     let root = project_with_dep("published", "src", &[("mathx.d.tl", DECL)]);
-    let sync = Project::at(&root).sync_types().unwrap();
+    let sync = Project::at(&root).sync_types(&root.join("types")).unwrap();
     assert_eq!(sync.written.len(), 1, "{sync:?}");
     assert!(sync.taken.is_empty(), "{sync:?}");
     assert!(root.join("types/mathx.d.tl").is_file());
@@ -104,7 +104,7 @@ fn a_nested_module_a_dep_publishes_keeps_its_path() {
         "src",
         &[("mathx.d.tl", DECL), ("mathx/vec.d.tl", DECL)],
     );
-    let sync = Project::at(&root).sync_types().unwrap();
+    let sync = Project::at(&root).sync_types(&root.join("types")).unwrap();
     assert_eq!(sync.written.len(), 2, "{sync:?}");
     assert!(root.join("types/mathx/vec.d.tl").is_file());
 }
@@ -115,7 +115,7 @@ fn a_nested_module_a_dep_publishes_keeps_its_path() {
 #[test]
 fn a_flat_package_root_is_found_through_its_entry() {
     let root = project_with_dep("flat", ".", &[("mathx.d.tl", DECL)]);
-    let sync = Project::at(&root).sync_types().unwrap();
+    let sync = Project::at(&root).sync_types(&root.join("types")).unwrap();
     assert_eq!(sync.written.len(), 1, "{sync:?}");
     assert!(root.join("types/mathx.d.tl").is_file());
 }
@@ -124,7 +124,7 @@ fn a_flat_package_root_is_found_through_its_entry() {
 fn a_name_the_project_already_has_is_kept_and_reported() {
     let root = project_with_dep("taken", "src", &[("mathx.d.tl", DECL)]);
     write(&root.join("types/mathx.d.tl"), "-- by hand\n");
-    let sync = Project::at(&root).sync_types().unwrap();
+    let sync = Project::at(&root).sync_types(&root.join("types")).unwrap();
     assert!(sync.written.is_empty(), "{sync:?}");
     assert_eq!(sync.taken.len(), 1, "{sync:?}");
     assert_eq!(
@@ -151,7 +151,7 @@ fn only_declarations_are_taken() {
             ("helper.tl", "return {}\n"),
         ],
     );
-    let sync = Project::at(&root).sync_types().unwrap();
+    let sync = Project::at(&root).sync_types(&root.join("types")).unwrap();
     assert_eq!(sync.written.len(), 1, "{sync:?}");
     assert!(!root.join("types/README.md").exists());
     assert!(!root.join("types/helper.tl").exists());
@@ -164,7 +164,7 @@ fn nothing_happens_before_an_install() {
         &root.join("mlua-pkg.toml"),
         "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[deps]\n",
     );
-    let sync = Project::at(&root).sync_types().unwrap();
+    let sync = Project::at(&root).sync_types(&root.join("types")).unwrap();
     assert!(sync.written.is_empty() && sync.taken.is_empty(), "{sync:?}");
     assert!(
         !root.join("types").exists(),
@@ -179,7 +179,7 @@ fn add_drops_the_library_dir_and_keeps_what_is_below_it() {
     let root = bare_project("add");
     let checkout = teal_types_checkout("collection");
     let sync = Project::at(&root)
-        .add_types_from(&checkout, "luasocket", "beef", false)
+        .add_types_from(&checkout, "luasocket", "beef", false, &root.join("types"))
         .unwrap();
     assert_eq!(sync.written.len(), 3, "{sync:?}");
     assert!(root.join("types/socket.d.tl").is_file());
@@ -205,7 +205,7 @@ fn a_library_the_collection_does_not_have_names_the_near_ones() {
     let root = bare_project("missing");
     let checkout = teal_types_checkout("collection-near");
     let err = Project::at(&root)
-        .add_types_from(&checkout, "socket", "beef", false)
+        .add_types_from(&checkout, "socket", "beef", false, &root.join("types"))
         .unwrap_err()
         .to_string();
     assert!(err.contains("luasocket"), "{err}");
@@ -219,7 +219,7 @@ fn add_keeps_what_is_there_until_it_is_forced() {
     let p = Project::at(&root);
 
     let kept = p
-        .add_types_from(&checkout, "luasocket", "beef", false)
+        .add_types_from(&checkout, "luasocket", "beef", false, &root.join("types"))
         .unwrap();
     assert_eq!(kept.taken.len(), 1, "{kept:?}");
     assert_eq!(
@@ -228,7 +228,7 @@ fn add_keeps_what_is_there_until_it_is_forced() {
     );
 
     let forced = p
-        .add_types_from(&checkout, "luasocket", "beef", true)
+        .add_types_from(&checkout, "luasocket", "beef", true, &root.join("types"))
         .unwrap();
     assert_eq!(forced.written.len(), 3, "{forced:?}");
     assert_ne!(

@@ -872,7 +872,8 @@ struct DepReport {
 }
 
 /// Materialise the declarations this project's dependencies ship, under
-/// `<types_root>/types/<crate>/`, and report on what happened to each.
+/// `<declaration root>/<crate>/` — the declaration root of the project at `types_root`,
+/// `types/` unless its `htl.toml` says otherwise — and report on what happened to each.
 ///
 /// The graph comes from `cargo metadata`, so this costs a subprocess on every command that
 /// generates. Nothing is built, and nothing is downloaded for dependencies already fetched.
@@ -888,8 +889,17 @@ fn dep_dts(cargo_root: &Path, types_root: &Path) -> DepReport {
     };
     // Orphans before materialising: the note beside a crate's declarations is what says
     // which crate they came from, and the write below rewrites it.
-    let left_in_place = htl::dep_dts::orphans(types_root, &decls);
-    let (written, not_written) = htl::dep_dts::materialise(types_root, &decls);
+    let types = match decl_root(types_root) {
+        Ok(t) => t,
+        Err(e) => {
+            return DepReport {
+                unresolved: Some(format!("{e:#}")),
+                ..DepReport::default()
+            };
+        }
+    };
+    let left_in_place = htl::dep_dts::orphans(&types, &decls);
+    let (written, not_written) = htl::dep_dts::materialise(&types, &decls);
     DepReport {
         written,
         not_written,
@@ -1138,6 +1148,16 @@ fn pkg_project() -> Result<htl::pkg::Project> {
     })
 }
 
+/// The declaration root of the project at `root`, from its model: `[layout] types`, which
+/// is `types/` unless `htl.toml` says otherwise — where the declarations htl brings into a
+/// project are written.
+fn decl_root(root: &Path) -> Result<PathBuf> {
+    let cfg = load_config(root)?;
+    Ok(project::model_of(&cfg, root)?
+        .and_then(|m| m.own().roots.decl.clone())
+        .unwrap_or_else(|| root.join("types")))
+}
+
 /// `htl pkg install`: fetch what the manifest declares, then bring in what the deps publish.
 fn cmd_pkg_install() -> Result<ExitCode> {
     let project = pkg_project()?;
@@ -1147,7 +1167,10 @@ fn cmd_pkg_install() -> Result<ExitCode> {
     // A dep publishes its declarations at `types/` in its package root, which is not where
     // `require` looks, so they are copied in for the checker to see.
     let project = htl::pkg::Project::at(&project.root);
-    report_types_sync(&project.sync_types()?, &project.root);
+    report_types_sync(
+        &project.sync_types(&decl_root(&project.root)?)?,
+        &project.root,
+    );
     report_patch_drift(&project);
     Ok(ExitCode::SUCCESS)
 }
@@ -1255,7 +1278,10 @@ fn cmd_pkg_update(opts: htl::pkg::mlua_pkg::ops::UpdateOpts) -> Result<ExitCode>
     if let Some(install) = &report.install {
         report_install(install, &project);
         let project = htl::pkg::Project::at(&project.root);
-        report_types_sync(&project.sync_types()?, &project.root);
+        report_types_sync(
+            &project.sync_types(&decl_root(&project.root)?)?,
+            &project.root,
+        );
         report_patch_drift(&project);
     }
     Ok(ExitCode::SUCCESS)
@@ -1367,9 +1393,10 @@ fn cmd_types_add(library: &str, from: Option<&Path>, force: bool) -> Result<Exit
     let project = htl::pkg::Project::find(&cwd).context(
         "no mlua-pkg.toml above the current directory: `types/` is a project's, so this runs in one",
     )?;
+    let types = decl_root(&project.root)?;
     let sync = match from {
-        Some(dir) => project.add_types_from(dir, library, "local", force)?,
-        None => project.add_types(library, force)?,
+        Some(dir) => project.add_types_from(dir, library, "local", force, &types)?,
+        None => project.add_types(library, force, &types)?,
     };
     report_types_sync(&sync, &project.root);
     if sync.written.is_empty() && !sync.taken.is_empty() {

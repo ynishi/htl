@@ -924,7 +924,8 @@ impl Project {
         Ok(reg)
     }
 
-    /// Bring the declarations a dep publishes into the project's own `types/`.
+    /// Bring the declarations a dep publishes into the project's own declaration root,
+    /// `types` — `[layout] types`, which the caller reads from the project's config.
     ///
     /// A dep that follows htl's own convention keeps its `.d.tl` under `types/` at its
     /// package root, and that is outside the entry directory `require` looks in
@@ -936,20 +937,19 @@ impl Project {
     /// A name `types/` already has is left alone and reported. Two libraries publishing a
     /// module of the same name is a real situation, and there is no registry to arbitrate
     /// it with, so the project decides rather than the last install winning.
-    pub fn sync_types(&self) -> anyhow::Result<TypesSync> {
+    pub fn sync_types(&self, types: &Path) -> anyhow::Result<TypesSync> {
         let mut out = TypesSync::default();
         if !self.installed() {
             return Ok(out);
         }
         let lock = mlua_pkg::lockfile::Lockfile::read(&self.lockfile)?;
-        let dest = self.root.join("types");
         for p in &lock.pkg {
             let Some(root) = self.package_root(p) else {
                 continue;
             };
             copy_declarations(
                 &root.join("types"),
-                &dest,
+                types,
                 &Origin {
                     name: p.name.clone(),
                     sha: p.sha.clone(),
@@ -962,7 +962,8 @@ impl Project {
         Ok(out)
     }
 
-    /// Copy one library's declarations out of teal-types into `types/`.
+    /// Copy one library's declarations out of teal-types into the project's declaration
+    /// root `types` (`[layout] types`).
     ///
     /// teal-types is where the Teal ecosystem collects declarations for libraries that
     /// ship none of their own, laid out as `types/<library>/<module>.d.tl`. Nothing there
@@ -970,7 +971,7 @@ impl Project {
     /// versioned on their own count, declare no dependency on the library, and name no
     /// revision of it. So the `.src` note beside each file is the whole of the record —
     /// what was taken, and from which commit of the collection.
-    pub fn add_types(&self, library: &str, force: bool) -> anyhow::Result<TypesSync> {
+    pub fn add_types(&self, library: &str, force: bool, types: &Path) -> anyhow::Result<TypesSync> {
         let cache = pkgs_dir(&self.root).cache();
         std::fs::create_dir_all(&cache)?;
         let fetcher = mlua_pkg::fetcher::GitFetcher::new(cache);
@@ -987,7 +988,7 @@ impl Project {
                 patch_drift: None,
             },
         )?;
-        self.add_types_from(&got.cache_path, library, &got.sha, force)
+        self.add_types_from(&got.cache_path, library, &got.sha, force, types)
     }
 
     /// The same from a checkout already on disk, recording `sha` as the revision it is at.
@@ -997,6 +998,7 @@ impl Project {
         library: &str,
         sha: &str,
         force: bool,
+        types: &Path,
     ) -> anyhow::Result<TypesSync> {
         let under = Path::new("types").join(library);
         let published = checkout.join(&under);
@@ -1006,7 +1008,7 @@ impl Project {
         let mut out = TypesSync::default();
         copy_declarations(
             &published,
-            &self.root.join("types"),
+            types,
             &Origin {
                 name: TEAL_TYPES_NAME.to_string(),
                 sha: sha.to_string(),
