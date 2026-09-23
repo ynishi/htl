@@ -843,7 +843,9 @@ local function explain_forward_ref(ast, src, e, msg)
    return msg
 end
 
-local function require_sites(ast)
+-- Every literal `require("<name>")` in `ast`, with where it resolves on the current path
+-- unless `names_only` says the names are all that is wanted.
+local function require_sites(ast, names_only)
    local out, seen = {}, {}
    local function go(n)
       if type(n) ~= "table" or seen[n] then return end
@@ -853,8 +855,12 @@ local function require_sites(ast)
          and type(n.e2) == "table" and type(n.e2[1]) == "table" and n.e2[1].kind == "string" then
          local tk = n.e2[1].tk or ""
          local name = tk:sub(2, -2)
-         local found, fd = tl.search_module(name, true)
-         if fd then fd:close() end
+         local found
+         if not names_only then
+            local fd
+            found, fd = tl.search_module(name, true)
+            if fd then fd:close() end
+         end
          out[#out + 1] = { name = name, y = n.y, x = n.x, path = found }
       end
       for k, v in pairs(n) do
@@ -1469,6 +1475,20 @@ function H.lua_requires(src, filename)
    local ast, errs = tl.parse(src, filename, "lua")
    if not ast or (errs and #errs > 0) then return {} end
    return require_sites(ast)
+end
+
+-- The module names a Teal source `require`s by literal, read from its syntax alone: no
+-- type check and no resolution, so it is cheap enough to ask of every file in a tree.
+-- nil when the source does not parse, which is not the same answer as "requires
+-- nothing".
+function H.tl_require_names(src, filename)
+   local ast, errs = tl.parse(src, filename)
+   if not ast or (errs and #errs > 0) then return nil end
+   local names = {}
+   for _, site in ipairs(require_sites(ast, true)) do
+      names[#names + 1] = site.name
+   end
+   return names
 end
 
 -- Where `require(name)` would resolve for the checker (`.tl` / `.d.tl` / `.lua`), and

@@ -38,7 +38,10 @@ fn project() -> PathBuf {
     );
     write(&root.join("src/main.tl"), "print(1)\n");
     write(&root.join("src/util.tl"), "return {}\n");
-    write(&root.join("tests/util_test.tl"), "print(2)\n");
+    write(
+        &root.join("tests/util_test.tl"),
+        "require(\"htl.test\")\nprint(2)\n",
+    );
     // dependency material that `htl pkg install` produces under the project
     write(
         &root.join(".htl/modules/cache/git/x/vec2/abc/src/vec2.tl"),
@@ -46,7 +49,7 @@ fn project() -> PathBuf {
     );
     write(
         &root.join(".htl/modules/cache/git/x/vec2/abc/tests/vec2_test.tl"),
-        "print(3)\n",
+        "require(\"htl.test\")\nprint(3)\n",
     );
     write(
         &root.join(".htl/modules/vendored/vec2/vec2.tl"),
@@ -59,7 +62,10 @@ fn project() -> PathBuf {
     );
     // build output and other tool state
     write(&root.join("target/debug/gen.tl"), "print(4)\n");
-    write(&root.join(".hidden/x_test.tl"), "print(5)\n");
+    write(
+        &root.join(".hidden/x_test.tl"),
+        "require(\"htl.test\")\nprint(5)\n",
+    );
     write(&root.join("node_modules/m/m.tl"), "return {}\n");
     root
 }
@@ -107,7 +113,7 @@ fn patched_project() -> PathBuf {
     write(&root.join("patches/mathx/src/mathx.tl"), "return {}\n");
     write(
         &root.join("patches/mathx/tests/mathx_test.tl"),
-        "print(2)\n",
+        "require(\"htl.test\")\nprint(2)\n",
     );
     root
 }
@@ -181,10 +187,16 @@ fn target_dir_project() -> PathBuf {
          git = \"https://example.invalid/mathx\"\ntag = \"v1\"\ntarget_dir = \"lua/mathx\"\n",
     );
     write(&root.join("src/main.tl"), "print(1)\n");
-    write(&root.join("tests/main_test.tl"), "print(2)\n");
+    write(
+        &root.join("tests/main_test.tl"),
+        "require(\"htl.test\")\nprint(2)\n",
+    );
     // the dependency's own source and tests, put there by `mlua-pkg install`
     write(&root.join("lua/mathx/init.tl"), "return {}\n");
-    write(&root.join("lua/mathx/mathx_test.tl"), "print(3)\n");
+    write(
+        &root.join("lua/mathx/mathx_test.tl"),
+        "require(\"htl.test\")\nprint(3)\n",
+    );
     // and the project's own module, under the same parent
     write(&root.join("lua/mine.tl"), "return {}\n");
     root
@@ -219,4 +231,34 @@ fn a_project_with_no_target_dir_copies_skips_nothing_extra() {
     let skip = htl_core::project_skip_dirs(&root);
     assert_eq!(skip.len(), 1, "just the pkgs dir: {skip:?}");
     assert!(skip[0].ends_with(".htl/modules"), "{skip:?}");
+}
+
+/// A test is a file that loads the test library: wherever it sits, whatever it is called.
+/// A file beside the tests that does not load it is a helper, and a file that does not
+/// parse but names the library is a test — the failure it will report is the point.
+#[test]
+fn a_test_is_a_file_that_loads_the_test_library() {
+    let root = std::env::temp_dir().join(format!("htl-discover-lib-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let t = "local t = require(\"htl.test\")\nt.it(\"x\", function() end)\n";
+    write(&root.join("tests/combat.tl"), t);
+    write(&root.join("tests/combat/hit.tl"), t);
+    write(&root.join("tests/helper.tl"), "return {}\n");
+    write(&root.join("tests/common/fx.tl"), "return { v = 1 }\n");
+    write(&root.join("src/util.tl"), "return {}\n");
+    write(&root.join("src/util_test.tl"), t);
+    write(
+        &root.join("tests/broken.tl"),
+        "local t = require(\"htl.test\")\nlocal x: = \n",
+    );
+    let files = discover_tests(std::slice::from_ref(&root)).unwrap();
+    assert_eq!(
+        rel(&root, &files),
+        vec![
+            "src/util_test.tl",
+            "tests/broken.tl",
+            "tests/combat.tl",
+            "tests/combat/hit.tl",
+        ]
+    );
 }

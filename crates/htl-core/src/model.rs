@@ -74,13 +74,6 @@ use crate::pkg;
 use anyhow::{Result, bail};
 use std::path::{Component, Path, PathBuf};
 
-/// Where a project keeps its tests when nothing says otherwise, relative to its root.
-///
-/// `htl new` writes `tests/<mod>_test.tl`, and a test file under this directory can
-/// `require` the project's sources by their own names. It is the test root of the
-/// project's own module ([`Roots::test`]).
-pub const TESTS_DIR: &str = "tests";
-
 /// A project: its root, its configuration, and the modules it is made of.
 ///
 /// Built by [`Project::load`] from a root that has already been found, or by
@@ -545,7 +538,7 @@ impl crate::Htl {
 
 /// The project's own module: named by `mlua-pkg.toml`'s `[package] name` when it has one
 /// that parses, by the root directory otherwise; mounted at the top; its roots from
-/// `[layout]` and [`TESTS_DIR`].
+/// `[layout]`.
 fn own_module(root: &Path, config: &HtlConfig, manifest: Option<&pkg::Project>) -> Module {
     let name = manifest
         .and_then(|m| mlua_pkg::manifest::Manifest::from_path(&m.manifest).ok())
@@ -562,7 +555,7 @@ fn own_module(root: &Path, config: &HtlConfig, manifest: Option<&pkg::Project>) 
         mount: String::new(),
         roots: Roots {
             source: Some(resolve_path(root, &config.layout.source)),
-            test: Some(root.join(TESTS_DIR)),
+            test: Some(resolve_path(root, &config.layout.tests)),
             decl: Some(resolve_path(root, &config.layout.types)),
         },
     }

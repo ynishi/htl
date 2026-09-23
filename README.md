@@ -67,7 +67,7 @@ htl = "0.6"                    # embedding: engine + proc macros in one import
 | `htl new <name>` / `htl init [dir]` | scaffold: `mlua-pkg.toml`, `src/<mod>/init.tl`, `src/main.tl`, `tests/`, README (`--lib` for no entry script; `--target <name>` for what will run the output, `--embed` being the shorthand for `--target bin`; `--htl <req>` for which htl the project depends on; `--no-x` for no `htlx` dependency) |
 | `htl check [paths] [--strict] [--lint rule=level] [--no-cache] [--cache-mode per-module\|whole-run] [--explain-cache]` | type-check; htl lints as `lint:`, advisory at their default level and fatal at `deny` (`--strict` promotes every `warn` to `deny`); a module reached through `require` (an installed dep, a `[check] paths` dir) is checked with the file and its type errors are errors too, once per run, with the file that required it; what has not changed is replayed from `.htl/` (see Caching) |
 | `htl run <file.tl \| app.hb> [args]` | check then execute; `require` of a `.tl` with type errors fails |
-| `htl test [paths] [--filter s] [--lib mod] [--coverage] [--lcov file] [--junit file] [--no-cache]` | `*_test.tl` and `tests/**/*.tl`, one isolated state per file; checking is replayed from `.htl/`, the run never is (see Caching) |
+| `htl test [paths] [--filter s] [--lib mod] [--coverage] [--lcov file] [--junit file] [--no-cache]` | every `.tl` that loads the test library (`htl.test`, or `--lib`), one isolated state per file; checking is replayed from `.htl/`, the run never is (see Caching) |
 | `htl fix [paths] [--rule a,b] [--unsafe] [--dry-run] [--diff] [--exit-non-zero-on-fix]` | apply the fixes diagnostics carry: the safe ones by default, `--unsafe` for the ones that may change what the program does (see Fixing) |
 | `htl fmt [paths] [--check] [--indent N]` | whitespace formatter (indentation from the syntax tree, blank lines, trailing space) |
 | `htl gen <file.tl> [-o out.lua]` | readable Lua, the escape hatch out of htl |
@@ -1315,6 +1315,7 @@ indent = 3
 [layout]                  # where this project's own files live
 source = "src"            # its .tl; "." for a flat project
 types = "types"           # hand-written .d.tl for modules something else provides
+tests = "tests"           # tests, and the helpers only tests may require
 
 [check]
 paths = ["mods", "~/.cache/tsk/sdk"]   # extra dirs require() resolves from while checking
@@ -1351,8 +1352,9 @@ more: the check that printed it worked, and which half is the stale one is the p
 to say. A `path` or `git` dependency states no version here and is passed over.
 
 `[layout]` is where this project's own files live: `source` holds its `.tl`, `types`
-holds the hand-written `.d.tl` for modules something else provides. Both default to the
-directory they name (`src` and `types`), which is what `htl new` writes and what every
+holds the hand-written `.d.tl` for modules something else provides, and `tests` holds its
+tests and the helpers only tests may `require` (see Tests). Each defaults to the
+directory it names (`src`, `types`, `tests`), which is what `htl new` writes and what every
 command searched before the section existed — a project that keeps its code somewhere
 else now says so instead of being told. Each is **one directory, not a list**: a module
 name resolves to exactly one file, so a directory that answers a name has to be the only
@@ -1730,6 +1732,23 @@ the assertion surface small enough to read in one screen. Matchers: `to_equal`,
 `t.expect_all(f()):to_equal(false, "no door")` (`t.expect(f())` is a 2-argument call and
 a type error; the message says so).
 
+**A test file is a `.tl` that loads the test library** — `require("htl.test")`, or the
+module `--lib` names — wherever it is and whatever it is called. `htl test` runs each one
+in a state of its own. Anything else is not run on its own: a module under `tests/` that
+does not load the library is a helper, which the tests `require` like any module. Which
+names a file requires is read from its syntax, before anything is checked; a file that
+does not parse is a test when its text names the library, so that it fails where it can
+be seen.
+
+`tests/` (`[layout] tests`) is the project's place for tests and for helpers only tests
+may reach: a test sees the project's sources and `tests/`, the sources do not see
+`tests/`, and a helper is named by its path below it (`tests/common/fx.tl` is
+`common.fx`). A unit test kept beside the module it tests is easier to tell from the
+module when it is called `<module>_test.tl`; the suffix is a convention, not a rule.
+Keep tests in a file of their own rather than in the module: a module that loads the
+test library loads it wherever the module is required, including in the program that
+ships it.
+
 A matcher that is not one of these is a type error too — `invalid key 'to_be' in type
 Expect<integer>` — and the checker appends the list above to it, read from the same
 declaration it refused the call against, so the names are in front of you at the moment
@@ -2099,7 +2118,7 @@ see, and a rule that fires on them is a rule nobody can act on.
 ├── patches/<dep>/         a dependency taken into the tree (htl pkg patch), committed;
 │                          checked, not formatted, its tests not run
 ├── src/main.tl            entry script
-└── tests/<mod>_test.tl
+└── tests/<mod>_test.tl     a test (it loads htl.test); helpers beside it are not run
 ```
 
 mlua-pkg's `entry` is a directory, so a consumer's `require("<name>")` looks for

@@ -1555,6 +1555,21 @@ end
         Ok(bc.iter().take(31).copied().collect())
     }
 
+    /// The module names a Teal source `require`s by literal, read from its syntax alone —
+    /// no type check and no resolution, so asking it of every file in a tree is cheap.
+    /// `None` when the source does not parse: which names it requires is then not known,
+    /// which is a different answer from requiring none.
+    pub fn tl_require_names(&self, src: &str, file: &Path) -> Result<Option<Vec<String>>> {
+        let f: Function = self.h.get("tl_require_names")?;
+        let t: Option<Table> = f.call((src, path_str(file)))?;
+        t.map(|t| {
+            t.sequence_values::<String>()
+                .collect::<mlua::Result<Vec<_>>>()
+        })
+        .transpose()
+        .map_err(Into::into)
+    }
+
     /// Literal `require`s of a plain Lua source, resolved through the checker's path.
     pub fn lua_requires(&self, src: &str, file: &Path) -> Result<Vec<RequireSite>> {
         let f: Function = self.h.get("lua_requires")?;

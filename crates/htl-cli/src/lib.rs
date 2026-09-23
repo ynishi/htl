@@ -232,12 +232,12 @@ Caching: https://github.com/ynishi/htl#caching
         #[arg(long)]
         explain_cache: bool,
     },
-    /// Run tests: `*_test.tl` and `tests/**/*.tl`, one isolated state per file
+    /// Run tests: every `.tl` that requires the test library, one isolated state per file
     ///
     /// README, "Tests": https://github.com/ynishi/htl#tests
     #[command(after_long_help = "\
 Examples:
-  htl test                       every *_test.tl and tests/**/*.tl
+  htl test                       every .tl that requires htl.test
   htl test tests --filter parser only tests whose \"suite > name\" contains it
   htl test --coverage --coverage-lines
                                  which lines of each module the suite never reached
@@ -1533,12 +1533,12 @@ fn cmd_test(
     if let Some(first) = paths.first() {
         auto_dts(first)?;
     }
-    // A patched dependency's `*_test.tl` are its suite, not this project's: `htl pkg patch`
+    // A patched dependency's tests are its suite, not this project's: `htl pkg patch`
     // takes the whole package root, tests included, and running them here would report a
     // library's own failures as the project's.
-    let files = htl::testing::discover_tests_skipping(&paths, &project::patched(&paths))?;
+    let files = htl::testing::discover_tests_for(&paths, &project::patched(&paths), lib)?;
     if files.is_empty() {
-        eprintln!("htl test: no test files found (looked for *_test.tl and tests/**/*.tl)");
+        eprintln!("htl test: no test files found (looked for .tl files that require(\"{lib}\"))");
         return Ok(ExitCode::FAILURE);
     }
     let cfg = load_config(&paths[0])?;

@@ -20,6 +20,7 @@
 //! [layout]
 //! source = "src"     # this project's own .tl; "." for a flat project
 //! types  = "types"   # hand-written .d.tl for modules something else provides
+//! tests  = "tests"   # tests, and helpers only tests may require
 //!
 //! [check]
 //! paths = ["mods"]   # extra dirs the checker resolves require() from
@@ -313,6 +314,14 @@ pub struct LayoutConfig {
     /// DefinitelyTyped shape. Default `types`.
     #[serde(default = "default_types")]
     pub types: String,
+    /// The project's tests and the helpers only tests may `require`. Default `tests`.
+    ///
+    /// A file here is not a test by being here: a test is a file that loads the test
+    /// library ([`crate::testing::discover_tests_for`]), and one that does not is a
+    /// helper. What the directory decides is who may read it — a test sees the project's
+    /// sources and this directory, the sources do not see this directory.
+    #[serde(default = "default_tests")]
+    pub tests: String,
 }
 
 fn default_source() -> String {
@@ -323,11 +332,16 @@ fn default_types() -> String {
     "types".to_string()
 }
 
+fn default_tests() -> String {
+    "tests".to_string()
+}
+
 impl Default for LayoutConfig {
     fn default() -> Self {
         Self {
             source: default_source(),
             types: default_types(),
+            tests: default_tests(),
         }
     }
 }

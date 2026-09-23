@@ -18,7 +18,7 @@
 //! it, in the files `htl test`, `htl build` and `[[contract]]` are pointed at:
 //!
 //! - `src/main.tl` (or `main.tl` at the root), the entry script,
-//! - every test file, as `htl test` discovers them (`*_test.tl`, `tests/**/*.tl`),
+//! - every test file, as `htl test` discovers them (every `.tl` that loads `htl.test`),
 //! - every module directly under a `[[contract]]` directory: those are loaded by name at
 //!   run time, from a mods directory the project does not own,
 //! - anything named in `[build] extra` / `[build] host`, which is where a dynamic

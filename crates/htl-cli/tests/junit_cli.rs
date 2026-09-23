@@ -191,7 +191,8 @@ fn a_message_full_of_markup_survives_as_data() {
 #[test]
 fn a_file_with_no_tests_is_a_suite_with_no_cases() {
     let root = scratch("notests");
-    write(&root.join("tests/plain_test.tl"), "local x = 1 + 1\n");
+    // Loads the test library, so it is a test file, and registers nothing.
+    write(&root.join("tests/plain_test.tl"), "require(\"htl.test\")\n");
     let out = root.join("junit.xml");
     let (ok, _stdout, stderr) = htl(&["test", "tests", "--junit", out.to_str().unwrap()], &root);
     assert!(ok, "it ran to completion: {stderr}");
