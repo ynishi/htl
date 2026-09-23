@@ -1304,6 +1304,10 @@ shadow-local = "allow"
 [fmt]
 indent = 3
 
+[layout]                  # where this project's own files live
+source = "src"            # its .tl; "." for a flat project
+types = "types"           # hand-written .d.tl for modules something else provides
+
 [check]
 paths = ["mods", "~/.cache/tsk/sdk"]   # extra dirs require() resolves from while checking
 
@@ -1338,10 +1342,25 @@ The two halves are still released together, so `htl check` prints one line when 
 more: the check that printed it worked, and which half is the stale one is the project's
 to say. A `path` or `git` dependency states no version here and is passed over.
 
+`[layout]` is where this project's own files live: `source` holds its `.tl`, `types`
+holds the hand-written `.d.tl` for modules something else provides. Both default to the
+directory they name (`src` and `types`), which is what `htl new` writes and what every
+command searched before the section existed — a project that keeps its code somewhere
+else now says so instead of being told. Each is **one directory, not a list**: a module
+name resolves to exactly one file, so a directory that answers a name has to be the only
+one that could. `"."` is a flat project, with the sources beside `htl.toml`.
+
+Two keys naming one directory is refused when the file is parsed, before any source is
+read — including a `[check] paths` entry that names the source or types directory. The
+three say three different things about a directory (this project's modules / its
+declarations of other people's / modules it did not write), and a directory cannot be
+two of them. Spelling does not get around it: `lib`, `./lib` and `./lib/.` are one
+directory.
+
 `[check] paths` is for modules the host supplies at run time from somewhere the
 checker would not look (an SDK cache, a mods dir): the CLI, `include_tl!` and
-`contract_resolvers` all add them, plus the `htl.toml` dir, its `src/` and its
-`types/`. `types/` is the conventional home for `.d.tl` (the DefinitelyTyped shape:
+`contract_resolvers` all add them, plus the `htl.toml` dir and the two `[layout]`
+directories. `types/` is the conventional home for `.d.tl` (the DefinitelyTyped shape:
 declarations the module's author did not ship), searched without any configuration;
 `htl new` creates it.
 

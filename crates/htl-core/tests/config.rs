@@ -839,6 +839,130 @@ fn types_dir_is_searched_by_default() {
     assert!(ci.ok(), "source beats the declaration: {:?}", ci.errors);
 }
 
+/// `src` and `types` were written into `search_paths` as constants. They are defaults
+/// now, and a default has to be the value the constant was: a project that says nothing
+/// gets the search order it got before the section existed.
+#[test]
+fn the_layout_defaults_are_the_constants_they_replaced() {
+    let root = scratch("layout-default");
+    write(&root.join("htl.toml"), "[lint]\n");
+    for d in ["src", "types"] {
+        std::fs::create_dir_all(root.join(d)).unwrap();
+    }
+    let (_, cfg) = HtlConfig::find(&root).unwrap().unwrap();
+    assert_eq!(cfg.layout.source, "src");
+    assert_eq!(cfg.layout.types, "types");
+    assert_eq!(
+        cfg.search_paths(&root),
+        vec![root.clone(), root.join("src"), root.join("types")]
+    );
+}
+
+/// A project that keeps its code somewhere else says so, and what it says is what is
+/// searched — in the place `src` held, so the order the section documents still reads
+/// top to bottom.
+#[test]
+fn the_layout_names_the_directories_that_are_searched() {
+    let root = scratch("layout-named");
+    write(
+        &root.join("htl.toml"),
+        "[layout]\nsource = \"lua\"\ntypes = \"decl\"\n",
+    );
+    write(
+        &root.join("decl/xlib.d.tl"),
+        "local record xlib\n   connect: function(string): boolean\nend\nreturn xlib\n",
+    );
+    write(
+        &root.join("lua/use.tl"),
+        "local xlib = require(\"xlib\")\nlocal ok: string = xlib.connect(\"h\")\nprint(ok)\n",
+    );
+    let (_, cfg) = HtlConfig::find(&root).unwrap().unwrap();
+    assert_eq!(
+        cfg.search_paths(&root),
+        vec![root.clone(), root.join("lua"), root.join("decl")]
+    );
+
+    let h = Htl::new().unwrap();
+    h.apply_config(&root, &cfg).unwrap();
+    let ci = h.check(&root.join("lua/use.tl")).unwrap();
+    assert!(
+        ci.errors
+            .iter()
+            .any(|e| e.contains("got boolean, expected string")),
+        "typed through the named types dir: {:?}",
+        ci.errors
+    );
+}
+
+/// A flat project — sources beside `htl.toml` rather than under a directory of their
+/// own — says `source = "."`, and that is the project root, not a second spelling of it.
+/// `root/.` would survive `dedup` and read as a different directory to every string
+/// comparison downstream.
+#[test]
+fn a_flat_project_names_the_root_once() {
+    let root = scratch("layout-flat");
+    write(&root.join("htl.toml"), "[layout]\nsource = \".\"\n");
+    write(
+        &root.join("xlib.tl"),
+        "local record xlib\nend\nreturn xlib\n",
+    );
+    let (_, cfg) = HtlConfig::find(&root).unwrap().unwrap();
+    assert_eq!(
+        cfg.search_paths(&root),
+        vec![root.clone()],
+        "one entry for one directory"
+    );
+}
+
+/// `[layout] source` says a module under a directory is this project's own; `types` and
+/// `[check] paths` say it is somebody else's. One directory cannot be both, the file says
+/// so on its own, and so it is refused when the file is parsed with nothing read from disk.
+///
+/// `types` named in `[check] paths` is *not* refused: both say the same thing about the
+/// directory, so saying it twice says nothing new. `gen_run_config`'s fixtures write it
+/// on purpose, to show that `types/` is searched either way.
+#[test]
+fn a_directory_that_is_both_the_project_s_and_not_is_refused_when_the_file_is_parsed() {
+    let same = HtlConfig::parse("[layout]\nsource = \"lib\"\ntypes = \"lib\"\n").unwrap_err();
+    let msg = format!("{same:#}");
+    assert!(
+        msg.contains("[layout] source") && msg.contains("[layout] types"),
+        "names both keys: {msg}"
+    );
+
+    // Spelling is not a second directory.
+    assert!(
+        HtlConfig::parse("[layout]\nsource = \"lib\"\ntypes = \"./lib/.\"\n").is_err(),
+        "./lib/. is lib"
+    );
+
+    // And the other layer: a `[check] paths` entry is for modules the project did not
+    // write, which its own source directory is not.
+    let overlap =
+        HtlConfig::parse("[layout]\nsource = \"lib\"\n\n[check]\npaths = [\"lib\"]\n").unwrap_err();
+    let msg = format!("{overlap:#}");
+    assert!(
+        msg.contains("[check] paths entry"),
+        "names the entry: {msg}"
+    );
+
+    // The default source directory is claimed too, by a project that never wrote the key.
+    assert!(
+        HtlConfig::parse("[check]\npaths = [\"src\"]\n").is_err(),
+        "src is the default source directory"
+    );
+
+    // Redundant, not contradictory: `types` is already searched, and both keys say a
+    // module found there is somebody else's.
+    HtlConfig::parse("[check]\npaths = [\"lib\", \"types\"]\n").unwrap();
+
+    // Two different directories are two different directories.
+    HtlConfig::parse(
+        "[layout]\nsource = \"lib\"\ntypes = \"decl\"\n\n[check]\npaths = [\"mods\"]\n",
+    )
+    .unwrap();
+}
+
 /// `search_paths` reads as a search order, and `apply_config` has to consult the
 /// directories in that order rather than in the reverse of it: `add_path` prepends, so
 /// adding the list front to back leaves the last entry first. The case it decides is two

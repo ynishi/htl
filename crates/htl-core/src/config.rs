@@ -17,6 +17,10 @@
 //! [fmt]
 //! indent = 3
 //!
+//! [layout]
+//! source = "src"     # this project's own .tl; "." for a flat project
+//! types  = "types"   # hand-written .d.tl for modules something else provides
+//!
 //! [check]
 //! paths = ["mods"]   # extra dirs the checker resolves require() from
 //!
@@ -36,7 +40,7 @@ use crate::lint;
 use anyhow::{Context, Result};
 use semver::{Version, VersionReq};
 use serde::Deserialize;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// The file name walked up for, and written by `htl new`. One name in one place, so that
 /// the search, the scaffold and the error that names it cannot disagree.
@@ -62,6 +66,9 @@ pub struct HtlConfig {
     /// `[fmt]` — what `htl fmt` writes where the formatter has a choice.
     #[serde(default)]
     pub fmt: FmtConfig,
+    /// `[layout]` — where this project's own files live.
+    #[serde(default)]
+    pub layout: LayoutConfig,
     /// `[check]` — where `require` may resolve from besides the project's own tree.
     #[serde(default)]
     pub check: CheckConfig,
@@ -280,6 +287,51 @@ pub struct FmtConfig {
     pub indent: Option<usize>,
 }
 
+/// `[layout]` — where this project's own files live.
+///
+/// These directories were constants until now: `src/` and `types/` were written into
+/// [`search_paths`](HtlConfig::search_paths) beside the project root, and a project that
+/// kept its code somewhere else had no way to say so. A constant is not a default — the
+/// reader cannot see it, and nobody can disagree with it — and every layout question htl
+/// answers starts here, so this is the section that answers them.
+///
+/// Each value is **one directory, not a list**. A module name resolves to exactly one
+/// file, so a root that answers a name has to be the only root that could; a list would
+/// put htl back in the business of deciding which of two files a name means.
+/// [`CheckConfig::paths`] is a list because it is the other layer — directories holding
+/// modules this project did not write, reached through a contract.
+///
+/// Relative to `htl.toml`. `"."` is a flat project, where the sources sit beside the
+/// config rather than under a directory of their own.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LayoutConfig {
+    /// The project's own `.tl`. Default `src`.
+    #[serde(default = "default_source")]
+    pub source: String,
+    /// Hand-written `.d.tl` for modules something else provides at run time, the
+    /// DefinitelyTyped shape. Default `types`.
+    #[serde(default = "default_types")]
+    pub types: String,
+}
+
+fn default_source() -> String {
+    "src".to_string()
+}
+
+fn default_types() -> String {
+    "types".to_string()
+}
+
+impl Default for LayoutConfig {
+    fn default() -> Self {
+        Self {
+            source: default_source(),
+            types: default_types(),
+        }
+    }
+}
+
 /// `[check]` — where `require` may resolve from besides the project's own tree.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -348,7 +400,51 @@ impl HtlConfig {
         // about the file, so it is reported when the file is read and by every reader of
         // it, including the one that never compares versions.
         cfg.toolchain.req().context("parsing htl.toml")?;
+        // Likewise: a directory claimed by two keys that mean different things is a
+        // contradiction the file states, so no source has to be read to find it.
+        cfg.source_dir_is_the_project_s_alone()
+            .context("parsing htl.toml")?;
         Ok(cfg)
+    }
+
+    /// The source directory claimed once, by the key that means "this project wrote it".
+    ///
+    /// `[layout] source` says a module under it is the project's own — checked with the
+    /// project, generated, bundled into the artefact. `[layout] types` and each `[check]
+    /// paths` entry say the opposite: a module found there is somebody else's, declared
+    /// or supplied rather than built. One directory cannot be both, and nothing later
+    /// could pick — which of two answers a name gets is the thing htl is trying to stop
+    /// deciding by accident.
+    ///
+    /// `types` appearing in `[check] paths` is *not* refused. Those two make the same
+    /// claim, so saying it twice says nothing new; a project that lists the directory it
+    /// would have got anyway is redundant, not wrong.
+    ///
+    /// Nothing here touches the filesystem. The contradiction is in the file, so it is
+    /// reported when the file is parsed, before a single source is read.
+    ///
+    /// Spelling does not hide it: `lib`, `./lib` and `./lib/.` compare equal, the way
+    /// [`search_paths`](Self::search_paths) resolves them. An absolute entry is compared
+    /// only with other absolute ones — there is no root here to resolve a relative one
+    /// against, and `search_paths` drops the duplicate entry it would otherwise make.
+    fn source_dir_is_the_project_s_alone(&self) -> Result<()> {
+        let source = without_cur_dir(Path::new(&self.layout.source));
+        let claimed = |dir: &str, by: &str| -> Result<()> {
+            if without_cur_dir(Path::new(dir)) != source {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "[layout] source and {by} are the same directory (\"{dir}\"): the first \
+                 says a module there is this project's own and the second says it is \
+                 somebody else's, and nothing later could tell which. Give them different \
+                 directories, or drop the key that should take its default"
+            )
+        };
+        claimed(&self.layout.types, "[layout] types")?;
+        for p in &self.check.paths {
+            claimed(p, &format!("the [check] paths entry \"{p}\""))?;
+        }
+        Ok(())
     }
 
     /// Nearest `htl.toml` at or above `start` (a file or directory). `Ok(None)` when
@@ -407,11 +503,15 @@ impl HtlConfig {
             .join(",")
     }
 
-    /// Directories the checker should search, in the order it consults them: `root`,
-    /// `root/src`, `root/types` (hand-written `.d.tl` for modules the host provides, the
-    /// DefinitelyTyped shape), then `[check] paths` (resolved against `root`, `~`
-    /// expanded). Only existing dirs. The project's own code comes before declarations
-    /// it keeps for other people's, and both come before anything supplied from outside.
+    /// Directories the checker should search, in the order it consults them: `root`, the
+    /// source directory, the types directory (hand-written `.d.tl` for modules the host
+    /// provides, the DefinitelyTyped shape), then `[check] paths` (resolved against
+    /// `root`, `~` expanded). Only existing dirs. The project's own code comes before
+    /// declarations it keeps for other people's, and both come before anything supplied
+    /// from outside.
+    ///
+    /// The two middle entries are [`LayoutConfig`]'s, `src` and `types` unless the
+    /// project says otherwise. They were constants here until that section existed.
     ///
     /// Put them on the path with [`Htl::add_search_paths`](crate::Htl::add_search_paths),
     /// which preserves this order; `add_path` alone prepends, so adding the list front to
@@ -421,8 +521,12 @@ impl HtlConfig {
     /// `types/` never shadows an implementation, and the order only decides between two
     /// declarations of one module — which `duplicate-declaration` reports.
     pub fn search_paths(&self, root: &Path) -> Vec<PathBuf> {
-        let types = root.join("types");
-        let mut out = vec![root.to_path_buf(), root.join("src"), types.clone()];
+        let types = resolve_path(root, &self.layout.types);
+        let mut out = vec![
+            root.to_path_buf(),
+            resolve_path(root, &self.layout.source),
+            types.clone(),
+        ];
         // `types/<crate>/` holding declarations materialised from that crate: on the path
         // itself, so the module keeps the name it was declared under whatever the crate
         // shipping it is called (`crate::materialised_types_dirs`). After `types/`, so a
@@ -431,6 +535,13 @@ impl HtlConfig {
         out.extend(crate::materialised_types_dirs(&types));
         for p in &self.check.paths {
             out.push(resolve_path(root, p));
+        }
+        // `source = "."` is a flat project, and `root.join(".")` is a second spelling of
+        // `root` that `dedup` would keep and every later string comparison would read as
+        // a different directory. Dropping the `.` components makes one directory one
+        // entry however the config spelled it (`lib`, `./lib`, `./lib/.`).
+        for p in &mut out {
+            *p = without_cur_dir(p);
         }
         out.retain(|p| p.is_dir());
         out.dedup();
@@ -540,6 +651,17 @@ pub fn join_specs<'a>(specs: impl IntoIterator<Item = &'a str>) -> String {
         .filter(|s| !s.trim().is_empty())
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// `p` with its `.` components dropped, so that one directory has one spelling: `lib`,
+/// `./lib` and `./lib/.` all come back as `lib`, and `.` comes back empty.
+///
+/// [`Path::components`] already drops a `.` anywhere but the front, and the front is
+/// where `htl.toml` most often has one.
+fn without_cur_dir(p: &Path) -> PathBuf {
+    p.components()
+        .filter(|c| !matches!(c, Component::CurDir))
+        .collect()
 }
 
 /// `~/x` -> `$HOME/x`; relative -> under `root`; absolute as is.
