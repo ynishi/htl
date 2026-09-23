@@ -1367,6 +1367,13 @@ declarations of other people's / modules it did not write), and a directory cann
 two of them. Spelling does not get around it: `lib`, `./lib` and `./lib/.` are one
 directory.
 
+A module name belongs to one module. When two implement it — the project's own
+`src/mathx.tl` and a dependency `mathx`, or a module under `[check] paths` of the same
+name — `htl check` reports an error at each file, naming both, rather than letting the
+order of the search path pick one. Rename one of them. A dependency's own submodules are
+under its name (`mathx.vec`) and are not the project's `vec`; a `.d.tl` beside an
+implementation declares it and is not a second claim.
+
 `[check] paths` is for modules the host supplies at run time from somewhere the
 checker would not look (an SDK cache, a mods dir): the CLI, `include_tl!` and
 `contract_resolvers` all add them, beside the two `[layout]` directories. `htl check`

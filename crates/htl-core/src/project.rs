@@ -1163,6 +1163,31 @@ pub fn check<O: Output>(
         sink.diag(Severity::Lint, &p);
         n_lint += 1;
     }
+    // A name two modules implement: the project's own `src/mathx.tl` and a dependency
+    // `mathx`, say. Which one a `require` gets was decided by the order of the search path
+    // and said nowhere, so it is an error, reported at each file that claims the name.
+    if let Some(m) = &model {
+        for c in m.conflicts(crate::model::View::Source) {
+            let owners: Vec<String> = c
+                .claims
+                .iter()
+                .map(|cl| format!("{} ({})", cl.module.describe(), display_path(&cl.file)))
+                .collect();
+            for cl in &c.claims {
+                sink.diag(
+                    Severity::Error,
+                    &format!(
+                        "{}:1:1: module name '{}' has more than one owner: {}. A name \
+                         belongs to one module; rename one of them",
+                        display_path(&cl.file),
+                        c.name,
+                        owners.join(", ")
+                    ),
+                );
+                n_err += 1;
+            }
+        }
+    }
     // A contract the host never enforces is documentation, not a guarantee. The scan reads
     // every Rust source of the crate, so a run with the rule off does not start it.
     if let Some((_, cfg_path, _)) = cfg

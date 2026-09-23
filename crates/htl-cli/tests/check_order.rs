@@ -183,3 +183,35 @@ fn the_working_directory_is_not_searched() {
         "the util.tl in the working directory is not the project's: {d:?}"
     );
 }
+
+/// A name the project and a dependency both implement is an error, said at each file and
+/// naming both owners — not settled by which of the two the search path met first.
+#[test]
+fn a_name_the_project_and_a_dependency_both_implement_is_an_error() {
+    let root = scratch("own-vs-dep");
+    write(&root.join("htl.toml"), "");
+    write(
+        &root.join("mlua-pkg.toml"),
+        "[package]\nname = \"game\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        &root.join(".htl/modules/entries/mathx/init.tl"),
+        "return {}\n",
+    );
+    write(&root.join("src/mathx.tl"), "return {}\n");
+    write(
+        &root.join("src/main.tl"),
+        "local m = require(\"mathx\")\nprint(m)\n",
+    );
+    let d = diagnostics(&["."], &root);
+    let about: Vec<&String> = d
+        .iter()
+        .filter(|l| l.contains("module name 'mathx' has more than one owner"))
+        .collect();
+    assert_eq!(about.len(), 2, "one at each file: {d:?}");
+    assert!(
+        about[0].contains("this project (src/mathx.tl)")
+            && about[0].contains("dependency mathx (.htl/modules/entries/mathx/init.tl)"),
+        "{about:?}"
+    );
+}

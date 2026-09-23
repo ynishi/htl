@@ -595,6 +595,124 @@ impl Project {
     }
 }
 
+/// One module name that more than one module implements, in one view.
+///
+/// A name has one owner. Two modules that both implement it — the project's `src/mathx.tl`
+/// and a dependency `mathx` — leave the checker to pick whichever the search path meets
+/// first, and nothing said which that was. A declaration beside an implementation is not a
+/// second claim (the declaration types the implementation), and two declarations of one
+/// name are `duplicate-declaration`'s to report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conflict {
+    /// The name both answer to.
+    pub name: String,
+    /// Each implementation, with the module that provides it, in the order the modules
+    /// are listed ([`Project::modules`]).
+    pub claims: Vec<Claim>,
+}
+
+/// One module's implementation of a name in a [`Conflict`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Claim {
+    /// The module that provides it.
+    pub module: Module,
+    /// The file.
+    pub file: PathBuf,
+}
+
+impl Module {
+    /// How a report names the module: `this project`, `dependency mathx`, `patched
+    /// dependency mathx`, `[check] paths entry vendor`, …
+    pub fn describe(&self) -> String {
+        match &self.owner {
+            Owner::Own => "this project".to_string(),
+            Owner::Patched => format!("patched dependency {}", self.name),
+            Owner::Vendored => format!("vendored dependency {}", self.name),
+            Owner::Installed => format!("dependency {}", self.name),
+            Owner::Crate { .. } => format!("declarations shipped by {}", self.name),
+            Owner::Contract => format!("contract directory {}", self.name),
+            Owner::External => format!("[check] paths entry {}", self.name),
+            Owner::Lib => "htl's own library".to_string(),
+        }
+    }
+}
+
+impl Project {
+    /// The names more than one module implements, as `view` sees the project.
+    ///
+    /// Every file under every root the view reaches is placed ([`locate`](Self::locate)),
+    /// so a file belongs to the module whose root holds it most specifically and is
+    /// counted once. Contract directories are not in any view: each is checked on its own.
+    /// The test root is in [`View::Test`] only.
+    ///
+    /// This reads directories, a dependency's included; it is asked once per check, not
+    /// per file.
+    pub fn conflicts(&self, view: View) -> Vec<Conflict> {
+        use std::collections::BTreeMap;
+        let mut by_name: BTreeMap<String, Vec<(usize, PathBuf)>> = BTreeMap::new();
+        let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        for m in self.modules.iter().filter(|m| m.owner != Owner::Contract) {
+            for (role, root) in m.roots.iter() {
+                if role == Role::Test && view != View::Test {
+                    continue;
+                }
+                let top = root.to_path_buf();
+                let walker = walkdir::WalkDir::new(root)
+                    .sort_by_file_name()
+                    .into_iter()
+                    .filter_entry(move |e| {
+                        e.path() == top || !crate::is_skipped_dir(e.path(), &[])
+                    });
+                for e in walker.flatten() {
+                    let file = e.path();
+                    let name = file.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                    let implements = name.ends_with(".lua")
+                        || (name.ends_with(".tl") && !name.ends_with(".d.tl"));
+                    if !e.file_type().is_file() || !implements {
+                        continue;
+                    }
+                    if !seen.insert(canon(file)) {
+                        continue;
+                    }
+                    let Some(place) = self.locate(file) else {
+                        continue;
+                    };
+                    if place.role == Role::Test && view != View::Test {
+                        continue;
+                    }
+                    let Some(i) = self.modules.iter().position(|x| x == place.module) else {
+                        continue;
+                    };
+                    by_name
+                        .entry(place.name)
+                        .or_default()
+                        .push((i, file.to_path_buf()));
+                }
+            }
+        }
+        by_name
+            .into_iter()
+            .filter_map(|(name, mut claims)| {
+                claims.sort_by_key(|(i, _)| *i);
+                let first = claims.first()?.0;
+                if claims.iter().all(|(i, _)| *i == first) {
+                    return None;
+                }
+                Some(Conflict {
+                    name,
+                    claims: claims
+                        .into_iter()
+                        .map(|(i, file)| Claim {
+                            module: self.modules[i].clone(),
+                            file,
+                        })
+                        .collect(),
+                })
+            })
+            .collect()
+    }
+}
+
 impl crate::Htl {
     /// Set this checker up for `project`, as `view` sees it: the working directory off the
     /// path ([`drop_cwd_search_path`](crate::Htl::drop_cwd_search_path)), its installed dependencies
@@ -1011,6 +1129,35 @@ mod tests {
             assert!(skip.contains(&root.join("patches/mathx")), "{skip:?}");
             assert!(skip.contains(&root.join("lua/lshape")), "{skip:?}");
         }
+    }
+
+    #[test]
+    fn a_name_two_modules_implement_is_a_conflict_and_a_declaration_is_not() {
+        let root = scratch("conflict");
+        write(
+            &root.join(pkg::MANIFEST_NAME),
+            "[package]\nname = \"game\"\nversion = \"0.1.0\"\n",
+        );
+        // An installed dependency `mathx`, with a submodule under its own name.
+        write(&root.join(".htl/modules/entries/mathx/init.tl"), "");
+        write(&root.join(".htl/modules/entries/mathx/vec.tl"), "");
+        // The project implements `mathx` too, and `vec` at the top — which is not `mathx.vec`.
+        write(&root.join("src/mathx.tl"), "");
+        write(&root.join("src/vec.tl"), "");
+        // A declaration beside an implementation elsewhere is not a second claim.
+        write(&root.join("types/mq.d.tl"), "");
+        write(&root.join(".htl/modules/entries/mq/init.tl"), "");
+        let p = Project::load(&root, HtlConfig::default()).unwrap();
+
+        let conflicts = p.conflicts(View::Source);
+        let names: Vec<&str> = conflicts.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["mathx"], "{conflicts:?}");
+        let owners: Vec<&Owner> = conflicts[0]
+            .claims
+            .iter()
+            .map(|c| &c.module.owner)
+            .collect();
+        assert_eq!(owners, [&Owner::Own, &Owner::Installed]);
     }
 
     #[test]
