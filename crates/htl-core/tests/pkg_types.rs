@@ -2,7 +2,7 @@
 //! entry directory `require` resolves through — so they are copied into the project's own
 //! `types/`, the one that is committed and checks on a fresh clone.
 
-use htl_core::pkg::Project;
+use htl_core::pkg::MluaProject;
 use mlua_pkg::lockfile::{LockedPkg, Lockfile};
 use std::path::{Path, PathBuf};
 
@@ -84,7 +84,9 @@ fn teal_types_checkout(name: &str) -> PathBuf {
 #[test]
 fn a_deps_published_declarations_land_in_types() {
     let root = project_with_dep("published", "src", &[("mathx.d.tl", DECL)]);
-    let sync = Project::at(&root).sync_types(&root.join("types")).unwrap();
+    let sync = MluaProject::at(&root)
+        .sync_types(&root.join("types"))
+        .unwrap();
     assert_eq!(sync.written.len(), 1, "{sync:?}");
     assert!(sync.taken.is_empty(), "{sync:?}");
     assert!(root.join("types/mathx.d.tl").is_file());
@@ -104,7 +106,9 @@ fn a_nested_module_a_dep_publishes_keeps_its_path() {
         "src",
         &[("mathx.d.tl", DECL), ("mathx/vec.d.tl", DECL)],
     );
-    let sync = Project::at(&root).sync_types(&root.join("types")).unwrap();
+    let sync = MluaProject::at(&root)
+        .sync_types(&root.join("types"))
+        .unwrap();
     assert_eq!(sync.written.len(), 2, "{sync:?}");
     assert!(root.join("types/mathx/vec.d.tl").is_file());
 }
@@ -115,7 +119,9 @@ fn a_nested_module_a_dep_publishes_keeps_its_path() {
 #[test]
 fn a_flat_package_root_is_found_through_its_entry() {
     let root = project_with_dep("flat", ".", &[("mathx.d.tl", DECL)]);
-    let sync = Project::at(&root).sync_types(&root.join("types")).unwrap();
+    let sync = MluaProject::at(&root)
+        .sync_types(&root.join("types"))
+        .unwrap();
     assert_eq!(sync.written.len(), 1, "{sync:?}");
     assert!(root.join("types/mathx.d.tl").is_file());
 }
@@ -124,7 +130,9 @@ fn a_flat_package_root_is_found_through_its_entry() {
 fn a_name_the_project_already_has_is_kept_and_reported() {
     let root = project_with_dep("taken", "src", &[("mathx.d.tl", DECL)]);
     write(&root.join("types/mathx.d.tl"), "-- by hand\n");
-    let sync = Project::at(&root).sync_types(&root.join("types")).unwrap();
+    let sync = MluaProject::at(&root)
+        .sync_types(&root.join("types"))
+        .unwrap();
     assert!(sync.written.is_empty(), "{sync:?}");
     assert_eq!(sync.taken.len(), 1, "{sync:?}");
     assert_eq!(
@@ -151,7 +159,9 @@ fn only_declarations_are_taken() {
             ("helper.tl", "return {}\n"),
         ],
     );
-    let sync = Project::at(&root).sync_types(&root.join("types")).unwrap();
+    let sync = MluaProject::at(&root)
+        .sync_types(&root.join("types"))
+        .unwrap();
     assert_eq!(sync.written.len(), 1, "{sync:?}");
     assert!(!root.join("types/README.md").exists());
     assert!(!root.join("types/helper.tl").exists());
@@ -164,7 +174,9 @@ fn nothing_happens_before_an_install() {
         &root.join("mlua-pkg.toml"),
         "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[deps]\n",
     );
-    let sync = Project::at(&root).sync_types(&root.join("types")).unwrap();
+    let sync = MluaProject::at(&root)
+        .sync_types(&root.join("types"))
+        .unwrap();
     assert!(sync.written.is_empty() && sync.taken.is_empty(), "{sync:?}");
     assert!(
         !root.join("types").exists(),
@@ -178,7 +190,7 @@ fn nothing_happens_before_an_install() {
 fn add_drops_the_library_dir_and_keeps_what_is_below_it() {
     let root = bare_project("add");
     let checkout = teal_types_checkout("collection");
-    let sync = Project::at(&root)
+    let sync = MluaProject::at(&root)
         .add_types_from(&checkout, "luasocket", "beef", false, &root.join("types"))
         .unwrap();
     assert_eq!(sync.written.len(), 3, "{sync:?}");
@@ -204,7 +216,7 @@ fn add_drops_the_library_dir_and_keeps_what_is_below_it() {
 fn a_library_the_collection_does_not_have_names_the_near_ones() {
     let root = bare_project("missing");
     let checkout = teal_types_checkout("collection-near");
-    let err = Project::at(&root)
+    let err = MluaProject::at(&root)
         .add_types_from(&checkout, "socket", "beef", false, &root.join("types"))
         .unwrap_err()
         .to_string();
@@ -216,7 +228,7 @@ fn add_keeps_what_is_there_until_it_is_forced() {
     let root = bare_project("forced");
     let checkout = teal_types_checkout("collection-force");
     write(&root.join("types/socket.d.tl"), "-- by hand\n");
-    let p = Project::at(&root);
+    let p = MluaProject::at(&root);
 
     let kept = p
         .add_types_from(&checkout, "luasocket", "beef", false, &root.join("types"))

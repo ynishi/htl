@@ -4,7 +4,7 @@
 //! copy git has not been told about. The copy itself and the `patch_base` bookkeeping are
 //! mlua-pkg's, and are exercised through it rather than reimplemented.
 
-use htl_core::pkg::Project;
+use htl_core::pkg::MluaProject;
 use mlua_pkg::lockfile::{LockedPkg, Lockfile};
 use std::path::{Path, PathBuf};
 
@@ -94,7 +94,7 @@ fn patch_takes_the_package_root_into_the_tree_and_records_where_it_came_from() {
     let (url, sha) = remote("remote-take");
     let root = project("take", &url, &sha);
 
-    let done = Project::at(&root).patch("mathx", false).unwrap();
+    let done = MluaProject::at(&root).patch("mathx", false).unwrap();
     assert!(done.report.created, "{done:?}");
     assert_eq!(done.report.base, sha);
     assert_eq!(done.report.patch_dir, root.join("patches/mathx"));
@@ -134,7 +134,7 @@ fn patch_takes_the_package_root_into_the_tree_and_records_where_it_came_from() {
     assert_eq!(lock.pkg[0].patch_dir, Some(PathBuf::from("patches/mathx")));
 
     assert_eq!(
-        Project::at(&root)
+        MluaProject::at(&root)
             .patches
             .iter()
             .map(|p| (p.name.as_str(), p.dir.clone()))
@@ -150,7 +150,7 @@ fn a_name_the_manifest_does_not_declare_is_refused_before_anything_is_written() 
     let root = project("unknown", &url, &sha);
     let before = std::fs::read_to_string(root.join("mlua-pkg.toml")).unwrap();
 
-    let err = Project::at(&root)
+    let err = MluaProject::at(&root)
         .patch("mathy", false)
         .unwrap_err()
         .to_string();
@@ -171,7 +171,7 @@ fn a_copy_with_uncommitted_changes_is_not_overwritten() {
     let (url, sha) = remote("remote-dirty");
     let root = project("dirty", &url, &sha);
     git(&root, &["init", "-q"]);
-    let p = Project::at(&root);
+    let p = MluaProject::at(&root);
     p.patch("mathx", false).unwrap();
 
     // Straight after `patch` the copy is untracked, which is uncommitted like any other.
@@ -241,18 +241,18 @@ fn installed_patch(name: &str, locked: &str, base: Option<&str>) -> PathBuf {
 fn a_patch_is_in_use_while_the_pin_still_resolves_to_its_base() {
     let sha = "a".repeat(40);
     let root = installed_patch("in-use", &sha, Some(&sha));
-    let status = Project::at(&root).patch_status();
+    let status = MluaProject::at(&root).patch_status();
     assert_eq!(status.len(), 1, "{status:?}");
     assert!(status[0].in_use, "{status:?}");
 
     let moved = installed_patch("moved", &"b".repeat(40), Some(&sha));
-    let status = Project::at(&moved).patch_status();
+    let status = MluaProject::at(&moved).patch_status();
     assert!(!status[0].in_use, "the pin moved off the base: {status:?}");
     assert_eq!(status[0].base.as_deref(), Some(sha.as_str()));
     assert_eq!(status[0].locked.as_deref(), Some("b".repeat(40).as_str()));
 
     let unrecorded = installed_patch("unrecorded", &sha, None);
-    let status = Project::at(&unrecorded).patch_status();
+    let status = MluaProject::at(&unrecorded).patch_status();
     assert!(
         !status[0].in_use,
         "and a copy with no recorded base is not one either: {status:?}"
@@ -265,7 +265,7 @@ fn a_patch_is_in_use_while_the_pin_still_resolves_to_its_base() {
 fn a_copy_git_cannot_account_for_is_not_overwritten_either() {
     let (url, sha) = remote("remote-nogit");
     let root = project("nogit", &url, &sha);
-    let p = Project::at(&root);
+    let p = MluaProject::at(&root);
     p.patch("mathx", false).unwrap();
 
     let err = p.patch("mathx", false).unwrap_err().to_string();
@@ -282,14 +282,14 @@ fn a_copy_git_cannot_account_for_is_not_overwritten_either() {
 fn the_dependencys_own_manifest_does_not_make_the_copy_a_project() {
     let (url, sha) = remote_with_manifest("remote-own-manifest");
     let root = project("own-manifest", &url, &sha);
-    Project::at(&root).patch("mathx", false).unwrap();
+    MluaProject::at(&root).patch("mathx", false).unwrap();
     assert!(
         root.join("patches/mathx/mlua-pkg.toml").is_file(),
         "the whole package root is copied, manifest included"
     );
 
     let inside = root.join("patches/mathx/src/mathx.tl");
-    let found = Project::find(&inside).expect("a project above the copy");
+    let found = MluaProject::find(&inside).expect("a project above the copy");
     assert_eq!(
         found.root,
         std::fs::canonicalize(&root).unwrap(),
@@ -325,7 +325,7 @@ fn the_entry_the_copy_is_required_from_comes_from_the_lockfile_then_the_copy() {
         "[package]\nname = \"mathx\"\nversion = \"0.1.0\"\nentry = \"lib\"\n",
     );
     assert_eq!(
-        Project::at(&root).patches[0].entry,
+        MluaProject::at(&root).patches[0].entry,
         root.join("patches/mathx/src")
     );
 
@@ -333,7 +333,7 @@ fn the_entry_the_copy_is_required_from_comes_from_the_lockfile_then_the_copy() {
     // itself, whether or not the directory it names has been written yet.
     std::fs::remove_file(root.join("mlua-pkg.lock")).unwrap();
     assert_eq!(
-        Project::at(&root).patches[0].entry,
+        MluaProject::at(&root).patches[0].entry,
         root.join("patches/mathx/lib"),
         "the copy's own [package].entry, which patch copied in with the sources"
     );
@@ -341,7 +341,7 @@ fn the_entry_the_copy_is_required_from_comes_from_the_lockfile_then_the_copy() {
     // And with neither, mlua-pkg's chain: `src/`, then `lua/`, then the root.
     std::fs::remove_file(root.join("patches/mathx/mlua-pkg.toml")).unwrap();
     assert_eq!(
-        Project::at(&root).patches[0].entry,
+        MluaProject::at(&root).patches[0].entry,
         root.join("patches/mathx/src")
     );
     std::fs::rename(
@@ -350,7 +350,7 @@ fn the_entry_the_copy_is_required_from_comes_from_the_lockfile_then_the_copy() {
     )
     .unwrap();
     assert_eq!(
-        Project::at(&root).patches[0].entry,
+        MluaProject::at(&root).patches[0].entry,
         root.join("patches/mathx/lua")
     );
 }
@@ -369,7 +369,7 @@ fn the_directory_on_the_path_is_the_one_holding_the_entry_under_the_dependencys_
         "[package]\nname = \"mathx\"\nversion = \"0.1.0\"\nentry = \"src/mathx\"\n",
     );
     std::fs::remove_file(root.join("mlua-pkg.lock")).unwrap();
-    let p = Project::at(&root);
+    let p = MluaProject::at(&root);
     assert_eq!(p.patches[0].entry, root.join("patches/mathx/src/mathx"));
     assert_eq!(
         p.patch_search_dirs(),
@@ -379,7 +379,7 @@ fn the_directory_on_the_path_is_the_one_holding_the_entry_under_the_dependencys_
 
     let flat = installed_patch("search-flat", &"a".repeat(40), None);
     assert_eq!(
-        Project::at(&flat).patch_search_dirs(),
+        MluaProject::at(&flat).patch_search_dirs(),
         vec![flat.join("patches/mathx/src")],
         "a flat package has nothing named after it, and the entry is what is left"
     );
@@ -393,7 +393,7 @@ fn the_directory_on_the_path_is_the_one_holding_the_entry_under_the_dependencys_
     );
     std::fs::remove_file(rooted.join("mlua-pkg.lock")).unwrap();
     assert_eq!(
-        Project::at(&rooted).patch_search_dirs(),
+        MluaProject::at(&rooted).patch_search_dirs(),
         vec![rooted.join("patches")]
     );
 }

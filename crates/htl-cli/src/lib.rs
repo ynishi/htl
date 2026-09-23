@@ -1137,9 +1137,9 @@ fn cmd_init(
 ///
 /// mlua-pkg reports a missing manifest as an I/O error that does not name the file, and the
 /// path htl looked for is the whole of the answer, so it is checked here.
-fn pkg_project() -> Result<htl::pkg::Project> {
+fn pkg_project() -> Result<htl::pkg::MluaProject> {
     let cwd = std::env::current_dir()?;
-    htl::pkg::Project::find(&cwd).with_context(|| {
+    htl::pkg::MluaProject::find(&cwd).with_context(|| {
         format!(
             "no {} above {}: `htl pkg` runs in a project",
             htl::pkg::MANIFEST_NAME,
@@ -1166,7 +1166,7 @@ fn cmd_pkg_install() -> Result<ExitCode> {
     // Re-read the project: install wrote the lockfile the two reports below are read from.
     // A dep publishes its declarations at `types/` in its package root, which is not where
     // `require` looks, so they are copied in for the checker to see.
-    let project = htl::pkg::Project::at(&project.root);
+    let project = htl::pkg::MluaProject::at(&project.root);
     report_types_sync(
         &project.sync_types(&decl_root(&project.root)?)?,
         &project.root,
@@ -1176,7 +1176,10 @@ fn cmd_pkg_install() -> Result<ExitCode> {
 }
 
 /// What install did, in the shape the other reports use. The library prints nothing.
-fn report_install(report: &htl::pkg::mlua_pkg::ops::InstallReport, project: &htl::pkg::Project) {
+fn report_install(
+    report: &htl::pkg::mlua_pkg::ops::InstallReport,
+    project: &htl::pkg::MluaProject,
+) {
     use htl::pkg::mlua_pkg::ops::Placement;
     for w in &report.warnings {
         // A patch that was not used is reported below in htl's own verbs, where both ways
@@ -1220,7 +1223,8 @@ fn report_install(report: &htl::pkg::mlua_pkg::ops::InstallReport, project: &htl
 fn cmd_pkg_add(spec: htl::pkg::mlua_pkg::ops::AddSpec) -> Result<ExitCode> {
     use htl::pkg::mlua_pkg::ops::AddOutcome;
     let cwd = std::env::current_dir()?;
-    let project = htl::pkg::Project::find(&cwd).unwrap_or_else(|| htl::pkg::Project::at(&cwd));
+    let project =
+        htl::pkg::MluaProject::find(&cwd).unwrap_or_else(|| htl::pkg::MluaProject::at(&cwd));
     let name = spec.name.clone();
     let done = project.add(spec)?;
     let manifest = project
@@ -1277,7 +1281,7 @@ fn cmd_pkg_update(opts: htl::pkg::mlua_pkg::ops::UpdateOpts) -> Result<ExitCode>
     }
     if let Some(install) = &report.install {
         report_install(install, &project);
-        let project = htl::pkg::Project::at(&project.root);
+        let project = htl::pkg::MluaProject::at(&project.root);
         report_types_sync(
             &project.sync_types(&decl_root(&project.root)?)?,
             &project.root,
@@ -1313,7 +1317,7 @@ fn cmd_pkg_clean(all: bool) -> Result<ExitCode> {
 /// only thing that keeps the copy from being forgotten in the tree is being told about it
 /// each time. Both ways out are named, in htl's verbs: mlua-pkg's own warning points at
 /// `mlua-pkg patch --force`, which skips the question htl asks git before overwriting.
-fn report_patch_drift(project: &htl::pkg::Project) {
+fn report_patch_drift(project: &htl::pkg::MluaProject) {
     let short = |s: &str| s.chars().take(7).collect::<String>();
     for s in project.patch_status() {
         if s.in_use {
@@ -1347,7 +1351,7 @@ fn report_patch_drift(project: &htl::pkg::Project) {
 /// and the `patch_base` bookkeeping are mlua-pkg's. See `Project::patch`.
 fn cmd_pkg_patch(dep: &str, force: bool) -> Result<ExitCode> {
     let cwd = std::env::current_dir()?;
-    let project = htl::pkg::Project::find(&cwd).context(
+    let project = htl::pkg::MluaProject::find(&cwd).context(
         "no mlua-pkg.toml above the current directory: a patch belongs to a project, so this runs in one",
     )?;
     let done = project.patch(dep, force)?;
@@ -1390,7 +1394,7 @@ fn report_types_sync(sync: &htl::pkg::TypesSync, root: &Path) {
 /// see `Project::add_types`.
 fn cmd_types_add(library: &str, from: Option<&Path>, force: bool) -> Result<ExitCode> {
     let cwd = std::env::current_dir()?;
-    let project = htl::pkg::Project::find(&cwd).context(
+    let project = htl::pkg::MluaProject::find(&cwd).context(
         "no mlua-pkg.toml above the current directory: `types/` is a project's, so this runs in one",
     )?;
     let types = decl_root(&project.root)?;
@@ -1749,7 +1753,7 @@ fn report_patched(paths: &[PathBuf]) {
         .filter_map(|p| std::fs::canonicalize(p).ok())
         .collect();
     let cwd = std::env::current_dir().unwrap_or_default();
-    let Some(project) = paths.first().and_then(|p| htl::pkg::Project::find(p)) else {
+    let Some(project) = paths.first().and_then(|p| htl::pkg::MluaProject::find(p)) else {
         return;
     };
     for p in &project.patches {

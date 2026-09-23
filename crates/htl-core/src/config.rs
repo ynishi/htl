@@ -470,7 +470,7 @@ impl HtlConfig {
     /// file included, and the copy is code the project owns rather than a project of its
     /// own: one root, one store, one lint selection over the whole tree, the patched
     /// directories with it. The question is `pkg::owning_project`'s, asked here and by
-    /// [`Project::find`](crate::pkg::Project::find) so that the manifest and the config
+    /// [`Project::find`](crate::pkg::MluaProject::find) so that the manifest and the config
     /// cannot disagree about where the root is.
     pub fn find(start: &Path) -> Result<Option<(PathBuf, Self)>> {
         let mut dir = if start.is_dir() {

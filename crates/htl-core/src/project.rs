@@ -586,7 +586,7 @@ impl Origins {
     ) -> Self {
         let canon = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
         let mut dependency = Vec::new();
-        if let Some(p) = crate::pkg::Project::find(start) {
+        if let Some(p) = crate::pkg::MluaProject::find(start) {
             dependency.push(canon(p.pkgs_dir.clone()));
             dependency.extend(p.target_dirs.iter().cloned().map(canon));
         }

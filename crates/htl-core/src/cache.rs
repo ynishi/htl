@@ -848,7 +848,7 @@ pub fn root_for(path: &Path) -> Option<PathBuf> {
 /// **The rule is the whole `.htl/`, not the store.** Every write htl makes as a side
 /// effect of reading a project asks here first, and there are two: the run cache
 /// (`project::store_refusal`, which every reader of the store comes through) and the
-/// entry links ([`crate::pkg::Project::link_entries`], through
+/// entry links ([`crate::pkg::MluaProject::link_entries`], through
 /// [`Htl::apply_project`](crate::Htl::apply_project)). The link repair was outside the
 /// rule until #267, where it wrote `.htl/modules/entries/<dep>` into the tree `cargo
 /// package` had just built and cargo refused the tarball. A reader of a scratch tree

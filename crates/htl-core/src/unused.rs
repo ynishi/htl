@@ -469,13 +469,10 @@ fn unused_deps(
     edges: &HashMap<PathBuf, Vec<cache::RequireJson>>,
     reached: &HashSet<PathBuf>,
 ) -> Vec<Dependency> {
-    let Some(project) = crate::pkg::Project::find(root) else {
+    let Some(project) = crate::pkg::MluaProject::find(root) else {
         return Vec::new();
     };
-    let Ok(manifest) = crate::pkg::mlua_pkg::manifest::Manifest::from_path(&project.manifest)
-    else {
-        return Vec::new();
-    };
+    let declared = project.declared_deps();
     let mut names: HashSet<String> = HashSet::new();
     let mut paths: Vec<PathBuf> = Vec::new();
     for f in reached {
@@ -488,7 +485,7 @@ fn unused_deps(
         }
     }
     let mut out: Vec<Dependency> = Vec::new();
-    for name in manifest.deps.keys() {
+    for name in &declared {
         let prefix = format!("{name}.");
         if names
             .iter()

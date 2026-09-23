@@ -1297,7 +1297,7 @@ impl Htl {
     ///
     /// Read by the rules that are about a library the project has rather than about its own
     /// code — `htlx-available`, which is silent in a project without htl-x — and by nothing
-    /// else. Called by [`Htl::apply_project`](crate::pkg::Project) with what the lockfile
+    /// else. Called by [`Htl::apply_project`](crate::pkg::MluaProject) with what the lockfile
     /// linked; a state nobody calls it on has none, which is the answer a run outside a
     /// project should get.
     /// The names cross as a sequence and the set is built on the other side, rather than
@@ -2187,7 +2187,7 @@ pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
 /// whether to walk it depends on what the walk is for ([`patched_dirs`]).
 #[cfg(feature = "pkg")]
 pub fn project_skip_dirs(root: &Path) -> Vec<PathBuf> {
-    match pkg::Project::find(root) {
+    match pkg::MluaProject::find(root) {
         Some(p) => {
             let mut out = vec![p.pkgs_dir];
             out.extend(p.vendored_copies);
@@ -2214,7 +2214,7 @@ pub fn project_skip_dirs(_root: &Path) -> Vec<PathBuf> {
 /// [`collect_tl_skipping`] / [`testing::discover_tests_skipping`] to say so.
 #[cfg(feature = "pkg")]
 pub fn patched_dirs(root: &Path) -> Vec<PathBuf> {
-    match pkg::Project::find(root) {
+    match pkg::MluaProject::find(root) {
         Some(p) => p.patch_dirs(),
         None => Vec::new(),
     }
@@ -2239,7 +2239,7 @@ pub fn patched_dirs(_root: &Path) -> Vec<PathBuf> {
 /// the hash of a file the entry recorded catches a line changing inside one.
 #[cfg(feature = "pkg")]
 pub fn dependency_dirs(root: &Path) -> Vec<PathBuf> {
-    match pkg::Project::find(root) {
+    match pkg::MluaProject::find(root) {
         Some(p) => {
             let mut out = p.patch_search_dirs();
             out.push(p.entries);

@@ -697,7 +697,7 @@ reg.add(NativeResolver::new().add("host", |lua| { /* Rust table */ }));
 reg.add(htl::pkg::TealResolver::new("scripts")?);     // .tl / init.tl -> check + gen; .d.tl -> type-only table
 reg.add(mlua_pkg::resolvers::FsResolver::new("scripts")?);
 reg.install(h.lua())?;
-// or, with an mlua-pkg.toml: htl::pkg::Project::find(dir)?.registry()
+// or, with an mlua-pkg.toml: htl::pkg::MluaProject::find(dir)?.registry()
 ```
 
 A `.tl` that fails its type check is `Some(Err)` in mlua-pkg's terms: it never falls

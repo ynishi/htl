@@ -314,7 +314,7 @@ impl Project {
     /// answers to every relative path in it.
     pub fn discover(start: &Path) -> Result<Option<Self>> {
         let config = HtlConfig::find(start)?;
-        let manifest = pkg::Project::find(start);
+        let manifest = pkg::MluaProject::find(start);
         let (root, config) = match (config, manifest) {
             (None, None) => return Ok(None),
             (Some((path, cfg)), m) => {
@@ -352,7 +352,7 @@ impl Project {
         let manifest = root
             .join(pkg::MANIFEST_NAME)
             .is_file()
-            .then(|| pkg::Project::at(root));
+            .then(|| pkg::MluaProject::at(root));
 
         modules.push(own_module(root, &config, manifest.as_ref()));
         if let Some(m) = &manifest {
@@ -590,7 +590,7 @@ impl crate::Htl {
     /// are consulted ([`Project::search_dirs`]).
     pub fn apply_model(&self, project: &Project, view: View) -> Result<()> {
         if project.root.join(pkg::MANIFEST_NAME).is_file() {
-            self.prepare_deps(&pkg::Project::at(&project.root))?;
+            self.prepare_deps(&pkg::MluaProject::at(&project.root))?;
         }
         self.add_search_paths(&project.search_dirs(view))
     }
@@ -599,10 +599,9 @@ impl crate::Htl {
 /// The project's own module: named by `mlua-pkg.toml`'s `[package] name` when it has one
 /// that parses, by the root directory otherwise; mounted at the top; its roots from
 /// `[layout]`.
-fn own_module(root: &Path, config: &HtlConfig, manifest: Option<&pkg::Project>) -> Module {
+fn own_module(root: &Path, config: &HtlConfig, manifest: Option<&pkg::MluaProject>) -> Module {
     let name = manifest
-        .and_then(|m| mlua_pkg::manifest::Manifest::from_path(&m.manifest).ok())
-        .map(|m| m.package.name)
+        .and_then(pkg::MluaProject::package_name)
         .unwrap_or_else(|| {
             canon(root)
                 .file_name()
@@ -629,7 +628,7 @@ fn own_module(root: &Path, config: &HtlConfig, manifest: Option<&pkg::Project>) 
 /// regardless: the name is the dependency's, and only one copy is the one its names mean.
 /// A patch is what the project edits, so it wins; a vendored copy is what the manifest
 /// put in the tree, so it comes next; an installed dependency is the rest.
-fn dependency_modules(p: &pkg::Project) -> Vec<Module> {
+fn dependency_modules(p: &pkg::MluaProject) -> Vec<Module> {
     let mut out: Vec<Module> = Vec::new();
     let taken = |out: &[Module], name: &str| out.iter().any(|m| m.name == name);
     for patch in &p.patches {
@@ -664,9 +663,7 @@ fn dependency_modules(p: &pkg::Project) -> Vec<Module> {
         .filter(|e| e.path().is_dir())
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
-    if let Ok(lock) = mlua_pkg::lockfile::Lockfile::read(&p.lockfile) {
-        installed.extend(lock.pkg.into_iter().map(|l| l.name));
-    }
+    installed.extend(p.locked_deps());
     installed.sort();
     installed.dedup();
     for name in installed {

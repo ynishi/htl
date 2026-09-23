@@ -408,21 +408,31 @@ impl TealResolver {
     }
 }
 
-// ---------------------------------------------------------------- Project (mlua-pkg.toml)
+// ---------------------------------------------------------------- MluaProject (mlua-pkg.toml)
 
 /// An `mlua-pkg.toml` project: where the manifest, lockfile and installed deps live.
+///
+/// Named for mlua-pkg's own `Project`, which it wraps, and the one place htl reads
+/// mlua-pkg's manifest and lockfile. htl's own idea of a project is `model::Project`
+/// (compiled with the `dts` feature as well), which builds its dependency modules from this one's
+/// fields and methods ([`patches`](Self::patches), [`vendored_copies`](Self::vendored_copies),
+/// [`entries`](Self::entries), [`locked_deps`](Self::locked_deps),
+/// [`package_name`](Self::package_name)) and never from mlua-pkg's types: what mlua-pkg
+/// calls a thing, or how its files are laid out, can change here without the model
+/// hearing of it. The `htl pkg` commands are mlua-pkg's operations under htl's name, and
+/// reach its types through [`mlua_pkg`] directly.
 ///
 /// Installed deps go under [`pkgs_dir`] — `<root>/.htl/modules`, beside the check cache
 /// and regenerated the same way: from the manifest and the lockfile rather than from the
 /// project's own sources. Deps that are *committed* are the other thing, and they are
 /// declared: `target_dirs`.
 #[derive(Debug, Clone)]
-pub struct Project {
+pub struct MluaProject {
     /// The directory holding `mlua-pkg.toml`, and what every other path here is derived
-    /// from. Canonicalised when [`Project::find`] walked up to it, so two starting points
+    /// from. Canonicalised when [`MluaProject::find`] walked up to it, so two starting points
     /// under the same project produce the same paths.
     pub root: PathBuf,
-    /// `<root>/mlua-pkg.toml`. Recorded even when it does not parse: [`Project::at`] takes
+    /// `<root>/mlua-pkg.toml`. Recorded even when it does not parse: [`MluaProject::at`] takes
     /// what it can from a broken manifest and leaves the reporting of it to mlua-pkg, so a
     /// project with a syntax error still has a root and a cache directory to name.
     pub manifest: PathBuf,
@@ -445,7 +455,7 @@ pub struct Project {
     /// `pkgs_dir/entries`: one link per installed dep, pointing at the dep's `entry`
     /// directory below the root — `../vendored/<name>/<entry>` — so `require("<name>.x")`
     /// finds `<entry>/x.tl` under it. htl writes these from the lockfile
-    /// ([`Project::link_entries`]); mlua-pkg places the root and records the entry, and
+    /// ([`MluaProject::link_entries`]); mlua-pkg places the root and records the entry, and
     /// applies it by rewriting the module name in its own `.lua` resolver, which a checker
     /// resolving through `package.path` cannot do. A directory of links is the same fact in
     /// the form a path can express, and the one directory the `.tl` side searches.
@@ -464,7 +474,7 @@ pub struct Project {
     pub vendored_copies: Vec<PathBuf>,
     /// The `patch_dir` deps: a dependency's source taken into the tree, and what the
     /// manifest calls it. Unlike a `target_dir` copy, which install rewrites, this one is
-    /// the project's own code — [`Project::patch`] wrote it once and the project edits it
+    /// the project's own code — [`MluaProject::patch`] wrote it once and the project edits it
     /// from then on. What that means for the walkers is in [`crate::patched_dirs`].
     pub patches: Vec<Patched>,
 }
@@ -561,7 +571,7 @@ fn patch_entry(dir: &Path, over: Option<&Path>) -> PathBuf {
     mlua_pkg::resolve_entry(dir, None).unwrap_or_else(|_| dir.to_path_buf())
 }
 
-/// What [`Project::add`] did: mlua-pkg's own report, and what htl carried across it.
+/// What [`MluaProject::add`] did: mlua-pkg's own report, and what htl carried across it.
 ///
 /// `add` rewrites the whole `[deps.<name>]` entry, so a patch the entry declared would be
 /// dropped by it. `kept_patch_dir` is that key, put back — named here so the report can say
@@ -577,7 +587,7 @@ pub struct AddDone {
     pub kept_patch_dir: Option<PathBuf>,
 }
 
-/// What [`Project::patch`] did: mlua-pkg's own report, and what htl took back out of the
+/// What [`MluaProject::patch`] did: mlua-pkg's own report, and what htl took back out of the
 /// copy.
 ///
 /// The copy is made from a checkout rather than from a published archive, so it arrives
@@ -586,7 +596,7 @@ pub struct AddDone {
 /// dependency can see upstream and the patcher cannot find in `patches/<dep>` is a
 /// difference worth one line of output.
 ///
-/// `Project::patch` returned mlua-pkg's `PatchReport` bare until 0.6.3, which shipped
+/// `MluaProject::patch` returned mlua-pkg's `PatchReport` bare until 0.6.3, which shipped
 /// this type in its place as a patch release; 0.7.0 is the version that says an API
 /// moved, and the one a caller of the old shape should read `0.6` as stopping before.
 /// The same holds for [`Patched::entry`], which arrived in the same release.
@@ -607,7 +617,7 @@ pub struct PatchDone {
 /// `in_use` is false when the directory is gone, when the lockfile records no base for it,
 /// or when the pin has moved on from that base — the dependency then resolves to the
 /// upstream revision, and the copy sits in the tree unused until it is refreshed or
-/// removed. See [`Project::patch_status`].
+/// removed. See [`MluaProject::patch_status`].
 #[derive(Debug, Clone)]
 pub struct PatchStatus {
     /// The `[deps]` key the patched dependency is declared under.
@@ -632,7 +642,7 @@ pub const MANIFEST_NAME: &str = mlua_pkg::project::MANIFEST_FILE_NAME;
 /// The lockfile's file name, from mlua-pkg for the same reason as [`MANIFEST_NAME`].
 pub const LOCKFILE_NAME: &str = mlua_pkg::project::LOCKFILE_FILE_NAME;
 
-/// Where [`Project::patch`] puts a dependency it takes into the tree: `patches/<dep>`,
+/// Where [`MluaProject::patch`] puts a dependency it takes into the tree: `patches/<dep>`,
 /// beside the project's own sources rather than under [`pkgs_dir`]. One directory per
 /// dependency, named after it, so the path a diagnostic carries names the dependency it
 /// is in.
@@ -653,7 +663,7 @@ pub fn pkgs_dir(root: &Path) -> mlua_pkg::PkgDir {
 }
 
 /// The directory under [`pkgs_dir`] that holds one link per installed dep at that dep's
-/// `entry` — where `require` looks. See [`Project::entries`].
+/// `entry` — where `require` looks. See [`MluaProject::entries`].
 pub const ENTRIES_DIR: &str = "entries";
 
 /// The project that owns `dir`, when `dir` is a dependency's directory rather than a
@@ -664,21 +674,21 @@ pub const ENTRIES_DIR: &str = "entries";
 /// with its owner in turn when the copy is itself inside another copy. `None` when
 /// nothing above claims it.
 ///
-/// One question, asked by [`Project::find`] and by
+/// One question, asked by [`MluaProject::find`] and by
 /// [`HtlConfig::find`](crate::config::HtlConfig::find), because a directory that is not a
 /// project must not become one for either of them: the enclosing manifest decides, and a
 /// manifest that came along in the copy does not.
 pub(crate) fn owning_project(dir: &Path) -> Option<PathBuf> {
     let mut up = dir.to_path_buf();
     while up.pop() {
-        if up.join(MANIFEST_NAME).is_file() && Project::at(&up).declares(dir) {
+        if up.join(MANIFEST_NAME).is_file() && MluaProject::at(&up).declares(dir) {
             return Some(owning_project(&up).unwrap_or(up));
         }
     }
     None
 }
 
-impl Project {
+impl MluaProject {
     /// Walk up from `start` (a file or directory) looking for `mlua-pkg.toml`.
     ///
     /// **The nearest manifest is not always the project.** `htl pkg patch` copies a
@@ -725,7 +735,7 @@ impl Project {
             .any(|d| dir.starts_with(std::fs::canonicalize(&d).unwrap_or(d)))
     }
 
-    /// Project rooted at `root` (must contain `mlua-pkg.toml`; not checked here).
+    /// The project rooted at `root` (must contain `mlua-pkg.toml`; not checked here).
     pub fn at(root: &Path) -> Self {
         let inner = mlua_pkg::Project::in_dir(root, pkgs_dir(root));
         let manifest = inner.manifest_path().to_path_buf();
@@ -808,6 +818,32 @@ impl Project {
     /// `true` once `mlua-pkg install` has produced the lockfile.
     pub fn installed(&self) -> bool {
         self.lockfile.is_file()
+    }
+
+    /// The name the manifest's `[package]` gives this project, when the manifest parses.
+    /// What a consumer that depends on it would call it by default.
+    pub fn package_name(&self) -> Option<String> {
+        mlua_pkg::manifest::Manifest::from_path(&self.manifest)
+            .ok()
+            .map(|m| m.package.name)
+    }
+
+    /// The names the manifest's `[deps]` declares, sorted: each the name a `require` of
+    /// that dependency spells. Empty when the manifest does not parse.
+    pub fn declared_deps(&self) -> Vec<String> {
+        let mut names: Vec<String> = mlua_pkg::manifest::Manifest::from_path(&self.manifest)
+            .map(|m| m.deps.into_keys().collect())
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    /// The names the lockfile records as installed, in its order. Empty when there is no
+    /// lockfile or it does not parse.
+    pub fn locked_deps(&self) -> Vec<String> {
+        mlua_pkg::lockfile::Lockfile::read(&self.lockfile)
+            .map(|l| l.pkg.into_iter().map(|p| p.name).collect())
+            .unwrap_or_default()
     }
 
     /// Resolver for `.tl` / `.d.tl` inside installed deps (symlink-aware, like
@@ -1034,7 +1070,7 @@ impl Project {
     ///
     /// The report says what each one resolved to and where it was placed, including
     /// whether it came from a `patch_dir`; nothing is printed here. Declarations a
-    /// dependency publishes are a separate step ([`Project::sync_types`]) because they are
+    /// dependency publishes are a separate step ([`MluaProject::sync_types`]) because they are
     /// copied into the project rather than installed.
     pub fn install(&self) -> anyhow::Result<mlua_pkg::ops::InstallReport> {
         let report = mlua_pkg::ops::install(&self.config())?;
@@ -1396,7 +1432,7 @@ pub const TEAL_TYPES_GIT: &str = "https://github.com/teal-language/teal-types";
 /// What the `.src` notes call it.
 const TEAL_TYPES_NAME: &str = "teal-types";
 
-/// What [`Project::sync_types`] and [`Project::add_types`] did: one entry per declaration
+/// What [`MluaProject::sync_types`] and [`MluaProject::add_types`] did: one entry per declaration
 /// they were offered.
 #[derive(Debug, Default)]
 pub struct TypesSync {
@@ -1518,7 +1554,7 @@ impl crate::Htl {
     /// tell the checker which there are — everything [`apply_project`](Self::apply_project)
     /// does besides putting directories on the path.
     ///
-    /// The entry links under [`Project::entries`] are written for every dependency the
+    /// The entry links under [`MluaProject::entries`] are written for every dependency the
     /// lockfile records and the directory lacks, and the directory itself is created, so
     /// a path naming it has something to name. Neither happens under build scratch
     /// ([`crate::cache::scratch_root`]), which is read-only to htl. The names go to the
@@ -1530,7 +1566,7 @@ impl crate::Htl {
     /// `apply_project` calls this and then puts the dependencies' directories on the path;
     /// `apply_model`, which builds the path from the project model, calls this for the
     /// same reason.
-    pub fn prepare_deps(&self, p: &Project) -> anyhow::Result<()> {
+    pub fn prepare_deps(&self, p: &MluaProject) -> anyhow::Result<()> {
         let installed = p.link_entries()?;
         self.set_deps(&installed)?;
         if crate::cache::scratch_root(&p.root).is_none() {
@@ -1544,11 +1580,11 @@ impl crate::Htl {
     /// Make the project's installed deps visible to the Teal checker and to the
     /// prelude's strict searcher (`htl run` / `htl test` without a Registry).
     ///
-    /// The directory on the path is [`Project::entries`], where each dep is reached at its
+    /// The directory on the path is [`MluaProject::entries`], where each dep is reached at its
     /// `entry`; the links are written first if the lockfile calls for any that are missing.
     ///
     /// **A `patch_dir` dependency is on the path in its own right**, at
-    /// [`Project::patch_search_dirs`]. The copy is committed and the manifest names it,
+    /// [`MluaProject::patch_search_dirs`]. The copy is committed and the manifest names it,
     /// so the two together are the whole of what a `require` of that dependency needs:
     /// no install, no link, no network, and nothing that has to exist outside what a
     /// clone or a tarball carries. That is the arrangement `cargo vendor` and Go's
@@ -1569,7 +1605,7 @@ impl crate::Htl {
     /// the directories go on the search path whether or not they exist (a path that
     /// resolves nothing is what a tarball with no `.htl/` means, and the project's own
     /// `src/` is still there), and the dependency names still come from the lockfile.
-    pub fn apply_project(&self, p: &Project) -> anyhow::Result<()> {
+    pub fn apply_project(&self, p: &MluaProject) -> anyhow::Result<()> {
         self.prepare_deps(p)?;
         // First, which is to say last: `add_path` prepends, so what goes on here is what
         // the path consults after everything below. A checkout that has installed
