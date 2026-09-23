@@ -33,6 +33,8 @@ fn htl(args: &[&str], cwd: &Path) -> (bool, String, String) {
 /// not called either but is written on one line, where the body has no span of its own.
 fn project() -> PathBuf {
     let root = scratch("neverran");
+    // What makes the directory a project whose `src/` its tests read.
+    write(&root.join("htl.toml"), "");
     write(
         &root.join("src/combat.tl"),
         "local record combat\nend\n\n\

@@ -160,6 +160,8 @@ fn fail_fast_stops_after_the_first_failure_in_a_file() {
 fn session_shares_the_checker_but_not_program_state() {
     use htl_core::testing::TestSession;
     let dir = scratch("session");
+    // What makes the directory a project whose `src/` its tests read.
+    write(&dir.join("htl.toml"), "");
     // Module with state: a counter that survives only within one program state.
     write(
         &dir.join("src/counter.tl"),
@@ -328,6 +330,8 @@ fn snapshots_write_compare_diff_and_update() {
 fn coverage_reports_executed_statements_with_tl_line_numbers() {
     use htl_core::testing::TestSession;
     let dir = scratch("coverage");
+    // What makes the directory a project whose `src/` its tests read.
+    write(&dir.join("htl.toml"), "");
     write(
         &dir.join("src/rest.tl"),
         "local record rest\nend\n\n\

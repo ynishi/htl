@@ -992,14 +992,22 @@ fn report_dts(results: &[(PathBuf, bool)], root: &Path) {
     );
 }
 
-/// If `start` is inside an `mlua-pkg.toml` project, expose its vendored deps to the
-/// checker / strict searcher. Returns the project when found.
-fn apply_project(h: &Htl, start: &Path) -> Result<Option<htl::pkg::Project>> {
-    let Some(p) = htl::pkg::Project::find(start) else {
-        return Ok(None);
-    };
-    h.apply_project(&p)?;
-    Ok(Some(p))
+/// The project `start` belongs to, with `h` set up for its sources the way `htl check`
+/// sets up its checker: the model's directories on the search path, its installed
+/// dependencies made reachable. `None`, with nothing on the path, outside a project.
+///
+/// What one file may read beyond that — the test root, for a file under it; its own
+/// directory, for a file in no project — is [`project::file_view`], asked per file.
+fn apply_model(
+    h: &Htl,
+    cfg: &project::Config,
+    start: &Path,
+) -> Result<Option<htl::model::Project>> {
+    let model = project::model_of(cfg, start)?;
+    if let Some(m) = &model {
+        h.apply_model(m, htl::model::View::Source)?;
+    }
+    Ok(model)
 }
 
 /// What the run wrote, and — when a target was asked for by name — what it left alone. The
@@ -1888,13 +1896,8 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
     if !file_spec.is_empty() {
         h.configure_lints(&file_spec)?;
     }
-    if let Some(first) = paths.first() {
-        auto_dts(first)?;
-        apply_project(&h, first)?;
-    }
-    if let Some((root, _, c)) = &cfg {
-        h.apply_config(root, c)?;
-    }
+    auto_dts(&paths[0])?;
+    let model = apply_model(&h, &cfg, &paths[0])?;
     h.install_test_lib()?;
     h.install_std()?;
     let opts = FixOptions {
@@ -1966,13 +1969,17 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
     let (mut changed, mut deferred, mut reverted, mut errors_remaining) =
         (0usize, 0usize, 0usize, 0usize);
     for f in &files {
-        h.add_layout_paths(f)?;
+        // Put back after each file, as `htl check` does, so a file is fixed against what
+        // it may read and not also against the directories of the files before it.
+        let saved = h.search_path()?;
+        project::file_view(&h, model.as_ref(), f)?;
         let before = if flags.diff {
             std::fs::read_to_string(f).ok()
         } else {
             None
         };
         let out = fix_file(&h, f, &opts)?;
+        h.set_search_path(&saved)?;
         if out.contents.is_some() {
             changed += 1;
         }
@@ -2292,11 +2299,7 @@ fn cmd_resolve(module: &str, path: Option<&Path>, json: bool) -> Result<ExitCode
     // First, so that the project's own directories go in front of it as they do under
     // `htl run`: `add_path` prepends, and the report prints the order it searched.
     h.install_std()?;
-    apply_project(&h, start)?;
-    if let Some((root, _, c)) = &cfg {
-        h.apply_config(root, c)?;
-    }
-    let model = project::model_of(&cfg, start)?;
+    let model = apply_model(&h, &cfg, start)?;
     let rep = htl::resolve::resolve(
         &h,
         module,
@@ -2586,19 +2589,12 @@ fn report_check(
 fn cmd_gen(file: &Path, out: Option<&Path>) -> Result<ExitCode> {
     let h = Htl::new()?;
     auto_dts(file)?;
-    apply_project(&h, file)?;
     // The search path `htl check` gives this file, so `htl gen` resolves what `htl check`
-    // resolved: a module under a `[check] paths` directory or under `types/` is on the
-    // path here too, and a file the checker accepts is one this command can emit. Same
-    // call, same position, as `cmd_build`. Only the path gains entries — a `.tl` source
-    // anywhere on it still beats a `.d.tl`.
+    // resolved and a file the checker accepts is one this command can emit. Same calls, in
+    // the same order, as `cmd_run` and `cmd_build`.
     let cfg = load_config(file)?;
-    if let Some((root, _, c)) = &cfg {
-        h.apply_config(root, c)?;
-    }
-    // After the config, as `htl check` does per file: `add_path` prepends, so this leaves
-    // the file's own directory consulted first and the project's directories behind it.
-    h.add_layout_paths(file)?;
+    let model = apply_model(&h, &cfg, file)?;
+    project::file_view(&h, model.as_ref(), file)?;
     h.install_std()?;
     let (code, c) = h.gen_lua(file)?;
     text_sink().checkinfo(&c);
@@ -2619,15 +2615,12 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
     let bytes = fs::read(file).with_context(|| format!("reading {}", file.display()))?;
     let h = Htl::new()?;
     auto_dts(file)?;
-    apply_project(&h, file)?;
     // The search path `htl check` gives this file, so `htl run` resolves what `htl check`
-    // resolved rather than failing on a `require` the checker was happy with. Same call,
-    // same position, as `cmd_build`; it runs before the bundle branch because a bundle
-    // carries its own modules and gains nothing from it either way.
+    // resolved rather than failing on a `require` the checker was happy with. Same calls
+    // as `cmd_gen` and `cmd_build`; before the bundle branch because a bundle carries its
+    // own modules and gains nothing from it either way.
     let cfg = load_config(file)?;
-    if let Some((root, _, c)) = &cfg {
-        h.apply_config(root, c)?;
-    }
+    let model = apply_model(&h, &cfg, file)?;
     h.install_test_lib()?;
     h.install_std()?;
     if Bundle::is_bundle(&bytes) {
@@ -2643,7 +2636,7 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
         });
     }
     // Check first so lints/warnings are visible before the script runs.
-    h.add_layout_paths(file)?;
+    project::file_view(&h, model.as_ref(), file)?;
     h.install_searcher()?;
     h.set_arg(&file.to_string_lossy(), args)?;
     let (code, c) = h.gen_lua(file)?;
@@ -2681,14 +2674,13 @@ fn cmd_build(
 ) -> Result<ExitCode> {
     let h = Htl::new()?;
     auto_dts(entry)?;
-    apply_project(&h, entry)?;
     // `std.*` resolves to its declaration and nothing else, so the linker files it under
     // the host's modules — which is what it is: the binary that runs the bundle preloads
     // it, as `htl run` does before `run_bundle`.
     h.install_std()?;
     let cfg = load_config(entry)?;
-    if let Some((root, _, cfg)) = &cfg {
-        h.apply_config(root, cfg)?;
+    let model = apply_model(&h, &cfg, entry)?;
+    if let Some((_, _, cfg)) = &cfg {
         opts.extra.extend(cfg.build.extra.iter().cloned());
         opts.host.extend(cfg.build.host.iter().cloned());
         // The one thing `[build] target` changes: this command produces the `hb` target and
@@ -2711,10 +2703,10 @@ fn cmd_build(
         }
         return cmd_build_dir(&h, entry, out, main, &opts);
     }
-    h.add_layout_paths(entry)?;
+    project::file_view(&h, model.as_ref(), entry)?;
     // The name the entry is served under: the one the project's model gives the file,
     // which is what a `require` of it elsewhere in the project writes.
-    opts.entry_name = project::model_of(&cfg, entry)?.and_then(|m| m.locate(entry).map(|p| p.name));
+    opts.entry_name = model.as_ref().and_then(|m| m.locate(entry).map(|p| p.name));
     // The store: `module` entries keyed the way `htl test` and the macros key them — the
     // file the module is and the lint selection `htl.toml` puts in force — so a module any
     // of them generated is one the build replays, and the reverse. Nothing is swept here:

@@ -1497,8 +1497,19 @@ pub fn test<O: Output>(
     let mut cov_deps: BTreeSet<PathBuf> = Default::default();
     let (mut passed, mut failed, mut bad_files, mut ran_files) = (0usize, 0usize, 0usize, 0usize);
     let started = std::time::Instant::now();
-    // One checker for the run; each file still gets a fresh program state.
-    let session = TestSession::new(lint, lib, *filter, run)?;
+    // One checker for the run; each file still gets a fresh program state. The project's
+    // model says what every file may read, built once from the config already loaded.
+    let model_root = cfg.as_ref().map(|(r, _, _)| r.clone()).unwrap_or_else(|| {
+        files
+            .first()
+            .map(|f| crate::parent_dir(f))
+            .unwrap_or_else(|| PathBuf::from("."))
+    });
+    let model = model_of(cfg, &model_root)?;
+    let mut session = TestSession::new(lint, lib, *filter, run)?;
+    if let Some(m) = &model {
+        session = session.for_project(m.clone());
+    }
 
     // Checking a test file and generating its Lua is most of what a run costs — the tests
     // themselves are a few percent of it — and none of that work depends on the outcome, so
@@ -1513,7 +1524,6 @@ pub fn test<O: Output>(
     let cfg_inputs: Vec<PathBuf> = cfg.iter().map(|(_, p, _)| p.clone()).collect();
 
     let mut replayed = 0usize;
-    let model = model_of(cfg, &root)?;
     let harvest = store.as_ref().map(|c| Harvest {
         store: c,
         session: &session,

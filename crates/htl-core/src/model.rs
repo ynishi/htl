@@ -57,10 +57,15 @@
 //! # What this module does not do yet
 //!
 //! A name still resolves through `package.path`: the model decides which directories go
-//! on it ([`Project::search_dirs`]), and the Teal checker searches them. `htl check`, the
-//! names `htl unused` reports, the origins `htl resolve` reports and the entry name of a
-//! bundle come from the model; `htl test`, `htl fix` / `gen` / `run` / `build`, the
-//! macros and the run cache's key still assemble the path their own way. Host modules — the `.d.tl` a Rust host generates from
+//! on it ([`Project::search_dirs`]), and the Teal checker searches them. Every command
+//! that checks, runs or bundles a file sets its checker up from the model — `htl check`,
+//! `test`, `fix`, `gen`, `run`, `build`, `resolve` and the `include_tl!` /
+//! `include_bundle!` macros — and a file that belongs to no project reads its own
+//! directory instead ([`project::file_view`](crate::project::file_view)). The run cache
+//! still keys an entry on a list of directories of its own. It holds every directory
+//! listed here but one — the test root, of which it has only the directory of the test
+//! file — so a helper added directly under `tests/` is not seen by an entry for a test in
+//! a subdirectory of it. Host modules — the `.d.tl` a Rust host generates from
 //! `#[host_module]` — are not loaded here: they are known to whoever compiled the host,
 //! and enter a project through the file they are written to.
 
@@ -474,8 +479,13 @@ impl Project {
     /// own directory otherwise, which resolves `x` to `<entry>/x.tl` and nothing below
     /// it — the one mount a path cannot express.
     ///
+    /// Contract directories are not listed. Each holds modules written against one record,
+    /// and a `sites/*` contract is a row of directories holding the *same* names — one
+    /// `one.tl` per site — so on one path they would hide each other. A contract directory
+    /// is checked on its own, against its contract.
+    ///
     /// The order is the project's own roots, then shipped declarations, then
-    /// dependencies, then what the project accepts from outside. It decides nothing the
+    /// dependencies, then `[check] paths`. It decides nothing the
     /// model does not already decide, except between two files in different modules that
     /// answer one name. That is a conflict the model does not report yet; until it does,
     /// the order is what picks, and it picks the project's own file first.
@@ -506,7 +516,7 @@ impl Project {
                 _ => out.push(root.clone()),
             }
         }
-        for m in owned_by(|o| matches!(o, Owner::Contract | Owner::External)) {
+        for m in owned_by(|o| matches!(o, Owner::External)) {
             out.extend(m.roots.source.clone());
         }
         let mut seen: Vec<PathBuf> = Vec::new();
@@ -864,6 +874,33 @@ mod tests {
         );
         let test = p.search_dirs(View::Test);
         assert!(test.contains(&root.join("tests")), "{test:?}");
+    }
+
+    #[test]
+    fn contract_directories_stay_off_the_search_path() {
+        let module = |name: &str, owner: Owner, dir: &str| Module {
+            name: name.into(),
+            owner,
+            mount: String::new(),
+            roots: Roots {
+                source: Some(PathBuf::from(dir)),
+                ..Roots::default()
+            },
+        };
+        let p = Project {
+            root: PathBuf::from("/p"),
+            config: HtlConfig::default(),
+            modules: vec![
+                module("p", Owner::Own, "/p/src"),
+                module("sites/a", Owner::Contract, "/p/sites/a"),
+                module("sites/b", Owner::Contract, "/p/sites/b"),
+                module("vendor", Owner::External, "/p/vendor"),
+            ],
+            problems: Vec::new(),
+        };
+        let dirs = p.search_dirs(View::Source);
+        assert!(!dirs.iter().any(|d| d.starts_with("/p/sites")), "{dirs:?}");
+        assert!(dirs.contains(&PathBuf::from("/p/vendor")), "{dirs:?}");
     }
 
     #[test]

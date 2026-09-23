@@ -316,6 +316,12 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
+`include_tl!` checks the file with the search path `htl check` gives it. In a project —
+an `htl.toml` or `mlua-pkg.toml` above the file — that is the project's `[layout]`
+directories and its dependencies, so a crate whose Teal lives in `scripts/` says
+`[layout] source = "scripts"`. A crate with neither file is no project, and the file
+reads the modules beside it.
+
 `exec` passes its arguments to the script as `...` and nothing else. A script that reads
 `arg[1]`, as `htl run` lets it, needs `h.set_arg("main.tl", &args)?` before `exec`: that
 fills the `arg` table the way the `lua` CLI and `htl run` do, so the same `main.tl` runs

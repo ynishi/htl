@@ -1344,25 +1344,6 @@ impl Htl {
         Ok(())
     }
 
-    /// Search paths implied by where `file` sits in the scaffold layout, in the order
-    /// they are consulted: its own directory first, and for a file under `tests/` then
-    /// the project root and `<root>/src` (the test runner's rule, so `htl check tests`
-    /// sees what `htl test` sees).
-    pub fn add_layout_paths(&self, file: &Path) -> Result<()> {
-        let dir = parent_dir(file);
-        let mut dirs = vec![dir.clone()];
-        if dir.file_name().is_some_and(|n| n == "tests")
-            && let Some(root) = dir.parent()
-        {
-            dirs.push(root.to_path_buf());
-            let src = root.join("src");
-            if src.is_dir() {
-                dirs.push(src);
-            }
-        }
-        self.add_search_paths(&dirs)
-    }
-
     /// Prepend `dir/?.tl;dir/?/init.tl` to `package.path` (Teal resolves requires through it).
     pub fn add_path(&self, dir: &Path) -> Result<()> {
         let f: Function = self.h.get("add_path")?;

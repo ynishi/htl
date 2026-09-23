@@ -64,7 +64,7 @@ fn one_candidate_is_reported_as_the_file_that_is_read() {
     assert!(out.contains("htl resolve util: src/util.tl"), "{out}");
     assert_eq!(row(&out, "src/util.tl"), "1 src/util.tl source read");
     // The directories are half the answer, so they are printed whatever was found.
-    assert!(out.contains("searched, in order: ., src"), "{out}");
+    assert!(out.contains("searched, in order: src, types"), "{out}");
 }
 
 /// Three declarations of one name, and the order is the whole reason one of them is in
@@ -160,7 +160,7 @@ fn a_name_that_resolves_to_nothing_says_so_and_exits_non_zero() {
         "{out}"
     );
     // What was looked at is the useful half of a report with no rows in it.
-    assert!(out.contains("searched, in order: ., src"), "{out}");
+    assert!(out.contains("searched, in order: src, types"), "{out}");
 }
 
 #[test]
