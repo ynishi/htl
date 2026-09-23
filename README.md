@@ -123,9 +123,11 @@ error: .htl/modules/entries/mathx/init.tl:12:8: in local declaration: got string
 requirer's own diagnostics. Paths read against the directory the command ran in, whether
 the walk or a `require` found the file, and one that lies outside it is written in full
 rather than as a stack of `..`. `htl run` would refuse the module at that `require`; the
-check says so first. Files under `tests/` are checked with the
-project root and `src/` on the search path, the same as `htl test`, so `htl check tests`
-and `htl test` agree.
+check says so first. A file under the project's `tests/` is checked with the project's
+sources and `tests/` itself on the search path, the same as `htl test`, so `htl check
+tests` and `htl test` agree; the project's sources cannot `require` what is under
+`tests/`. A file with neither an `htl.toml` nor an `mlua-pkg.toml` above it belongs to
+no project, and resolves its `require`s in its own directory.
 
 A failure at run time names Teal, not the Lua htl generated — the file and the line that
 raised, and the same for every frame that reached it. `htl run boom.tl`, where `boom.tl`
@@ -1359,8 +1361,9 @@ directory.
 
 `[check] paths` is for modules the host supplies at run time from somewhere the
 checker would not look (an SDK cache, a mods dir): the CLI, `include_tl!` and
-`contract_resolvers` all add them, plus the `htl.toml` dir and the two `[layout]`
-directories. `types/` is the conventional home for `.d.tl` (the DefinitelyTyped shape:
+`contract_resolvers` all add them, beside the two `[layout]` directories. `htl check`
+does not search the `htl.toml` directory itself: a `.tl` there is the project's only when
+`source = "."` says the sources are there. `types/` is the conventional home for `.d.tl` (the DefinitelyTyped shape:
 declarations the module's author did not ship), searched without any configuration;
 `htl new` creates it.
 

@@ -56,11 +56,11 @@
 //!
 //! # What this module does not do yet
 //!
-//! It builds the model and answers questions about files. Checking, testing, building
-//! and the run cache still assemble `package.path` the way they did before, and a name
-//! still resolves through that path. Moving each of them onto the model is what the model
-//! is for; until then it is a description of the project that the rest of htl can be
-//! compared against. Host modules — the `.d.tl` a Rust host generates from
+//! A name still resolves through `package.path`: the model decides which directories go
+//! on it ([`Project::search_dirs`]), and the Teal checker searches them. `htl check`, the
+//! names `htl unused` reports, the origins `htl resolve` reports and the entry name of a
+//! bundle come from the model; `htl test`, `htl fix` / `gen` / `run` / `build`, the
+//! macros and the run cache's key still assemble the path their own way. Host modules — the `.d.tl` a Rust host generates from
 //! `#[host_module]` — are not loaded here: they are known to whoever compiled the host,
 //! and enter a project through the file they are written to.
 
@@ -446,6 +446,93 @@ impl Project {
     }
 }
 
+/// What a checker is being set up to check, which decides the roots it may read from.
+///
+/// A test may `require` a helper beside it under the test root; the project's sources
+/// may not reach into its tests. Everything else is visible from both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    /// The project's own sources, and anything they reach.
+    Source,
+    /// A test file: the sources' view plus the project's test root.
+    Test,
+}
+
+impl Project {
+    /// The directories to put on `package.path` for `view`, in the order they are
+    /// consulted.
+    ///
+    /// This is where the model meets Lua's search: each module contributes the
+    /// directories that make its files answer to the names [`Module::name_of`] gives
+    /// them. For a module mounted at the top that is its roots themselves. For a
+    /// dependency mounted at `x` it is the directory *holding* a directory named `x` —
+    /// `package.path`'s templates are `<dir>/?.lua` and `<dir>/?/init.lua`, so only a
+    /// directory named after the mount turns `x.sub` into a file. An installed
+    /// dependency's link `entries/x` is named so, and `entries/` goes on the path once
+    /// for all of them; a vendored copy is its own directory named after the dependency;
+    /// a patched copy's entry is named after it in the usual layout (`src/x`), and is its
+    /// own directory otherwise, which resolves `x` to `<entry>/x.tl` and nothing below
+    /// it — the one mount a path cannot express.
+    ///
+    /// The order is the project's own roots, then shipped declarations, then
+    /// dependencies, then what the project accepts from outside. It decides nothing the
+    /// model does not already decide, except between two files in different modules that
+    /// answer one name. That is a conflict the model does not report yet; until it does,
+    /// the order is what picks, and it picks the project's own file first.
+    ///
+    /// htl's own library is not listed: [`install_test_lib`](crate::Htl::install_test_lib)
+    /// and `install_std` write it and put it on the path themselves. Directories are
+    /// listed whether or not they exist, because the run cache keys an entry on them and a
+    /// directory created later changes what a name means.
+    pub fn search_dirs(&self, view: View) -> Vec<PathBuf> {
+        let own = self.own();
+        let mut out: Vec<PathBuf> = Vec::new();
+        out.extend(own.roots.source.clone());
+        out.extend(own.roots.decl.clone());
+        if view == View::Test {
+            out.extend(own.roots.test.clone());
+        }
+        let owned_by = |o: fn(&Owner) -> bool| self.modules.iter().filter(move |m| o(&m.owner));
+        for m in owned_by(|o| matches!(o, Owner::Crate { .. })) {
+            out.extend(m.roots.decl.clone());
+        }
+        for m in owned_by(|o| matches!(o, Owner::Patched | Owner::Vendored | Owner::Installed)) {
+            let Some(root) = &m.roots.source else {
+                continue;
+            };
+            let named_after_mount = root.file_name().is_some_and(|f| f == m.mount_last());
+            match root.parent() {
+                Some(up) if named_after_mount => out.push(up.to_path_buf()),
+                _ => out.push(root.clone()),
+            }
+        }
+        for m in owned_by(|o| matches!(o, Owner::Contract | Owner::External)) {
+            out.extend(m.roots.source.clone());
+        }
+        let mut seen: Vec<PathBuf> = Vec::new();
+        out.retain(|d| {
+            let c = canon(d);
+            let fresh = !seen.contains(&c);
+            seen.push(c);
+            fresh
+        });
+        out
+    }
+}
+
+impl crate::Htl {
+    /// Set this checker up for `project`, as `view` sees it: its installed dependencies
+    /// made reachable ([`prepare_deps`](crate::Htl::prepare_deps), when the project has an
+    /// `mlua-pkg.toml`), then the model's directories on the search path in the order they
+    /// are consulted ([`Project::search_dirs`]).
+    pub fn apply_model(&self, project: &Project, view: View) -> Result<()> {
+        if project.root.join(pkg::MANIFEST_NAME).is_file() {
+            self.prepare_deps(&pkg::Project::at(&project.root))?;
+        }
+        self.add_search_paths(&project.search_dirs(view))
+    }
+}
+
 /// The project's own module: named by `mlua-pkg.toml`'s `[package] name` when it has one
 /// that parses, by the root directory otherwise; mounted at the top; its roots from
 /// `[layout]` and [`TESTS_DIR`].
@@ -751,6 +838,32 @@ mod tests {
         assert_eq!((d.role, d.name.as_str()), (Role::Decl, "host"));
         let s = p.locate(Path::new("/p/scripts/main.tl")).unwrap();
         assert_eq!((s.role, s.name.as_str()), (Role::Source, "main"));
+    }
+
+    #[test]
+    fn search_dirs_put_a_dependency_s_parent_on_the_path_and_tests_only_for_tests() {
+        let root = scratch("search");
+        write(
+            &root.join(pkg::MANIFEST_NAME),
+            "[package]\nname = \"game\"\nversion = \"0.1.0\"\n\n\
+             [deps.lshape]\ngit = \"https://example.invalid/lshape\"\ntag = \"v1\"\ntarget_dir = \"lua/lshape\"\n",
+        );
+        write(&root.join("lua/lshape/init.tl"), "");
+        write(&root.join(".htl/modules/entries/mq/init.tl"), "");
+        let p = Project::load(&root, HtlConfig::default()).unwrap();
+
+        let src = p.search_dirs(View::Source);
+        assert_eq!(src[0], root.join("src"));
+        assert_eq!(src[1], root.join("types"));
+        assert!(src.contains(&root.join("lua")), "{src:?}");
+        assert!(src.contains(&root.join(".htl/modules/entries")), "{src:?}");
+        assert!(!src.contains(&root.join("tests")), "{src:?}");
+        assert!(
+            !src.contains(&root),
+            "the root is not a source root: {src:?}"
+        );
+        let test = p.search_dirs(View::Test);
+        assert!(test.contains(&root.join("tests")), "{test:?}");
     }
 
     #[test]

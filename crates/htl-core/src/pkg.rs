@@ -1512,6 +1512,33 @@ pub fn contract_resolvers(
 }
 
 impl crate::Htl {
+    /// Bring the project's installed dependencies to where a `require` can read them, and
+    /// tell the checker which there are — everything [`apply_project`](Self::apply_project)
+    /// does besides putting directories on the path.
+    ///
+    /// The entry links under [`Project::entries`] are written for every dependency the
+    /// lockfile records and the directory lacks, and the directory itself is created, so
+    /// a path naming it has something to name. Neither happens under build scratch
+    /// ([`crate::cache::scratch_root`]), which is read-only to htl. The names go to the
+    /// rules that are about a library the project has rather than about its own code
+    /// (`htlx-available`): the lockfile's rather than the manifest's, because a dependency
+    /// nothing installed is one `require` cannot reach, and advice to use it would be
+    /// advice to fail a check.
+    ///
+    /// `apply_project` calls this and then puts the dependencies' directories on the path;
+    /// `apply_model`, which builds the path from the project model, calls this for the
+    /// same reason.
+    pub fn prepare_deps(&self, p: &Project) -> anyhow::Result<()> {
+        let installed = p.link_entries()?;
+        self.set_deps(&installed)?;
+        if crate::cache::scratch_root(&p.root).is_none() {
+            let _ = std::fs::create_dir_all(&p.entries);
+        }
+        Ok(())
+    }
+}
+
+impl crate::Htl {
     /// Make the project's installed deps visible to the Teal checker and to the
     /// prelude's strict searcher (`htl run` / `htl test` without a Registry).
     ///
@@ -1541,21 +1568,13 @@ impl crate::Htl {
     /// resolves nothing is what a tarball with no `.htl/` means, and the project's own
     /// `src/` is still there), and the dependency names still come from the lockfile.
     pub fn apply_project(&self, p: &Project) -> anyhow::Result<()> {
-        let installed = p.link_entries()?;
-        // The names, for the rules that are about a library the project has rather than
-        // about its own code (`htlx-available`). The lockfile's rather than the manifest's:
-        // a dependency nothing installed is one `require` cannot reach, and advice to use
-        // it would be advice to fail a check.
-        self.set_deps(&installed)?;
+        self.prepare_deps(p)?;
         // First, which is to say last: `add_path` prepends, so what goes on here is what
         // the path consults after everything below. A checkout that has installed
         // resolves through its links exactly as it did before, and the copy answers where
         // there are none — a tarball, a clone nobody has installed in yet.
         for d in p.patch_search_dirs() {
             self.add_path(&d)?;
-        }
-        if crate::cache::scratch_root(&p.root).is_none() {
-            let _ = std::fs::create_dir_all(&p.entries);
         }
         self.add_path(&p.entries)?;
         for d in &p.target_dirs {

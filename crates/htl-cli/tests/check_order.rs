@@ -95,12 +95,15 @@ fn walking_a_tree_agrees_with_checking_its_files_one_at_a_time() {
     );
 }
 
-/// `add_layout_paths` deliberately puts the project root and `src/` on the path for a file
-/// under `tests/`, so that `htl check tests` sees what `htl test` sees. Restoring the path
-/// per file must not take that away.
+/// A file under the project's test root reads the project's sources, so that `htl check
+/// tests` sees what `htl test` sees. Restoring the path per file must not take that away.
+///
+/// The `htl.toml` is what makes the directory a project: without one there is no source
+/// root to read, and a file resolves its `require`s beside it and nowhere else.
 #[test]
 fn a_test_file_still_sees_the_project_root_and_src() {
     let root = scratch("tests-layout");
+    write(&root.join("htl.toml"), "");
     write(
         &root.join("src/util.tl"),
         "local record util\nend\nfunction util.f(): integer\n   return 1\nend\nreturn util\n",
