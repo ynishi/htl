@@ -130,8 +130,10 @@ Refs #<issue>
 - The version bump is not written by hand. A dispatch of the `Release-plz` workflow
   opens a release PR with the bump and the CHANGELOG, and merging it publishes
   (`release-plz.toml` says how). The subject decides the size of the next release:
-  a PR whose title starts with `feat:` makes it a minor, which on 0.x is the unit
-  that changes what a scaffold or a release pin can know; anything else is a patch.
+  a commit whose subject starts with `feat:` makes it a minor, which on 0.x is the
+  unit that changes what a scaffold or a release pin can know; anything else is a
+  patch. Every commit of a pull request reaches `main` — see Pull requests — so it
+  is the commits release-plz reads, not the title the pull request carried.
 - `feat:` is also what a change to a published crate's public API asks for — a
   signature, a return type, a field on a public struct, whatever a consumer of
   `htl-core`, `htl-macros` or `htl` could have written against. On 0.x cargo treats
@@ -153,6 +155,19 @@ Refs #<issue>
 One issue per pull request, against `main`. Before opening it, run `just pre-push`
 on the final tree, plus the installed-binary run above when the change calls for
 one.
+
+**A pull request is merged with a rebase, never a squash, and the repository no
+longer allows one.** Every commit on the branch reaches `main` as it stands. That
+is the point: a squash leaves one commit saying what the change was and nothing
+saying how it got there — what was tried, what turned out to be wrong, what the
+fix had to become — and the next person to work near it, human or agent, reads
+the history and learns none of it. The cost is paid every time afterwards, in
+judgements made again from scratch.
+
+So write the branch for that reader. A commit is a step of the work, not a
+checkpoint: one that reverses an earlier decision says which and why, and one
+that fixes a mistake says what the mistake was. A branch with several commits is
+expected and is not something to tidy away before opening the pull request.
 
 The body records what changed, what was verified (the commands and their
 outcome, and on which project), and what it deliberately does not cover, and

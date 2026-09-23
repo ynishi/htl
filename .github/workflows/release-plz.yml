@@ -43,6 +43,9 @@ jobs:
           command: release-pr
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+      # `--rebase`, never `--squash`: the repository does not allow a squash, and a
+      # merge that collapses a pull request loses the record of how the work went.
+      # CONTRIBUTING, "Pull requests", says why.
       - name: Arm auto-merge on the release PR
         if: ${{ inputs.auto_merge && steps.release-pr.outputs.prs != '[]' }}
         env:
@@ -50,7 +53,7 @@ jobs:
           PRS: ${{ steps.release-pr.outputs.prs }}
         run: |
           for n in $(echo "$PRS" | jq -r '.[].number'); do
-            gh pr merge "$n" --auto --squash
+            gh pr merge "$n" --auto --rebase
           done
 
   # Publishes the five crates and pushes the v<version> tag when the release PR
