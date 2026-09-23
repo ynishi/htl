@@ -417,6 +417,21 @@ pub fn model_of(config: &Config, first: &Path) -> Result<Option<crate::model::Pr
     }
 }
 
+/// The directories a walk over `paths` for `purpose` does not enter: the project model's
+/// answer ([`crate::model::Project::not_walked`]) when there is a model, and outside a
+/// project the patched dependencies below `paths` for any purpose but checking.
+pub fn not_walked(
+    model: Option<&crate::model::Project>,
+    paths: &[PathBuf],
+    purpose: crate::model::Purpose,
+) -> Vec<PathBuf> {
+    match model {
+        Some(m) => m.not_walked(purpose),
+        None if purpose == crate::model::Purpose::Check => Vec::new(),
+        None => patched(paths),
+    }
+}
+
 /// The patched dependencies below `paths` — `patch_dir` deps, as directories.
 ///
 /// What a check walks and formatting or a test run does not: the copy is the project's

@@ -54,6 +54,14 @@
 //! and the inner root is the one that owns what is under it. So a file has one owner and
 //! one name, and the outer root's module does not also claim it under a longer name.
 //!
+//! # Which files a walk visits
+//!
+//! A module's roots are where its names are read from; its home ([`Module::home`]) is the
+//! directory it owns as a whole. A walk over the tree — the files `htl check` checks,
+//! `htl fmt` formats, `htl test` runs — decides whose files it enters by owner
+//! ([`Purpose`], [`Project::not_walked`]): never a dependency an install writes, a
+//! patched dependency only to check it.
+//!
 //! # What this module does not do yet
 //!
 //! A name still resolves through `package.path`: the model decides which directories go
@@ -114,6 +122,16 @@ pub struct Module {
     pub mount: String,
     /// Where its files are, by role.
     pub roots: Roots,
+    /// The directory the module owns as a whole, when it has one: everything below it is
+    /// the module's, whether or not a root reaches it.
+    ///
+    /// Not the same as its roots. A patched dependency's names are read from its entry
+    /// (`patches/mathx/src/mathx`), but the copy is `patches/mathx/`, its tests and its
+    /// manifest included; a walk deciding whether a file is the project's to format asks
+    /// about the copy. For the project's own module it is the project root, which holds
+    /// every other module's home that sits inside the tree — the most specific home
+    /// answers ([`Project::not_walked`]).
+    pub home: Option<PathBuf>,
 }
 
 /// How a module came to be in the project, which decides what may be done to its files.
@@ -357,6 +375,7 @@ impl Project {
                         source: Some(dir.clone()),
                         ..Roots::default()
                     },
+                    home: Some(dir.clone()),
                 });
                 accepted.push(dir);
             }
@@ -377,6 +396,7 @@ impl Project {
                     source: Some(dir.clone()),
                     ..Roots::default()
                 },
+                home: Some(dir.clone()),
             });
             accepted.push(dir);
         }
@@ -388,6 +408,7 @@ impl Project {
                 decl: Some(crate::lib_dir()),
                 ..Roots::default()
             },
+            home: Some(crate::lib_dir()),
         });
         Ok(Self {
             root: root.to_path_buf(),
@@ -523,6 +544,45 @@ impl Project {
     }
 }
 
+/// What a walk over a project's files is for, which decides whose files it enters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    /// Reporting what is wrong: `htl check`, `htl fix`. A patched dependency is entered —
+    /// the copy is the project's code, and its errors are the project's to fix.
+    Check,
+    /// Changing or judging the project's own code: `htl fmt`, `htl unused`. A patched
+    /// dependency is left alone — its change is a diff against the revision it came from,
+    /// and a reformatting of every file would bury it; what reaches it lives upstream.
+    Own,
+    /// Running the project's tests: `htl test`. A patched dependency's tests are its own
+    /// suite, and running them would report a library's failures as the project's.
+    Test,
+}
+
+impl Project {
+    /// The directories a walk for `purpose` does not enter: the homes of the modules
+    /// whose files are not the walk's to visit.
+    ///
+    /// An installed or vendored dependency is never entered: `mlua-pkg install` writes
+    /// it, and every file in it is someone else's. A patched one is entered only to
+    /// check it. The project's own module, contract directories and `[check] paths`
+    /// inside the tree are walked as they always were; declarations a crate shipped are
+    /// `.d.tl`, which no walk collects. Directories a walk never enters whatever it is for
+    /// — build output, dot-directories — are the walker's own rule
+    /// ([`crate::is_skipped_dir`]).
+    pub fn not_walked(&self, purpose: Purpose) -> Vec<PathBuf> {
+        self.modules
+            .iter()
+            .filter(|m| match m.owner {
+                Owner::Installed | Owner::Vendored => true,
+                Owner::Patched => purpose != Purpose::Check,
+                _ => false,
+            })
+            .filter_map(|m| m.home.clone())
+            .collect()
+    }
+}
+
 impl crate::Htl {
     /// Set this checker up for `project`, as `view` sees it: its installed dependencies
     /// made reachable ([`prepare_deps`](crate::Htl::prepare_deps), when the project has an
@@ -558,6 +618,7 @@ fn own_module(root: &Path, config: &HtlConfig, manifest: Option<&pkg::Project>) 
             test: Some(resolve_path(root, &config.layout.tests)),
             decl: Some(resolve_path(root, &config.layout.types)),
         },
+        home: Some(root.to_path_buf()),
     }
 }
 
@@ -572,7 +633,12 @@ fn dependency_modules(p: &pkg::Project) -> Vec<Module> {
     let mut out: Vec<Module> = Vec::new();
     let taken = |out: &[Module], name: &str| out.iter().any(|m| m.name == name);
     for patch in &p.patches {
-        out.push(dependency(&patch.name, Owner::Patched, patch.entry.clone()));
+        out.push(dependency(
+            &patch.name,
+            Owner::Patched,
+            patch.entry.clone(),
+            patch.dir.clone(),
+        ));
     }
     for copy in &p.vendored_copies {
         let name = copy
@@ -580,7 +646,12 @@ fn dependency_modules(p: &pkg::Project) -> Vec<Module> {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
         if !taken(&out, &name) {
-            out.push(dependency(&name, Owner::Vendored, copy.clone()));
+            out.push(dependency(
+                &name,
+                Owner::Vendored,
+                copy.clone(),
+                copy.clone(),
+            ));
         }
     }
     // Installed: every link under `entries/`, which is where a `require` reads an
@@ -601,13 +672,16 @@ fn dependency_modules(p: &pkg::Project) -> Vec<Module> {
     for name in installed {
         if !taken(&out, &name) {
             let entry = p.entries.join(&name);
-            out.push(dependency(&name, Owner::Installed, entry));
+            let home = p.vendored.join(&name);
+            out.push(dependency(&name, Owner::Installed, entry, home));
         }
     }
     out
 }
 
-fn dependency(name: &str, owner: Owner, entry: PathBuf) -> Module {
+/// A dependency's module: its names read from `entry` under its own name, the whole of
+/// `home` its own.
+fn dependency(name: &str, owner: Owner, entry: PathBuf, home: PathBuf) -> Module {
     Module {
         name: name.to_string(),
         owner,
@@ -616,6 +690,7 @@ fn dependency(name: &str, owner: Owner, entry: PathBuf) -> Module {
             source: Some(entry),
             ..Roots::default()
         },
+        home: Some(home),
     }
 }
 
@@ -642,9 +717,10 @@ fn crate_modules(decl_root: &Path) -> Vec<Module> {
                 },
                 mount: String::new(),
                 roots: Roots {
-                    decl: Some(dir),
+                    decl: Some(dir.clone()),
                     ..Roots::default()
                 },
+                home: Some(dir),
             }
         })
         .collect()
@@ -740,6 +816,7 @@ mod tests {
             owner: Owner::Installed,
             mount: "lshape".into(),
             roots: Roots::default(),
+            home: None,
         };
         let root = Path::new("/p/.htl/modules/entries/lshape");
         let n = |f: &str| dep.name_of(root, &root.join(f));
@@ -758,6 +835,7 @@ mod tests {
             owner: Owner::Own,
             mount: String::new(),
             roots: Roots::default(),
+            home: None,
         };
         let root = Path::new("/p/src");
         assert_eq!(own.name_of(root, &root.join("init.tl")), None);
@@ -830,6 +908,7 @@ mod tests {
                 test: None,
                 decl: Some(PathBuf::from("/p/scripts")),
             },
+            home: None,
         };
         let p = Project {
             root: PathBuf::from("/p"),
@@ -879,6 +958,7 @@ mod tests {
                 source: Some(PathBuf::from(dir)),
                 ..Roots::default()
             },
+            home: Some(PathBuf::from(dir)),
         };
         let p = Project {
             root: PathBuf::from("/p"),
@@ -894,6 +974,30 @@ mod tests {
         let dirs = p.search_dirs(View::Source);
         assert!(!dirs.iter().any(|d| d.starts_with("/p/sites")), "{dirs:?}");
         assert!(dirs.contains(&PathBuf::from("/p/vendor")), "{dirs:?}");
+    }
+
+    #[test]
+    fn a_walk_skips_a_dependency_s_whole_copy_and_a_patch_only_when_not_checking() {
+        let root = scratch("walk");
+        write(
+            &root.join(pkg::MANIFEST_NAME),
+            "[package]\nname = \"game\"\nversion = \"0.1.0\"\n\n\
+             [deps.mathx]\ngit = \"https://example.invalid/mathx\"\ntag = \"v1\"\npatch_dir = \"patches/mathx\"\n\n\
+             [deps.lshape]\ngit = \"https://example.invalid/lshape\"\ntag = \"v1\"\ntarget_dir = \"lua/lshape\"\n",
+        );
+        write(&root.join("patches/mathx/src/mathx/init.tl"), "");
+        write(&root.join("lua/lshape/init.tl"), "");
+        let p = Project::load(&root, HtlConfig::default()).unwrap();
+
+        let check = p.not_walked(Purpose::Check);
+        assert!(check.contains(&root.join("lua/lshape")), "{check:?}");
+        assert!(!check.contains(&root.join("patches/mathx")), "{check:?}");
+        for purpose in [Purpose::Own, Purpose::Test] {
+            let skip = p.not_walked(purpose);
+            // The copy, not its entry: its tests and manifest are the dependency's too.
+            assert!(skip.contains(&root.join("patches/mathx")), "{skip:?}");
+            assert!(skip.contains(&root.join("lua/lshape")), "{skip:?}");
+        }
     }
 
     #[test]

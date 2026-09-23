@@ -1536,12 +1536,14 @@ fn cmd_test(
     // A patched dependency's tests are its suite, not this project's: `htl pkg patch`
     // takes the whole package root, tests included, and running them here would report a
     // library's own failures as the project's.
-    let files = htl::testing::discover_tests_for(&paths, &project::patched(&paths), lib)?;
+    let cfg = load_config(&paths[0])?;
+    let model = project::model_of(&cfg, &paths[0])?;
+    let skip = project::not_walked(model.as_ref(), &paths, htl::model::Purpose::Test);
+    let files = htl::testing::discover_tests_for(&paths, &skip, lib)?;
     if files.is_empty() {
         eprintln!("htl test: no test files found (looked for .tl files that require(\"{lib}\"))");
         return Ok(ExitCode::FAILURE);
     }
-    let cfg = load_config(&paths[0])?;
     let opts = project::TestOptions {
         config: &cfg,
         lint,
@@ -1829,10 +1831,12 @@ fn cmd_fmt(paths: &[PathBuf], check: bool, indent: Option<usize>) -> Result<Exit
         .or_else(|| cfg.as_ref().and_then(|(_, _, c)| c.fmt.indent))
         .unwrap_or(3);
     let h = Htl::new()?;
-    // Not a patched dependency: formatting the copy would turn every one of its files into
-    // a diff against the revision it was taken from, and bury the project's own change
-    // somewhere inside that.
-    let files = htl::collect_tl_skipping(&paths, &project::patched(&paths))?;
+    // Not a dependency's files, a patched one included: formatting the copy would turn
+    // every one of its files into a diff against the revision it was taken from, and bury
+    // the project's own change somewhere inside that.
+    let model = project::model_of(&cfg, &paths[0])?;
+    let skip = project::not_walked(model.as_ref(), &paths, htl::model::Purpose::Own);
+    let files = htl::collect_tl_skipping(&paths, &skip)?;
     let (mut changed, mut failed) = (0usize, 0usize);
     for f in &files {
         let before = fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?;
@@ -1916,7 +1920,9 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
     // Here as well as inside `fix_file`, so a misspelt rule is answered even when the
     // paths hold no `.tl` at all — the request is wrong either way.
     opts.validate()?;
-    let files = htl::collect_tl(&paths)?;
+    let walk_model = project::model_of(&cfg, &paths[0])?;
+    let skip = project::not_walked(walk_model.as_ref(), &paths, htl::model::Purpose::Check);
+    let files = htl::collect_tl_skipping(&paths, &skip)?;
 
     // The working tree is the undo: refuse to rewrite what git could not give back.
     if !flags.dry_run {
@@ -2177,7 +2183,9 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
     // code, and its errors are the project's to fix. Which dependency each directory
     // stands in for is said here, so that an error under it is read as that dependency's
     // without the reader having to know the manifest.
-    let files = htl::collect_tl(&paths)?;
+    let walk_model = project::model_of(&cfg, &paths[0])?;
+    let skip = project::not_walked(walk_model.as_ref(), &paths, htl::model::Purpose::Check);
+    let files = htl::collect_tl_skipping(&paths, &skip)?;
     if !json {
         report_patched(&paths);
     }

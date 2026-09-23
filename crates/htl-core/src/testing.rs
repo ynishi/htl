@@ -342,8 +342,10 @@ pub fn run_tests(paths: &[PathBuf], suite: &Suite) -> Result<SuiteReport> {
         paths.to_vec()
     };
     let lib = suite.lib.as_deref().unwrap_or(DEFAULT_LIB);
-    let files = discover_tests_for(&paths, &project::patched(&paths), lib)?;
     let cfg = project::config_of(&paths[0])?;
+    let model = project::model_of(&cfg, &paths[0])?;
+    let skip = project::not_walked(model.as_ref(), &paths, crate::model::Purpose::Test);
+    let files = discover_tests_for(&paths, &skip, lib)?;
     let opts = project::TestOptions {
         config: &cfg,
         lint: suite.lint.as_deref(),

@@ -195,7 +195,7 @@ pub fn unused(opts: &Options<'_>) -> Result<Report> {
     };
     // A patched dependency is the project's code to check but not the project's to judge
     // unused: what reaches it lives upstream.
-    let skip = project::patched(&walk);
+    let skip = project::not_walked(opts.model, &walk, crate::model::Purpose::Own);
     let files = crate::collect_tl_skipping(&walk, &skip)?;
 
     // The graph, from the check that already resolves every `require` — replayed from the
