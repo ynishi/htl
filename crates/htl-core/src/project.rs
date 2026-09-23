@@ -403,6 +403,20 @@ pub fn config_of(first: &Path) -> Result<Config> {
     Ok(HtlConfig::find(first)?.map(|(p, c)| (crate::parent_dir(&p), p, c)))
 }
 
+/// The [model](crate::model) of the project `config` was loaded for, or of the mlua-pkg
+/// project above `first` when there is no `htl.toml`. `None` when there is neither.
+///
+/// Built from the config the caller already holds rather than found again, so a command
+/// reads `htl.toml` once and the model and the config cannot describe two different
+/// files. The mlua-pkg manifest is read at the config's root; one somewhere else is not
+/// consulted, since a project has one root.
+pub fn model_of(config: &Config, first: &Path) -> Result<Option<crate::model::Project>> {
+    match config {
+        Some((root, _, cfg)) => crate::model::Project::load(root, cfg.clone()).map(Some),
+        None => crate::model::Project::discover(first),
+    }
+}
+
 /// The patched dependencies below `paths` — `patch_dir` deps, as directories.
 ///
 /// What a check walks and formatting or a test run does not: the copy is the project's

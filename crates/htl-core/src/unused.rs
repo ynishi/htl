@@ -63,6 +63,9 @@ pub struct Options<'a> {
     pub paths: &'a [PathBuf],
     /// `htl.toml`, already loaded ([`crate::project::config_of`]).
     pub config: &'a Config,
+    /// The project's [model](crate::model) ([`crate::project::model_of`]): what name each
+    /// walked file answers to. `None` names every file from the search path alone.
+    pub model: Option<&'a crate::model::Project>,
     /// The run cache's switches ([`crate::project::cache_options`]): the graph comes from
     /// a check, and a check replays.
     pub cache: cache::Options,
@@ -232,6 +235,15 @@ pub fn unused(opts: &Options<'_>) -> Result<Report> {
         let c = canon(f);
         shown.insert(c.clone(), display(f));
         if crate::is_declaration(f) {
+            continue;
+        }
+        // The model's name when a module holds the file: one name, from the module that
+        // owns it. Below is for a file no module's root holds — a `main.tl` at the root of
+        // a project whose sources are under `src/` — which the search path still reaches
+        // through the root it puts on it.
+        if let Some(n) = opts.model.and_then(|m| m.locate(&c)).map(|p| p.name) {
+            name_of.insert(c.clone(), n.clone());
+            by_name.entry(n).or_insert_with(|| c.clone());
             continue;
         }
         for d in &dirs {

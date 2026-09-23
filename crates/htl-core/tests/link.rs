@@ -196,6 +196,23 @@ fn extra_modules_are_bundled_for_dynamic_requires() {
     assert!(linked.bundle().unwrap().module("plugin").is_some());
 }
 
+/// A caller that knows the entry's name — from the project's model — has the bundle serve
+/// it under that name rather than the file's stem.
+#[test]
+fn entry_name_names_the_entry() {
+    let root = project("entry-name");
+    write(&root.join("src/app/main.tl"), "print(1)\n");
+    let h = checker(&root);
+    let opts = LinkOptions {
+        entry_name: Some("app.main".into()),
+        ..Default::default()
+    };
+    let linked = link(&h, &root.join("src/app/main.tl"), &opts).unwrap();
+    let b = linked.bundle().unwrap();
+    assert_eq!(b.entry, "app.main");
+    assert!(b.module("app.main").is_some());
+}
+
 #[test]
 fn bundle_runs_with_host_module_and_refuses_without() {
     let root = project("run");

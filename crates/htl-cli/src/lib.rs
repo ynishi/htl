@@ -769,6 +769,7 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
                 source,
                 extra,
                 host,
+                entry_name: None,
             },
             BuildCache {
                 use_cache: !no_cache,
@@ -2223,9 +2224,11 @@ fn cmd_unused(paths: &[PathBuf], flags: UnusedFlags) -> Result<ExitCode> {
     // A `.d.tl` written from Rust source is an input to the check the graph comes from,
     // exactly as it is for `htl check`.
     auto_dts(&paths[0])?;
+    let model = project::model_of(&cfg, &paths[0])?;
     let rep = htl::unused::unused(&htl::unused::Options {
         paths: &paths,
         config: &cfg,
+        model: model.as_ref(),
         cache: project::cache_options(use_cache, None, &cfg, explain),
     })?;
     let s = &rep.summary;
@@ -2289,15 +2292,16 @@ fn cmd_resolve(module: &str, path: Option<&Path>, json: bool) -> Result<ExitCode
     // First, so that the project's own directories go in front of it as they do under
     // `htl run`: `add_path` prepends, and the report prints the order it searched.
     h.install_std()?;
-    let project = apply_project(&h, start)?;
+    apply_project(&h, start)?;
     if let Some((root, _, c)) = &cfg {
         h.apply_config(root, c)?;
     }
+    let model = project::model_of(&cfg, start)?;
     let rep = htl::resolve::resolve(
         &h,
         module,
         cfg.as_ref().map(|(r, _, _)| r.as_path()),
-        project.as_ref(),
+        model.as_ref(),
     )?;
     if json {
         report::emit(&rep)?;
@@ -2708,6 +2712,9 @@ fn cmd_build(
         return cmd_build_dir(&h, entry, out, main, &opts);
     }
     h.add_layout_paths(entry)?;
+    // The name the entry is served under: the one the project's model gives the file,
+    // which is what a `require` of it elsewhere in the project writes.
+    opts.entry_name = project::model_of(&cfg, entry)?.and_then(|m| m.locate(entry).map(|p| p.name));
     // The store: `module` entries keyed the way `htl test` and the macros key them — the
     // file the module is and the lint selection `htl.toml` puts in force — so a module any
     // of them generated is one the build replays, and the reverse. Nothing is swept here:

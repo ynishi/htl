@@ -493,17 +493,25 @@ fn dependency_modules(p: &pkg::Project) -> Vec<Module> {
             out.push(dependency(&name, Owner::Vendored, copy.clone()));
         }
     }
-    // The lockfile lists what an install placed, and `entries/<name>` is the link to each
-    // one's entry directory. No lockfile, nothing installed.
+    // Installed: every link under `entries/`, which is where a `require` reads an
+    // installed dependency from, and every name the lockfile records, whose link an
+    // install has yet to write. A name in either is one dependency, mounted at the link.
+    let mut installed: Vec<String> = std::fs::read_dir(&p.entries)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
     if let Ok(lock) = mlua_pkg::lockfile::Lockfile::read(&p.lockfile) {
-        for locked in &lock.pkg {
-            if !taken(&out, &locked.name) {
-                out.push(dependency(
-                    &locked.name,
-                    Owner::Installed,
-                    p.entries.join(&locked.name),
-                ));
-            }
+        installed.extend(lock.pkg.into_iter().map(|l| l.name));
+    }
+    installed.sort();
+    installed.dedup();
+    for name in installed {
+        if !taken(&out, &name) {
+            let entry = p.entries.join(&name);
+            out.push(dependency(&name, Owner::Installed, entry));
         }
     }
     out

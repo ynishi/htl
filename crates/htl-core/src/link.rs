@@ -49,6 +49,16 @@ pub struct LinkOptions {
     /// the search path could answer it — a library that bundles its own module names it
     /// here in the binary's bundle so the two do not carry it twice.
     pub host: Vec<String>,
+    /// The module name the entry is served under in the bundle. `None` derives it from
+    /// the file alone: its stem, or its directory's name for an `init.tl`.
+    ///
+    /// A caller that has the project's model (`model::Project::locate`) passes the name it
+    /// gives the file, which is the one a `require` elsewhere in the project writes —
+    /// `src/app/main.tl` is `app.main` there, and a bundle serving it as `main` would
+    /// answer a name nothing asks for. The file alone cannot say which directory the
+    /// name starts from, so the default is right only for an entry at the top of the
+    /// source root.
+    pub entry_name: Option<String>,
 }
 
 /// The run cache as the linker uses it: the store, plus what the store needs to key and
@@ -200,7 +210,10 @@ pub fn link_with(
     store: Option<LinkStore<'_>>,
 ) -> Result<Linked> {
     let mut out = Linked::default();
-    let entry_name = entry_module_name(entry);
+    let entry_name = opts
+        .entry_name
+        .clone()
+        .unwrap_or_else(|| entry_module_name(entry));
     let host_declared: HashSet<String> = opts.host.iter().cloned().collect();
     let mut host: BTreeSet<String> = BTreeSet::new();
     let mut queued: HashSet<String> = HashSet::new();

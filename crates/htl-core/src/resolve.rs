@@ -153,13 +153,13 @@ pub struct Resolution {
 ///
 /// `root` is the directory holding `htl.toml`, and only decides how paths are printed:
 /// what is inside the project reads relative to it, and what is not stays absolute.
-/// `project` is the mlua-pkg project when there is one, for naming the dependency a
-/// candidate was installed or vendored from.
+/// `model` is the project's [model](crate::model) when there is one, for naming the
+/// dependency or crate a candidate came from.
 pub fn resolve(
     h: &Htl,
     name: &str,
     root: Option<&Path>,
-    project: Option<&crate::pkg::Project>,
+    model: Option<&crate::model::Project>,
 ) -> Result<Resolution> {
     let candidates = h.module_candidates(name)?;
     let dirs = h.search_path_dirs()?;
@@ -197,7 +197,7 @@ pub fn resolve(
                 kind: c.kind,
                 status,
                 shadowed_by: (status == Status::Shadowed).then_some(read_at).flatten(),
-                origin: origin_of(&c.path, &dir, project),
+                origin: origin_of(&c.path, model),
             }
         })
         .collect::<Vec<_>>();
@@ -257,75 +257,29 @@ fn dir_of(c: &ModuleCandidate, dirs: &[PathBuf]) -> PathBuf {
         .unwrap_or_else(|| c.dir.clone())
 }
 
-/// Where the file came from, when it came from anywhere but the project's own tree.
-fn origin_of(path: &Path, dir: &Path, project: Option<&crate::pkg::Project>) -> Option<Origin> {
-    // A declaration materialised from a crate: the note beside it names the crate and the
-    // version, which is the whole reason `htl dts` writes one.
-    if let Some(note) = crate::dep_dts::Note::read(dir) {
-        return Some(Origin {
-            kind: OriginKind::Crate,
-            name: note.package,
-            version: Some(note.version),
-        });
-    }
-    // A hand-laid `types/<lib>/` carries no note, and the path below `types/` is then the
-    // module name rather than a package: nothing to attribute it to.
-    let p = project?;
-    // `entries/` is where `require` reads a dep; `vendored/` is the root beside it, and a
-    // path through either names the dependency the same way.
-    if let Some(name) = under(path, &p.entries).or_else(|| under(path, &p.vendored)) {
-        return Some(Origin {
-            kind: OriginKind::Dependency,
-            name,
-            version: None,
-        });
-    }
-    for copy in &p.vendored_copies {
-        if starts_with(path, copy) {
-            return Some(Origin {
-                kind: OriginKind::Vendored,
-                name: dir_name(copy),
-                version: None,
-            });
-        }
-    }
-    // A patched copy, whichever way the search path reached it: its own entry directory,
-    // which `apply_project` puts on the path, or the link an install wrote at the same
-    // place — both canonicalise into the copy, and the dependency is the same one.
-    for patch in &p.patches {
-        if starts_with(path, &patch.dir) {
-            return Some(Origin {
-                kind: OriginKind::Patched,
-                name: patch.name.clone(),
-                version: None,
-            });
-        }
-    }
-    None
-}
-
-/// The name of the first directory of `path` below `dir`, when `path` is below it: the
-/// dependency an installed file belongs to.
-fn under(path: &Path, dir: &Path) -> Option<String> {
-    let (p, d) = (canon(path), canon(dir));
-    let rest = p.strip_prefix(&d).ok()?;
-    Some(
-        rest.components()
-            .next()?
-            .as_os_str()
-            .to_string_lossy()
-            .into(),
-    )
-}
-
-fn starts_with(path: &Path, dir: &Path) -> bool {
-    canon(path).starts_with(canon(dir))
-}
-
-fn dir_name(p: &Path) -> String {
-    p.file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| p.display().to_string())
+/// Where the file came from, when it came from anywhere but the project's own tree: the
+/// module that owns it in the [model](crate::model), when that module is a dependency or
+/// a crate's declarations.
+///
+/// The model answers for the file, not for the directory the searcher found it through,
+/// so a declaration under `types/<crate>/` is the crate's however the path reached it.
+/// The project's own modules, contract and `[check] paths` directories and htl's library
+/// have no origin to report.
+fn origin_of(path: &Path, model: Option<&crate::model::Project>) -> Option<Origin> {
+    use crate::model::Owner;
+    let module = model?.locate(path)?.module;
+    let (kind, version) = match &module.owner {
+        Owner::Crate { version } => (OriginKind::Crate, version.clone()),
+        Owner::Installed => (OriginKind::Dependency, None),
+        Owner::Vendored => (OriginKind::Vendored, None),
+        Owner::Patched => (OriginKind::Patched, None),
+        Owner::Own | Owner::Contract | Owner::External | Owner::Lib => return None,
+    };
+    Some(Origin {
+        kind,
+        name: module.name.clone(),
+        version,
+    })
 }
 
 fn canon(p: &Path) -> PathBuf {

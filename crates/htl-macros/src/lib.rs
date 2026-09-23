@@ -158,6 +158,14 @@ fn resolve_bundle(
         opts.extra.extend(c.build.extra.iter().cloned());
         opts.host.extend(c.build.host.iter().cloned());
     }
+    // The name the entry is served under, from the project's model, as `htl build` does:
+    // the one a `require` of the file elsewhere in the project writes.
+    let model = match (&ck.cfg_path, cfg) {
+        (Some(_), Some(c)) => htl_core::model::Project::load(&ck.root, c.clone()).map(Some),
+        _ => htl_core::model::Project::discover(&path),
+    }
+    .map_err(|e| format!("include_bundle!: {e:#}"))?;
+    opts.entry_name = model.and_then(|m| m.locate(&path).map(|p| p.name));
     let store = ck.store();
     let linked = htl_core::link::link_with(h, &path, &opts, ck.link_store(store.as_ref()))
         .map_err(|e| format!("include_bundle!: {e:#}"))?;
