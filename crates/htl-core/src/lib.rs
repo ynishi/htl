@@ -8,6 +8,12 @@
 //! - [`Htl::preload`]: register generated Lua (e.g. from `include_tl!`) under a module name
 //! - [`bundle`]: stripped-bytecode bundles produced by `htl build`
 //!
+//! A project — its own code, its dependencies, the declarations crates ship to it and the
+//! directories it accepts modules from — is described by the `model` module (compiled
+//! with the `pkg` and `dts` features): one `Module` per unit that owns a namespace, each
+//! with its source, test and declaration roots, and one rule for the name a file answers
+//! to.
+//!
 //! Two libraries ship inside the binary rather than on a project's search path, and both
 //! are installed the same way — a `package.preload` entry for the run, a `.d.tl` under
 //! [`lib_dir`] for the checker: `htl.test` ([`Htl::install_test_lib`], `describe` / `it` /
@@ -54,6 +60,11 @@ pub mod fix;
 // these names, so the list is here rather than in `lint.lua`, which is one of the halves.
 pub mod link;
 pub mod lint;
+// Which modules a project is made of and what name each file answers to. Reads the
+// mlua-pkg manifest and the notes `htl dts` writes, so it carries the project layer's
+// features.
+#[cfg(all(feature = "pkg", feature = "dts"))]
+pub mod model;
 #[cfg(feature = "pkg")]
 pub mod pkg;
 // The project layer: a walk over many files, the run cache under it, and the decisions
