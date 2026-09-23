@@ -47,7 +47,7 @@ const SRC: &str = "local dep = require(\"dep\")\nlocal record m\nend\n\n\
 
 fn project(name: &str) -> PathBuf {
     let root = scratch(name);
-    write(&root.join("htl.toml"), "[check]\npaths = [\"src\"]\n");
+    write(&root.join("htl.toml"), "[lint]\n");
     write(
         &root.join("src/dep.tl"),
         "local record dep\nend\nfunction dep.note(): string\n   return \"n\"\nend\nreturn dep\n",
@@ -171,7 +171,7 @@ fn both_rules_are_still_addressed_by_name() {
     // The same two names as keys of `[lint.rules]`.
     write(
         &root.join("htl.toml"),
-        "[check]\npaths = [\"src\"]\n\n[lint.rules]\n\
+        "[lint.rules]\n\
          \"shadow-local\" = \"allow\"\n\"tl:redeclaration\" = \"allow\"\n",
     );
     let left = diagnostics(&root, &[]);

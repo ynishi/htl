@@ -143,7 +143,10 @@ fn require_cycle_comes_back() {
         &root.join("src/b.tl"),
         "local a = require(\"a\")\nreturn { a = a }\n",
     );
-    write(&root.join("htl.toml"), "[check]\npaths = [\"src\"]\n");
+    // Only so that a project is found; `src` is the source directory and on the path
+    // without being named, and naming it as a `[check] paths` entry now says the
+    // opposite of what `[layout] source` says about it.
+    write(&root.join("htl.toml"), "[lint]\n");
     round_trip(&root, "src", "require-cycle", true);
 }
 

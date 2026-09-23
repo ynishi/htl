@@ -42,7 +42,7 @@ const SRC: &str = "local dep = require(\"dep\")\nlocal record m\nend\n\n\
 
 fn project(name: &str) -> PathBuf {
     let root = scratch(name);
-    write(&root.join("htl.toml"), "[check]\npaths = [\"src\"]\n");
+    write(&root.join("htl.toml"), "[lint]\n");
     write(
         &root.join("src/dep.tl"),
         "local record dep\nend\nfunction dep.note(): string\n   return \"n\"\nend\nreturn dep\n",
@@ -161,7 +161,7 @@ fn a_kind_goes_off_from_the_config() {
     let root = project("config");
     write(
         &root.join("htl.toml"),
-        "[check]\npaths = [\"src\"]\n\n[lint.rules]\n\"tl:redeclaration\" = \"allow\"\n",
+        "[lint.rules]\n\"tl:redeclaration\" = \"allow\"\n",
     );
     let off = under(&root, "tl:redeclaration", &[]);
     assert!(off.is_empty(), "[lint.rules] allow left it: {off:?}");
