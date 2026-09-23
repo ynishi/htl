@@ -215,3 +215,44 @@ fn a_name_the_project_and_a_dependency_both_implement_is_an_error() {
         "{about:?}"
     );
 }
+
+/// A dependency sees its own modules and what it depends on, not the project using it: a
+/// `require` in a dependency that lands on the project's own `src/util.tl` is an error at
+/// that call, while one that lands on another dependency is not.
+#[test]
+fn a_dependency_does_not_see_the_projects_own_modules() {
+    let root = scratch("dep-view");
+    write(&root.join("htl.toml"), "");
+    write(
+        &root.join("mlua-pkg.toml"),
+        "[package]\nname = \"game\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        &root.join(".htl/modules/entries/mathx/init.tl"),
+        "local u = require(\"util\")\nlocal o = require(\"other\")\nprint(u, o)\nreturn {}\n",
+    );
+    write(
+        &root.join(".htl/modules/entries/other/init.tl"),
+        "return {}\n",
+    );
+    write(&root.join("src/util.tl"), "return {}\n");
+    write(
+        &root.join("src/main.tl"),
+        "local m = require(\"mathx\")\nprint(m)\n",
+    );
+    let d = diagnostics(&["."], &root);
+    let reach: Vec<&String> = d
+        .iter()
+        .filter(|l| l.contains("in dependency mathx reaches"))
+        .collect();
+    assert_eq!(
+        reach.len(),
+        1,
+        "the util require, and not the other one: {d:?}"
+    );
+    assert!(reach[0].contains("require(\"util\")"), "{reach:?}");
+    assert!(
+        reach[0].contains(".htl/modules/entries/mathx/init.tl:1:"),
+        "said at the dependency's call: {reach:?}"
+    );
+}

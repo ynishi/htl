@@ -872,6 +872,93 @@ local function require_sites(ast, names_only)
    return out
 end
 
+-- The project model's view of who may read what, set by the Rust side from the model
+-- (`Htl::set_views`): the directories of the project's own module, and the directories
+-- each dependency's files are reached through, with its name. Empty until set, and a
+-- checker nobody set up from a model asks nothing of it.
+H.views = { own = {}, not_own = {}, dep_dirs = {}, dep_names = {}, root = nil }
+
+-- Takes the lists as sequences and builds nothing across the state line, for the reason
+-- `H.set_deps` gives. `not_own` is every other module's directory, some of which sit
+-- inside the project's own (`types/<crate>/` inside `types/`, `.htl/modules/entries`
+-- inside a flat project's root): a file under one of those is that module's.
+function H.set_views(own, not_own, dep_dirs, dep_names, root)
+   H.views = {
+      own = own or {},
+      not_own = not_own or {},
+      dep_dirs = dep_dirs or {},
+      dep_names = dep_names or {},
+      root = root,
+   }
+end
+
+-- `path` as the project spells it: below the root, without a `./` a flat layout leaves.
+local function project_relative(path)
+   local root = H.views.root
+   if root and path:sub(1, #root + 1) == root .. "/" then
+      path = path:sub(#root + 2)
+   end
+   while path:sub(1, 2) == "./" do path = path:sub(3) end
+   return path
+end
+
+-- The index in `dirs` of the directory `path` is under, if any. Spellings are compared as
+-- they are: both sides come from the same model, which is also what built the search path.
+local function dir_holding(path, dirs)
+   for i, d in ipairs(dirs) do
+      if path:sub(1, #d + 1) == d .. "/" then return i end
+   end
+end
+
+-- A dependency sees its own modules and what it depends on; the project that uses it is
+-- not among them. Every file a check reaches is parsed through here — the checked file
+-- and each one `require` leads to — so this is where the requiring file is known: a
+-- `require` in a dependency's file that resolves into one of the project's own
+-- directories is an error at the call, instead of the dependency quietly reading whatever
+-- the project happens to call by that name.
+--
+-- Found when the file is parsed, reported once it has been checked: as a type error of
+-- the dependency's file, added to its result. A parse error would stop the file being
+-- checked at all, and every module requiring it would then see a type that is not its.
+local view_errors = {}
+do
+   local tl_parse = tl.parse
+   tl.parse = function(input, filename, parse_lang)
+      local ast, errs, required = tl_parse(input, filename, parse_lang)
+      local dep = filename and ast and dir_holding(filename, H.views.dep_dirs)
+      if dep then
+         for _, site in ipairs(require_sites(ast)) do
+            if site.path and dir_holding(site.path, H.views.own)
+               and not dir_holding(site.path, H.views.not_own) then
+               view_errors[filename] = view_errors[filename] or {}
+               table.insert(view_errors[filename], {
+                  filename = filename,
+                  y = site.y,
+                  x = site.x,
+                  msg = string.format(
+                     "require(\"%s\") in dependency %s reaches this project's own %s: " ..
+                     "a dependency sees its own modules and what it depends on, not the project using it",
+                     site.name, H.views.dep_names[dep], project_relative(site.path)),
+               })
+            end
+         end
+      end
+      return ast, errs, required
+   end
+   local tl_check_string = tl.check_string
+   tl.check_string = function(input, env, filename, parse_lang)
+      local result = tl_check_string(input, env, filename, parse_lang)
+      local pending = filename and view_errors[filename]
+      if pending and result then
+         view_errors[filename] = nil
+         result.type_errors = result.type_errors or {}
+         for _, e in ipairs(pending) do table.insert(result.type_errors, e) end
+         result.ok = false
+      end
+      return result
+   end
+end
+
 -- Proactive form of the same check: every `require("<literal>")` in the file whose
 -- resolution is the file itself gets its own error at the call site. Teal may swallow
 -- the self-require as a circular require and only complain later ("unknown type

@@ -1324,6 +1324,34 @@ impl Htl {
         Ok(())
     }
 
+    /// Tell the checker which directories are the project's own, which of the directories
+    /// inside them belong to another module (`not_own`), and which a dependency's files
+    /// are reached through (with the dependency's name, index for index), and the project
+    /// root the error names a file relative to, so that a
+    /// `require` in a dependency that resolves into the project's own directories is an
+    /// error at the call. The project model (`model::Project::views`) says which; its
+    /// `apply_model` calls this.
+    ///
+    /// Sequences across the state line, for the reason [`set_deps`](Self::set_deps) gives.
+    pub fn set_views(
+        &self,
+        own: &[String],
+        not_own: &[String],
+        dep_dirs: &[String],
+        dep_names: &[String],
+        root: &Path,
+    ) -> Result<()> {
+        let f: Function = self.h.get("set_views")?;
+        f.call::<()>((
+            own.to_vec(),
+            not_own.to_vec(),
+            dep_dirs.to_vec(),
+            dep_names.to_vec(),
+            path_str(root),
+        ))?;
+        Ok(())
+    }
+
     /// Names of all lint rules (enabled or not), the project layer's among them.
     pub fn lint_rules(&self) -> Result<Vec<String>> {
         Ok(lint::rule_names().into_iter().map(str::to_string).collect())

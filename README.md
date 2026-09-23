@@ -1374,6 +1374,11 @@ order of the search path pick one. Rename one of them. A dependency's own submod
 under its name (`mathx.vec`) and are not the project's `vec`; a `.d.tl` beside an
 implementation declares it and is not a second claim.
 
+A dependency sees its own modules and what it depends on, not the project that uses it.
+A `require` in a dependency that would land on one of the project's own files — the
+project happens to have a `util.tl` and the dependency asks for `util` — is an error at
+that `require`, rather than the dependency quietly reading the project's file.
+
 `[check] paths` is for modules the host supplies at run time from somewhere the
 checker would not look (an SDK cache, a mods dir): the CLI, `include_tl!` and
 `contract_resolvers` all add them, beside the two `[layout]` directories. `htl check`
