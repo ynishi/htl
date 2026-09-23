@@ -156,18 +156,9 @@ One issue per pull request, against `main`. Before opening it, run `just pre-pus
 on the final tree, plus the installed-binary run above when the change calls for
 one.
 
-**A pull request is merged with a rebase, never a squash, and the repository no
-longer allows one.** Every commit on the branch reaches `main` as it stands. That
-is the point: a squash leaves one commit saying what the change was and nothing
-saying how it got there — what was tried, what turned out to be wrong, what the
-fix had to become — and the next person to work near it, human or agent, reads
-the history and learns none of it. The cost is paid every time afterwards, in
-judgements made again from scratch.
-
-So write the branch for that reader. A commit is a step of the work, not a
-checkpoint: one that reverses an earlier decision says which and why, and one
-that fixes a mistake says what the mistake was. A branch with several commits is
-expected and is not something to tidy away before opening the pull request.
+A pull request lands as a merge commit; squash and rebase are not used. So every
+commit on the branch reaches `main` — a commit is a step of the work, and several
+of them are expected rather than something to tidy away first.
 
 The body records what changed, what was verified (the commands and their
 outcome, and on which project), and what it deliberately does not cover, and
