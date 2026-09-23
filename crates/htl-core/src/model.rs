@@ -99,6 +99,13 @@ pub struct Project {
     pub config: HtlConfig,
     /// Every module the project consists of. Exactly one has [`Owner::Own`].
     pub modules: Vec<Module>,
+    /// The directory of entry links an install writes (`.htl/modules/entries`), one per
+    /// installed dependency, each at the dependency's require root. `None` without an
+    /// `mlua-pkg.toml`. On the search path whenever the project has one
+    /// ([`search_dirs`](Self::search_dirs)): it is the one directory through which every
+    /// installed dependency — linked under `vendored/` or copied to a `target_dir` —
+    /// answers to its name.
+    pub links: Option<PathBuf>,
     /// What reading the project could not make sense of, as messages. The model is built
     /// from the rest; nothing here stops a load. Today these come from `---@contract`
     /// markers that do not parse.
@@ -414,6 +421,7 @@ impl Project {
             root: root.to_path_buf(),
             config,
             modules,
+            links: manifest.as_ref().map(|m| m.entries.clone()),
             problems,
         })
     }
@@ -520,6 +528,10 @@ impl Project {
         for m in owned_by(|o| matches!(o, Owner::Crate { .. })) {
             out.extend(m.roots.decl.clone());
         }
+        // The links first: a dependency an install placed answers through its link, at its
+        // require root, whatever that root is called. The directories below are for what
+        // a link cannot cover — a patch or a copy in a tree nobody has installed in.
+        out.extend(self.links.clone());
         for m in owned_by(|o| matches!(o, Owner::Patched | Owner::Vendored | Owner::Installed)) {
             let Some(root) = &m.roots.source else {
                 continue;
@@ -639,17 +651,15 @@ fn dependency_modules(p: &pkg::MluaProject) -> Vec<Module> {
             patch.dir.clone(),
         ));
     }
-    for copy in &p.vendored_copies {
-        let name = copy
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        if !taken(&out, &name) {
+    // A `target_dir` copy is named by the manifest, not by its directory, and read from
+    // its entry inside the copy, as a patch is.
+    for copy in &p.copies {
+        if !taken(&out, &copy.name) {
             out.push(dependency(
-                &name,
+                &copy.name,
                 Owner::Vendored,
-                copy.clone(),
-                copy.clone(),
+                copy.entry.clone(),
+                copy.dir.clone(),
             ));
         }
     }
@@ -669,7 +679,7 @@ fn dependency_modules(p: &pkg::MluaProject) -> Vec<Module> {
     for name in installed {
         if !taken(&out, &name) {
             let entry = p.entries.join(&name);
-            let home = p.vendored.join(&name);
+            let home = p.placed_at(&name);
             out.push(dependency(&name, Owner::Installed, entry, home));
         }
     }
@@ -911,6 +921,7 @@ mod tests {
             root: PathBuf::from("/p"),
             config: HtlConfig::default(),
             modules: vec![own],
+            links: None,
             problems: Vec::new(),
         };
         let d = p.locate(Path::new("/p/scripts/host.d.tl")).unwrap();
@@ -966,6 +977,7 @@ mod tests {
                 module("sites/b", Owner::Contract, "/p/sites/b"),
                 module("vendor", Owner::External, "/p/vendor"),
             ],
+            links: None,
             problems: Vec::new(),
         };
         let dirs = p.search_dirs(View::Source);

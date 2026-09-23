@@ -397,3 +397,113 @@ fn the_directory_on_the_path_is_the_one_holding_the_entry_under_the_dependencys_
         vec![rooted.join("patches")]
     );
 }
+
+/// A `target_dir` dependency is copied into the tree, not linked under `vendored/`, and
+/// its require root is `<target_dir>/<entry>`. Its entry link points there — not at a
+/// `vendored/<name>` that does not exist — and what it publishes beside its entry is
+/// found there too.
+#[test]
+fn a_target_dir_copy_is_linked_and_read_at_its_require_root() {
+    let root = scratch("target-dir-entry");
+    write(
+        &root.join("mlua-pkg.toml"),
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[deps.lsh]\n\
+         git = \"https://example.invalid/lsh\"\ntarget_dir = \"lua/shapes\"\n",
+    );
+    write(
+        &root.join("lua/shapes/src/init.tl"),
+        "return { sides = 4 }\n",
+    );
+    write(
+        &root.join("lua/shapes/types/lsh_extra.d.tl"),
+        "local record lsh_extra\nend\nreturn lsh_extra\n",
+    );
+    Lockfile {
+        version: 1,
+        pkg: vec![LockedPkg {
+            name: "lsh".into(),
+            source: "git+https://example.invalid/lsh".into(),
+            tag: None,
+            rev: None,
+            branch: None,
+            sha: "0".repeat(40),
+            entry: PathBuf::from("src"),
+            patch_dir: None,
+            patch_base: None,
+        }],
+    }
+    .write(root.join("mlua-pkg.lock"))
+    .unwrap();
+
+    let p = MluaProject::at(&root);
+    assert_eq!(p.copies.len(), 1);
+    assert_eq!(
+        p.copies[0].name, "lsh",
+        "the manifest's name, not the directory's"
+    );
+    assert_eq!(p.copies[0].entry, root.join("lua/shapes/src"));
+    assert_eq!(p.link_entries().unwrap(), vec!["lsh".to_string()]);
+    let link = root.join(".htl/modules/entries/lsh");
+    assert_eq!(
+        std::fs::read_link(&link).unwrap(),
+        Path::new("../../../lua/shapes/src"),
+        "relative, at the copy's require root"
+    );
+    assert!(link.join("init.tl").is_file(), "and the link resolves");
+
+    let sync = p.sync_types(&root.join("types")).unwrap();
+    assert!(
+        root.join("types/lsh_extra.d.tl").is_file(),
+        "what the copy publishes is copied in: {:?}",
+        sync.written
+    );
+
+    // Through the model, as every command sets its checker up.
+    #[cfg(feature = "dts")]
+    {
+        let model = htl_core::model::Project::load(&root, Default::default()).unwrap();
+        let h = htl_core::Htl::new().unwrap();
+        h.apply_model(&model, htl_core::model::View::Source)
+            .unwrap();
+        let (found, _) = h.resolve_module("lsh").unwrap();
+        assert_eq!(
+            std::fs::canonicalize(found.unwrap()).unwrap(),
+            std::fs::canonicalize(root.join("lua/shapes/src/init.tl")).unwrap()
+        );
+        let placed = model.locate(&root.join("lua/shapes/src/init.tl")).unwrap();
+        assert_eq!(
+            (placed.module.name.as_str(), placed.name.as_str()),
+            ("lsh", "lsh")
+        );
+    }
+}
+
+/// A patched dependency's entry link points at the patch, so the copy the project edits is
+/// the one every `require` reads from the moment `htl pkg patch` wrote it — not the copy
+/// the patch replaced, until the next install re-points `vendored/<name>`.
+#[test]
+fn a_patch_is_what_its_entry_link_reaches() {
+    let root = installed_patch("patch-link", &"a".repeat(40), Some(&"a".repeat(40)));
+    let p = MluaProject::at(&root);
+    assert_eq!(p.link_entries().unwrap(), vec!["mathx".to_string()]);
+    let link = root.join(".htl/modules/entries/mathx");
+    assert_eq!(
+        std::fs::read_link(&link).unwrap(),
+        Path::new("../../../patches/mathx/src"),
+        "the patch's entry, not ../vendored/mathx/src"
+    );
+    assert!(link.join("mathx.tl").is_file(), "and the link resolves");
+
+    #[cfg(feature = "dts")]
+    {
+        let model = htl_core::model::Project::load(&root, Default::default()).unwrap();
+        let h = htl_core::Htl::new().unwrap();
+        h.apply_model(&model, htl_core::model::View::Source)
+            .unwrap();
+        let (found, _) = h.resolve_module("mathx").unwrap();
+        assert_eq!(
+            std::fs::canonicalize(found.unwrap()).unwrap(),
+            std::fs::canonicalize(root.join("patches/mathx/src/mathx.tl")).unwrap()
+        );
+    }
+}

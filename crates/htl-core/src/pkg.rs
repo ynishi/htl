@@ -472,11 +472,35 @@ pub struct MluaProject {
     /// format or take tests from, and editing one there does not survive the next install.
     /// What that means for the walkers is in [`crate::project_skip_dirs`].
     pub vendored_copies: Vec<PathBuf>,
+    /// The `target_dir` deps with what they are: the name the manifest declares, the copy,
+    /// and the directory inside it that `require` reads — the same three facts
+    /// [`Patched`] carries for a patch.
+    ///
+    /// A copy is not under `vendored/`, where every other installed package is: install
+    /// puts it at `<root>/<target_dir>` instead, and its require root is
+    /// `<target_dir>/<entry>` (mlua-pkg's `LockedPkg::require_dir`). What asks where an
+    /// installed package is — the entry links, the declarations a package publishes —
+    /// asks here first ([`placed_at`](Self::placed_at)).
+    pub copies: Vec<Copied>,
     /// The `patch_dir` deps: a dependency's source taken into the tree, and what the
     /// manifest calls it. Unlike a `target_dir` copy, which install rewrites, this one is
     /// the project's own code — [`MluaProject::patch`] wrote it once and the project edits it
     /// from then on. What that means for the walkers is in [`crate::patched_dirs`].
     pub patches: Vec<Patched>,
+}
+
+/// A `target_dir` dependency: a package install copies into the project's tree rather than
+/// linking under `vendored/`. Both paths absolute.
+#[derive(Debug, Clone)]
+pub struct Copied {
+    /// The `[deps]` key: the name a `require` of it spells. Not the copy's directory
+    /// name, which the manifest is free to choose (`target_dir = "lua/shapes"` for `lshape`).
+    pub name: String,
+    /// Where `target_dir` points: the package root, copied.
+    pub dir: PathBuf,
+    /// `<dir>/<entry>`: the directory inside the copy that `require("<name>.x")` reads
+    /// `x` from. Found as a patch's is ([`Patched::entry`]).
+    pub entry: PathBuf,
 }
 
 /// A dependency the project took into its tree: the name the manifest declares it under,
@@ -497,7 +521,7 @@ pub struct Patched {
     pub dir: PathBuf,
     /// `<dir>/<entry>`: the dependency's own require root inside the copy, the same
     /// directory `entries/<name>` is a link to. `require("<name>.x")` reads `x.tl` from
-    /// here. How it is arrived at is `patch_entry`'s to say, below; what goes on the
+    /// here. How it is arrived at is `copy_entry`'s to say, below; what goes on the
     /// search path is [`search_dir`](Self::search_dir).
     pub entry: PathBuf,
 }
@@ -540,7 +564,8 @@ impl Patched {
     }
 }
 
-/// Which directory inside a patched copy `require` reads it from.
+/// Which directory inside a copy of a package — a `patch_dir` or a `target_dir` — `require`
+/// reads it from.
 ///
 /// `over` is the entry somebody recorded for this dependency — the lockfile's when an
 /// install has run, else the `entry` the project's own `[deps.<name>]` overrides it with;
@@ -559,7 +584,7 @@ impl Patched {
 /// when none do; a `patch_dir` naming a directory nobody wrote is that error, and the
 /// answer is the directory itself — a path on the search path that resolves nothing, which
 /// is what the situation is.
-fn patch_entry(dir: &Path, over: Option<&Path>) -> PathBuf {
+fn copy_entry(dir: &Path, over: Option<&Path>) -> PathBuf {
     if let Some(e) = over {
         return mlua_pkg::lockfile::join_entry(dir, e);
     }
@@ -745,17 +770,23 @@ impl MluaProject {
         let mut target_dirs: Vec<PathBuf> = Vec::new();
         let mut vendored_copies: Vec<PathBuf> = Vec::new();
         let mut patches: Vec<Patched> = Vec::new();
+        let mut copies: Vec<Copied> = Vec::new();
         if let Ok(m) = mlua_pkg::manifest::Manifest::from_path(&manifest) {
-            // The lockfile, and only for a manifest that patches something: it is the one
-            // place an `entry` is recorded once an install has run, and every other
+            // The lockfile, and only for a manifest that patches or copies something: it is
+            // the one place an `entry` is recorded once an install has run, and every other
             // project would be paying a file read for an answer it has no question for.
             let locked = m
                 .deps
                 .values()
-                .any(|d| d.patch_dir.is_some())
+                .any(|d| d.patch_dir.is_some() || d.target_dir.is_some())
                 .then(|| mlua_pkg::lockfile::Lockfile::read(inner.lock_path()).ok())
                 .flatten();
             for (name, dep) in &m.deps {
+                let over = locked
+                    .as_ref()
+                    .and_then(|l| l.pkg.iter().find(|p| &p.name == name))
+                    .map(|p| p.entry.clone())
+                    .or_else(|| dep.entry.clone());
                 if let Some(td) = &dep.target_dir {
                     let abs = root.join(td);
                     let parent = abs
@@ -766,17 +797,17 @@ impl MluaProject {
                         target_dirs.push(parent);
                     }
                     if !vendored_copies.contains(&abs) {
-                        vendored_copies.push(abs);
+                        vendored_copies.push(abs.clone());
                     }
+                    copies.push(Copied {
+                        name: name.clone(),
+                        entry: copy_entry(&abs, over.as_deref()),
+                        dir: abs,
+                    });
                 }
                 if let Some(pd) = &dep.patch_dir {
                     let dir = root.join(pd);
-                    let over = locked
-                        .as_ref()
-                        .and_then(|l| l.pkg.iter().find(|p| &p.name == name))
-                        .map(|p| p.entry.clone())
-                        .or_else(|| dep.entry.clone());
-                    let entry = patch_entry(&dir, over.as_deref());
+                    let entry = copy_entry(&dir, over.as_deref());
                     patches.push(Patched {
                         name: name.clone(),
                         dir,
@@ -794,6 +825,7 @@ impl MluaProject {
             pkgs_dir: inner.pkg_dir().base().to_path_buf(),
             target_dirs,
             vendored_copies,
+            copies,
             patches,
         }
     }
@@ -813,6 +845,15 @@ impl MluaProject {
     /// through, and the probe over it is what notices when it arrives.
     pub fn patch_search_dirs(&self) -> Vec<PathBuf> {
         self.patches.iter().map(Patched::search_dir).collect()
+    }
+
+    /// Where install put the package `name`: its `target_dir` copy when the manifest gives it
+    /// one, `vendored/<name>` otherwise. The package root, not its require root.
+    pub fn placed_at(&self, name: &str) -> PathBuf {
+        match self.copies.iter().find(|c| c.name == name) {
+            Some(c) => c.dir.clone(),
+            None => self.vendored.join(name),
+        }
     }
 
     /// `true` once `mlua-pkg install` has produced the lockfile.
@@ -865,8 +906,10 @@ impl MluaProject {
         TealResolver::new_symlink_aware(&self.entries)
     }
 
-    /// Write `entries/<name>` → `../vendored/<name>/<entry>` for every package the lockfile
-    /// records, and remove a link there the lockfile no longer names.
+    /// Write `entries/<name>` → the require root of the copy the project uses, for every
+    /// package the lockfile records — its patch, its `target_dir` copy, or
+    /// `../vendored/<name>/<entry>` (see `link_target`) — and remove a link there the
+    /// lockfile no longer names.
     ///
     /// Idempotent and cheap: a link that already points where it should is left alone. It
     /// runs after every install, and again from [`teal_resolver`](Self::teal_resolver) and
@@ -874,9 +917,9 @@ impl MluaProject {
     /// these works after upgrading without a reinstall. Returns the names linked, in
     /// lockfile order; no lockfile is no packages, not an error.
     ///
-    /// The link is relative so that it follows `vendored/<name>` wherever install points
-    /// that — at the cache, or at a `patch_dir` copy — rather than pinning a revision of
-    /// its own. An entry of `"."` gets a link too, to the root: one layout, not two.
+    /// The link is relative: through `vendored/<name>` it follows wherever install points
+    /// that rather than pinning a revision of its own, and into the tree it follows the
+    /// tree. An entry of `"."` gets a link too, to the root: one layout, not two.
     ///
     /// **Under build scratch it repairs nothing**, and the reason it must not is
     /// [`crate::cache::scratch_root`]'s to state. It still reads the lockfile and still
@@ -895,10 +938,7 @@ impl MluaProject {
             .with_context(|| format!("creating {}", self.entries.display()))?;
         let mut names = Vec::new();
         for p in &lock.pkg {
-            let mut target = PathBuf::from("..").join("vendored").join(&p.name);
-            if !(p.entry.as_os_str().is_empty() || p.entry == Path::new(".")) {
-                target.push(&p.entry);
-            }
+            let target = self.link_target(p);
             let link = self.entries.join(&p.name);
             match std::fs::symlink_metadata(&link) {
                 Ok(m) if m.file_type().is_symlink() => {
@@ -930,6 +970,52 @@ impl MluaProject {
             }
         }
         Ok(names)
+    }
+
+    /// Where `entries/<name>` points for the locked package `p`: the require root of the
+    /// copy of it the project uses, written relative to `entries/` so that the link follows
+    /// the tree when the tree moves.
+    ///
+    /// The link is how a `require` of the name reaches the package, so it names the same
+    /// copy the project's model says the name belongs to, in the same order: a patch the
+    /// project took into its tree and edits wins, then a `target_dir` copy, then what
+    /// install linked under `vendored/`.
+    ///
+    /// - A `patch_dir` package: at the patch's entry ([`Patched::entry`]). Pointing through
+    ///   `vendored/<name>` instead would reach the patch only once an install has re-pointed
+    ///   that at it, and between `htl pkg patch` and that install every command would read
+    ///   the copy the patch replaced while the project edited the other one.
+    /// - A `target_dir` package: at `<target_dir>/<entry>`. Install puts it in the project's
+    ///   tree and not under `vendored/`, where a link would name a directory that is not
+    ///   there.
+    /// - Anything else: through `vendored/<name>/<entry>`, following wherever install points
+    ///   that.
+    ///
+    /// A copy outside the project root is linked by its absolute path.
+    fn link_target(&self, p: &mlua_pkg::lockfile::LockedPkg) -> PathBuf {
+        if let Some(patch) = self.patches.iter().find(|x| x.name == p.name) {
+            return self.relative_to_entries(&patch.entry);
+        }
+        if let Some(copy) = self.copies.iter().find(|c| c.name == p.name) {
+            return self.relative_to_entries(&p.require_dir(&copy.dir));
+        }
+        p.require_dir(&PathBuf::from("..").join("vendored").join(&p.name))
+    }
+
+    /// `target` written relative to [`entries`](Self::entries) when both are inside the
+    /// project root, absolute otherwise.
+    fn relative_to_entries(&self, target: &Path) -> PathBuf {
+        let (Ok(from_root), Ok(inside)) = (
+            self.entries.strip_prefix(&self.root),
+            target.strip_prefix(&self.root),
+        ) else {
+            return target.to_path_buf();
+        };
+        let mut up = PathBuf::new();
+        for _ in from_root.components() {
+            up.push("..");
+        }
+        up.join(inside)
     }
 
     /// mlua-pkg's own resolver for plain `.lua` inside vendored deps.
@@ -1237,15 +1323,16 @@ impl MluaProject {
             .collect()
     }
 
-    /// The package root behind `vendored/<name>`.
+    /// The package root of `p`, where install put it ([`placed_at`](Self::placed_at)):
+    /// behind `vendored/<name>`, or the `target_dir` copy.
     ///
-    /// That symlink points at the package root itself, and the lockfile's `entry` says
+    /// The `vendored/<name>` symlink points at the package root itself, and the lockfile's `entry` says
     /// where below it `require` looks — so what a dep publishes beside its entry, `types/`
     /// among it, is reached from here without subtracting the entry again. mlua-pkg moved
     /// the symlink from the entry directory to the root in 0.11; a dep whose entry is
     /// `src/` used to need the difference popped off and now must not.
     fn package_root(&self, p: &mlua_pkg::lockfile::LockedPkg) -> Option<PathBuf> {
-        std::fs::canonicalize(self.vendored.join(&p.name)).ok()
+        std::fs::canonicalize(self.placed_at(&p.name)).ok()
     }
 }
 
@@ -1596,9 +1683,9 @@ impl crate::Htl {
     ///
     /// Those directories go on first and are therefore consulted last, after the links,
     /// the `target_dir` copies and the project's own `src/`. A checkout that has
-    /// installed resolves exactly what it resolved before — the link and the copy are
-    /// the same files, and the link still answers first — so what this adds is an answer
-    /// where there was none.
+    /// installed resolves the patch through its link, which points at the patch's entry
+    /// ([`link_entries`](MluaProject::link_entries)), so what this adds is an answer where
+    /// there was none.
     ///
     /// Except under build scratch, where this writes nothing at all — the rule and the
     /// reason are [`crate::cache::scratch_root`]'s. What it does there it does read-only:

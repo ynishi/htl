@@ -493,20 +493,15 @@ fn unused_deps(
         {
             continue;
         }
-        let mut dirs = vec![canon(&project.vendored.join(name))];
+        // Where install put it — `vendored/<name>`, or its `target_dir` copy — and its
+        // patch when it has one.
+        let mut dirs = vec![canon(&project.placed_at(name))];
         dirs.extend(
             project
                 .patches
                 .iter()
                 .filter(|p| &p.name == name)
                 .map(|p| canon(&p.dir)),
-        );
-        dirs.extend(
-            project
-                .vendored_copies
-                .iter()
-                .filter(|d| d.file_name().and_then(|s| s.to_str()) == Some(name.as_str()))
-                .map(|d| canon(d)),
         );
         if paths.iter().any(|p| dirs.iter().any(|d| p.starts_with(d))) {
             continue;
