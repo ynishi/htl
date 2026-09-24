@@ -484,7 +484,7 @@ Caching: https://github.com/ynishi/htl#caching
         /// Modules to bundle that only a dynamic require reaches (also `[build] extra`)
         #[arg(long, value_delimiter = ',')]
         extra: Vec<String>,
-        /// Modules the host provides (also `[build] host`; `.d.tl`-only modules are implied)
+        /// Modules the host provides, besides the project's own list (`#[host_module]`, `[build] host`, `std.*`; `.d.tl`-only modules are implied)
         #[arg(long, value_delimiter = ',')]
         host: Vec<String>,
         /// Generate every module even if its cached form still holds, and do not store
@@ -2390,13 +2390,28 @@ fn print_resolution(r: &htl::resolve::Resolution) {
         .candidates
         .iter()
         .any(|c| c.status == htl::resolve::Status::Ambiguous);
-    match &r.read {
-        Some(read) => println!("htl resolve {}: {read}", r.module),
-        None if ambiguous => println!(
+    // A name the host provides: what answers it at run time is the host, and a row read
+    // for it is only the declaration it is typed from. Refused when a file implements it
+    // too, and then the header is the error, as a check reports it.
+    let typed_by = r
+        .read
+        .as_ref()
+        .map(|d| format!(", typed by {d}"))
+        .unwrap_or_default();
+    match (&r.read, &r.error, &r.provided_by) {
+        (_, Some(e), _) => println!("htl resolve {}: error: {e}", r.module),
+        (_, None, Some(by)) => {
+            println!(
+                "htl resolve {}: provided by the host ({by}){typed_by}",
+                r.module
+            )
+        }
+        (Some(read), None, None) => println!("htl resolve {}: {read}", r.module),
+        (None, None, None) if ambiguous => println!(
             "htl resolve {}: more than one module implements it, and no order picks one",
             r.module
         ),
-        None => println!(
+        (None, None, None) => println!(
             "htl resolve {}: nothing in the project or on the search path answers require(\"{}\")",
             r.module, r.module
         ),
@@ -2758,6 +2773,12 @@ fn cmd_build(
     h.install_std()?;
     let cfg = load_config(entry)?;
     let model = apply_model(&h, &cfg, entry)?;
+    // The names the host provides are the model's — `#[host_module]`s in the crate around
+    // the project, `[build] host`, `std.*` — so the bundle leaves out what the host
+    // registers without anyone restating it; `--host` adds to them.
+    if let Some(m) = &model {
+        opts.host.extend(m.provided().map(|(n, _)| n.to_string()));
+    }
     if let Some((_, _, cfg)) = &cfg {
         opts.extra.extend(cfg.build.extra.iter().cloned());
         opts.host.extend(cfg.build.host.iter().cloned());

@@ -364,9 +364,7 @@ fn embed_scaffold_runs_main_as_a_bundle_that_fills_arg() {
         "the script reads arg:\n{main_tl}"
     );
     assert!(
-        main_rs.contains(
-            "include_bundle!(\"src/main.tl\", host = [\"host\", \"sample\"], debug = true)"
-        ),
+        main_rs.contains("include_bundle!(\"src/main.tl\", host = [\"sample\"], debug = true)"),
         "the entry's closure is the bundle, minus what the library provides:\n{main_rs}"
     );
     assert!(

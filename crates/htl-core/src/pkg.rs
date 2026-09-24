@@ -512,7 +512,8 @@ pub struct MluaProject {
     /// A copy is a dependency's source that happens to sit in the repo, and `mlua-pkg
     /// install` rewrites it every time it runs — so it is not the project's to check,
     /// format or take tests from, and editing one there does not survive the next install.
-    /// What that means for the walkers is in [`crate::project_skip_dirs`].
+    /// What that means for the walkers is the project model's to say (its
+    /// `Project::not_walked`).
     pub vendored_copies: Vec<PathBuf>,
     /// The `target_dir` deps with what they are: the name the manifest declares, the copy,
     /// and the directory inside it that `require` reads — the same three facts
@@ -527,7 +528,8 @@ pub struct MluaProject {
     /// The `patch_dir` deps: a dependency's source taken into the tree, and what the
     /// manifest calls it. Unlike a `target_dir` copy, which install rewrites, this one is
     /// the project's own code — [`MluaProject::patch`] wrote it once and the project edits it
-    /// from then on. What that means for the walkers is in [`crate::patched_dirs`].
+    /// from then on. What that means for the walkers is the project model's to say (its
+    /// `Project::not_walked`).
     pub patches: Vec<Patched>,
 }
 
@@ -881,11 +883,10 @@ impl MluaProject {
     /// Where a `require` searches the patched deps: one directory per patch, at its
     /// [`search_dir`](Patched::search_dir).
     ///
-    /// The search path and the cache's probe list are the same list, and this is it
-    /// ([`Htl::apply_project`](crate::Htl::apply_project),
-    /// [`crate::dependency_dirs`]). Nothing here is asked to exist: a `patch_dir` the
-    /// manifest names and nobody has written yet is a directory a name resolves nothing
-    /// through, and the probe over it is what notices when it arrives.
+    /// What [`Htl::apply_project`](crate::Htl::apply_project) puts on the search path for a
+    /// host that sets its checker up from the manifest. Nothing here is asked to exist: a
+    /// `patch_dir` the manifest names and nobody has written yet is a directory a name
+    /// resolves nothing through until it arrives.
     pub fn patch_search_dirs(&self) -> Vec<PathBuf> {
         self.patches.iter().map(Patched::search_dir).collect()
     }

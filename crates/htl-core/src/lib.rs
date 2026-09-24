@@ -521,6 +521,17 @@ pub fn contract_lints(
 /// declaration is how a host module is given types at all, and `htl dts` writes exactly
 /// that file, so the two agree by construction.
 ///
+/// In a project this lint has nothing left to say, and says nothing. The model knows the
+/// names the host provides ([`model::Project::provides`]), and its resolver answers a name
+/// a file of the project implements as well with
+/// [`Resolution::HostShadowed`](model::Resolution::HostShadowed): an error at the
+/// `require`, in the check and at run time, and a search that yields the name's
+/// declaration or nothing — never the file. So the require this lint looks for, one of a
+/// host module name that landed on a file, does not occur, and the error is what reports
+/// the state. The lint stays for a file in no project, which has no model: there
+/// `host_modules` is the scan of the crate around the file, and a warning is all that
+/// scan can back. The rule stays registered either way, since configs name it.
+///
 /// Call it with the search path the file was checked under: the answer depends on it.
 pub fn declaration_conflict_lints(
     h: &Htl,
@@ -1663,6 +1674,21 @@ end
         Ok(f.call(name)?)
     }
 
+    /// Why `name` is refused although the host provides it: the project model's message
+    /// when a file of the model implements the name as well (the model's
+    /// `Resolution::HostShadowed`). `None` when no file
+    /// does, when the host does not provide the name, or when no model is installed
+    /// ([`apply_model`](Self::apply_model)).
+    ///
+    /// [`resolve_module`](Self::resolve_module) answers such a name with its declaration,
+    /// or with nothing, never with the file — which on its own reads as a host module, or
+    /// as a missing one. This is what says it is neither: an error wherever the name is
+    /// required, the way [`ambiguity`](Self::ambiguity) says it for two implementations.
+    pub fn host_shadowing(&self, name: &str) -> Result<Option<String>> {
+        let f: Function = self.h.get("host_shadowing")?;
+        Ok(f.call(name)?)
+    }
+
     /// Every file on the search path that could answer `require(name)`, in the order the
     /// searchers consult them — so the first is the one [`resolve_module`](Self::resolve_module)
     /// answers with, and the rest are what it hides.
@@ -2257,7 +2283,8 @@ pub fn collect_tl(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
 }
 
 /// [`collect_tl`], not entering `skip` either — directories named by path rather than by
-/// name, for what the caller knows and a name cannot say ([`patched_dirs`]).
+/// name, for what the caller knows and a name cannot say — the project model's
+/// `Project::not_walked`.
 pub fn collect_tl_skipping(paths: &[PathBuf], skip: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for p in paths {

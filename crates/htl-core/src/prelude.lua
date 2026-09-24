@@ -43,6 +43,15 @@ do
             local fd = b and io.open(b, "rb")
             if fd then return b, fd, {} end
             return nil, nil, { a }
+         elseif kind == "shadowed" then
+            -- A name the host provides that a file of the model implements too: the
+            -- `tl.parse` wrapper reports it at the `require`. The file is never the
+            -- answer — the host's module is what runs — so the require is typed from the
+            -- name's declaration when there is one, and otherwise answered with nothing,
+            -- whose `module not found` the wrapper's error replaces.
+            local fd = search_all and b and io.open(b, "rb")
+            if fd then return b, fd, {} end
+            return nil, nil, { a }
          elseif kind ~= "outside" then
             return nil, nil, { a }
          end
@@ -946,13 +955,15 @@ do
          end
          for _, site in ipairs(require_sites(ast, true)) do
             local kind, msg = H.resolve_name(filename, site.name)
-            if kind == "hidden" or kind == "ambiguous" then
+            if kind == "hidden" or kind == "ambiguous" or kind == "shadowed" then
                view_errors[filename] = view_errors[filename] or {}
                table.insert(view_errors[filename], {
                   filename = filename, y = site.y, x = site.x, msg = msg,
-                  -- Nothing answered the search for it, so Teal says `module not found`
-                  -- at the same place: this error is instead of that one.
-                  replaces = kind == "ambiguous" and ("module not found: '" .. site.name .. "'") or nil,
+                  -- Nothing answered the search for it — for a name the host provides,
+                  -- when it has no declaration — so Teal says `module not found` at the
+                  -- same place: this error is instead of that one.
+                  replaces = (kind == "ambiguous" or kind == "shadowed")
+                     and ("module not found: '" .. site.name .. "'") or nil,
                })
             end
          end
@@ -1612,7 +1623,9 @@ end
 -- Where `require(name)` would resolve for the checker (`.tl` / `.d.tl` / `.lua`), and
 -- where a plain `.lua` implementation sits on the path, if any. Both may be nil.
 -- A name more than one file implements resolves to neither: the model's search answers
--- nothing for it, and `H.ambiguity` says why.
+-- nothing for it, and `H.ambiguity` says why. A name the host provides that a file of the
+-- model implements as well (kind `shadowed`) resolves to its declaration, or to nothing,
+-- and never to a `.lua`: the file is not what runs, so nothing downstream may take it.
 function H.resolve_module(name)
    local kind, _, _, lua = nil, nil, nil, nil
    if H.resolve_name then kind, _, _, lua = H.resolve_name(nil, name) end
@@ -1634,6 +1647,17 @@ function H.ambiguity(name)
    if not H.resolve_name then return nil end
    local kind, msg = H.resolve_name(nil, name)
    if kind == "ambiguous" then return msg end
+   return nil
+end
+
+-- The model's message when the host provides `name` and a file of the model implements
+-- it too (kind `shadowed`), else nil. `H.resolve_module` answers such a name with its
+-- declaration or nothing, which alone reads as a host module or a missing one; this is
+-- what tells the linker it is neither, for a `require` no check has seen (a plain `.lua`).
+function H.host_shadowing(name)
+   if not H.resolve_name then return nil end
+   local kind, msg = H.resolve_name(nil, name)
+   if kind == "shadowed" then return msg end
    return nil
 end
 
@@ -1926,7 +1950,10 @@ local function resolve_for_require(module_name)
       -- Two implementations: the check reports it at the `require`, but a `require` the
       -- check never saw (in a plain `.lua`) reaches here, and `tl.search_module` would
       -- answer it with one of the two. No order picks one at run time either.
-      if kind == "ambiguous" then error(impl, 0) end
+      -- A name the host provides that a file implements too is refused the same way: a
+      -- run with the host never reaches this searcher (`package.preload` answers first),
+      -- so serving the file here would run what no run with the host runs.
+      if kind == "ambiguous" or kind == "shadowed" then error(impl, 0) end
       if kind == "found" and not impl and lua then
          local lfd = io.open(lua, "rb")
          if lfd then

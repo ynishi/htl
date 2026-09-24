@@ -6,7 +6,8 @@ use htl::mlua::Table;
 use htl::{Htl, include_bundle};
 
 // `mq` is htl-mq's: its declaration is `types/htl-mq/mq.d.tl`, which `htl check` writes.
-const MAIN: &[u8] = include_bundle!("src/main.tl", host = ["fx", "mq", "{{mod}}"], debug = true);
+// `fx` is this crate's `#[host_module]`, which the build knows without being told.
+const MAIN: &[u8] = include_bundle!("src/main.tl", host = ["mq", "{{mod}}"], debug = true);
 
 fn main() -> anyhow::Result<()> {
     let h = Htl::new()?;

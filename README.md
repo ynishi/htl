@@ -74,7 +74,7 @@ htl = "0.6"                    # embedding: engine + proc macros in one import
 | `htl build <entry.tl> -o app.hb [--debug] [--source] [--extra a,b] [--host x,y] [--no-cache] [--explain-cache]` | link the entry's `require` closure into one bundle (see Bundles), replaying from the run cache what still holds (see Caching; the directory form is not cached); a bundle is the `hb` target, so a project whose `[build] target` is `bin` or `cdylib` is refused (see Build targets) |
 | `htl bundle info <app.hb> [--format json]` | what a bundle records, without running it: format, the htl that built it, payload kind, the Lua its bytecode is for, entry, modules, host-provided names |
 | `htl unused [paths] [--format json] [--exit-non-zero-on-unused] [--no-cache]` | the complement of the same closure: modules no entry reaches, and `[deps]` no reached module requires (see Unused) |
-| `htl resolve <module> [path] [--format json]` | which file `require("<module>")` resolves to: every file of the project that answers to the name, which one is read, and which crate or dependency each came from (see `types/`); exits 1 when the name resolves to nothing, or to two implementations |
+| `htl resolve <module> [path] [--format json]` | which file `require("<module>")` resolves to: every file of the project that answers to the name, which one is read, and which crate or dependency each came from (see `types/`); for a name the host provides, which source says so; exits 1 when the name resolves to nothing, to two implementations, or to a file under a name the host provides |
 | `htl pkg install` | fetch every dependency `mlua-pkg.toml` declares into `.htl/modules/` and write `mlua-pkg.lock`; the deps' own `types/` are then copied into the project's (see `types/`) |
 | `htl pkg add <name> <git> [--tag t \| --rev r \| --branch b] [--entry dir] [--target-dir dir]` | write the dependency into the manifest (`install` fetches it); a `patch_dir` the entry already declared is kept |
 | `htl pkg update [name] [--dry-run] [--force]` | refresh dependencies and bump the pins that follow releases, then install |
@@ -450,12 +450,26 @@ from `#[derive(TealRecord)]` structs and enums in the same source file, types fr
 other modules via `uses = [Name]` + their own `.d.tl`.
 
 The name a host module registers is a name the Teal sources no longer own. The host puts
-it in `package.preload`, which Lua consults before any path searcher, so a `scripts/host.tl`
-sitting beside `#[host_module(name = "host")]` is the file the check reads and never the
-module the program runs — green check, successful build, `attempt to call a nil value` at
-the first function the two do not share. `host-module-shadowed` reports that at the
-`require`, naming both. It is a lint rather than a fix: which of the two should give up the
-name is the project's decision, and htl moves neither resolution order.
+it in `package.preload`, which Lua consults before any path searcher, so a `src/host.tl`
+sitting beside `#[host_module(name = "host")]` would be the file the check reads and never
+the module the program runs — green check, `attempt to call a nil value` at the first
+function the two do not share. In a project (a directory with `htl.toml` or
+`mlua-pkg.toml`) that is an error, reported at every `require` of the name:
+
+```text
+src/main.tl:1:14: 'host' is provided by the host (#[host_module] in Cargo.toml's crate)
+and also implemented by src/host.tl: the host's module is what runs, so this file would be
+checked and never run — rename it, or stop providing the name
+```
+
+The same holds for a `src/host.lua`, with or without a `.d.tl` beside it, and for a name
+the host provides by the other two routes: `[build] host` in `htl.toml` (the message says
+`[build] host in htl.toml`) and `std.*` (`htl's std`). `htl run` and `htl test` refuse the
+file at its `require` with the same message rather than run it. The host's `.d.tl` is not
+an implementation: it is how the module is typed, and the check reads it. Which of the two
+gives up the name is the project's decision — rename the file, or stop providing the name.
+A file in no project has no model to ask, and is reported by the `host-module-shadowed`
+lint instead (see "Lints").
 
 ### Your own `Lua`
 
@@ -581,7 +595,8 @@ use htl::mlua::Table;
 use htl::{Htl, include_bundle};
 
 // `mq` is htl-mq's: its declaration is `types/htl-mq/mq.d.tl`, which `htl dts` writes.
-const MAIN: &[u8] = include_bundle!("src/main.tl", host = ["host", "game", "mq"], debug = true);
+// `host` is this crate's `#[host_module]`, which the build knows without being told.
+const MAIN: &[u8] = include_bundle!("src/main.tl", host = ["game", "mq"], debug = true);
 
 fn main() -> anyhow::Result<()> {
     let h = Htl::new()?;
@@ -869,7 +884,7 @@ no-any = "warn"           # allow by default; see it while you migrate, without 
 | `explicit-number` | allow | `local n = 0` (inferred `integer`) that is later assigned a number expression (`n = n * 1.5`, `n = a / b`): names the declaration and the assignment; write `local n: number = 0`. Plain integer counters are not reported |
 | `class-record` | allow | a record declaring metamethods (`metamethod __index: Actor` = a class): its metatable is attached by `setmetatable` at run time and is not part of the value, so serialization and the Rust boundary drop it; keep such records out of saved data and host signatures |
 | `duplicate-declaration` | warn | two `.d.tl` for one module: an order decides which is read — the project's own first, then dependencies', crates', `[check] paths` — and nothing in either file says so. Names the one read and the one that was not (see "Project config") |
-| `host-module-shadowed` | warn | a `require` of a name a `#[host_module]` in the surrounding crate registers that resolved to a Teal file of that name: `package.preload` beats the path searcher at run time, so the file is what is checked and the host is what runs. Reported at the require, naming both (see "Rust host") |
+| `host-module-shadowed` | warn | for a file in no project (no `htl.toml` or `mlua-pkg.toml` above it): a `require` of a name a `#[host_module]` in the surrounding crate registers that resolved to a Teal file of that name: `package.preload` beats the path searcher at run time, so the file is what is checked and the host is what runs. Reported at the require, naming both. In a project the same state is an error rather than this lint (see "Embedding in Rust") |
 | `contract` | warn | a module under a `[[contract]]` directory that does not satisfy the contract's type or its `---@required` fields, and a `---@contract` marker that cannot be turned into a contract or published (see "Data from outside the program") |
 | `contract-unenforced` | warn | a contract the host never builds resolvers for, so it is documentation rather than a run-time guarantee. Say where the enforcement lives with `[[contract]] enforced_by` when the scan cannot see it |
 | `require-cycle` | warn | a loop in the require graph of the files `htl check <dir>` just checked, e.g. `a.tl -> b.tl -> a.tl`. Teal types the back edge as an opaque circular require, so without this the symptom is "cannot index" somewhere else |
@@ -1526,6 +1541,36 @@ the report ends with the directories it searched instead (`searched, in order: �
 of them is the project's: the project's directories are the model's to answer for, and
 are not on Lua's search path at all.
 
+A name the host provides — a `#[host_module]` in the crate around the project, `[build]
+host`, `std.*` — is answered at run time by the host and by no file, and the header says
+which of the three the project model read it from; a row read for it is the declaration it
+is typed from:
+
+```console
+$ htl resolve host
+htl resolve host: provided by the host (#[host_module] in Cargo.toml's crate), typed by src/host.d.tl
+
+  order  file           kind         status
+  1      src/host.d.tl  declaration  read
+
+  answered by the project model
+```
+
+A `.tl` or `.lua` of the project under such a name is the error `htl check` reports at its
+`require` (see "Embedding in Rust"): the header is that error, the file's row is
+`refused`, and the command exits 1.
+
+```console
+$ htl resolve host
+htl resolve host: error: 'host' is provided by the host (#[host_module] in Cargo.toml's crate) and also implemented by src/host.tl: the host's module is what runs, so this file would be checked and never run — rename it, or stop providing the name
+
+  order  file           kind         status
+  1      src/host.tl    source       refused
+  2      src/host.d.tl  declaration  read
+
+  answered by the project model
+```
+
 A name that resolves to nothing says so and exits non-zero, so a script can ask. `--format
 json` carries the same rows ("Machine-readable output"). `htl.test` is not a project's
 module — `htl test` preloads it into the state it runs — so it is not a name to ask
@@ -2014,17 +2059,22 @@ names are stable; fields may be added, not renamed.
   none. `check_errors` is what the check behind the graph reported: a file that does not
   check contributes no edges, so a report from a run with any is a guess.
 - `resolve`: `{ module, read?, candidates: [{ order, path, dir, kind:
-  "source"|"declaration"|"lua", status: "read"|"shadowed"|"runtime"|"ambiguous", shadowed_by?,
-  origin?: { kind: "crate"|"dependency"|"vendored"|"patched", name, version? } }],
-  answered_by: "model"|"path", searched: [dir], summary: { candidates, shadowed, ok } }`.
+  "source"|"declaration"|"lua", status: "read"|"shadowed"|"runtime"|"ambiguous"|"refused",
+  shadowed_by?, origin?: { kind: "crate"|"dependency"|"vendored"|"patched", name, version? } }],
+  answered_by: "model"|"path", searched: [dir], provided_by?, error?, summary: { candidates,
+  shadowed, ok } }`.
   `answered_by` says whether the rows are the project model's files under the name or what
   Lua's search path found for a name the project does not have; `searched` is that path's
   directories either way. `order` is the position in
   the search order, and `status` what became of that candidate: `read` is the file the
   checker reads, `shadowed` names the `order` that is read instead (`shadowed_by`), and
   `runtime` is the `.lua` a declaration types — loaded by the run, hidden by nothing.
-  `read` and `ok` are absent and false when the name resolves to nothing. Paths are
-  relative to the project root when they are inside it.
+  `read` and `ok` are absent and false when the name resolves to nothing. `provided_by`
+  is present for a name the host provides, worded as the text header words it (`#[host_module]
+  in Cargo.toml's crate`, `[build] host in htl.toml`, `htl's std`), and `ok` is then true
+  without a file; `error` is present when a file of the project implements such a name as
+  well — those rows are `refused` — and `ok` is false. Paths are relative to the project
+  root when they are inside it.
 
 GitHub Actions annotations from a check, for instance:
 
@@ -2071,8 +2121,13 @@ and is refused up front, naming them, if one is missing.
   `--source` bundle says its Lua is `any`; a format 1 bundle (`HTLB\x01`, before the
   fingerprint) says it was not recorded.
 - A dynamic `require(expr)` cannot be followed: list its targets under `[build] extra`
-  in `htl.toml` (or `--extra`). Modules the host provides without a `.d.tl` go under
-  `[build] host` (or `--host`).
+  in `htl.toml` (or `--extra`). The names the host provides are the project's: every
+  `#[host_module]` in the crate around the project, `[build] host`, and `std.*` are left
+  out of the bundle without being listed again. A module the host registers some other
+  way (by hand, or from another crate) and that has no `.d.tl` goes under `[build] host`
+  (or `--host`). A `.tl` or `.lua` of the project under any of these names is an error (see
+  "Embedding in Rust"): the check reports it at a checked file's `require`, and `htl
+  build` at a plain `.lua`'s, which nothing checks — and writes no bundle.
 - Bundled modules are installed as `package.preload` entries, the same place a host
   puts its own (a name the host preloaded first is left alone: the host wins). So
   everything that defers to preload, a `.d.tl` stepping aside for the implementation
@@ -2097,10 +2152,12 @@ From Rust, `include_bundle!` does the same at `cargo build` and keeps the guaran
 so an edit rebuilds, and a Teal type error anywhere in the closure fails the build.
 
 ```rust
-const BUNDLE: &[u8] = htl::include_bundle!("src/main.tl", host = ["host"], extra = ["modkit"]);
-// payload = "source" for a target whose Lua header differs (big-endian, non-default
-// number types; see Portability above); debug = true keeps line numbers.
-// [build] extra / host in htl.toml are merged in.
+const BUNDLE: &[u8] = htl::include_bundle!("src/main.tl", extra = ["modkit"]);
+// The host's names are the project's, as for `htl build`: `Host`'s `#[host_module]`, `[build]
+// host` and `std.*` are not bundled. `host = [..]` is optional, for a module the project
+// cannot see (registered by hand, or by another crate). payload = "source" for a target
+// whose Lua header differs (big-endian, non-default number types; see Portability above);
+// debug = true keeps line numbers. [build] extra in htl.toml is merged in.
 Host { .. }.htl_preload(&h)?;
 h.run_bundle(&htl::bundle::Bundle::decode(BUNDLE)?, &args)?;
 ```
@@ -2142,8 +2199,10 @@ the files `htl test`, `htl build`, `[[contract]]` and a Rust host are pointed at
 - every module directly under a `[[contract]]` directory: those are loaded by name at run
   time, from a mods directory the project does not own. The `exclude`d ones too —
   `exclude` says a module is not held to the contract, not that nothing loads it;
-- anything named in `[build] extra` / `[build] host`, which is where a dynamic
-  `require(expr)` already has to list its targets for `htl build` to bundle them;
+- anything named in `[build] extra`, which is where a dynamic `require(expr)` already has
+  to list its targets for `htl build` to bundle them, and every name the host provides —
+  a `#[host_module]` in the crate around the project, `[build] host`, `std.*` — the names
+  `htl build` leaves to the host;
 - the file a Rust host embeds: the first argument of an `include_bundle!` / `include_tl!`
   / `include_tl_bytes!` in the crate around the project. A project whose `main` is in Rust
   has no `src/main.tl`, and its entry is named there and nowhere else.

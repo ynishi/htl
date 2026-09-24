@@ -54,6 +54,13 @@ pub fn include_tl_bytes(input: TokenStream) -> TokenStream {
 /// Links the entry's `require` closure at `cargo build` (see `htl::link`) and embeds
 /// the encoded bundle as `&'static [u8]`; run it with
 /// `Htl::run_bundle(&Bundle::decode(BUNDLE)?, &args)` after registering host modules.
+///
+/// Every option is optional. The names the host provides are the project's model's: each
+/// `#[host_module]` in the crate around the project, `[build] host` in `htl.toml`, and
+/// `std.*` — none of them is bundled, and a file of the project under one of them is an
+/// error, since the host's module is what would run. `host = [..]` adds names the model
+/// cannot see (a module registered by hand, or by another crate); it does not need to
+/// restate a `#[host_module]` of this crate, which is the one list the model reads it from.
 /// Every linked file and every declaration the checker read is `include_bytes!`-tracked,
 /// so an edit rebuilds and a Teal type error is a compile error, like `include_tl!`.
 /// `payload` is `"bytecode"` (default, stripped; `debug = true` keeps line info) or
@@ -154,6 +161,11 @@ fn resolve_bundle(
     let ck = checker_for("include_bundle!", manifest_dir, &path)?;
     let (h, cfg) = (&ck.h, &ck.cfg);
     let mut opts = opts.clone();
+    // The host's names come from the project's model, as for `htl build`: a
+    // `#[host_module]` in this crate is one without `host = [..]` naming it again.
+    if let Some(m) = &ck.model {
+        opts.host.extend(m.provided().map(|(n, _)| n.to_string()));
+    }
     if let Some(c) = cfg {
         opts.extra.extend(c.build.extra.iter().cloned());
         opts.host.extend(c.build.host.iter().cloned());
@@ -1690,6 +1702,51 @@ mod tests {
         assert!(
             !published.join(".htl").exists(),
             "cargo publish's verify copy is left exactly as it was"
+        );
+    }
+
+    /// `include_bundle!` with no `host = [..]`: the crate's `#[host_module]` names are the
+    /// host's, from the project's model. A `.lua` beside the name's declaration was
+    /// bundled in the host module's place before; it is the model's error now, and the
+    /// expansion fails with it.
+    #[test]
+    fn bundle_takes_the_host_names_from_the_crates_host_modules() {
+        let root = scratch("bundle-host-module");
+        write(&root.join("htl.toml"), "");
+        write(
+            &root.join("Cargo.toml"),
+            "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        );
+        write(
+            &root.join("src/lib.rs"),
+            "use htl::host_module;\npub struct Host;\n#[host_module(name = \"host\")]\n\
+             impl Host {\n    \
+             pub fn base(&self) -> i64 { 1 }\n}\n",
+        );
+        write(
+            &root.join("src/host.d.tl"),
+            "local record host\n   base: function(): integer\nend\nreturn host\n",
+        );
+        write(
+            &root.join("src/main.tl"),
+            "local host = require(\"host\")\nprint(host.base())\n",
+        );
+        let opts = htl_core::link::LinkOptions::default();
+        let out = resolve_bundle(&root, "src/main.tl", &opts).expect("links");
+        let b = htl_core::bundle::Bundle::decode(&out.bytes).unwrap();
+        assert_eq!(b.host_modules, vec!["host".to_string()]);
+
+        write(
+            &root.join("src/host.lua"),
+            "return { base = function() return 2 end }\n",
+        );
+        let err = resolve_bundle(&root, "src/main.tl", &opts).expect_err("refused");
+        assert!(
+            err.contains(
+                "'host' is provided by the host (#[host_module] in Cargo.toml's crate) \
+                          and also implemented by src/host.lua"
+            ),
+            "{err}"
         );
     }
 

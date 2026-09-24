@@ -34,7 +34,9 @@ impl Fx {
     }
 }
 
-const BUNDLE: &[u8] = htl::include_bundle!("src/{{mod}}/init.tl", host = ["fx", "mq"]);
+// `fx` is this crate's `#[host_module]`, which the build knows without being told; `mq` is
+// htl-mq's, registered by another crate, so it is named.
+const BUNDLE: &[u8] = htl::include_bundle!("src/{{mod}}/init.tl", host = ["mq"]);
 
 /// Register what this crate provides on a fresh `Htl`: `fx`, htl-mq's `mq`, `std.*`, then
 /// the engine as `require("{{mod}}")`.
