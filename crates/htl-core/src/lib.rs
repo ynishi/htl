@@ -60,6 +60,9 @@ pub mod fix;
 // these names, so the list is here rather than in `lint.lua`, which is one of the halves.
 pub mod link;
 pub mod lint;
+// The naming rule (a file's module name, and the files a name may be), shared by the
+// project model and a host's `TealResolver`, which is compiled without the model.
+pub mod naming;
 // Which modules a project is made of and what name each file answers to. Reads the
 // mlua-pkg manifest and the notes `htl dts` writes, so it carries the project layer's
 // features.
@@ -947,8 +950,10 @@ end
 -- Idempotent, as the checker prelude's H.add_path is and for the same reason: a
 -- directory already on the path keeps the place whoever put it there gave it, and
 -- `Htl::add_path` calls both states, so the two must agree on the order they produce.
-function R.add_path(dir)
-   local templates = dir .. "/?.lua;" .. dir .. "/?/init.lua;" .. dir .. "/?/?.lua"
+-- The templates are the prelude's `H.templates`: `?/?` only for a directory of packages.
+function R.add_path(dir, packages)
+   local templates = dir .. "/?.lua;" .. dir .. "/?/init.lua"
+   if packages then templates = templates .. ";" .. dir .. "/?/?.lua" end
    if package.path == nil or package.path == "" then
       package.path = templates
       return
@@ -1390,14 +1395,32 @@ impl Htl {
         Ok(())
     }
 
-    /// Prepend `dir/?.tl;dir/?/init.tl` to `package.path` (Teal resolves requires through it).
+    /// Prepend `dir` to `package.path` (Teal resolves requires through it) as a directory
+    /// of modules mounted at the top: `dir/<a>/<b>.tl` is `a.b`, and `dir/<a>/init.tl` is
+    /// `a`. A directory already on the path keeps its place.
+    ///
+    /// A file named after its directory is an ordinary submodule here — `dir/util/util.tl`
+    /// is `util.util`, not `util` ([`naming`]). That spelling belongs to a directory of
+    /// packages: [`add_package_path`](Self::add_package_path).
     pub fn add_path(&self, dir: &Path) -> Result<()> {
+        self.add_path_as(dir, false)
+    }
+
+    /// Prepend `dir` to `package.path` as a directory that holds packages by name — the
+    /// dependency links under `.htl/modules/entries`, the parent of a vendored copy or a
+    /// patch: `dir/<name>/init.tl` is `<name>`, and so is `dir/<name>/<name>.tl`, a flat
+    /// package's entry ([`naming`]).
+    pub fn add_package_path(&self, dir: &Path) -> Result<()> {
+        self.add_path_as(dir, true)
+    }
+
+    fn add_path_as(&self, dir: &Path, packages: bool) -> Result<()> {
         let f: Function = self.h.get("add_path")?;
-        f.call::<()>(path_str(dir))?;
+        f.call::<()>((path_str(dir), packages))?;
         if self.split {
             // The program state resolves plain `.lua` (and `.d.tl` siblings) itself.
             let f: Function = self.runtime()?.get("add_path")?;
-            f.call::<()>(path_str(dir))?;
+            f.call::<()>((path_str(dir), packages))?;
         }
         Ok(())
     }

@@ -1656,7 +1656,7 @@ function H.template_dir(template)
 end
 
 -- The directories `package.path` searches, in order, one entry each however many
--- templates a directory contributes (`add_path` adds three).
+-- templates a directory contributes (`add_path` adds two or three).
 function H.search_dirs()
    local out, seen = {}, {}
    for template in package.path:gmatch("[^;]+") do
@@ -1967,8 +1967,18 @@ end
 
 -- tl.search_module rewrites the ".lua" suffix of each package.path template to
 -- ".tl" / ".d.tl" / ".lua" in turn, so templates must end in ".lua".
--- `?/?.lua` lets a flat package expose its top-level module as `<name>/<name>.tl`
--- (mlua-pkg's entry is a directory; without init.tl this is how a flat layout resolves).
+--
+-- The templates of a directory are the naming rule's spellings (`htl_core::naming`):
+-- `?.lua` and `?/init.lua` everywhere, and `?/?.lua` only where the directory holds
+-- packages by name (`packages` true: the dependency links, the parent of a vendored copy
+-- or a patch), because `<name>/<name>.tl` is a flat package's entry and nothing else. On
+-- any other directory the template made `util/util.tl` answer to `util` as well as to
+-- `util.util`.
+function H.templates(dir, packages)
+   local t = dir .. "/?.lua;" .. dir .. "/?/init.lua"
+   if packages then t = t .. ";" .. dir .. "/?/?.lua" end
+   return t
+end
 --
 -- A directory already on the path keeps the place it has. Whoever put it there said
 -- where it goes -- a host stating its order once with add_search_paths, or an earlier
@@ -1976,14 +1986,14 @@ end
 -- called last: a resolver that puts its own root in front on its first resolve would
 -- override the host for every module checked after it. Absent from the path, the
 -- directory is still prepended, so the only source of a root is still consulted first.
-function H.add_path(dir)
-   local templates = dir .. "/?.lua;" .. dir .. "/?/init.lua;" .. dir .. "/?/?.lua"
+function H.add_path(dir, packages)
+   local templates = H.templates(dir, packages)
    if package.path == nil or package.path == "" then
       package.path = templates
       return
    end
    -- Whole entries, not a substring: "/a/?.lua" must not match "/other/a/?.lua". The
-   -- first template stands for the three, which are only ever written together here.
+   -- first template stands for the rest, which are only ever written together here.
    local first = dir .. "/?.lua"
    for entry in package.path:gmatch("[^;]+") do
       if entry == first then
@@ -2001,9 +2011,9 @@ end
 -- a module the next check is about. `TealResolver`'s expect_type stub is the caller --
 -- it resolves the served module by name, and a second contract directory holding a module
 -- of the same name would otherwise decide which file the contract is checked against.
-function H.push_path_front(dir)
+function H.push_path_front(dir, packages)
    local saved = package.path
-   local templates = dir .. "/?.lua;" .. dir .. "/?/init.lua;" .. dir .. "/?/?.lua"
+   local templates = H.templates(dir, packages)
    if saved == nil or saved == "" then
       package.path = templates
    else

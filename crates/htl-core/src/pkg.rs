@@ -8,6 +8,7 @@
 //!    ├─ NativeResolver   host_module userdata / Rust tables
 //!    ├─ TealResolver     name -> name.tl | name/init.tl  (check + gen + load)
 //!    │                   name -> name.d.tl              (type-only: empty table)
+//!    │                   (the naming rule's spellings: crate::naming)
 //!    ├─ VendoredResolver mlua-pkg.toml git deps
 //!    └─ FsResolver       plain .lua
 //! ```
@@ -29,9 +30,28 @@ pub use mlua_pkg;
 
 /// Resolves `require("a.b")` to `a/b.tl`, `a/b/init.tl`, or `a/b.d.tl` under a
 /// sandboxed root, type-checking and generating on the fly.
+///
+/// # Which file a name is
+///
+/// The files a name may be are the naming rule's ([`crate::naming`]), the rule the project
+/// model names every file by, read from the name back to the files: so a module a host
+/// serves here has the name `htl check` gives it. The root is read as a directory of
+/// modules mounted at the top — `a/b.tl` is `a.b`, `a/init.tl` is `a`, and `util/util.tl`
+/// is `util.util` and nothing else — unless it is a directory of packages
+/// ([`holding_packages`](Self::holding_packages)), where each child is a package mounted at
+/// its name and a flat package's `<name>/<name>.tl` is `<name>`.
+///
+/// Two implementations of one name (`util.tl` beside `util/init.tl`) are an error, as they
+/// are to the checker: which of them runs is not a choice the order of a list should make.
+///
+/// The rule is applied on every `require` rather than to a table built once, because the
+/// directory is the host's: a mod dropped into it after the host started is one the next
+/// `require` finds.
 pub struct TealResolver {
     sandbox: Box<dyn SandboxedFs>,
     root: Option<PathBuf>,
+    /// The root holds packages by name ([`holding_packages`](Self::holding_packages)).
+    packages: bool,
     path_added: AtomicBool,
     module_separator: char,
     /// `"defs.Mod"`: every module served by this resolver must be assignable to that type.
@@ -53,6 +73,7 @@ impl TealResolver {
         Ok(Self {
             sandbox: Box::new(FsSandbox::new(&root)?),
             root: Some(root),
+            packages: false,
             path_added: AtomicBool::new(false),
             module_separator: '.',
             expect_type: None,
@@ -69,6 +90,7 @@ impl TealResolver {
         Ok(Self {
             sandbox: Box::new(SymlinkAwareSandbox::new(&root)?),
             root: Some(root),
+            packages: false,
             path_added: AtomicBool::new(false),
             module_separator: '.',
             expect_type: None,
@@ -85,6 +107,7 @@ impl TealResolver {
         Self {
             sandbox: Box::new(sandbox),
             root,
+            packages: false,
             path_added: AtomicBool::new(false),
             module_separator: '.',
             expect_type: None,
@@ -95,13 +118,28 @@ impl TealResolver {
         }
     }
 
+    /// Read the root as a directory of packages, each a child named after the package:
+    /// `<root>/<name>/init.tl` is `<name>`, and so is `<root>/<name>/<name>.tl`, the entry of
+    /// a flat package; `<root>/<name>/sub.tl` is `<name>.sub`. What
+    /// [`MluaProject::teal_resolver`] serves the dependency links from, and what
+    /// [`MluaProject::registry`] does for the parent of a `target_dir` copy.
+    ///
+    /// Without it the root is a directory of modules mounted at the top, the way a host's
+    /// script directory is, and `<root>/<name>/<name>.tl` is `<name>.<name>`. The checker's
+    /// search path spells the root the same way
+    /// ([`Htl::add_package_path`](crate::Htl::add_package_path)).
+    pub fn holding_packages(mut self) -> Self {
+        self.packages = true;
+        self
+    }
+
     /// The character in a module name that stands for a directory boundary. `.` by
     /// default, as `require("a.b")` writes it.
     ///
     /// It is a setting rather than a constant because the name a host registers a module
     /// under is the host's to choose, and one that uses `/` or `::` still has to reach
-    /// `a/b.tl` on disk. Only the separator moves: the candidate list built from it
-    /// (`.tl`, `/init.tl`, `/<last>.tl`, `.d.tl`) is the same whatever it is.
+    /// `a/b.tl` on disk. Only the separator moves: the files a name may be are the naming
+    /// rule's whatever it is.
     pub fn with_module_separator(mut self, sep: char) -> Self {
         self.module_separator = sep;
         self
@@ -305,7 +343,7 @@ impl TealResolver {
         let saved: Option<String> = match &self.root {
             Some(root) => {
                 let f: Function = h.get("push_path_front")?;
-                Some(f.call::<String>(root.to_string_lossy().as_ref())?)
+                Some(f.call::<String>((root.to_string_lossy().as_ref(), self.packages))?)
             }
             None => None,
         };
@@ -355,19 +393,23 @@ impl TealResolver {
             }
         }
         if let Some(root) = &self.root {
-            f.call::<()>(root.to_string_lossy().as_ref())?;
+            f.call::<()>((root.to_string_lossy().as_ref(), self.packages))?;
         }
         let _ = lua;
         Ok(())
     }
 
-    fn has_lua_sibling(&self, relative: &str) -> bool {
-        for cand in [format!("{relative}.lua"), format!("{relative}/init.lua")] {
-            if let Ok(Some(_)) = self.sandbox.read(Path::new(&cand)) {
-                return true;
-            }
+    /// The paths under the root that may be `name` (dot-separated), in the naming rule's
+    /// order: implementations, declarations, plain Lua.
+    fn candidates(&self, name: &str) -> Vec<PathBuf> {
+        if !self.packages {
+            return crate::naming::candidates("", name);
         }
-        false
+        let package = name.split('.').next().unwrap_or(name);
+        crate::naming::candidates(package, name)
+            .into_iter()
+            .map(|c| Path::new(package).join(c))
+            .collect()
     }
 
     fn load_teal(
@@ -530,8 +572,9 @@ impl Patched {
     /// The directory to put on the search path so that the copy answers to the
     /// dependency's name.
     ///
-    /// A directory on the path is consulted as `<dir>/<module>`, `<dir>/<module>/init`
-    /// and `<dir>/<module>/<module>` (the three templates `add_path` writes), with the
+    /// A directory of packages on the path is consulted as `<dir>/<module>`,
+    /// `<dir>/<module>/init` and `<dir>/<module>/<module>` (the three templates
+    /// [`add_package_path`](crate::Htl::add_package_path) writes), with the
     /// dots of the module name as separators. So the directory that resolves a
     /// dependency exactly as `.htl/modules/entries` does is the one holding
     /// [`entry`](Self::entry) *as a child named after the dependency* — which is what
@@ -903,7 +946,7 @@ impl MluaProject {
         if crate::cache::scratch_root(&self.root).is_none() {
             let _ = std::fs::create_dir_all(&self.entries);
         }
-        TealResolver::new_symlink_aware(&self.entries)
+        Ok(TealResolver::new_symlink_aware(&self.entries)?.holding_packages())
     }
 
     /// Write `entries/<name>` → the require root of the copy the project uses, for every
@@ -1039,7 +1082,7 @@ impl MluaProject {
         reg.add(self.vendored_resolver()?);
         for d in &self.target_dirs {
             if d.is_dir() {
-                reg.add(TealResolver::new(d)?);
+                reg.add(TealResolver::new(d)?.holding_packages());
                 reg.add(mlua_pkg::resolvers::FsResolver::new(d)?);
             }
         }
@@ -1698,12 +1741,14 @@ impl crate::Htl {
         // the path consults after everything below. A checkout that has installed
         // resolves through its links exactly as it did before, and the copy answers where
         // there are none — a tarball, a clone nobody has installed in yet.
+        // Each of these holds packages by name, so a flat package's `<name>/<name>.tl` is
+        // its entry there (`add_package_path`); the project's `src/` below does not.
         for d in p.patch_search_dirs() {
-            self.add_path(&d)?;
+            self.add_package_path(&d)?;
         }
-        self.add_path(&p.entries)?;
+        self.add_package_path(&p.entries)?;
         for d in &p.target_dirs {
-            self.add_path(d)?;
+            self.add_package_path(d)?;
         }
         // The project's own modules: `<root>/src` (the scaffold layout) so a script anywhere
         // in the project resolves them the same way `tests/` does.
@@ -1719,7 +1764,7 @@ impl crate::Htl {
 ///
 /// Every variant carries `module` — the name that was required, not the path it resolved
 /// to — because that is the name the `require` in the caller's source spells, and the
-/// caller is where the mistake is read from. All four are returned as `Some(Err)` so the
+/// caller is where the mistake is read from. All of them are returned as `Some(Err)` so the
 /// `Registry` stops rather than falling through to a later resolver: a `.tl` that does not
 /// check must not be quietly replaced by a `.lua` of the same name.
 #[derive(Debug)]
@@ -1754,6 +1799,14 @@ pub enum TealResolveError {
         /// nilable, so which ones are missing is the whole of what the type check could
         /// not say.
         fields: Vec<String>,
+    },
+    /// More than one file under the root implements the name — `util.tl` beside
+    /// `util/init.tl` — which the checker reports as an error too. Neither is served.
+    Ambiguous {
+        /// The name that was required.
+        module: String,
+        /// Every implementation found, in the naming rule's order.
+        files: Vec<PathBuf>,
     },
     /// The file could not be read through the sandbox — outside the root, or gone between
     /// the resolver finding it and opening it.
@@ -1799,6 +1852,14 @@ impl std::fmt::Display for TealResolveError {
                 "module '{module}' is missing required field(s) of {expected}: {} (every field of that record must be non-nil)",
                 fields.join(", ")
             ),
+            Self::Ambiguous { module, files } => {
+                let files: Vec<String> = files.iter().map(|p| p.display().to_string()).collect();
+                write!(
+                    f,
+                    "module '{module}' is implemented by more than one file: {}",
+                    files.join(", ")
+                )
+            }
             Self::Read { module, source } => write!(f, "reading module '{module}': {source}"),
         }
     }
@@ -1815,15 +1876,11 @@ fn preloaded(lua: &Lua, name: &str) -> mlua::Result<bool> {
 
 impl Resolver for TealResolver {
     fn resolve(&self, lua: &Lua, name: &str) -> Option<mlua::Result<Value>> {
-        let relative = name.replace(self.module_separator, "/");
-        // Flat packages: `<name>/<name>.tl` stands in for `<name>/init.tl`.
-        let last = relative.rsplit('/').next().unwrap_or(&relative).to_string();
-        let candidates = [
-            (format!("{relative}.tl"), false),
-            (format!("{relative}/init.tl"), false),
-            (format!("{relative}/{last}.tl"), false),
-            (format!("{relative}.d.tl"), true),
-        ];
+        let dotted: String = name
+            .split(self.module_separator)
+            .collect::<Vec<_>>()
+            .join(".");
+        let candidates = self.candidates(&dotted);
         let h = match Self::prelude(lua) {
             Ok(h) => h,
             Err(e) => return Some(Err(e)),
@@ -1831,61 +1888,91 @@ impl Resolver for TealResolver {
         if let Err(e) = self.ensure_checker_path(lua, &h) {
             return Some(Err(e));
         }
-        for (candidate, type_only) in &candidates {
-            match self.sandbox.read(Path::new(candidate)) {
-                Ok(Some(file)) => {
-                    if *type_only {
-                        // A `.d.tl` may describe a plain `.lua` served by a later resolver
-                        // (FsResolver / VendoredResolver): step aside if one is present.
-                        // Native modules must be registered *before* this resolver.
-                        if self.has_lua_sibling(&relative) {
-                            return None;
-                        }
-                        // ... or that the host registered in `package.preload` (a Rust
-                        // `#[host_module]`, `Htl::preload_value`). The Registry's searcher
-                        // runs *before* Lua's preload searcher, so this is the only chance.
-                        match preloaded(lua, name) {
-                            Ok(true) => return None,
-                            Ok(false) => {}
-                            Err(e) => return Some(Err(e)),
-                        }
-                        // Declaration-only module: nothing to run. Hand require a table whose
-                        // lookups explain that the implementation lives elsewhere.
-                        return Some(h.get::<Function>("type_only_module").and_then(|f| {
-                            f.call::<Value>((name, file.resolved_path.to_string_lossy().as_ref()))
-                        }));
-                    }
-                    let loaded =
-                        match self.load_teal(lua, &h, &file.content, &file.resolved_path, name) {
-                            Ok(v) => v,
-                            Err(e) => return Some(Err(e)),
-                        };
-                    if !self.held(name) {
-                        return Some(Ok(loaded));
-                    }
-                    match self.missing_fields(&h, &loaded) {
-                        Ok(m) if m.is_empty() => return Some(Ok(loaded)),
-                        Ok(missing) => {
-                            return Some(Err(mlua::Error::external(
-                                TealResolveError::MissingFields {
-                                    module: name.to_string(),
-                                    expected: self.expect_type.clone().unwrap_or_default(),
-                                    fields: missing,
-                                },
-                            )));
-                        }
-                        Err(e) => return Some(Err(e)),
-                    }
-                }
-                Ok(None) => continue,
-                Err(source) => {
-                    return Some(Err(mlua::Error::external(TealResolveError::Read {
-                        module: name.to_string(),
-                        source,
-                    })));
-                }
+        let read = |candidate: &Path| {
+            self.sandbox.read(candidate).map_err(|source| {
+                mlua::Error::external(TealResolveError::Read {
+                    module: name.to_string(),
+                    source,
+                })
+            })
+        };
+        let is = |c: &Path, ext: &str| c.to_string_lossy().ends_with(ext);
+        let mut implementations = Vec::new();
+        for c in candidates
+            .iter()
+            .filter(|c| is(c, ".tl") && !is(c, ".d.tl"))
+        {
+            match read(c) {
+                Ok(Some(file)) => implementations.push(file),
+                Ok(None) => {}
+                Err(e) => return Some(Err(e)),
             }
         }
-        None
+        if implementations.len() > 1 {
+            return Some(Err(mlua::Error::external(TealResolveError::Ambiguous {
+                module: name.to_string(),
+                files: implementations
+                    .into_iter()
+                    .map(|f| f.resolved_path)
+                    .collect(),
+            })));
+        }
+        if let Some(file) = implementations.pop() {
+            let loaded = match self.load_teal(lua, &h, &file.content, &file.resolved_path, name) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if !self.held(name) {
+                return Some(Ok(loaded));
+            }
+            return match self.missing_fields(&h, &loaded) {
+                Ok(m) if m.is_empty() => Some(Ok(loaded)),
+                Ok(missing) => Some(Err(mlua::Error::external(
+                    TealResolveError::MissingFields {
+                        module: name.to_string(),
+                        expected: self.expect_type.clone().unwrap_or_default(),
+                        fields: missing,
+                    },
+                ))),
+                Err(e) => Some(Err(e)),
+            };
+        }
+        let mut declaration = None;
+        for c in candidates.iter().filter(|c| is(c, ".d.tl")) {
+            match read(c) {
+                Ok(Some(file)) => {
+                    declaration = Some(file);
+                    break;
+                }
+                Ok(None) => {}
+                Err(e) => return Some(Err(e)),
+            }
+        }
+        let file = declaration?;
+        // A `.d.tl` may describe a plain `.lua` served by a later resolver (FsResolver /
+        // VendoredResolver): step aside if one is present. Native modules must be
+        // registered *before* this resolver.
+        let lua_beside = candidates
+            .iter()
+            .filter(|c| is(c, ".lua"))
+            .any(|c| matches!(self.sandbox.read(c), Ok(Some(_))));
+        if lua_beside {
+            return None;
+        }
+        // ... or that the host registered in `package.preload` (a Rust `#[host_module]`,
+        // `Htl::preload_value`). The Registry's searcher runs *before* Lua's preload
+        // searcher, so this is the only chance.
+        match preloaded(lua, name) {
+            Ok(true) => return None,
+            Ok(false) => {}
+            Err(e) => return Some(Err(e)),
+        }
+        // Declaration-only module: nothing to run. Hand require a table whose lookups
+        // explain that the implementation lives elsewhere.
+        Some(
+            h.get::<Function>("type_only_module").and_then(|f| {
+                f.call::<Value>((name, file.resolved_path.to_string_lossy().as_ref()))
+            }),
+        )
     }
 }

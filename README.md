@@ -704,6 +704,14 @@ A `.tl` that fails its type check is `Some(Err)` in mlua-pkg's terms: it never f
 through to a later resolver. Native modules must be registered *before* the Teal
 resolver and described by a `.d.tl` for the checker.
 
+A `TealResolver` names files the way `htl check` does: under its root, `a/b.tl` is `a.b`,
+`a/init.tl` is `a`, and `util/util.tl` is `util.util` — never `util`. Two implementations
+of one name (`util.tl` beside `util/init.tl`) are an error, not a choice. A directory
+whose children are packages by name, where `<name>/<name>.tl` is a flat package's entry,
+is `TealResolver::new(dir)?.holding_packages()`; `MluaProject::registry` builds its
+resolvers that way. `Htl::add_path` and `Htl::add_package_path` are the checker's side of
+the same two readings.
+
 Teal resolves every `require("literal")` at check time, and htl keeps it that way. When a
 module exists only at run time (the user's `Tasks.tl` that a long-built host loads), the
 same two shapes that TypeScript, Kotlin scripting and Gradle use apply:
@@ -2169,7 +2177,9 @@ see, and a rule that fires on them is a rule nobody can act on.
 
 mlua-pkg's `entry` is a directory, so a consumer's `require("<name>")` looks for
 `<name>/init.tl`. A flat package can instead ship `<name>/<name>.tl` (e.g. `entry = "src"`
-with `src/<name>.tl`); htl resolves that form in the checker and in `TealResolver`.
+with `src/<name>.tl`); htl resolves that form in the checker and in `TealResolver`. It
+is the entry of a package and nothing else: in the project's own `src/`, `util/util.tl`
+is `util.util`.
 
 `mlua-pkg.toml` names one dependency from the start: `htlx`, the collections Lua does not
 have ([htl-x](https://github.com/ynishi/htl-x) — `htlx.list` / `tablex` / `seq` /

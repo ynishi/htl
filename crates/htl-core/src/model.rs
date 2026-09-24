@@ -84,7 +84,7 @@ pub use resolver::{Found, Resolution, Resolver};
 use crate::config::{CONFIG_NAME, HtlConfig, resolve_path};
 use crate::pkg;
 use anyhow::{Result, bail};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 /// A project: its root, its configuration, and the modules it is made of.
 ///
@@ -270,39 +270,12 @@ impl Module {
     /// [`name_of`](Self::name_of) for a path already relative to the root, for a caller
     /// that made both canonical once (the [`Resolver`] places thousands of files).
     pub(crate) fn name_of_relative(&self, rel: &Path) -> Option<String> {
-        let mut parts: Vec<String> = rel
-            .components()
-            .filter_map(|c| match c {
-                Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
-                _ => None,
-            })
-            .collect();
-        let last = parts.pop()?;
-        parts.push(module_stem(&last).to_string());
-        let names_its_directory = parts.last().is_some_and(|s| s == "init")
-            || (parts.len() == 1 && !self.mount.is_empty() && self.mount_last() == parts[0]);
-        if names_its_directory {
-            parts.pop();
-        }
-        let mut name: Vec<&str> = Vec::new();
-        if !self.mount.is_empty() {
-            name.push(&self.mount);
-        }
-        name.extend(parts.iter().map(String::as_str));
-        (!name.is_empty()).then(|| name.join("."))
+        crate::naming::name_of(&self.mount, rel)
     }
 
     fn mount_last(&self) -> &str {
-        self.mount.rsplit('.').next().unwrap_or(&self.mount)
+        crate::naming::mount_last(&self.mount)
     }
-}
-
-/// `util.d.tl` -> `util`, `util.tl` -> `util`, `util.lua` -> `util`; anything else as is.
-fn module_stem(file_name: &str) -> &str {
-    [".d.tl", ".tl", ".lua"]
-        .iter()
-        .find_map(|ext| file_name.strip_suffix(ext))
-        .unwrap_or(file_name)
 }
 
 /// `file` relative to `root`, comparing canonical forms when both exist so that a
@@ -545,10 +518,9 @@ impl Project {
             let Some(root) = &m.roots.source else {
                 continue;
             };
-            let named_after_mount = root.file_name().is_some_and(|f| f == m.mount_last());
-            match root.parent() {
-                Some(up) if named_after_mount => out.push(up.to_path_buf()),
-                _ => out.push(root.clone()),
+            match package_parent(m, root) {
+                Some(up) => out.push(up),
+                None => out.push(root.clone()),
             }
         }
         for m in owned_by(|o| matches!(o, Owner::External)) {
@@ -563,6 +535,39 @@ impl Project {
         });
         out
     }
+}
+
+impl Project {
+    /// The directories of [`search_dirs`](Self::search_dirs) that hold packages by name —
+    /// the dependency links, and the parent of a dependency's root named after it (a
+    /// patch's `src/<name>`, a copy's `lua/<name>`) — where a flat package's
+    /// `<name>/<name>.tl` is `<name>` ([`naming`](crate::naming)). Every other directory
+    /// on the path is a root of modules mounted at the top, where that file is
+    /// `<name>.<name>`; the checker's path spells the two differently
+    /// ([`Htl::add_package_path`](crate::Htl::add_package_path)).
+    pub fn package_dirs(&self) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = self.links.iter().cloned().collect();
+        for m in self
+            .modules
+            .iter()
+            .filter(|m| matches!(m.owner, Owner::Patched | Owner::Vendored | Owner::Installed))
+        {
+            if let Some(up) = m.roots.source.as_ref().and_then(|r| package_parent(m, r)) {
+                out.push(up);
+            }
+        }
+        out
+    }
+}
+
+/// The directory holding a dependency's source `root` as a child named after the
+/// dependency, when it is one: consulted as `<dir>/<name>`, it resolves the dependency
+/// the way its link does.
+fn package_parent(m: &Module, root: &Path) -> Option<PathBuf> {
+    let named_after_mount = root.file_name().is_some_and(|f| f == m.mount_last());
+    named_after_mount
+        .then(|| root.parent().map(Path::to_path_buf))
+        .flatten()
 }
 
 /// What a walk over a project's files is for, which decides whose files it enters.
@@ -767,7 +772,9 @@ impl crate::Htl {
     /// dependencies made reachable ([`prepare_deps`](crate::Htl::prepare_deps), when the
     /// project has an `mlua-pkg.toml`), the model's [`Resolver`] answering every name
     /// ([`install_resolver`](Self::install_resolver)), then the model's directories on the
-    /// search path in the order they are consulted ([`Project::search_dirs`]).
+    /// search path in the order they are consulted ([`Project::search_dirs`]), a directory
+    /// of packages ([`Project::package_dirs`]) with a flat package's spelling and every
+    /// other one without it.
     pub fn apply_model(&self, project: &Project, view: View) -> Result<()> {
         // The names come from the project's roots, so the working directory is not one of
         // the places they are looked for.
@@ -776,7 +783,16 @@ impl crate::Htl {
             self.prepare_deps(&pkg::MluaProject::at(&project.root))?;
         }
         self.install_resolver(Resolver::new(project))?;
-        self.add_search_paths(&project.search_dirs(view))
+        // Back to front, as `add_search_paths` does, each directory spelled as what it is.
+        let packages: Vec<PathBuf> = project.package_dirs().iter().map(|d| canon(d)).collect();
+        for d in project.search_dirs(view).iter().rev() {
+            if packages.contains(&canon(d)) {
+                self.add_package_path(d)?;
+            } else {
+                self.add_path(d)?;
+            }
+        }
+        Ok(())
     }
 
     /// Have the checker ask `resolver` for every module name.
