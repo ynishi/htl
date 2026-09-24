@@ -40,8 +40,9 @@
 //!
 //! `paths` narrows what is *reported*, never what is walked: a module reached only from
 //! `tests/` is reached, and asking about `src` alone must not turn that into a finding.
-//! So the walk is the project root's whenever an `htl.toml` says where that is, and the
-//! paths are applied to the answer.
+//! So the walk is the project root's whenever there is a project — an `htl.toml` or an
+//! `mlua-pkg.toml` says where it is, and the project model has it — and the paths are
+//! applied to the answer.
 //!
 //! # Exports are not a kind here
 //!
@@ -187,13 +188,16 @@ pub fn unused(opts: &Options<'_>) -> Result<Report> {
     } else {
         opts.paths.to_vec()
     };
-    let root = match opts.config {
-        Some((r, _, _)) => r.clone(),
+    // The project's root, from its model — an `htl.toml` or an `mlua-pkg.toml`, whichever
+    // the project has — as every other command takes it. Outside any project there is no
+    // root, and the working directory stands in for one.
+    let root = match opts.model {
+        Some(m) => m.root.clone(),
         None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     };
-    // Reachability is the project's, not the path's: walk the root when one is known, and
-    // let `given` decide only what is reported.
-    let walk: Vec<PathBuf> = match opts.config {
+    // Reachability is the project's, not the path's: walk the root when there is a
+    // project, and let `given` decide only what is reported.
+    let walk: Vec<PathBuf> = match opts.model {
         Some(_) => vec![root.clone()],
         None => given.clone(),
     };

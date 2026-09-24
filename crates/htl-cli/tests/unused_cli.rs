@@ -338,3 +338,47 @@ fn the_entry_is_main_tl_in_the_source_root_the_layout_names() {
     assert!(err.contains("lib/b.tl"), "b is required by nothing: {err}");
     assert!(!err.contains("lib/a.tl"), "a is reached from main: {err}");
 }
+
+/// The walk is the project's whatever manifest says where the project is. With only an
+/// `mlua-pkg.toml`, `htl unused src` read `src/` alone — the root came from `htl.toml`, and
+/// without one the paths given were the walk — so a module only a test requires was
+/// reported unused; run from `src/`, the working directory was taken for the root. The
+/// project model has the root either way, and the answer is the one an `htl.toml` gives.
+#[test]
+fn an_mlua_pkg_project_is_walked_from_its_root_whatever_the_paths() {
+    let root = scratch("mlua-pkg-root");
+    write(
+        &root.join("mlua-pkg.toml"),
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\n",
+    );
+    write(&root.join("src/main.tl"), "print(1)\n");
+    write(&root.join("src/only_tests.tl"), "return { n = 1 }\n");
+    write(
+        &root.join("tests/only_test.tl"),
+        "local t = require(\"htl.test\")\nlocal o = require(\"only_tests\")\n\
+         t.it(\"x\", function() t.expect(o.n):to_equal(1) end)\n",
+    );
+    let unused_modules = |args: &[&str], cwd: &Path| {
+        let (ok, _, err) = htl(args, cwd);
+        assert!(ok, "{args:?}: {err}");
+        err.lines()
+            .filter(|l| l.starts_with("module:"))
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        unused_modules(&["unused", "src"], &root),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        unused_modules(&["unused"], &root.join("src")),
+        Vec::<String>::new()
+    );
+
+    // And what an `htl.toml` beside it answers, for comparison.
+    write(&root.join("htl.toml"), "");
+    assert_eq!(
+        unused_modules(&["unused", "src"], &root),
+        Vec::<String>::new()
+    );
+}
