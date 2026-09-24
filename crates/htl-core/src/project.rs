@@ -1118,81 +1118,21 @@ pub fn check<O: Output>(
         let dirs: Vec<PathBuf> = files.iter().flat_map(|f| search_dirs(f)).collect();
         c.store_run(&run_key, &files, &cfg_inputs, &dirs, &modules);
     }
-    // Project-level: cycles in the require graph of the files just checked.
-    if lints.on("require-cycle") {
-        for cyc in lints.keep(crate::require_cycles(&infos)) {
-            sink.diag(Severity::Lint, &cyc);
-            n_lint += 1;
-        }
-    }
-    // A marker that could not be turned into a contract, and a contract that could not be
-    // published: reported once for the run, and before the enforcement question, which
-    // cannot be asked about a contract there is no agreement on.
-    let publish_problems = match cfg {
-        Some((r, _, _)) => crate::contract::publish(r, &contracts).1,
-        None => Vec::new(),
-    };
-    // Both report under `contract`, so both go through the selection. Publishing itself is
-    // not gated on it: writing a contract's type where the config says to put it is work
-    // the command was asked to do, and only what it has to say about it is a finding.
-    let problems: Vec<String> = contract_problems
-        .iter()
-        .chain(&publish_problems)
-        .cloned()
-        .collect();
-    for p in lints.keep(problems) {
-        sink.diag(Severity::Lint, &p);
-        n_lint += 1;
-    }
-    // A name two modules implement: the project's own `src/mathx.tl` and a dependency
-    // `mathx`, say. Which one a `require` gets was decided by the order of the search path
-    // and said nowhere, so it is an error, reported at each file that claims the name.
-    if let Some(m) = &model {
-        // An `[imports]` entry pointing at a dependency the project does not have: said
-        // at `htl.toml`, which is the line to fix.
-        let at = cfg
-            .as_ref()
-            .map(|(_, p, _)| display_path(p))
-            .unwrap_or_else(|| crate::config::CONFIG_NAME.to_string());
-        for p in m.import_problems() {
-            sink.diag(Severity::Error, &format!("{at}:1:1: {p}"));
-            n_err += 1;
-        }
-        for c in m.conflicts(crate::model::View::Source) {
-            let owners: Vec<String> = c
-                .claims
-                .iter()
-                .map(|cl| format!("{} ({})", cl.module.describe(), display_path(&cl.file)))
-                .collect();
-            for cl in &c.claims {
-                sink.diag(
-                    Severity::Error,
-                    &format!(
-                        "{}:1:1: module name '{}' has more than one owner: {}. A name \
-                         belongs to one module; rename one of them",
-                        display_path(&cl.file),
-                        c.name,
-                        owners.join(", ")
-                    ),
-                );
-                n_err += 1;
-            }
-        }
-    }
-    // A contract the host never enforces is documentation, not a guarantee. The scan reads
-    // every Rust source of the crate, so a run with the rule off does not start it.
-    if let Some((_, cfg_path, _)) = cfg
-        && lints.on("contract-unenforced")
-    {
-        for l in lints.keep(crate::contract_enforcement_lints(
-            cfg_path,
-            &contracts,
-            cargo_root.as_deref(),
-        )) {
-            sink.diag(Severity::Lint, &l);
-            n_lint += 1;
-        }
-    }
+    // What the project says about itself as a whole, once the files have been checked.
+    let whole = project_findings(
+        sink,
+        &Whole {
+            config: cfg,
+            model,
+            lints: &lints,
+            contracts: &contracts,
+            contract_problems: &contract_problems,
+            cargo_root: cargo_root.as_deref(),
+        },
+        &infos,
+    );
+    n_err += whole.errors;
+    n_lint += whole.lints;
     // Nothing else removes an entry, and this is the only moment the whole set is in hand.
     if let Some(c) = &store {
         let keep = match c.mode() {
@@ -1216,6 +1156,129 @@ pub fn check<O: Output>(
         replayed,
         requires,
     })
+}
+
+/// What a check reads to say what the project says about itself as a whole: the
+/// findings no single file carries ([`project_findings`]).
+pub struct Whole<'a> {
+    /// `htl.toml`, as the run loaded it.
+    pub config: &'a Config,
+    /// The project, when there is one: its `[imports]` and which modules claim a name.
+    pub model: Option<&'a crate::model::Project>,
+    /// The run's lint selection: which of the project-level rules are on.
+    pub lints: &'a crate::lint::Lints,
+    /// The run's contracts ([`crate::contract::resolve`]) and the markers that could not
+    /// be turned into one.
+    pub contracts: &'a [crate::contract::Resolved],
+    /// See `contracts`.
+    pub contract_problems: &'a [String],
+    /// The Rust crate around the project, where `contract-unenforced` looks for the host's
+    /// enforcement.
+    pub cargo_root: Option<&'a Path>,
+}
+
+/// How many errors and lints [`project_findings`] said.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WholeCounts {
+    /// A name with more than one owner, an `[imports]` entry naming no dependency.
+    pub errors: usize,
+    /// `require-cycle`, the `contract` problems of markers and publishing,
+    /// `contract-unenforced`.
+    pub lints: usize,
+}
+
+/// Say, to `sink`, what the project says about itself as a whole: cycles in the require
+/// graph of `infos` (the files just checked), contract markers that could not become a
+/// contract or be published, `[imports]` entries naming no dependency, names two modules
+/// implement, and contracts no host enforces.
+///
+/// None of these belongs to one file, so no file's check carries them; a command that
+/// judges the project has to ask for them as well as for its files'. Publishing the
+/// contracts' types is part of it: it is where the publishing problems come from.
+pub fn project_findings<O: Output>(
+    sink: &mut Sink<O>,
+    w: &Whole<'_>,
+    infos: &[(PathBuf, CheckInfo)],
+) -> WholeCounts {
+    let mut out = WholeCounts::default();
+    // Project-level: cycles in the require graph of the files just checked.
+    if w.lints.on("require-cycle") {
+        for cyc in w.lints.keep(crate::require_cycles(infos)) {
+            sink.diag(Severity::Lint, &cyc);
+            out.lints += 1;
+        }
+    }
+    // A marker that could not be turned into a contract, and a contract that could not be
+    // published: reported once for the run, and before the enforcement question, which
+    // cannot be asked about a contract there is no agreement on.
+    let publish_problems = match w.config {
+        Some((r, _, _)) => crate::contract::publish(r, w.contracts).1,
+        None => Vec::new(),
+    };
+    // Both report under `contract`, so both go through the selection. Publishing itself is
+    // not gated on it: writing a contract's type where the config says to put it is work
+    // the command was asked to do, and only what it has to say about it is a finding.
+    let problems: Vec<String> = w
+        .contract_problems
+        .iter()
+        .chain(&publish_problems)
+        .cloned()
+        .collect();
+    for p in w.lints.keep(problems) {
+        sink.diag(Severity::Lint, &p);
+        out.lints += 1;
+    }
+    // A name two modules implement: the project's own `src/mathx.tl` and a dependency
+    // `mathx`, say. Which one a `require` gets was decided by the order of the search path
+    // and said nowhere, so it is an error, reported at each file that claims the name.
+    if let Some(m) = w.model {
+        // An `[imports]` entry pointing at a dependency the project does not have: said
+        // at `htl.toml`, which is the line to fix.
+        let at = w
+            .config
+            .as_ref()
+            .map(|(_, p, _)| display_path(p))
+            .unwrap_or_else(|| crate::config::CONFIG_NAME.to_string());
+        for p in m.import_problems() {
+            sink.diag(Severity::Error, &format!("{at}:1:1: {p}"));
+            out.errors += 1;
+        }
+        for c in m.conflicts(crate::model::View::Source) {
+            let owners: Vec<String> = c
+                .claims
+                .iter()
+                .map(|cl| format!("{} ({})", cl.module.describe(), display_path(&cl.file)))
+                .collect();
+            for cl in &c.claims {
+                sink.diag(
+                    Severity::Error,
+                    &format!(
+                        "{}:1:1: module name '{}' has more than one owner: {}. A name \
+                         belongs to one module; rename one of them",
+                        display_path(&cl.file),
+                        c.name,
+                        owners.join(", ")
+                    ),
+                );
+                out.errors += 1;
+            }
+        }
+    }
+    // A contract the host never enforces is documentation, not a guarantee. The scan reads
+    // every Rust source of the crate, so a run with the rule off does not start it.
+    if let Some((_, cfg_path, _)) = w.config
+        && w.lints.on("contract-unenforced")
+    {
+        for l in w.lints.keep(crate::contract_enforcement_lints(
+            cfg_path,
+            w.contracts,
+            w.cargo_root,
+        )) {
+            sink.diag(Severity::Lint, &l);
+            out.lints += 1;
+        }
+    }
+    out
 }
 
 // ------------------------------------------------------------------ coverage
