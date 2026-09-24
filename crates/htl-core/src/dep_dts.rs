@@ -464,6 +464,16 @@ fn wildcard(pattern: &str, name: &str) -> bool {
 /// `htl check` neither counts one nor reports one in `--format json`. `htl dts` prints
 /// them under `not written` and exits non-zero on them.
 pub fn materialise(types: &Path, decls: &[DepDecl]) -> (Vec<(PathBuf, bool)>, Vec<String>) {
+    materialise_to(types, decls, true)
+}
+
+/// [`materialise`], writing only when `write` is set; without it each pair says whether the
+/// file would change, and the notes beside them are not written either.
+pub fn materialise_to(
+    types: &Path,
+    decls: &[DepDecl],
+    write: bool,
+) -> (Vec<(PathBuf, bool)>, Vec<String>) {
     let mut written = Vec::new();
     let mut problems = Vec::new();
     let mut notes: BTreeMap<&str, Note> = BTreeMap::new();
@@ -502,7 +512,7 @@ pub fn materialise(types: &Path, decls: &[DepDecl]) -> (Vec<(PathBuf, bool)>, Ve
                 continue;
             }
         };
-        match crate::write_if_changed(&target, &text) {
+        match crate::write_if_changed_when(&target, &text, write) {
             Ok(w) => {
                 taken.insert(target.clone(), d);
                 notes
@@ -529,7 +539,9 @@ pub fn materialise(types: &Path, decls: &[DepDecl]) -> (Vec<(PathBuf, bool)>, Ve
     // the same way, and reporting it as a declaration would report one file too many.
     for (pkg, note) in &notes {
         let dir = types.join(pkg);
-        if let Err(e) = crate::write_if_changed(&dir.join(crate::DEP_TYPES_NOTE), &note.text()) {
+        if let Err(e) =
+            crate::write_if_changed_when(&dir.join(crate::DEP_TYPES_NOTE), &note.text(), write)
+        {
             problems.push(format!(
                 "writing {}: {e}",
                 dir.join(crate::DEP_TYPES_NOTE).display()

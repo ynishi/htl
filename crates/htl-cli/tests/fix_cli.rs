@@ -275,3 +275,57 @@ fn the_old_error_spelling_says_what_it_is_called_now() {
     let (ok, _, err) = htl(&["fix", "src", "--dry-run"], &root);
     assert!(ok, "{err}");
 }
+
+/// `--dry-run` and `--diff` write nothing, the declarations generation would publish
+/// included: the contract type `src/defs.tl` declares is named as what a real run would
+/// write, and only a real run writes it.
+#[test]
+fn a_dry_run_writes_no_declaration_and_says_which_it_would() {
+    let root = scratch("dry-dts");
+    write(&root.join("htl.toml"), "[[contract]]\ndir = \"mods\"\n");
+    write(
+        &root.join("mlua-pkg.toml"),
+        "[package]\nname = \"game\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        &root.join("src/defs.tl"),
+        "local record defs\n   record Mod ---@contract\n      name: string\n   end\nend\nreturn defs\n",
+    );
+    write(&root.join("mods/a.tl"), "return { name = \"a\" }\n");
+    let published = root.join("types/defs.d.tl");
+    // Every file of the project and its bytes, `.htl/` (htl's own store) aside.
+    let tree = |root: &Path| -> Vec<(PathBuf, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    if p.file_name().is_some_and(|n| n != ".htl") {
+                        stack.push(p);
+                    }
+                } else {
+                    out.push((p.clone(), std::fs::read(&p).unwrap()));
+                }
+            }
+        }
+        out.sort();
+        out
+    };
+    let before = tree(&root);
+    for flag in ["--dry-run", "--diff"] {
+        let (_, _, err) = htl(&["fix", flag, "."], &root);
+        assert!(!published.exists(), "{flag} wrote the declaration: {err}");
+        assert!(
+            tree(&root) == before,
+            "{flag} changed the project's files: {err}"
+        );
+        assert!(
+            err.contains("dts: would write types/defs.d.tl (dry run: not written"),
+            "{flag}: {err}"
+        );
+    }
+    let (_, _, err) = htl(&["fix", "--allow-no-vcs", "."], &root);
+    assert!(published.is_file(), "{err}");
+    assert!(err.contains("dts: wrote types/defs.d.tl"), "{err}");
+}

@@ -860,13 +860,20 @@ fn config_lints(h: &Htl, cfg: &project::Config) -> Result<htl::lint::Lints> {
 /// exits non-zero on it, but `run` / `test` / `build` have neither, and a declaration
 /// that is quietly not written is one an outside author finds missing later.
 fn auto_dts(start: &Path) -> Result<()> {
+    auto_dts_to(start, true)
+}
+
+/// [`auto_dts`], writing only when `write` is set. A dry run (`htl fix --dry-run` /
+/// `--diff`) works out every declaration the same way and says which it would write, and
+/// what it then checks is the declarations as they are on disk — which is why it says so.
+fn auto_dts_to(start: &Path, write: bool) -> Result<()> {
     let mut project = None;
     if let Some((root, _, cfg)) = load_config(start)? {
         // The contracts the project's model holds, published from there.
         let model = htl::model::Project::load(&root, cfg)?;
         let contracts: Vec<_> = model.contracts.iter().map(|c| c.terms.clone()).collect();
-        let (results, problems) = htl::contract::publish(&root, &contracts);
-        announce_dts(&results, &root);
+        let (results, problems) = htl::contract::publish_to(&root, &contracts, write);
+        announce_dts_to(&results, &root, write);
         for p in &problems {
             eprintln!("dts: {p}");
         }
@@ -875,11 +882,12 @@ fn auto_dts(start: &Path) -> Result<()> {
     let Some(root) = htl::dts::find_cargo_package_root(start) else {
         return Ok(());
     };
-    let results = htl::dts::generate_crate(&root).map_err(|e| anyhow::anyhow!("htl dts: {e}"))?;
-    announce_dts(&results, &root);
+    let results =
+        htl::dts::generate_crate_to(&root, write).map_err(|e| anyhow::anyhow!("htl dts: {e}"))?;
+    announce_dts_to(&results, &root, write);
     let types_root = project.unwrap_or_else(|| root.clone());
-    let report = dep_dts(&root, &types_root);
-    announce_dts(&report.written, &types_root);
+    let report = dep_dts_to(&root, &types_root, write);
+    announce_dts_to(&report.written, &types_root, write);
     announce_dep_report(&report, "dts: ");
     Ok(())
 }
@@ -913,6 +921,11 @@ struct DepReport {
 /// The graph comes from `cargo metadata`, so this costs a subprocess on every command that
 /// generates. Nothing is built, and nothing is downloaded for dependencies already fetched.
 fn dep_dts(cargo_root: &Path, types_root: &Path) -> DepReport {
+    dep_dts_to(cargo_root, types_root, true)
+}
+
+/// [`dep_dts`], writing only when `write` is set.
+fn dep_dts_to(cargo_root: &Path, types_root: &Path, write: bool) -> DepReport {
     let decls = match htl::dep_dts::resolve(cargo_root) {
         Ok(d) => d,
         Err(e) => {
@@ -934,7 +947,7 @@ fn dep_dts(cargo_root: &Path, types_root: &Path) -> DepReport {
         }
     };
     let left_in_place = htl::dep_dts::orphans(&types, &decls);
-    let (written, not_written) = htl::dep_dts::materialise(&types, &decls);
+    let (written, not_written) = htl::dep_dts::materialise_to(&types, &decls, write);
     DepReport {
         written,
         not_written,
@@ -959,13 +972,20 @@ fn announce_dep_report(report: &DepReport, prefix: &str) {
     }
 }
 
-fn announce_dts(results: &[(PathBuf, bool)], root: &Path) {
-    for (target, written) in results {
-        if *written {
-            eprintln!(
-                "dts: wrote {}",
-                target.strip_prefix(root).unwrap_or(target).display()
-            );
+/// What generation wrote, or for a run that did not write (`wrote` unset) what it would
+/// have.
+fn announce_dts_to(results: &[(PathBuf, bool)], root: &Path, wrote: bool) {
+    for (target, changed) in results {
+        if *changed {
+            let target = target.strip_prefix(root).unwrap_or(target).display();
+            if wrote {
+                eprintln!("dts: wrote {target}");
+            } else {
+                eprintln!(
+                    "dts: would write {target} (dry run: not written; checked against the \
+                     file on disk)"
+                );
+            }
         }
     }
 }
@@ -1971,7 +1991,8 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
         paths.to_vec()
     };
     let cfg = load_config(&paths[0])?;
-    auto_dts(&paths[0])?;
+    // A dry run writes nothing, the declarations generated before the check included.
+    auto_dts_to(&paths[0], !flags.dry_run)?;
     let model = project::model_of(&cfg, &paths[0])?;
     // What `htl check` holds a file to, resolved the same way and read by the same checker,
     // so a file this run leaves reports what a check of it would.
@@ -2174,7 +2195,10 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
         }
     }
     // What the project says about itself as a whole.
-    let w = project::project_findings(&mut sink, &scope.whole(&cfg, model.as_ref()), &infos);
+    // A dry run publishes nothing either.
+    let mut whole = scope.whole(&cfg, model.as_ref());
+    whole.publish = !flags.dry_run;
+    let w = project::project_findings(&mut sink, &whole, &infos);
     found.errors += w.errors;
     found.lints += w.lints;
     let project_diagnostics = if flags.json {

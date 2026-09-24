@@ -303,6 +303,17 @@ fn same_record(root: &Path, earlier: &Resolved, later: &Resolved) -> bool {
 /// disagree, `dts: wrote` is said twice, and the file never settles. A file's markers are
 /// made self-contained together, once.
 pub fn publish(root: &Path, contracts: &[Resolved]) -> (Vec<(PathBuf, bool)>, Vec<String>) {
+    publish_to(root, contracts, true)
+}
+
+/// [`publish`], writing only when `write` is set. Without it everything is worked out the
+/// same way — the problems are the same ones — and each pair says whether the file would
+/// change: what a dry run reports.
+pub fn publish_to(
+    root: &Path,
+    contracts: &[Resolved],
+    write: bool,
+) -> (Vec<(PathBuf, bool)>, Vec<String>) {
     let mut written = Vec::new();
     let mut problems = Vec::new();
     // Each file to write and the module it is written from, in the order the contracts
@@ -358,7 +369,7 @@ pub fn publish(root: &Path, contracts: &[Resolved]) -> (Vec<(PathBuf, bool)>, Ve
                 continue;
             }
         };
-        match crate::write_if_changed(&target, &text) {
+        match crate::write_if_changed_when(&target, &text, write) {
             Ok(w) => written.push((target, w)),
             Err(e) => problems.push(format!(
                 "{}:1:1: writing {}: {e} [htl contract]",
