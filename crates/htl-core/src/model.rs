@@ -725,7 +725,7 @@ impl crate::Htl {
                     Resolution::Ambiguous(claims) => {
                         let who: Vec<String> = claims
                             .iter()
-                            .map(|(m, f)| format!("{m} ({})", f.display()))
+                            .map(|(m, f)| format!("{m} ({})", r.show(f)))
                             .collect();
                         (
                             "ambiguous".into(),

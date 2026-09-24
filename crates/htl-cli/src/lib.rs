@@ -2798,11 +2798,13 @@ fn cmd_build(
         sink.checkinfo(c);
     }
     let n_err = linked.errors.len();
-    for e in linked
-        .errors
+    // The checks' own errors went through the sink above; what is left is the linker's.
+    let checked: std::collections::HashSet<&String> = linked
+        .checks
         .iter()
-        .filter(|e| e.contains("is not on the search path"))
-    {
+        .flat_map(|(_, c)| c.errors.iter())
+        .collect();
+    for e in linked.errors.iter().filter(|e| !checked.contains(e)) {
         eprintln!("error: {e}");
     }
     if n_err > 0 {

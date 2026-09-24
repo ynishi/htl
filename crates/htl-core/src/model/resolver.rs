@@ -173,6 +173,18 @@ impl Resolver {
         Some(super::Place { module, role, name })
     }
 
+    /// `file` as a message names it: relative to the project's root when it is under it,
+    /// as it is otherwise.
+    pub fn show(&self, file: &Path) -> String {
+        let shown: PathBuf = file
+            .strip_prefix(&self.project.root)
+            .unwrap_or(file)
+            .components()
+            .filter(|c| !matches!(c, std::path::Component::CurDir))
+            .collect();
+        shown.display().to_string()
+    }
+
     /// Whether `file` is one of the model's: a search that found it under a name the
     /// model did not give it found the wrong thing (a `package.path` template's alias).
     pub fn owns(&self, file: &Path) -> bool {
@@ -266,20 +278,13 @@ impl Resolver {
                 .as_ref()
                 .map(|p| p.module.name.clone())
                 .unwrap_or_default();
-            let shown: PathBuf = hidden
-                .file
-                .strip_prefix(&self.project.root)
-                .unwrap_or(&hidden.file)
-                .components()
-                .filter(|c| !matches!(c, std::path::Component::CurDir))
-                .collect();
             return Resolution::NotVisible(
                 hidden.file.clone(),
                 format!(
                     "require(\"{name}\") in dependency {dep} reaches this project's own {}: a \
                      dependency sees its own modules and what it depends on, not the project \
                      using it",
-                    shown.display()
+                    self.show(&hidden.file)
                 ),
             );
         }

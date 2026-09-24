@@ -233,6 +233,7 @@ pub fn link_with(
             Target::Missing => out.errors.push(format!(
                 "extra module '{name}' not found on the search path"
             )),
+            Target::Ambiguous(why) => out.errors.push(format!("extra module {why}")),
         }
     }
 
@@ -277,6 +278,13 @@ pub fn link_with(
                     host.insert(r.module.clone());
                 }
                 Target::Missing => out.errors.push(unresolved(&path, r)),
+                // A checked file's `require` of it is already an error of the check, at
+                // the same place; a plain `.lua` is checked by nobody, so it is said here.
+                Target::Ambiguous(why) if !typed => {
+                    out.errors
+                        .push(format!("{}:{}:{}: {why}", path.display(), r.line, r.col))
+                }
+                Target::Ambiguous(_) => {}
             }
         }
         let Some(code) = code else { continue };
@@ -402,6 +410,9 @@ enum Target {
     /// Declared only (`.d.tl` with no `.lua` behind it): the host provides it.
     Host,
     Missing,
+    /// More than one file implements the name: the model's message saying which. Nothing
+    /// is bundled for it, since no order picks one.
+    Ambiguous(String),
 }
 
 /// What a `require(name)` points at for the linker. `found` is the checker's own
@@ -431,7 +442,10 @@ fn classify(h: &Htl, name: &str, found: Option<&Path>) -> Result<Target> {
         None => h.resolve_module(name)?,
     };
     let Some(p) = found else {
-        return Ok(Target::Missing);
+        return Ok(match h.ambiguity(name)? {
+            Some(why) => Target::Ambiguous(why),
+            None => Target::Missing,
+        });
     };
     if !is_decl(&p) {
         return Ok(Target::File(p));

@@ -1387,7 +1387,10 @@ dependency's, for the entry of a flat package (see "Layout of a project").
 A module name belongs to one module. When two implement it — the project's own
 `src/mathx.tl` and a dependency `mathx`, or a module under `[check] paths` of the same
 name — `htl check` reports an error at each file, naming both, rather than letting the
-order of the search path pick one. Rename one of them. A dependency's own submodules are
+order of the search path pick one. Rename one of them. A `require` of such a name is an
+error as well, naming both files — in the check, at run time and in a bundle, a `require`
+in a plain `.lua` included — and so is one of a name a module implements twice
+(`src/demo.tl` beside `src/demo/init.tl`). A dependency's own submodules are
 under its name (`mathx.vec`) and are not the project's `vec`; a `.d.tl` beside an
 implementation declares it and is not a second claim.
 

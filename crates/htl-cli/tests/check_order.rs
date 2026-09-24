@@ -429,3 +429,92 @@ fn a_cached_test_sees_a_helper_added_under_tests() {
     assert!(!out.status.success(), "not replayed from the store: {err}");
     assert!(!err.contains("from cache"), "{err}");
 }
+
+/// A name two files implement is reported at the `require` as that, naming both — not as
+/// the `module not found` Teal says when its search comes back empty. Within the sources,
+/// and in a test's view, where a helper under `tests/` and a module under `src/` answer to
+/// the same name.
+#[test]
+fn a_require_of_a_name_two_files_implement_names_both() {
+    let root = scratch("ambiguous-require");
+    write(&root.join("htl.toml"), "");
+    write(&root.join("src/demo.tl"), "return { n = 1 }\n");
+    write(&root.join("src/demo/init.tl"), "return { n = 2 }\n");
+    write(
+        &root.join("src/main.tl"),
+        "local d = require(\"demo\")\nprint(d.n)\n",
+    );
+    write(&root.join("src/helper.tl"), "return { v = 1 }\n");
+    write(&root.join("tests/helper.tl"), "return { v = 2 }\n");
+    write(
+        &root.join("tests/sub/a_test.tl"),
+        "local t = require(\"htl.test\")\nlocal h = require(\"helper\")\n\
+         t.it(\"x\", function() t.expect(h.v):to_equal(1) end)\n",
+    );
+    let d = diagnostics(&["."], &root).join("\n");
+    assert!(!d.contains("module not found"), "{d}");
+    assert!(
+        d.contains("src/main.tl:1: 'demo' is implemented by more than one file")
+            && d.contains("(src/demo.tl)")
+            && d.contains("(src/demo/init.tl)"),
+        "{d}"
+    );
+    assert!(
+        d.contains("tests/sub/a_test.tl:2: 'helper' is implemented by more than one file")
+            && d.contains("(src/helper.tl)")
+            && d.contains("(tests/helper.tl)"),
+        "{d}"
+    );
+}
+
+/// A `require` no check sees — in a plain `.lua` — of a name two files implement: the run
+/// and the bundle refuse it with the same message, rather than loading or bundling one of
+/// the two.
+#[test]
+fn a_plain_lua_require_of_a_name_two_files_implement_is_refused_at_run_time_and_in_a_bundle() {
+    let root = scratch("ambiguous-lua");
+    write(&root.join("htl.toml"), "");
+    write(&root.join("src/demo.tl"), "return { n = 1 }\n");
+    write(&root.join("src/demo/init.tl"), "return { n = 2 }\n");
+    write(
+        &root.join("src/plain.lua"),
+        "local d = require(\"demo\")\nreturn d\n",
+    );
+    write(
+        &root.join("src/plain.d.tl"),
+        "local record plain\n   n: integer\nend\nreturn plain\n",
+    );
+    write(
+        &root.join("src/main.tl"),
+        "local p = require(\"plain\")\nprint(p.n)\n",
+    );
+    let run = |args: &[&str]| {
+        let out = Command::new(common::htl_bin())
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )
+    };
+    let bundle = root.join("out.hb");
+    for (ok, out) in [
+        run(&["run", "src/main.tl"]),
+        run(&["build", "src/main.tl", "-o", bundle.to_str().unwrap()]),
+    ] {
+        assert!(!ok, "{out}");
+        assert!(
+            out.contains("'demo' is implemented by more than one file")
+                && out.contains("(src/demo.tl)")
+                && out.contains("(src/demo/init.tl)"),
+            "{out}"
+        );
+    }
+    assert!(!bundle.exists(), "no bundle is written");
+}

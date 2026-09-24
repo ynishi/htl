@@ -946,10 +946,13 @@ do
          end
          for _, site in ipairs(require_sites(ast, true)) do
             local kind, msg = H.resolve_name(filename, site.name)
-            if kind == "hidden" then
+            if kind == "hidden" or kind == "ambiguous" then
                view_errors[filename] = view_errors[filename] or {}
                table.insert(view_errors[filename], {
                   filename = filename, y = site.y, x = site.x, msg = msg,
+                  -- Nothing answered the search for it, so Teal says `module not found`
+                  -- at the same place: this error is instead of that one.
+                  replaces = kind == "ambiguous" and ("module not found: '" .. site.name .. "'") or nil,
                })
             end
          end
@@ -967,7 +970,17 @@ do
       if pending and result then
          view_errors[filename] = nil
          result.type_errors = result.type_errors or {}
-         for _, e in ipairs(pending) do table.insert(result.type_errors, e) end
+         for _, e in ipairs(pending) do
+            if e.replaces then
+               for i = #result.type_errors, 1, -1 do
+                  local t = result.type_errors[i]
+                  if t.y == e.y and t.x == e.x and t.msg == e.replaces then
+                     table.remove(result.type_errors, i)
+                  end
+               end
+            end
+            table.insert(result.type_errors, { filename = e.filename, y = e.y, x = e.x, msg = e.msg })
+         end
          result.ok = false
       end
       return result
@@ -1598,12 +1611,14 @@ end
 
 -- Where `require(name)` would resolve for the checker (`.tl` / `.d.tl` / `.lua`), and
 -- where a plain `.lua` implementation sits on the path, if any. Both may be nil.
+-- A name more than one file implements resolves to neither: the model's search answers
+-- nothing for it, and `H.ambiguity` says why.
 function H.resolve_module(name)
+   local kind, _, _, lua = nil, nil, nil, nil
+   if H.resolve_name then kind, _, _, lua = H.resolve_name(nil, name) end
    local found, fd = tl.search_module(name, true)
    if fd then fd:close() end
    local lua_path
-   local kind, _, _, lua = nil, nil, nil, nil
-   if H.resolve_name then kind, _, _, lua = H.resolve_name(nil, name) end
    if kind == "found" then
       -- The model's `.lua` for the name, and no other: `package.path` would also find one
       -- under a name the model does not give it.
@@ -1612,6 +1627,14 @@ function H.resolve_module(name)
       lua_path = package.searchpath(name, package.path)
    end
    return found, lua_path
+end
+
+-- The model's message when more than one file implements `name`, else nil.
+function H.ambiguity(name)
+   if not H.resolve_name then return nil end
+   local kind, msg = H.resolve_name(nil, name)
+   if kind == "ambiguous" then return msg end
+   return nil
 end
 
 -- Every file on the current `package.path` that could answer `require(name)`, in the
@@ -1900,6 +1923,10 @@ local function resolve_for_require(module_name)
    -- alias as readily as the file.
    if H.resolve_name then
       local kind, impl, _, lua = H.resolve_name(nil, module_name)
+      -- Two implementations: the check reports it at the `require`, but a `require` the
+      -- check never saw (in a plain `.lua`) reaches here, and `tl.search_module` would
+      -- answer it with one of the two. No order picks one at run time either.
+      if kind == "ambiguous" then error(impl, 0) end
       if kind == "found" and not impl and lua then
          local lfd = io.open(lua, "rb")
          if lfd then

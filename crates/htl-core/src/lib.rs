@@ -1655,6 +1655,14 @@ end
         Ok((found.map(PathBuf::from), lua.map(PathBuf::from)))
     }
 
+    /// Why `name` resolves to nothing although files answer to it: the project model's
+    /// message when more than one of them implements it. `None` when it does not, or when
+    /// no model is installed ([`apply_model`](Self::apply_model)).
+    pub fn ambiguity(&self, name: &str) -> Result<Option<String>> {
+        let f: Function = self.h.get("ambiguity")?;
+        Ok(f.call(name)?)
+    }
+
     /// Every file on the search path that could answer `require(name)`, in the order the
     /// searchers consult them — so the first is the one [`resolve_module`](Self::resolve_module)
     /// answers with, and the rest are what it hides.
