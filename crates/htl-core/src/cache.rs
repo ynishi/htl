@@ -399,6 +399,11 @@ pub struct CheckInfoJson {
     /// check said. Absent in entries written before the field existed.
     #[serde(default)]
     pub dependency_errors: Vec<DependencyErrorJson>,
+    /// [`CheckInfo::syntax_errors`]. Absent in entries written before the field existed,
+    /// and read back as none — which they were: only a file that generated is stored with
+    /// its check, and a file the parser rejected generates nothing.
+    #[serde(default)]
+    pub syntax_errors: usize,
 }
 
 impl CheckInfoJson {
@@ -406,6 +411,7 @@ impl CheckInfoJson {
     pub fn from_check(c: &CheckInfo) -> Self {
         Self {
             errors: c.errors.clone(),
+            syntax_errors: c.syntax_errors,
             warnings: c.warnings.clone(),
             lints: c.lints.clone(),
             deps: c.deps.iter().map(|p| normal(p)).collect(),
@@ -437,6 +443,7 @@ impl CheckInfoJson {
     pub fn to_check(&self) -> CheckInfo {
         CheckInfo {
             errors: self.errors.clone(),
+            syntax_errors: self.syntax_errors,
             warnings: self.warnings.clone(),
             lints: self.lints.clone(),
             deps: self.deps.iter().map(PathBuf::from).collect(),

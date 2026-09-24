@@ -1479,7 +1479,8 @@ function H.check(filename, env, opts)
    -- generates it, and the searcher refuses the dependency itself on its first `require`.
    local dep_errors = dependency_errors(filename, result, env)
    return { ok = #errors == 0, errors = errors, error_fixes = error_fixes, warnings = warnings, deps = deps,
-      lints = lints, lint_fixes = lint_fixes, requires = requires, dependency_errors = dep_errors, result = result }
+      lints = lints, lint_fixes = lint_fixes, requires = requires, dependency_errors = dep_errors,
+      syntax_errors = #(result.syntax_errors or {}), result = result }
 end
 
 -- `H.check` of what is on disk right now: a fresh env, nothing seeded, nothing stored --
