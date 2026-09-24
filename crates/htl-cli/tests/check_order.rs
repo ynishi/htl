@@ -344,3 +344,57 @@ fn a_file_answers_to_its_model_name_only() {
     assert!(missing.iter().any(|l| l.contains("'util'")), "{d:?}");
     assert!(missing.iter().any(|l| l.contains("'shipper.mq'")), "{d:?}");
 }
+
+/// Run time and a bundle resolve with the same model the check did. A dependency's plain
+/// `.lua`, typed by a declaration, requires another `.lua` of the same dependency: the
+/// run serves both from the dependency, and the bundle carries both.
+#[test]
+fn run_time_and_the_bundle_resolve_as_the_check_did() {
+    let root = scratch("run-resolves");
+    write(&root.join("htl.toml"), "");
+    write(
+        &root.join("mlua-pkg.toml"),
+        "[package]\nname = \"game\"\nversion = \"0.1.0\"\n",
+    );
+    let dep = root.join(".htl/modules/entries/mathx");
+    write(
+        &dep.join("raw.lua"),
+        "local more = require(\"mathx.more\")\n\
+         local alias = pcall(require, \"mathx\")\n\
+         return { k = more.k + 1, alias = alias }\n",
+    );
+    write(&dep.join("more.lua"), "return { k = 6 }\n");
+    write(
+        &dep.join("raw.d.tl"),
+        "local record raw\n   k: integer\n   alias: boolean\nend\nreturn raw\n",
+    );
+    // What the `?/?` template would have made `mathx`: the project's own `src/mathx/mathx.tl`
+    // is `mathx.mathx`, and a run must not read it for `mathx.more` or anything else.
+    write(&root.join("src/mathx/mathx.tl"), "return { k = 100 }\n");
+    write(
+        &root.join("src/main.tl"),
+        "local raw = require(\"mathx.raw\")\nprint(raw.k, raw.alias)\n",
+    );
+    let run = |args: &[&str]| {
+        let out = Command::new(common::htl_bin())
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        (
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let (out, err) = run(&["run", "src/main.tl"]);
+    assert_eq!(out, "7\tfalse", "{err}");
+    let (_, err) = run(&["build", "src/main.tl", "-o", "app.hb"]);
+    assert!(err.contains("-> app.hb"), "{err}");
+    let (info, _) = run(&["bundle", "info", "app.hb"]);
+    assert!(
+        info.contains("mathx.raw") && info.contains("mathx.more"),
+        "{info}"
+    );
+    let (out, err) = run(&["run", "app.hb"]);
+    assert_eq!(out, "7\tfalse", "{err}");
+}
