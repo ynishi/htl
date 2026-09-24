@@ -631,6 +631,25 @@ impl HtlConfig {
         out.dedup();
         out
     }
+
+    /// Where the project declares its contracts: the roots of the modules the project
+    /// model makes of this config — the source root, the declaration root and the
+    /// directories materialised under it, each `[check] paths` entry — in
+    /// [`search_paths`](Self::search_paths)' order. The project root is among them only
+    /// when it is the source root (`[layout] source = "."`): otherwise it is no module's
+    /// root, and a file there is not one of the project's modules.
+    ///
+    /// A function of the config rather than of a loaded [`crate::model::Project`] so that
+    /// a host built with `pkg` alone, which has no model, looks for markers in the same
+    /// places the model does (`pkg::contract_resolvers`).
+    pub fn marker_roots(&self, root: &Path) -> Vec<PathBuf> {
+        let source = without_cur_dir(&resolve_path(root, &self.layout.source));
+        let top = without_cur_dir(root);
+        self.search_paths(root)
+            .into_iter()
+            .filter(|p| *p != top || *p == source)
+            .collect()
+    }
 }
 
 /// The first `[[contract]]` key that used to live in `htl.toml` and now lives on the
@@ -742,7 +761,7 @@ pub fn join_specs<'a>(specs: impl IntoIterator<Item = &'a str>) -> String {
 ///
 /// [`Path::components`] already drops a `.` anywhere but the front, and the front is
 /// where `htl.toml` most often has one.
-fn without_cur_dir(p: &Path) -> PathBuf {
+pub(crate) fn without_cur_dir(p: &Path) -> PathBuf {
     p.components()
         .filter(|c| !matches!(c, Component::CurDir))
         .collect()
