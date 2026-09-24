@@ -210,6 +210,48 @@ impl Resolver {
         Self::new(&self.project)
     }
 
+    /// Whether a directory of the model now holds a file under `name` that the table does
+    /// not have: one [`rebuilt`](Self::rebuilt) would add, so that `name` stops being
+    /// [`Outside`](Resolution::Outside) the model.
+    ///
+    /// What a host's checker asks before it gives up on a name
+    /// ([`Htl::install_resolver`](crate::Htl::install_resolver)): a module it has had since
+    /// it started may require one dropped in since. The answer costs a `stat` per spelling
+    /// of the name ([`naming::candidates`](crate::naming::candidates)) per root, not a walk,
+    /// and a file the walk would not place under `name` — under a skipped directory, or a
+    /// nested root's — is not counted, so a name it says yes to is in the table once it is
+    /// rebuilt, and no name makes every check rebuild it.
+    pub(crate) fn gained(&self, name: &str) -> bool {
+        // `@/<name>` and `@<dependency>/<name>` are names of the table's `<name>`.
+        let name = match name.strip_prefix('@') {
+            Some(rest) => match rest.split_once('/') {
+                Some((_, inner)) => inner,
+                None => return false,
+            },
+            None => name,
+        };
+        self.project
+            .modules
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.owner != Owner::Contract)
+            .any(|(i, m)| {
+                let spellings = crate::naming::candidates(&m.mount, name);
+                m.roots.iter().any(|(_, root)| {
+                    spellings.iter().any(|rel| {
+                        let file = root.join(rel);
+                        if !file.is_file() || walk_skips(root, rel) {
+                            return false;
+                        }
+                        let canonical = super::canon(&file);
+                        !self.known.contains(&canonical)
+                            && place(&self.project, &self.roots, &canonical)
+                                .is_some_and(|(module, _, n)| module == i && n == name)
+                    })
+                })
+            })
+    }
+
     /// [`Project::locate`] over the canonical roots taken once in [`new`](Self::new).
     fn placed(&self, file: &Path) -> Option<super::Place<'_>> {
         let (module, role, name) = place(&self.project, &self.roots, &super::canon(file))?;
@@ -612,6 +654,19 @@ fn place(
     Some((*module, *role, name))
 }
 
+/// Whether [`Resolver::new`]'s walk of `root` leaves out `rel`: a directory on the way to
+/// it is one source collection does not enter ([`crate::is_skipped_dir`]).
+fn walk_skips(root: &Path, rel: &Path) -> bool {
+    let mut dir = root.to_path_buf();
+    let Some(parent) = rel.parent() else {
+        return false;
+    };
+    parent.components().any(|c| {
+        dir.push(c);
+        crate::is_skipped_dir(&dir, &[])
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -635,6 +690,32 @@ mod tests {
             Resolution::Found(f) => f.implementation,
             other => panic!("not found: {other:?}"),
         }
+    }
+
+    /// #328: `gained` says yes to a file the table does not have under the name, and to
+    /// nothing else — not a name with no file, not a file the walk skips — and no longer
+    /// once the table is rebuilt, so a host that adds nothing never rebuilds it.
+    #[test]
+    fn gained_names_only_a_file_a_rebuild_would_add() {
+        let root = scratch("gained");
+        write(&root.join("src/main.tl"), "return {}\n");
+        let r = Resolver::new(&Project::load(&root, HtlConfig::default()).unwrap());
+        assert!(!r.gained("main"), "in the table already");
+        assert!(!r.gained("helper"), "no file");
+
+        write(&root.join("src/target/x.tl"), "return {}\n");
+        assert!(!r.gained("target.x"), "under a directory the walk skips");
+
+        write(&root.join("src/helper.tl"), "return {}\n");
+        write(&root.join("src/util/init.tl"), "return {}\n");
+        assert!(r.gained("helper"));
+        assert!(r.gained("util"));
+        assert!(r.gained("@/helper"));
+
+        let r = r.rebuilt();
+        assert!(!r.gained("helper"));
+        assert!(!r.gained("util"));
+        assert!(matches!(r.resolve(None, "helper"), Resolution::Found(_)));
     }
 
     #[test]

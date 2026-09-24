@@ -226,3 +226,21 @@ fn a_file_added_after_the_host_started_is_found_at_the_next_require() {
     );
     assert_eq!(n_of(&h, "later"), Ok(21));
 }
+
+/// #328: a module the host has had since it started, first required after a file it
+/// requires was dropped in. The module is in the table, so nothing rebuilds it before the
+/// check; the check's own `require` is what finds the new name outside it.
+#[test]
+fn a_known_module_requiring_a_file_added_later_checks_against_it() {
+    let root = scratch("known");
+    write(
+        &root.join("scripts/known.tl"),
+        "local helper = require(\"helper\")\nreturn { n = helper.n + 1 }\n",
+    );
+    let project = Project::for_host(&root, &[HostDir::Modules("scripts".into())]);
+    let h = host(&project);
+    assert!(loads(&h, "helper").is_err());
+
+    write(&root.join("scripts/helper.tl"), "return { n = 40 }\n");
+    assert_eq!(n_of(&h, "known"), Ok(41));
+}

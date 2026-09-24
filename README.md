@@ -738,8 +738,9 @@ names files: `a/b.tl` is `a.b`, `a/init.tl` is `a`, `util/util.tl` under `script
 entry while `mods/a/b/a/b.tl` is `a.b.a.b`, not `a.b`. Two implementations of one name
 (`util.tl` beside `util/init.tl`, or a script and a mod of one name) are an error to
 both. The run applies the rule on every `require`, so a mod dropped into a served
-directory while the host runs is found, and its check reads the directories as they are
-by then. A package directory or root added later is a new `Project`.
+directory while the host runs is found, and the check reads the directories as they are
+by then — the new mod's own check, and the check of a module the host already had that
+requires it. A package directory or root added later is a new `Project`.
 
 `Htl::apply_config`, `Htl::add_path`, `Htl::add_package_path` and a `TealResolver` over one
 directory (`TealResolver::new(dir)`, `.holding_packages()`) are still there, for a host
