@@ -105,6 +105,13 @@ dot-directory are not entered, so dependencies' sources and tests stay theirs. A
 directory passed explicitly is always walked. A `target_dir` copy is not entered either,
 and there the manifest is what says so: the copy sits in the repo under a name the project
 chose, so nothing about the path tells it apart from the project's own code beside it.
+Nor does a walk by `check`, `fix` or `unused` take a `.tl` that belongs to no module of the
+project — one directly under the project root, which is no module's root unless
+`[layout] source = "."`, or in a directory the layout does not name: nothing can require
+it by a name the project gives it, so it is not the project's to check or to count as
+unused. The run names such files once, with where they go (`1 file(s) belong to no module
+of the project and were not checked: ./stray.tl; move them under src/`); a file named on
+the command line is checked all the same.
 `mlua-pkg install` rewrites it every time it runs — checking it would report a dependency's
 errors as the project's, `htl fmt` would write a diff against upstream that the next
 install undoes, and its `*_test.tl` are a dependency's suite (Go's `./...` has excluded

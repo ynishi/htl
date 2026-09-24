@@ -520,7 +520,7 @@ fn strip_under(file: &Path, root: &Path) -> Option<PathBuf> {
     f.strip_prefix(&r).ok().map(Path::to_path_buf)
 }
 
-fn canon(p: &Path) -> PathBuf {
+pub(crate) fn canon(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
