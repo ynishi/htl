@@ -1227,6 +1227,41 @@ fn a_host_with_the_model_gets_the_same_contract_from_it() {
     );
 }
 
+/// A marker is read where the project's modules are: the source root, the declaration
+/// root, `[check] paths`. The project root is none of them, so a marker left there
+/// declares nothing, and the problem says where the file belongs rather than leaving a
+/// contract that silently holds nothing.
+#[test]
+fn a_marker_at_the_project_root_is_not_read_and_says_where_to_move_it() {
+    let (root, cfg) = project_declaring_at("root-marker", "defs.tl", CONTRACT_TOML);
+    let (found, problems) = htl_core::contract::resolve(&root, &cfg);
+    assert!(found.is_empty(), "{found:?}");
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("defs.tl:2:1: this ---@contract is not read")
+                && p.contains("Move it under [layout] source (src) or types (types)")),
+        "{problems:?}"
+    );
+    let model = htl_core::model::Project::load(&root, cfg).unwrap();
+    assert!(model.contracts.is_empty());
+    assert!(model.problems.iter().any(|p| p.contains("is not read")));
+}
+
+/// A flat project (`[layout] source = "."`) has its modules at the root, so a marker there
+/// is read like any other.
+#[test]
+fn a_flat_projects_root_is_its_source_root_and_its_markers_are_read() {
+    let (root, cfg) = project_declaring_at(
+        "flat-marker",
+        "defs.tl",
+        "[layout]\nsource = \".\"\n\n[[contract]]\ndir = \"mods\"\n",
+    );
+    let (found, problems) = htl_core::contract::resolve(&root, &cfg);
+    assert_eq!(found.len(), 1, "{problems:?}");
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
 /// A contract type declared in `types/` — where `htl new` puts hand-written declarations
 /// and where a host publishes the one its mod authors write against. The `contract` lint
 /// resolves it because `contract_lints` goes through `apply_config`; the resolver has to

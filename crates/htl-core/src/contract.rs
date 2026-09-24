@@ -183,10 +183,16 @@ struct Marker {
 
 /// Contracts this project declares, and what is wrong with the ones it does not.
 ///
-/// The scan covers [`HtlConfig::search_paths`] — where the checker resolves modules
-/// from — one level deep, plus `<sub>/init.tl`, which is the shape Teal's own path
-/// templates resolve. A marker anywhere else is not found, and the module name of a file
-/// nested deeper cannot be written as `<module>.<Type>` anyway.
+/// The scan covers the roots of the project's modules ([`HtlConfig::marker_roots`]: the
+/// source root, the declaration root, `[check] paths`) one level deep, plus
+/// `<sub>/init.tl`, which is the shape Teal's own path templates resolve. A marker
+/// anywhere else is not found, and the module name of a file nested deeper cannot be
+/// written as `<module>.<Type>` anyway. The declaring module is named by
+/// [`crate::naming`], as every module of the project is.
+///
+/// The project root is not scanned unless it is the source root: a file there is no
+/// module of the project. A marker left in one is not silently dropped, though. It is
+/// reported, with where to move it.
 ///
 /// The second half of the pair is diagnostics: a bare marker with no `[[contract]]` to
 /// inherit from, two markers claiming one directory, a marker on a record that is not
@@ -195,14 +201,15 @@ struct Marker {
 pub fn resolve(root: &Path, cfg: &HtlConfig) -> (Vec<Resolved>, Vec<String>) {
     let mut out = Vec::new();
     let mut problems = Vec::new();
-    for file in scan_targets(root, cfg) {
+    problems.extend(markers_outside_the_project(root, cfg));
+    for (dir, file) in scan_targets(root, cfg) {
         let Ok(src) = std::fs::read_to_string(&file) else {
             continue;
         };
         if !src.contains("---@contract") {
             continue;
         }
-        match read_file(root, &file, &src, cfg) {
+        match read_file(root, &dir, &file, &src, cfg) {
             Ok(found) => out.extend(found),
             Err(msgs) => problems.extend(msgs),
         }
@@ -637,11 +644,12 @@ fn record_close(lines: &[&str], path: &[String]) -> Option<usize> {
     Some(to)
 }
 
-/// Files a marker can be found in: those directly under a search path, and the
-/// `init.tl` of an immediate subdirectory (`require("sub")` resolves to `sub/init.tl`).
-fn scan_targets(root: &Path, cfg: &HtlConfig) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    for dir in cfg.search_paths(root) {
+/// Files a marker can be found in: those directly under a root of the project's modules
+/// ([`HtlConfig::marker_roots`]), and the `init.tl` of an immediate subdirectory
+/// (`require("sub")` resolves to `sub/init.tl`).
+fn scan_targets(root: &Path, cfg: &HtlConfig) -> Vec<(PathBuf, PathBuf)> {
+    let mut out: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for dir in cfg.marker_roots(root) {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -660,9 +668,49 @@ fn scan_targets(root: &Path, cfg: &HtlConfig) -> Vec<PathBuf> {
             }
         }
         here.sort();
-        out.extend(here);
+        out.extend(here.into_iter().map(|f| (dir.clone(), f)));
     }
-    out.dedup();
+    out.dedup_by(|a, b| a.1 == b.1);
+    out
+}
+
+/// A `---@contract` in a file directly under the project root when the root is no module's
+/// root ([`HtlConfig::marker_roots`]): not read, and said so, with where the file belongs.
+/// It was read before the project model decided which directories hold the project's
+/// modules, so a project written then finds its contract gone. This is how it finds out
+/// why rather than finding a contract that silently holds nothing.
+fn markers_outside_the_project(root: &Path, cfg: &HtlConfig) -> Vec<String> {
+    let top = crate::config::without_cur_dir(root);
+    if cfg.marker_roots(root).contains(&top) {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && is_teal(p))
+        .collect();
+    files.sort();
+    let mut out = Vec::new();
+    for f in files {
+        let Ok(src) = std::fs::read_to_string(&f) else {
+            continue;
+        };
+        let Some(at) = src.lines().position(|l| l.contains("---@contract")) else {
+            continue;
+        };
+        out.push(format!(
+            "{}:{}:1: this ---@contract is not read: the project root is not where the \
+             project's modules are, so a file there declares nothing. Move it under \
+             [layout] source ({}) or types ({}) [htl contract]",
+            f.display(),
+            at + 1,
+            cfg.layout.source,
+            cfg.layout.types,
+        ));
+    }
     out
 }
 
@@ -672,27 +720,22 @@ fn is_teal(p: &Path) -> bool {
         .is_some_and(|n| n.ends_with(".tl"))
 }
 
-/// The module name a `require` would use for `file`: its stem, or the directory name
-/// when the file is an `init.tl`.
-fn module_name(file: &Path) -> Option<String> {
-    let stem = file.file_name()?.to_str()?.trim_end_matches(".tl");
-    let stem = stem.strip_suffix(".d").unwrap_or(stem);
-    if stem == "init" {
-        return Some(file.parent()?.file_name()?.to_str()?.to_string());
-    }
-    Some(stem.to_string())
-}
-
 /// Every contract declared in one file. `Err` carries what is wrong with the markers it
 /// does have, one message per marker, so a file with two of them reports both.
 fn read_file(
     root: &Path,
+    dir: &Path,
     file: &Path,
     src: &str,
     cfg: &HtlConfig,
 ) -> Result<Vec<Resolved>, Vec<String>> {
     let lines: Vec<&str> = src.lines().collect();
-    let Some(module) = module_name(file) else {
+    // Named as every module of the project is: its path below the root it was found in.
+    let Some(module) = file
+        .strip_prefix(dir)
+        .ok()
+        .and_then(|rel| crate::naming::name_of("", rel))
+    else {
         return Ok(Vec::new());
     };
     let mut out = Vec::new();
