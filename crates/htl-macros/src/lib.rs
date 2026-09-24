@@ -303,7 +303,7 @@ impl Checker {
             htl_core::project::store(
                 &self.root,
                 htl_core::cache::Options::from_env(),
-                htl_core::project::store_refusal(&self.root, self.cfg_path.is_some()).as_deref(),
+                htl_core::project::store_refusal(&self.root, self.model.is_some()).as_deref(),
                 "the macro expansion",
             ),
             self.model.as_ref(),
@@ -333,9 +333,6 @@ fn checker_for(tag: &str, manifest_dir: &Path, path: &Path) -> Result<Checker, S
     // roots. htl.toml `[lint]` first, then HTL_LINTS, so the env var wins.
     let found = htl_core::model::Project::find_root(path).map_err(|e| format!("{tag}: {e:#}"))?;
     let cfg_path = found.as_ref().and_then(|r| r.config_file.clone());
-    let cfg_root = cfg_path
-        .as_ref()
-        .and(found.as_ref().map(|r| r.root.clone()));
     let cfg = cfg_path
         .as_ref()
         .and(found.as_ref().map(|r| r.config.clone()));
@@ -362,7 +359,12 @@ fn checker_for(tag: &str, manifest_dir: &Path, path: &Path) -> Result<Checker, S
     htl_core::project::file_view(&h, model.as_ref(), path).map_err(|e| format!("{tag}: {e:#}"))?;
     h.install_test_lib().map_err(|e| format!("{tag}: {e:#}"))?;
     h.install_std().map_err(|e| format!("{tag}: {e:#}"))?;
-    let root = cfg_root.unwrap_or_else(|| manifest_dir.to_path_buf());
+    // The project's root, where its store is — as for every command — and the crate's
+    // manifest directory for a crate in no project, which keeps no store.
+    let root = model
+        .as_ref()
+        .map(|m| m.root.clone())
+        .unwrap_or_else(|| manifest_dir.to_path_buf());
     Ok(Checker {
         h,
         cfg,

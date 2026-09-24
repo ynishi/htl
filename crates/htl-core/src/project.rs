@@ -459,18 +459,28 @@ pub fn with_model(
     )
 }
 
+/// The directory whose `.htl/` holds the store: the project's root, wherever the command
+/// ran from — where its installed dependencies live too (`.htl/modules`), so a project has
+/// one `.htl/`. Outside any project, the working directory: a person asking for a check
+/// of a loose file keeps a store where they stand.
+pub fn store_root(model: Option<&crate::model::Project>) -> PathBuf {
+    model
+        .map(|m| m.root.clone())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
 /// Why a run must not keep a store under `root`, when it must not.
 ///
 /// A person standing in a project and asking for a check never trips this: the store goes
-/// beside `htl.toml`, or in the working directory. A macro expands wherever cargo compiles
-/// the crate, which is not always somewhere a store belongs — the crate may not have opted
-/// into the layout at all (`htl init` / `htl new` write `htl.toml` and gitignore `.htl/`),
-/// or it may be building in build scratch, which is [`cache::scratch_root`]'s to define
-/// and to explain: this is the store's half of a rule that covers the whole `.htl/`, the
-/// entry links included.
-pub fn store_refusal(root: &Path, has_config: bool) -> Option<String> {
-    if !has_config {
-        return Some("no htl.toml".to_string());
+/// at the project root ([`store_root`]), or in the working directory. A macro expands
+/// wherever cargo compiles the crate, which is not always somewhere a store belongs — the
+/// crate may be in no project at all (`htl init` / `htl new` write `htl.toml` and gitignore
+/// `.htl/`), or it may be building in build scratch, which is [`cache::scratch_root`]'s to
+/// define and to explain: this is the store's half of a rule that covers the whole `.htl/`,
+/// the entry links included.
+pub fn store_refusal(root: &Path, in_project: bool) -> Option<String> {
+    if !in_project {
+        return Some("no project".to_string());
     }
     cache::scratch_root(root).map(str::to_string)
 }
@@ -968,13 +978,6 @@ pub fn check<O: Output>(
         None => (Vec::new(), Vec::new()),
     };
 
-    // The store lives at the project root, so invocations from different directories in
-    // one project share it; what separates them is the key, which carries the working
-    // directory and each path as written.
-    let root = cfg
-        .as_ref()
-        .map(|(r, _, _)| r.clone())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     // The project the walk belongs to is the first path's. Nothing named at all is the
     // working directory, which is what a command line with no argument already means.
     let start = paths
@@ -985,6 +988,10 @@ pub fn check<O: Output>(
     // from the config already loaded.
     let model = model_of(cfg, start)?;
     let origins = Origins::new(model.as_ref());
+    // The store lives at the project root, so invocations from different directories in
+    // one project share it; what separates them is the key, which carries the working
+    // directory and each path as written.
+    let root = store_root(model.as_ref());
     let store = with_model(store(&root, cache_opts, None, "htl check"), model.as_ref());
     // A dependency error is said once per run, and not on behalf of a file the walk
     // checks itself. The rule applies to replayed entries as much as to fresh checks.
@@ -1540,10 +1547,7 @@ pub fn test<O: Output>(
     // themselves are a few percent of it — and none of that work depends on the outcome, so
     // it is reusable in exactly the way a check's is. Running is not: a test has to run to
     // say whether it passes, every time.
-    let root = cfg
-        .as_ref()
-        .map(|(r, _, _)| r.clone())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let root = store_root(model.as_ref());
     let store = with_model(store(&root, cache_opts, None, "htl test"), model.as_ref());
     let keys: Vec<cache::Key> = files.iter().map(|f| cache::gen_key(f, lint)).collect();
     let cfg_inputs: Vec<PathBuf> = cfg.iter().map(|(_, p, _)| p.clone()).collect();

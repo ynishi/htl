@@ -817,20 +817,6 @@ impl Options {
     }
 }
 
-/// Where a project's store lives: beside the `htl.toml` found from `path`, or nowhere.
-///
-/// One project, one store: every reader — `htl check`, `htl test`, `htl build`, the proc
-/// macros — resolves it through here, so they find each other's entries. A directory with
-/// no `htl.toml` has not opted into the layout (`htl init` / `htl new` write the file and
-/// gitignore `.htl/`); the CLI falls back to the working directory for its own commands,
-/// the macros to no store at all.
-pub fn root_for(path: &Path) -> Option<PathBuf> {
-    crate::config::HtlConfig::find(path)
-        .ok()
-        .flatten()
-        .map(|(file, _)| crate::parent_dir(&file))
-}
-
 /// Why nothing may be written under `root`, if nothing may — build scratch, named.
 ///
 /// A macro expands wherever cargo compiles the crate: in the checkout, but also in the

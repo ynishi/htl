@@ -518,3 +518,30 @@ fn a_plain_lua_require_of_a_name_two_files_implement_is_refused_at_run_time_and_
     }
     assert!(!bundle.exists(), "no bundle is written");
 }
+
+/// A project keeps one `.htl/`: its store goes at the project's root wherever the command
+/// ran from, beside the installed dependencies — for a project described by
+/// `mlua-pkg.toml` alone as for one with an `htl.toml`. It used to go beside `htl.toml`,
+/// else in the working directory, so checking such a project from `src/` wrote a second
+/// `.htl/` there.
+#[test]
+fn the_store_is_at_the_project_root_wherever_the_command_ran() {
+    let root = scratch("store-root");
+    write(
+        &root.join("mlua-pkg.toml"),
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\n",
+    );
+    write(&root.join("src/a.tl"), "print(1)\n");
+    let out = Command::new(common::htl_bin())
+        .args(["check", "."])
+        .current_dir(root.join("src"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(root.join(".htl/cache").is_dir(), "the store is at the root");
+    assert!(!root.join("src/.htl").exists(), "and nowhere else");
+}

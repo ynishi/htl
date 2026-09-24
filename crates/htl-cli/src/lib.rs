@@ -2438,10 +2438,7 @@ fn count(n: usize, one: &str, many: &str) -> String {
 /// live there, and the path is built here rather than taken from an argument, so there is
 /// no spelling of the command that removes anything else.
 fn cmd_cache_clear(path: Option<&Path>) -> Result<ExitCode> {
-    let start = path.unwrap_or(Path::new("."));
-    let root = load_config(start)?
-        .map(|(r, _, _)| r)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let root = cache_root(path)?;
     let dir = root.join(".htl").join("cache");
     if !dir.is_dir() {
         eprintln!("htl cache: nothing stored at {}", dir.display());
@@ -2463,11 +2460,12 @@ fn cmd_cache_clear(path: Option<&Path>) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// The project root a cache command works on: beside `htl.toml`, or the working directory.
+/// The directory a cache command works on: the project's root, as every command keeps its
+/// store there ([`project::store_root`]), or the working directory outside a project.
 fn cache_root(path: Option<&Path>) -> Result<PathBuf> {
     let start = path.unwrap_or(Path::new("."));
-    Ok(cache::root_for(start)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))))
+    let model = htl::model::Project::find_root(start)?.map(|r| r.root);
+    Ok(model.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))))
 }
 
 /// Say what the store holds.
@@ -2777,8 +2775,7 @@ fn cmd_build(
     // of them generated is one the build replays, and the reverse. Nothing is swept here:
     // a build sees one closure, and only `htl check`, which sees the project, bounds the
     // store (`cache.rs`).
-    let root = cache::root_for(entry)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let root = project::store_root(model.as_ref());
     let spec = cfg
         .as_ref()
         .map(|(_, _, c)| c.lint_spec())
