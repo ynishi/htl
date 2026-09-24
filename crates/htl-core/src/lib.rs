@@ -1348,7 +1348,24 @@ impl Htl {
             dep_dirs.to_vec(),
             dep_names.to_vec(),
             path_str(root),
+            // What a file the command line named relatively is relative to.
+            std::env::current_dir()
+                .map(|d| path_str(&d))
+                .unwrap_or_default(),
         ))?;
+        Ok(())
+    }
+
+    /// Tell the checker how the project's `[imports]` rewrite `require`s: each name in
+    /// `from` (and every name under it) becomes the one at the same index of `to`, in the
+    /// project's own files; in the files of each dependency in `deps`, a name under the
+    /// dependency's own name becomes `@<dependency>/<name>`. The project model
+    /// (`model::Project::rewrites`) says which; its `apply_model` calls this.
+    ///
+    /// Sequences across the state line, for the reason [`set_deps`](Self::set_deps) gives.
+    pub fn set_imports(&self, from: &[String], to: &[String], deps: &[String]) -> Result<()> {
+        let f: Function = self.h.get("set_imports")?;
+        f.call::<()>((from.to_vec(), to.to_vec(), deps.to_vec()))?;
         Ok(())
     }
 

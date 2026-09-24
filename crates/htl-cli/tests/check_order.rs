@@ -256,3 +256,59 @@ fn a_dependency_does_not_see_the_projects_own_modules() {
         "said at the dependency's call: {reach:?}"
     );
 }
+
+/// `[imports]` settles a name two modules answer to without a rename: the project says
+/// which one it means, and reaches the other under a name of its choosing. The
+/// dependency's own `require`s keep meaning the dependency's modules.
+#[test]
+fn imports_say_which_module_a_shared_name_means() {
+    let root = scratch("imports");
+    write(
+        &root.join("htl.toml"),
+        "[imports]\nmathx = \"dep:mathx\"\nmathx_local = \"own:mathx\"\n",
+    );
+    write(
+        &root.join("mlua-pkg.toml"),
+        "[package]\nname = \"game\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        &root.join(".htl/modules/entries/mathx/init.tl"),
+        "local vec = require(\"mathx.vec\")\nreturn { twice = function(n: integer): integer return vec.k * n end }\n",
+    );
+    write(
+        &root.join(".htl/modules/entries/mathx/vec.tl"),
+        "return { k = 2 }\n",
+    );
+    write(&root.join("src/mathx.tl"), "return { local_one = 1 }\n");
+    // The project's own `mathx.vec` too: the dependency must still read its own.
+    write(&root.join("src/mathx/vec.tl"), "return { other = true }\n");
+    write(
+        &root.join("src/main.tl"),
+        "local m = require(\"mathx\")\nlocal l = require(\"mathx_local\")\n\
+         local x: integer = m.twice(21)\nlocal y: integer = l.local_one\nprint(x + y)\n",
+    );
+    let d = diagnostics(&["."], &root);
+    assert!(d.is_empty(), "the imports settle both names: {d:?}");
+    // And the program runs with the modules the project meant, from source and bundled.
+    let run = |args: &[&str]| {
+        let out = Command::new(common::htl_bin())
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    assert_eq!(run(&["run", "src/main.tl"]), "43");
+    run(&["build", "src/main.tl", "-o", "app.hb"]);
+    assert_eq!(run(&["run", "app.hb"]), "43");
+
+    write(
+        &root.join("htl.toml"),
+        "[imports]\nmathx = \"dep:nosuch\"\n",
+    );
+    let d = diagnostics(&["."], &root);
+    assert!(
+        d.iter().any(|l| l.contains("no dependency named nosuch")),
+        "{d:?}"
+    );
+}

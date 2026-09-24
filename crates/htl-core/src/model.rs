@@ -690,8 +690,17 @@ impl Project {
                 }
             }
         }
+        // A name `[imports]` says which module it means is not a conflict: the project
+        // said, and the rewrite below is what makes it so.
+        let decided = self.config.import_targets();
+        let covered = |name: &str| {
+            decided
+                .iter()
+                .any(|(k, _)| name == k || name.starts_with(&format!("{k}.")))
+        };
         by_name
             .into_iter()
+            .filter(|(name, _)| !covered(name))
             .filter_map(|(name, mut claims)| {
                 claims.sort_by_key(|(i, _)| *i);
                 let first = claims.first()?.0;
@@ -762,6 +771,73 @@ impl Project {
     }
 }
 
+/// How the project's `[imports]` rewrite `require`s ([`Project::rewrites`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Rewrites {
+    /// Names as the project writes them, index for index with [`to`](Self::to). Each
+    /// covers itself and every name under it.
+    pub from: Vec<String>,
+    /// What each becomes: the project's own module's name for `own:`, and for `dep:` the
+    /// dependency's module under a name only that dependency answers to,
+    /// `@<dependency>/<name>`.
+    pub to: Vec<String>,
+    /// The dependencies an `[imports]` entry points at. A name one of them answers to may
+    /// also be one the project's own module answers to, so in these dependencies' own
+    /// files a `require` of a name under the dependency's name is rewritten to
+    /// `@<dependency>/<name>` too — the dependency's file keeps meaning its own module.
+    pub deps: Vec<String>,
+}
+
+impl Project {
+    /// What `[imports]` gets wrong about this project: a `dep:` target naming no
+    /// dependency.
+    pub fn import_problems(&self) -> Vec<String> {
+        self.config
+            .import_targets()
+            .into_iter()
+            .filter_map(|(key, t)| match t {
+                crate::config::ImportTarget::Dep(name) => {
+                    let dep = name.split('.').next().unwrap_or(&name).to_string();
+                    let known = self.modules.iter().any(|m| {
+                        m.name == dep
+                            && matches!(
+                                m.owner,
+                                Owner::Installed | Owner::Vendored | Owner::Patched
+                            )
+                    });
+                    (!known).then(|| {
+                        format!(
+                            "[imports] {key} = \"dep:{name}\": the project has no dependency \
+                             named {dep}"
+                        )
+                    })
+                }
+                crate::config::ImportTarget::Own(_) => None,
+            })
+            .collect()
+    }
+
+    /// The `require` rewrites `[imports]` asks for.
+    pub fn rewrites(&self) -> Rewrites {
+        let mut r = Rewrites::default();
+        for (key, t) in self.config.import_targets() {
+            let to = match t {
+                crate::config::ImportTarget::Own(name) => name,
+                crate::config::ImportTarget::Dep(name) => {
+                    let dep = name.split('.').next().unwrap_or(&name).to_string();
+                    if !r.deps.contains(&dep) {
+                        r.deps.push(dep.clone());
+                    }
+                    format!("@{dep}/{name}")
+                }
+            };
+            r.from.push(key);
+            r.to.push(to);
+        }
+        r
+    }
+}
+
 impl crate::Htl {
     /// Set this checker up for `project`, as `view` sees it: the working directory off the
     /// path ([`drop_cwd_search_path`](crate::Htl::drop_cwd_search_path)), what a
@@ -778,6 +854,8 @@ impl crate::Htl {
         }
         let v = project.views();
         self.set_views(&v.own, &v.not_own, &v.dep_dirs, &v.dep_names, &project.root)?;
+        let r = project.rewrites();
+        self.set_imports(&r.from, &r.to, &r.deps)?;
         self.add_search_paths(&project.search_dirs(view))
     }
 }

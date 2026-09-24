@@ -12,9 +12,43 @@ local H = {}
 -- searchers already try `.tl` before `.d.tl`; make the checker agree, so a declaration
 -- is what you check against only when no source of that module is reachable.
 -- (`require_module` looks `tl.search_module` up on each call, so wrapping it works.)
+-- `@<dependency>/<name>`: a module of one dependency, found in that dependency's
+-- directories and nowhere else. The name `[imports]` rewrites a `require` to when the
+-- project's own module answers to the same name, so that the search path's order does
+-- not decide between the two (`H.set_imports`). `exts` in the order to try them.
+local function search_dep(module_name, exts)
+   local dep, name = module_name:match("^@([^/]+)/(.+)$")
+   if not dep then return nil end
+   local rest = name == dep and "" or name:sub(#dep + 2)
+   local tried = {}
+   for i, d in ipairs(H.views and H.views.dep_dirs or {}) do
+      if H.views.dep_names[i] == dep then
+         local bases
+         if rest == "" then
+            bases = { d .. "/init", d .. "/" .. dep }
+         else
+            local rel = (rest:gsub("%.", "/"))
+            bases = { d .. "/" .. rel, d .. "/" .. rel .. "/init" }
+         end
+         for _, ext in ipairs(exts) do
+            for _, b in ipairs(bases) do
+               local path = b .. ext
+               local fd = io.open(path, "rb")
+               if fd then return path, fd, tried end
+               tried[#tried + 1] = "no file '" .. path .. "'"
+            end
+         end
+      end
+   end
+   return nil, nil, tried
+end
+
 do
    local tl_search = tl.search_module
    tl.search_module = function(module_name, search_all)
+      if module_name:sub(1, 1) == "@" then
+         return search_dep(module_name, search_all and { ".tl", ".d.tl", ".lua" } or { ".tl" })
+      end
       local found, fd, tried = tl_search(module_name, false) -- `.tl` only
       if found or not search_all then
          return found, fd, tried
@@ -861,7 +895,7 @@ local function require_sites(ast, names_only)
             found, fd = tl.search_module(name, true)
             if fd then fd:close() end
          end
-         out[#out + 1] = { name = name, y = n.y, x = n.x, path = found }
+         out[#out + 1] = { name = name, y = n.y, x = n.x, path = found, node = n.e2[1] }
       end
       for k, v in pairs(n) do
          if k ~= "if_parent" and k ~= "type" and k ~= "newtype" and k ~= "decltuple" and k ~= "expected"
@@ -882,18 +916,38 @@ H.views = { own = {}, not_own = {}, dep_dirs = {}, dep_names = {}, root = nil }
 -- `H.set_deps` gives. `not_own` is every other module's directory, some of which sit
 -- inside the project's own (`types/<crate>/` inside `types/`, `.htl/modules/entries`
 -- inside a flat project's root): a file under one of those is that module's.
-function H.set_views(own, not_own, dep_dirs, dep_names, root)
+-- `path` absolute and without `.` segments, so that a file the command line named
+-- relatively (`./src/main.tl`) and a directory the model holds absolutely (`/p/src`, or
+-- `/p/.` for a flat project) compare as the same place. `cwd` is the command's.
+local function normal(path, cwd)
+   if path:sub(1, 1) ~= "/" and cwd then path = cwd .. "/" .. path end
+   repeat
+      local before = path
+      path = path:gsub("/%./", "/")
+   until path == before
+   path = path:gsub("/%.$", "")
+   return path
+end
+
+function H.set_views(own, not_own, dep_dirs, dep_names, root, cwd)
+   local function all(list)
+      local out = {}
+      for i, d in ipairs(list or {}) do out[i] = normal(d, cwd) end
+      return out
+   end
    H.views = {
-      own = own or {},
-      not_own = not_own or {},
-      dep_dirs = dep_dirs or {},
+      own = all(own),
+      not_own = all(not_own),
+      dep_dirs = all(dep_dirs),
       dep_names = dep_names or {},
-      root = root,
+      root = root and normal(root, cwd),
+      cwd = cwd,
    }
 end
 
 -- `path` as the project spells it: below the root, without a `./` a flat layout leaves.
 local function project_relative(path)
+   path = normal(path, H.views.cwd)
    local root = H.views.root
    if root and path:sub(1, #root + 1) == root .. "/" then
       path = path:sub(#root + 2)
@@ -905,6 +959,7 @@ end
 -- The index in `dirs` of the directory `path` is under, if any. Spellings are compared as
 -- they are: both sides come from the same model, which is also what built the search path.
 local function dir_holding(path, dirs)
+   path = normal(path, H.views.cwd)
    for i, d in ipairs(dirs) do
       if path:sub(1, #d + 1) == d .. "/" then return i end
    end
@@ -921,11 +976,56 @@ end
 -- the dependency's file, added to its result. A parse error would stop the file being
 -- checked at all, and every module requiring it would then see a type that is not its.
 local view_errors = {}
+
+-- `[imports]` as the model resolved it (`Htl::set_imports`): a name the project writes,
+-- and what it is rewritten to; and the dependencies whose own names the project's may
+-- share. Empty until set.
+H.imports = { from = {}, to = {}, deps = {} }
+
+function H.set_imports(from, to, deps)
+   local d = {}
+   for _, name in ipairs(deps or {}) do d[name] = true end
+   H.imports = { from = from or {}, to = to or {}, deps = d }
+end
+
+-- What `name` becomes in a file of the project's own module under `[imports]`, if
+-- anything: the entry for it or for a name above it, the rest carried across.
+local function imported(name)
+   for i, k in ipairs(H.imports.from) do
+      if name == k then return H.imports.to[i] end
+      if name:sub(1, #k + 1) == k .. "." then
+         return H.imports.to[i] .. name:sub(#k + 1)
+      end
+   end
+end
+
+local function rewrite(site, to)
+   site.node.conststr = to
+   site.node.tk = string.format("%q", to)
+end
+
 do
    local tl_parse = tl.parse
    tl.parse = function(input, filename, parse_lang)
       local ast, errs, required = tl_parse(input, filename, parse_lang)
       local dep = filename and ast and dir_holding(filename, H.views.dep_dirs)
+      local own = filename and ast and not dep and dir_holding(filename, H.views.own)
+         and not dir_holding(filename, H.views.not_own)
+      -- The rewrites first, so that what is checked and what is generated — the same AST
+      -- — both carry the name the project meant.
+      if own and #H.imports.from > 0 then
+         for _, site in ipairs(require_sites(ast, true)) do
+            local to = imported(site.name)
+            if to then rewrite(site, to) end
+         end
+      elseif dep and H.imports.deps[H.views.dep_names[dep]] then
+         local name = H.views.dep_names[dep]
+         for _, site in ipairs(require_sites(ast, true)) do
+            if site.name == name or site.name:sub(1, #name + 1) == name .. "." then
+               rewrite(site, "@" .. name .. "/" .. site.name)
+            end
+         end
+      end
       if dep then
          for _, site in ipairs(require_sites(ast)) do
             if site.path and dir_holding(site.path, H.views.own)
@@ -1583,7 +1683,16 @@ end
 function H.resolve_module(name)
    local found, fd = tl.search_module(name, true)
    if fd then fd:close() end
-   local lua_path = package.searchpath(name, package.path)
+   local lua_path
+   if name:sub(1, 1) == "@" then
+      -- A dependency's module under an `[imports]` name: `package.path` does not know
+      -- it, the dependency's own directories do.
+      local lfd
+      lua_path, lfd = search_dep(name, { ".lua" })
+      if lfd then lfd:close() end
+   else
+      lua_path = package.searchpath(name, package.path)
+   end
    return found, lua_path
 end
 
@@ -1860,6 +1969,16 @@ end
 -- Type errors raise: unlike tl.loader(), they are fatal at require time.
 local function resolve_for_require(module_name)
    local found, fd = tl.search_module(module_name, false)
+   -- A dependency's `.lua` under an `[imports]` name: Lua's own searcher reads
+   -- `package.path` and has never heard of `@<dependency>/…`, so it is served from here.
+   if not found and module_name:sub(1, 1) == "@" then
+      local lua_path, lfd = search_dep(module_name, { ".lua" })
+      if lua_path then
+         local src = lfd:read("a")
+         lfd:close()
+         return "code", src, lua_path
+      end
+   end
    if not found then
       local dfound, dfd = tl.search_module(module_name, true)
       if dfound and dfound:match("%.d%.tl$") then

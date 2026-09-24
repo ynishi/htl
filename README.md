@@ -1320,6 +1320,9 @@ tests = "tests"           # tests, and the helpers only tests may require
 [check]
 paths = ["mods", "~/.cache/tsk/sdk"]   # extra dirs require() resolves from while checking
 
+[imports]
+mathx = "dep:mathx"       # a name the project and a dependency share: which one it means
+
 [build]
 target = "bin"            # what runs this project's output: hb (the default when absent),
                           # bin, cdylib, window (see "Build targets")
@@ -1378,6 +1381,21 @@ A dependency sees its own modules and what it depends on, not the project that u
 A `require` in a dependency that would land on one of the project's own files — the
 project happens to have a `util.tl` and the dependency asks for `util` — is an error at
 that `require`, rather than the dependency quietly reading the project's file.
+
+`[imports]` settles a shared name without a rename. It is the project's say over its own
+`require`s, and each entry covers a name and every name under it:
+
+```toml
+[imports]
+mathx = "dep:mathx"          # require("mathx"), require("mathx.vec"): the dependency's
+mathx_local = "own:mathx"    # the project's own mathx, under a name of its choosing
+```
+
+A `dep:` entry makes the dependency's modules answer to `@<dependency>/<name>` —
+`require("mathx")` in the project is generated as `require("@mathx/mathx")`, and the
+dependency's own `require("mathx.vec")` as `require("@mathx/mathx.vec")` — so that at run
+time and in a bundle each name still has one module behind it. A `dep:` entry naming a
+dependency the project does not have is an error at `htl.toml`.
 
 `[check] paths` is for modules the host supplies at run time from somewhere the
 checker would not look (an SDK cache, a mods dir): the CLI, `include_tl!` and

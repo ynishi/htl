@@ -1167,6 +1167,16 @@ pub fn check<O: Output>(
     // `mathx`, say. Which one a `require` gets was decided by the order of the search path
     // and said nowhere, so it is an error, reported at each file that claims the name.
     if let Some(m) = &model {
+        // An `[imports]` entry pointing at a dependency the project does not have: said
+        // at `htl.toml`, which is the line to fix.
+        let at = cfg
+            .as_ref()
+            .map(|(_, p, _)| display_path(p))
+            .unwrap_or_else(|| crate::config::CONFIG_NAME.to_string());
+        for p in m.import_problems() {
+            sink.diag(Severity::Error, &format!("{at}:1:1: {p}"));
+            n_err += 1;
+        }
         for c in m.conflicts(crate::model::View::Source) {
             let owners: Vec<String> = c
                 .claims
