@@ -23,10 +23,13 @@
 //! share their modules' entries.
 //!
 //! The **inputs** are the module and everything reading it required, by content hash. The
-//! **probes** are the directories a `require` could resolve in, by the set of module names
-//! in each — a new `.tl` appearing earlier on the search path changes what a name resolves
-//! to while every recorded hash still matches, and nothing else would catch it. This is the
-//! hole ccache documents in its direct mode.
+//! **probes** say what each name the module required resolves to — a new `.tl` appearing
+//! somewhere changes that while every recorded hash still matches, and nothing else would
+//! catch it. This is the hole ccache documents in its direct mode. With the project's model
+//! ([`Cache::with_answers`]) a probe is the model's answer for every such name, asked from
+//! the module: one hash, and the question it hashes is the one that matters. Without one
+//! (a file outside any project) a probe is a directory the search path consults, by the
+//! set of those names it offers.
 //!
 //! # No mtimes anywhere
 //!
@@ -184,9 +187,19 @@ struct Probe {
     dir: String,
     /// Hash of `(name, whether it resolves here)` over the module's own requires, in the
     /// order they are stored. Changing which directory a name resolves in changes this for
-    /// both directories involved, which is how a shadowing file is caught.
+    /// both directories involved, which is how a shadowing file is caught. For the
+    /// [`MODEL_PROBE`], the hash of the model's answer for each of those names.
     names: String,
 }
+
+/// The `dir` of the one probe a store with the project model records: not a directory,
+/// the model's answers ([`Cache::with_answers`]).
+const MODEL_PROBE: &str = "(project model)";
+
+/// The project model's answer for a module name, asked from a file (`None` for a whole
+/// run), as a string that changes whenever the answer does — which module, which files.
+/// What a store with the model probes instead of directories ([`Cache::with_answers`]).
+pub type Answers = std::sync::Arc<dyn Fn(Option<&Path>, &str) -> String + Send + Sync>;
 
 /// One diagnostic exactly as it was handed to the sink, so a replay goes through the same
 /// printing code the original run did rather than through a reconstruction of it.
@@ -848,7 +861,7 @@ pub fn root_for(path: &Path) -> Option<PathBuf> {
 /// **The rule is the whole `.htl/`, not the store.** Every write htl makes as a side
 /// effect of reading a project asks here first, and there are two: the run cache
 /// (`project::store_refusal`, which every reader of the store comes through) and the
-/// entry links ([`crate::pkg::Project::link_entries`], through
+/// entry links ([`crate::pkg::MluaProject::link_entries`], through
 /// [`Htl::apply_project`](crate::Htl::apply_project)). The link repair was outside the
 /// rule until #267, where it wrote `.htl/modules/entries/<dep>` into the tree `cargo
 /// package` had just built and cargo refused the tarball. A reader of a scratch tree
@@ -1030,6 +1043,8 @@ pub struct Cache {
     /// Name-resolves-here answers taken during this run, by (directory, name). Same
     /// reasoning.
     dirs: RefCell<HashMap<(String, String), bool>>,
+    /// The project model's answers, when the caller has a model ([`with_answers`](Self::with_answers)).
+    answers: Option<Answers>,
 }
 
 impl Cache {
@@ -1046,7 +1061,33 @@ impl Cache {
             stats: RefCell::new(Stats::default()),
             hashes: RefCell::new(HashMap::new()),
             dirs: RefCell::new(HashMap::new()),
+            answers: None,
         })
+    }
+
+    /// Probe with the project model's `answers` instead of the search path's directories.
+    ///
+    /// The directories were a stand-in for the question an entry has to ask — does each
+    /// name the module required still mean the file it meant — and a list of them could
+    /// only ask it of the directories on the list: a helper added directly under `tests/`
+    /// was not seen by a test in `tests/sub/`, whose list had `tests/sub` and not `tests`.
+    /// The model answers the question itself. An entry recorded this way misses in a run
+    /// without the model, and the reverse, since neither can check the other's probe.
+    pub fn with_answers(mut self, answers: Answers) -> Self {
+        self.answers = Some(answers);
+        self
+    }
+
+    /// The model's answers for `names`, asked from `subject`, hashed.
+    fn model_hash(&self, answers: &Answers, subject: Option<&str>, names: &[String]) -> String {
+        let mut h = blake3::Hasher::new();
+        for n in names {
+            h.update(n.as_bytes());
+            h.update(b"\0");
+            h.update(answers(subject.map(Path::new), n).as_bytes());
+            h.update(b"\x01");
+        }
+        h.finalize().to_hex().to_string()
     }
 
     /// What this run has done with the store so far.
@@ -1145,6 +1186,7 @@ impl Cache {
         inputs: &[Input],
         probes: &[Probe],
         names: &[String],
+        subject: Option<&str>,
     ) -> bool {
         let Some(current) = Stamp::for_kind(kind) else {
             return false;
@@ -1167,6 +1209,21 @@ impl Cache {
             }
         }
         for p in probes {
+            if p.dir == MODEL_PROBE {
+                let Some(answers) = &self.answers else {
+                    self.miss("recorded against a project model this run does not have");
+                    return false;
+                };
+                if self.model_hash(answers, subject, names) != p.names {
+                    self.miss("what a name this module requires resolves to changed");
+                    return false;
+                }
+                continue;
+            }
+            if self.answers.is_some() {
+                self.miss("recorded without the project model this run has");
+                return false;
+            }
             if self.probe_hash(&p.dir, names) != p.names {
                 self.miss(&format!(
                     "what {} offers for this module's requires changed",
@@ -1204,6 +1261,7 @@ impl Cache {
             &entry.inputs,
             &entry.probes,
             &names,
+            Some(&entry.subject),
         ) {
             return None;
         }
@@ -1236,7 +1294,14 @@ impl Cache {
             return None;
         }
         let names = Self::required_names(&entry.modules);
-        if !self.still_valid(RUN, &entry.stamp, &entry.inputs, &entry.probes, &names) {
+        if !self.still_valid(
+            RUN,
+            &entry.stamp,
+            &entry.inputs,
+            &entry.probes,
+            &names,
+            None,
+        ) {
             return None;
         }
         self.touch(key);
@@ -1260,7 +1325,13 @@ impl Cache {
         Some(inputs)
     }
 
-    fn probes_for(&self, dirs: &[PathBuf], names: &[String]) -> Vec<Probe> {
+    fn probes_for(&self, dirs: &[PathBuf], names: &[String], subject: Option<&str>) -> Vec<Probe> {
+        if let Some(answers) = &self.answers {
+            return vec![Probe {
+                dir: MODEL_PROBE.to_string(),
+                names: self.model_hash(answers, subject, names),
+            }];
+        }
         let mut dirs: Vec<String> = dirs.iter().map(|p| normal(p)).collect();
         dirs.sort();
         dirs.dedup();
@@ -1297,7 +1368,7 @@ impl Cache {
             subject: normal(file),
             kind: key.kind.to_string(),
             inputs,
-            probes: self.probes_for(dirs, &names),
+            probes: self.probes_for(dirs, &names, Some(&normal(file))),
             module: module.clone(),
         };
         match self.write(key, &entry) {
@@ -1334,7 +1405,7 @@ impl Cache {
             subjects: files.iter().map(|f| normal(f)).collect(),
             kind: key.kind.to_string(),
             inputs,
-            probes: self.probes_for(dirs, &names),
+            probes: self.probes_for(dirs, &names, None),
             modules: modules.to_vec(),
         };
         match self.write(key, &entry) {

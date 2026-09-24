@@ -5,7 +5,7 @@
 //! revisions are real ones rather than fixtures.
 
 use htl_core::Htl;
-use htl_core::pkg::Project;
+use htl_core::pkg::MluaProject;
 use mlua_pkg::ops::{AddSpec, CleanReport, Placement, UpdateOpts, UpdateOutcome};
 use std::path::{Path, PathBuf};
 
@@ -106,7 +106,7 @@ fn install_places_packages_under_the_directory_htl_names() {
     // A `target/` in the project would send mlua-pkg's own binary to `target/mlua-pkgs`.
     std::fs::create_dir_all(root.join("target")).unwrap();
 
-    let report = Project::at(&root).install().unwrap();
+    let report = MluaProject::at(&root).install().unwrap();
     assert_eq!(report.packages.len(), 1, "{report:?}");
     assert_eq!(report.direct, 1);
     assert_eq!(report.transitive, 0);
@@ -155,14 +155,14 @@ fn packaged_copy(name: &str, from: &Path) -> PathBuf {
 fn nothing_is_written_into_the_copy_cargo_package_verifies() {
     let (url, sha) = remote("remote-packaged");
     let root = project("packaged", &url, &sha);
-    Project::at(&root).install().unwrap();
+    MluaProject::at(&root).install().unwrap();
     assert!(
         std::fs::symlink_metadata(root.join(".htl/modules/entries/mathx")).is_ok(),
         "the checkout is where install writes the links"
     );
 
     let copy = packaged_copy("verify", &root);
-    let p = Project::find(&copy.join("src/main.tl")).unwrap();
+    let p = MluaProject::find(&copy.join("src/main.tl")).unwrap();
     assert_eq!(p.root, std::fs::canonicalize(&copy).unwrap());
     assert_eq!(
         p.link_entries().unwrap(),
@@ -184,7 +184,7 @@ fn nothing_is_written_into_the_copy_cargo_package_verifies() {
         std::fs::copy(root.join(f), elsewhere.join(f)).unwrap();
     }
     write(&elsewhere.join("src/main.tl"), "print(1)\n");
-    let q = Project::find(&elsewhere.join("src/main.tl")).unwrap();
+    let q = MluaProject::find(&elsewhere.join("src/main.tl")).unwrap();
     Htl::new().unwrap().apply_project(&q).unwrap();
     assert!(
         std::fs::symlink_metadata(elsewhere.join(".htl/modules/entries/mathx")).is_ok(),
@@ -198,14 +198,14 @@ fn nothing_is_written_into_the_copy_cargo_package_verifies() {
 fn install_resolves_a_patched_dependency_from_its_copy() {
     let (url, sha) = remote("remote-patched");
     let root = project("patched", &url, &sha);
-    let p = Project::at(&root);
+    let p = MluaProject::at(&root);
     p.patch("mathx", false).unwrap();
     write(
         &root.join("patches/mathx/src/mathx.tl"),
         "return { twice = function(n: number): number return n + n end }\n",
     );
 
-    let report = Project::at(&root).install().unwrap();
+    let report = MluaProject::at(&root).install().unwrap();
     let pkg = &report.packages[0];
     assert!(pkg.patched, "{report:?}");
     assert_eq!(
@@ -229,7 +229,7 @@ fn install_resolves_a_patched_dependency_from_its_copy() {
 fn patch_drops_the_repositorys_dot_entries_and_keeps_the_package() {
     let (url, sha) = remote_with_housekeeping("remote-housekeeping");
     let root = project("housekeeping", &url, &sha);
-    let done = Project::at(&root).patch("mathx", false).unwrap();
+    let done = MluaProject::at(&root).patch("mathx", false).unwrap();
     assert_eq!(
         done.dropped,
         vec![".DS_Store", ".git", ".github", ".gitignore"],
@@ -259,7 +259,7 @@ fn patch_drops_the_repositorys_dot_entries_and_keeps_the_package() {
     }
 
     // The issue's acceptance: what is left is still a package install resolves from.
-    let report = Project::at(&root).install().unwrap();
+    let report = MluaProject::at(&root).install().unwrap();
     assert!(report.packages[0].patched, "{report:?}");
     assert_eq!(
         std::fs::canonicalize(report.packages[0].root()).unwrap(),
@@ -278,9 +278,9 @@ fn patch_drops_the_repositorys_dot_entries_and_keeps_the_package() {
 fn add_keeps_the_patch_a_dependency_already_declares() {
     let (url, sha) = remote("remote-add");
     let root = project("add", &url, &sha);
-    Project::at(&root).patch("mathx", false).unwrap();
+    MluaProject::at(&root).patch("mathx", false).unwrap();
 
-    let done = Project::at(&root)
+    let done = MluaProject::at(&root)
         .add(AddSpec {
             name: "mathx".into(),
             git: url.clone(),
@@ -299,7 +299,7 @@ fn add_keeps_the_patch_a_dependency_already_declares() {
         "{manifest}"
     );
     assert!(
-        Project::at(&root).install().unwrap().packages[0].patched,
+        MluaProject::at(&root).install().unwrap().packages[0].patched,
         "so the next install still resolves from the copy"
     );
 }
@@ -309,7 +309,7 @@ fn add_keeps_the_patch_a_dependency_already_declares() {
 fn add_writes_a_dependency_the_manifest_did_not_have() {
     let (url, sha) = remote("remote-new");
     let root = project("new", &url, &sha);
-    let done = Project::at(&root)
+    let done = MluaProject::at(&root)
         .add(AddSpec {
             name: "vec2".into(),
             git: url.clone(),
@@ -329,7 +329,7 @@ fn add_writes_a_dependency_the_manifest_did_not_have() {
 fn add_writes_the_manifest_when_there_is_none() {
     let root = scratch("add-bare");
     std::fs::create_dir_all(&root).unwrap();
-    let done = Project::at(&root)
+    let done = MluaProject::at(&root)
         .add(AddSpec::new("mathx", "https://example.invalid/mathx"))
         .unwrap();
     assert!(done.report.manifest_created, "{done:?}");
@@ -351,7 +351,9 @@ fn update_reports_its_dependencies_in_a_stable_order() {
          [deps.zeta]\ngit = \"https://example.invalid/zeta\"\nrev = \"aaaa\"\n\n\
          [deps.alpha]\ngit = \"https://example.invalid/alpha\"\nrev = \"bbbb\"\n",
     );
-    let report = Project::at(&root).update(UpdateOpts::default()).unwrap();
+    let report = MluaProject::at(&root)
+        .update(UpdateOpts::default())
+        .unwrap();
     let names: Vec<&str> = report.entries.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(names, vec!["alpha", "zeta"]);
     assert!(
@@ -371,7 +373,7 @@ fn update_reports_its_dependencies_in_a_stable_order() {
 fn clean_tells_an_empty_cache_from_a_swept_one_and_from_no_lockfile() {
     let (url, sha) = remote("remote-clean");
     let root = project("clean", &url, &sha);
-    let p = Project::at(&root);
+    let p = MluaProject::at(&root);
     assert_eq!(p.clean(false).unwrap(), CleanReport::NoLockfile);
 
     p.install().unwrap();

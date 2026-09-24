@@ -1,4 +1,9 @@
 # The example is a project of its own: this is what lets `include_tl!` / `include_bundle!`
 # keep a run cache under `examples/embed/.htl/` (gitignored), the same store `htl build`
 # and `htl check` use when run here.
-[check]
+#
+# Its Teal is in `scripts/`, beside the Rust in `src/`, and the declarations of what the
+# host registers (`host.d.tl`, `store.d.tl`) sit with it: a `.d.tl` is a declaration
+# wherever it is, so the one directory is all the layout there is.
+[layout]
+source = "scripts"

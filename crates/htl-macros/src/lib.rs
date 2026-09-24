@@ -158,6 +158,14 @@ fn resolve_bundle(
         opts.extra.extend(c.build.extra.iter().cloned());
         opts.host.extend(c.build.host.iter().cloned());
     }
+    // The name the entry is served under, from the project's model, as `htl build` does:
+    // the one a `require` of the file elsewhere in the project writes.
+    let model = match (&ck.cfg_path, cfg) {
+        (Some(_), Some(c)) => htl_core::model::Project::load(&ck.root, c.clone()).map(Some),
+        _ => htl_core::model::Project::discover(&path),
+    }
+    .map_err(|e| format!("include_bundle!: {e:#}"))?;
+    opts.entry_name = model.and_then(|m| m.locate(&path).map(|p| p.name));
     let store = ck.store();
     let linked = htl_core::link::link_with(h, &path, &opts, ck.link_store(store.as_ref()))
         .map_err(|e| format!("include_bundle!: {e:#}"))?;
@@ -265,6 +273,9 @@ struct Checker {
     root: PathBuf,
     /// The lint selection in force: `[lint]` from `htl.toml`, then `HTL_LINTS`.
     spec: String,
+    /// The project model the expansion was checked against, when the file is in a
+    /// project: what the store probes with.
+    model: Option<htl_core::model::Project>,
 }
 
 impl Checker {
@@ -290,11 +301,14 @@ impl Checker {
     /// Nothing is swept from here — an expansion sees one closure, and only `htl check`,
     /// which sees the project, bounds the store.
     fn store(&self) -> Option<htl_core::cache::Cache> {
-        htl_core::project::store(
-            &self.root,
-            htl_core::cache::Options::from_env(),
-            htl_core::project::store_refusal(&self.root, self.cfg_path.is_some()).as_deref(),
-            "the macro expansion",
+        htl_core::project::with_model(
+            htl_core::project::store(
+                &self.root,
+                htl_core::cache::Options::from_env(),
+                htl_core::project::store_refusal(&self.root, self.cfg_path.is_some()).as_deref(),
+                "the macro expansion",
+            ),
+            self.model.as_ref(),
         )
     }
 
@@ -328,21 +342,21 @@ fn checker_for(tag: &str, manifest_dir: &Path, path: &Path) -> Result<Checker, S
         h.configure_lints(&spec)
             .map_err(|e| format!("{tag}: lint spec {spec:?}: {e:#}"))?;
     }
+    // The project's directories and nothing else: Lua's own default path is relative to
+    // wherever cargo happens to run the compiler, which is not a directory the source
+    // names. What the file may read is the project model's, as `htl check` has it; a file
+    // in no project reads its own directory.
     h.reset_search_path().map_err(|e| format!("{tag}: {e:#}"))?;
-    h.add_path(&htl_core::parent_dir(path))
-        .map_err(|e| format!("{tag}: {e:#}"))?;
-    let crate_src = manifest_dir.join("src");
-    if crate_src.is_dir() {
-        h.add_path(&crate_src)
+    let model = match (&cfg_root, &cfg) {
+        (Some(root), Some(c)) => htl_core::model::Project::load(root, c.clone()).map(Some),
+        _ => htl_core::model::Project::discover(path),
+    }
+    .map_err(|e| format!("{tag}: {e:#}"))?;
+    if let Some(m) = &model {
+        h.apply_model(m, htl_core::model::View::Source)
             .map_err(|e| format!("{tag}: {e:#}"))?;
     }
-    if let Some(p) = htl_core::pkg::Project::find(path) {
-        h.apply_project(&p).map_err(|e| format!("{tag}: {e:#}"))?;
-    }
-    if let (Some(root), Some(c)) = (&cfg_root, &cfg) {
-        h.apply_config(root, c)
-            .map_err(|e| format!("{tag}: {e:#}"))?;
-    }
+    htl_core::project::file_view(&h, model.as_ref(), path).map_err(|e| format!("{tag}: {e:#}"))?;
     h.install_test_lib().map_err(|e| format!("{tag}: {e:#}"))?;
     h.install_std().map_err(|e| format!("{tag}: {e:#}"))?;
     let root = cfg_root.unwrap_or_else(|| manifest_dir.to_path_buf());
@@ -352,6 +366,7 @@ fn checker_for(tag: &str, manifest_dir: &Path, path: &Path) -> Result<Checker, S
         cfg_path,
         root,
         spec,
+        model,
     })
 }
 

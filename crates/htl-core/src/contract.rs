@@ -55,6 +55,9 @@ pub struct Resolved {
     pub exclude: Vec<String>,
     /// Where to publish the declaration, from `---@contract(dts = "…")`.
     pub dts: Option<String>,
+    /// The project's declaration root (`[layout] types`) when the contract was read,
+    /// absolute: where the declaration is published when the marker names no `dts`.
+    pub types: PathBuf,
     /// Where this contract is enforced when the scan cannot see it, from
     /// `[[contract]] enforced_by`. Not a marker argument: enforcement is the host's
     /// business, and the record is published to authors who have no use for the path.
@@ -146,7 +149,7 @@ pub fn resolve(root: &Path, cfg: &HtlConfig) -> (Vec<Resolved>, Vec<String>) {
         if !src.contains("---@contract") {
             continue;
         }
-        match read_file(&file, &src, cfg) {
+        match read_file(root, &file, &src, cfg) {
             Ok(found) => out.extend(found),
             Err(msgs) => problems.extend(msgs),
         }
@@ -185,13 +188,14 @@ pub fn resolve(root: &Path, cfg: &HtlConfig) -> (Vec<Resolved>, Vec<String>) {
 }
 
 /// Where a contract publishes its declaration: `---@contract(dts = "…")` relative to the
-/// project root, or `types/<module>.d.tl` by default — `types/` being the directory a
-/// project keeps declarations for other people in, searched with no configuration.
+/// project root, or `<module>.d.tl` in the project's declaration root by default
+/// ([`Resolved::types`], `[layout] types`) — the directory a project keeps declarations
+/// for other people in.
 pub fn dts_target(root: &Path, c: &Resolved) -> Option<PathBuf> {
     let module = c.type_path.split_once('.')?.0;
     Some(match &c.dts {
         Some(p) => crate::config::resolve_path(root, p),
-        None => root.join("types").join(format!("{module}.d.tl")),
+        None => c.types.join(format!("{module}.d.tl")),
     })
 }
 
@@ -628,7 +632,12 @@ fn module_name(file: &Path) -> Option<String> {
 
 /// Every contract declared in one file. `Err` carries what is wrong with the markers it
 /// does have, one message per marker, so a file with two of them reports both.
-fn read_file(file: &Path, src: &str, cfg: &HtlConfig) -> Result<Vec<Resolved>, Vec<String>> {
+fn read_file(
+    root: &Path,
+    file: &Path,
+    src: &str,
+    cfg: &HtlConfig,
+) -> Result<Vec<Resolved>, Vec<String>> {
     let lines: Vec<&str> = src.lines().collect();
     let Some(module) = module_name(file) else {
         return Ok(Vec::new());
@@ -703,6 +712,7 @@ fn read_file(file: &Path, src: &str, cfg: &HtlConfig) -> Result<Vec<Resolved>, V
                 .or_else(|| inherited.map(|c| c.exclude.clone()))
                 .unwrap_or_default(),
             dts: marker.dts,
+            types: crate::config::resolve_path(root, &cfg.layout.types),
             enforced_by: inherited.and_then(|c| c.enforced_by.clone()),
             declared_in: file.to_path_buf(),
             declared_at: i + 1,

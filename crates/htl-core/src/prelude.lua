@@ -6,6 +6,16 @@ local lint = require("htl.lint")
 local fmt_mod = require("htl.fmt")
 local H = {}
 
+-- The requiring file, for the project model's resolver (`H.resolve_name`, installed by
+-- `Htl::install_resolver`): the file htl's own walk over an AST names while it asks
+-- (`H.asking`), else the innermost file Teal is checking (`H.requirers`, kept by the
+-- `tl.check_string` wrapper below). Neither is set for a run-time `require`, which carries
+-- only the name.
+H.requirers = {}
+function H.current_requirer()
+   return H.asking or H.requirers[#H.requirers]
+end
+
 -- Source beats declaration. tl's own search order is `.d.tl` across the whole path
 -- first, then `.tl`, so a stale `mods/defs.d.tl` written by a host would shadow the
 -- `src/defs.tl` it was made from wherever the two sit on the path. htl's run-time
@@ -15,11 +25,41 @@ local H = {}
 do
    local tl_search = tl.search_module
    tl.search_module = function(module_name, search_all)
-      local found, fd, tried = tl_search(module_name, false) -- `.tl` only
-      if found or not search_all then
-         return found, fd, tried
+      -- A name the project model has is answered by the model and nothing else: its
+      -- implementation, else (for a search that takes them) its declaration, then its
+      -- `.lua`. A name it does not have falls through to `package.path`, for a library
+      -- installed for the machine.
+      if H.resolve_name then
+         local kind, a, b, c = H.resolve_name(H.current_requirer(), module_name)
+         if kind == "found" then
+            local path = a or (search_all and (b or c)) or nil
+            local fd = path and io.open(path, "rb")
+            if fd then return path, fd, {} end
+            return nil, nil, {}
+         elseif kind == "hidden" then
+            -- A dependency reaching the project's own module: the `tl.parse` wrapper
+            -- reports it at the `require`, which is the one error to say. Answering with
+            -- the file keeps Teal from adding a `module not found` in front of it.
+            local fd = b and io.open(b, "rb")
+            if fd then return b, fd, {} end
+            return nil, nil, { a }
+         elseif kind ~= "outside" then
+            return nil, nil, { a }
+         end
       end
-      return tl_search(module_name, true) -- `.d.tl`, then `.lua`
+      local found, fd, tried = tl_search(module_name, false) -- `.tl` only
+      if not found and search_all then
+         found, fd, tried = tl_search(module_name, true) -- `.d.tl`, then `.lua`
+      end
+      -- The model's own file, found under a name the model does not give it — what a
+      -- `package.path` template makes of `src/util/util.tl` for `util`: not that module.
+      if found and H.owns_file and H.owns_file(found) then
+         if fd then fd:close() end
+         tried = tried or {}
+         tried[#tried + 1] = "'" .. found .. "' is not the module '" .. module_name .. "'"
+         return nil, nil, tried
+      end
+      return found, fd, tried
    end
 end
 
@@ -672,7 +712,10 @@ local function explain_self_require(filename, e)
       or msg:match("module not found: '([^']+)'")
       or msg:match("circular require: '([^']+)'")
    if not name then return msg end
+   local before = H.asking
+   H.asking = filename
    local found, fd = tl.search_module(name, true)
+   H.asking = before
    if fd then fd:close() end
    if found and norm_path(found) == norm_path(filename) then
       return msg .. string.format(
@@ -843,7 +886,9 @@ local function explain_forward_ref(ast, src, e, msg)
    return msg
 end
 
-local function require_sites(ast)
+-- Every literal `require("<name>")` in `ast`, with where it resolves on the current path
+-- unless `names_only` says the names are all that is wanted.
+local function require_sites(ast, names_only, requirer)
    local out, seen = {}, {}
    local function go(n)
       if type(n) ~= "table" or seen[n] then return end
@@ -853,9 +898,16 @@ local function require_sites(ast)
          and type(n.e2) == "table" and type(n.e2[1]) == "table" and n.e2[1].kind == "string" then
          local tk = n.e2[1].tk or ""
          local name = tk:sub(2, -2)
-         local found, fd = tl.search_module(name, true)
-         if fd then fd:close() end
-         out[#out + 1] = { name = name, y = n.y, x = n.x, path = found }
+         local found
+         if not names_only then
+            local fd
+            local before = H.asking
+            H.asking = requirer or before
+            found, fd = tl.search_module(name, true)
+            H.asking = before
+            if fd then fd:close() end
+         end
+         out[#out + 1] = { name = name, y = n.y, x = n.x, path = found, node = n.e2[1] }
       end
       for k, v in pairs(n) do
          if k ~= "if_parent" and k ~= "type" and k ~= "newtype" and k ~= "decltuple" and k ~= "expected"
@@ -866,13 +918,82 @@ local function require_sites(ast)
    return out
 end
 
+-- Rewriting a `require` and holding a dependency to its own view both need the requiring
+-- file, and every file a check reaches is parsed through `tl.parse` with its name — the
+-- checked file and each one `require` leads to. The model decides both
+-- (`H.rewrite_name`, `H.resolve_name`); this is where they are applied.
+--
+-- A rewrite goes into the AST, so what is checked and what is generated carry the same
+-- name. A dependency reaching the project's own module is found when the file is parsed
+-- and reported once it has been checked, as a type error of the dependency's file: a
+-- parse error would stop the file being checked at all, and every module requiring it
+-- would then see a type that is not its own.
+local view_errors = {}
+
+local function rewrite(site, to)
+   site.node.conststr = to
+   site.node.tk = string.format("%q", to)
+end
+
+do
+   local tl_parse = tl.parse
+   tl.parse = function(input, filename, parse_lang)
+      local ast, errs, required = tl_parse(input, filename, parse_lang)
+      if ast and filename and H.rewrite_name then
+         for _, site in ipairs(require_sites(ast, true)) do
+            local to = H.rewrite_name(filename, site.name)
+            if to then rewrite(site, to) end
+         end
+         for _, site in ipairs(require_sites(ast, true)) do
+            local kind, msg = H.resolve_name(filename, site.name)
+            if kind == "hidden" or kind == "ambiguous" then
+               view_errors[filename] = view_errors[filename] or {}
+               table.insert(view_errors[filename], {
+                  filename = filename, y = site.y, x = site.x, msg = msg,
+                  -- Nothing answered the search for it, so Teal says `module not found`
+                  -- at the same place: this error is instead of that one.
+                  replaces = kind == "ambiguous" and ("module not found: '" .. site.name .. "'") or nil,
+               })
+            end
+         end
+      end
+      return ast, errs, required
+   end
+   local tl_check_string = tl.check_string
+   tl.check_string = function(input, env, filename, parse_lang)
+      -- The file whose `require`s Teal resolves while this runs.
+      table.insert(H.requirers, filename)
+      local ok, result = pcall(tl_check_string, input, env, filename, parse_lang)
+      table.remove(H.requirers)
+      if not ok then error(result, 0) end
+      local pending = filename and view_errors[filename]
+      if pending and result then
+         view_errors[filename] = nil
+         result.type_errors = result.type_errors or {}
+         for _, e in ipairs(pending) do
+            if e.replaces then
+               for i = #result.type_errors, 1, -1 do
+                  local t = result.type_errors[i]
+                  if t.y == e.y and t.x == e.x and t.msg == e.replaces then
+                     table.remove(result.type_errors, i)
+                  end
+               end
+            end
+            table.insert(result.type_errors, { filename = e.filename, y = e.y, x = e.x, msg = e.msg })
+         end
+         result.ok = false
+      end
+      return result
+   end
+end
+
 -- Proactive form of the same check: every `require("<literal>")` in the file whose
 -- resolution is the file itself gets its own error at the call site. Teal may swallow
 -- the self-require as a circular require and only complain later ("unknown type
 -- site.Config"), which hides the cause.
 local function self_require_errors(filename, ast)
    local out = {}
-   for _, r in ipairs(require_sites(ast)) do
+   for _, r in ipairs(require_sites(ast, false, filename)) do
       if r.path and norm_path(r.path) == norm_path(filename) then
          out[#out + 1] = {
             y = r.y, x = r.x,
@@ -1060,7 +1181,10 @@ local function collect_errors(filename, result, src)
       -- ms on a large module and it ran for every module a program required [measured].
       local suspicious = false
       for name in (source() or ""):gmatch("require%s*%(?%s*[\"']([^\"']+)[\"']") do
+         local before = H.asking
+         H.asking = filename
          local found, fd = tl.search_module(name, true)
+         H.asking = before
          if fd then fd:close() end
          if found and norm_path(found) == norm_path(filename) then suspicious = true break end
       end
@@ -1338,7 +1462,7 @@ function H.check(filename, env, opts)
    end
    local requires = {}
    -- require sites feed the project-level require-cycle lint: same gate as the lints.
-   if opts.lints ~= false and result.ast then requires = require_sites(result.ast) end
+   if opts.lints ~= false and result.ast then requires = require_sites(result.ast, false, filename) end
    prof("lint+req", filename, t0)
    -- Errors in what this file required. `ok` stays the file's own answer: `H.gen` still
    -- generates it, and the searcher refuses the dependency itself on its first `require`.
@@ -1468,16 +1592,49 @@ end
 function H.lua_requires(src, filename)
    local ast, errs = tl.parse(src, filename, "lua")
    if not ast or (errs and #errs > 0) then return {} end
-   return require_sites(ast)
+   return require_sites(ast, false, filename)
+end
+
+-- The module names a Teal source `require`s by literal, read from its syntax alone: no
+-- type check and no resolution, so it is cheap enough to ask of every file in a tree.
+-- nil when the source does not parse, which is not the same answer as "requires
+-- nothing".
+function H.tl_require_names(src, filename)
+   local ast, errs = tl.parse(src, filename)
+   if not ast or (errs and #errs > 0) then return nil end
+   local names = {}
+   for _, site in ipairs(require_sites(ast, true)) do
+      names[#names + 1] = site.name
+   end
+   return names
 end
 
 -- Where `require(name)` would resolve for the checker (`.tl` / `.d.tl` / `.lua`), and
 -- where a plain `.lua` implementation sits on the path, if any. Both may be nil.
+-- A name more than one file implements resolves to neither: the model's search answers
+-- nothing for it, and `H.ambiguity` says why.
 function H.resolve_module(name)
+   local kind, _, _, lua = nil, nil, nil, nil
+   if H.resolve_name then kind, _, _, lua = H.resolve_name(nil, name) end
    local found, fd = tl.search_module(name, true)
    if fd then fd:close() end
-   local lua_path = package.searchpath(name, package.path)
+   local lua_path
+   if kind == "found" then
+      -- The model's `.lua` for the name, and no other: `package.path` would also find one
+      -- under a name the model does not give it.
+      lua_path = lua
+   elseif kind == nil or kind == "outside" then
+      lua_path = package.searchpath(name, package.path)
+   end
    return found, lua_path
+end
+
+-- The model's message when more than one file implements `name`, else nil.
+function H.ambiguity(name)
+   if not H.resolve_name then return nil end
+   local kind, msg = H.resolve_name(nil, name)
+   if kind == "ambiguous" then return msg end
+   return nil
 end
 
 -- Every file on the current `package.path` that could answer `require(name)`, in the
@@ -1522,7 +1679,7 @@ function H.template_dir(template)
 end
 
 -- The directories `package.path` searches, in order, one entry each however many
--- templates a directory contributes (`add_path` adds three).
+-- templates a directory contributes (`add_path` adds two or three).
 function H.search_dirs()
    local out, seen = {}, {}
    for template in package.path:gmatch("[^;]+") do
@@ -1535,10 +1692,18 @@ function H.search_dirs()
    return out
 end
 
--- Every `<name>.d.tl` reachable on the current `package.path`, in the order the path is
--- consulted: the declarations of `module_candidates`, which is the same walk.
+-- Every `<name>.d.tl` there is: with the project model (`H.claims_name`), every
+-- declaration a module of the model has under the name, the project's first; without
+-- one, every one reachable on the current `package.path`, in the order the path is
+-- consulted — the declarations of `module_candidates`, which is the same walk.
 function H.declaration_sites(name)
    local out = {}
+   if H.claims_name then
+      for _, p in ipairs(H.claims_name(name)) do
+         if p:sub(-5) == ".d.tl" then out[#out + 1] = p end
+      end
+      return out
+   end
    for _, c in ipairs(H.module_candidates(name)) do
       if c.kind == "declaration" then
          out[#out + 1] = c.path
@@ -1752,6 +1917,25 @@ end
 --   "missing", msg        nothing on package.path
 -- Type errors raise: unlike tl.loader(), they are fatal at require time.
 local function resolve_for_require(module_name)
+   -- A module the project model has as `.lua` alone (a dependency's plain Lua, typed or
+   -- not) is served from here, at the file the model says: Lua's own searcher reads
+   -- `package.path`, which has never heard of `@<dependency>/…` and would read a template's
+   -- alias as readily as the file.
+   if H.resolve_name then
+      local kind, impl, _, lua = H.resolve_name(nil, module_name)
+      -- Two implementations: the check reports it at the `require`, but a `require` the
+      -- check never saw (in a plain `.lua`) reaches here, and `tl.search_module` would
+      -- answer it with one of the two. No order picks one at run time either.
+      if kind == "ambiguous" then error(impl, 0) end
+      if kind == "found" and not impl and lua then
+         local lfd = io.open(lua, "rb")
+         if lfd then
+            local src = lfd:read("a")
+            lfd:close()
+            return "code", src, lua
+         end
+      end
+   end
    local found, fd = tl.search_module(module_name, false)
    if not found then
       local dfound, dfd = tl.search_module(module_name, true)
@@ -1818,8 +2002,18 @@ end
 
 -- tl.search_module rewrites the ".lua" suffix of each package.path template to
 -- ".tl" / ".d.tl" / ".lua" in turn, so templates must end in ".lua".
--- `?/?.lua` lets a flat package expose its top-level module as `<name>/<name>.tl`
--- (mlua-pkg's entry is a directory; without init.tl this is how a flat layout resolves).
+--
+-- The templates of a directory are the naming rule's spellings (`htl_core::naming`):
+-- `?.lua` and `?/init.lua` everywhere, and `?/?.lua` only where the directory holds
+-- packages by name (`packages` true: the dependency links, the parent of a vendored copy
+-- or a patch), because `<name>/<name>.tl` is a flat package's entry and nothing else. On
+-- any other directory the template made `util/util.tl` answer to `util` as well as to
+-- `util.util`.
+function H.templates(dir, packages)
+   local t = dir .. "/?.lua;" .. dir .. "/?/init.lua"
+   if packages then t = t .. ";" .. dir .. "/?/?.lua" end
+   return t
+end
 --
 -- A directory already on the path keeps the place it has. Whoever put it there said
 -- where it goes -- a host stating its order once with add_search_paths, or an earlier
@@ -1827,14 +2021,14 @@ end
 -- called last: a resolver that puts its own root in front on its first resolve would
 -- override the host for every module checked after it. Absent from the path, the
 -- directory is still prepended, so the only source of a root is still consulted first.
-function H.add_path(dir)
-   local templates = dir .. "/?.lua;" .. dir .. "/?/init.lua;" .. dir .. "/?/?.lua"
+function H.add_path(dir, packages)
+   local templates = H.templates(dir, packages)
    if package.path == nil or package.path == "" then
       package.path = templates
       return
    end
    -- Whole entries, not a substring: "/a/?.lua" must not match "/other/a/?.lua". The
-   -- first template stands for the three, which are only ever written together here.
+   -- first template stands for the rest, which are only ever written together here.
    local first = dir .. "/?.lua"
    for entry in package.path:gmatch("[^;]+") do
       if entry == first then
@@ -1852,9 +2046,9 @@ end
 -- a module the next check is about. `TealResolver`'s expect_type stub is the caller --
 -- it resolves the served module by name, and a second contract directory holding a module
 -- of the same name would otherwise decide which file the contract is checked against.
-function H.push_path_front(dir)
+function H.push_path_front(dir, packages)
    local saved = package.path
-   local templates = dir .. "/?.lua;" .. dir .. "/?/init.lua;" .. dir .. "/?/?.lua"
+   local templates = H.templates(dir, packages)
    if saved == nil or saved == "" then
       package.path = templates
    else
@@ -1866,6 +2060,18 @@ end
 -- Drop Lua's default search path (`./?.lua` etc., i.e. cwd-relative resolution) so only
 -- directories given to add_path are consulted. Used by the proc macros, where the cwd
 -- is cargo's and has nothing to do with the script being embedded.
+-- Drop the entries of package.path that are relative to the working directory (Lua's own
+-- `./?.lua;./?/init.lua`), keeping the rest in order.
+function H.drop_cwd_path()
+   local kept = {}
+   for entry in (package.path or ""):gmatch("[^;]+") do
+      if entry:sub(1, 2) ~= "./" and entry:sub(1, 1) ~= "?" then
+         kept[#kept + 1] = entry
+      end
+   end
+   package.path = table.concat(kept, ";")
+end
+
 function H.reset_path()
    package.path = ""
 end

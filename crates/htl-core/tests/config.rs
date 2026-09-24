@@ -326,7 +326,7 @@ fn a_patch_directory_is_not_a_project_of_its_own() {
 
     // The same rule for the manifest, which is what decides where `.htl/modules` goes.
     assert_eq!(
-        htl_core::pkg::Project::find(&file).unwrap().root,
+        htl_core::pkg::MluaProject::find(&file).unwrap().root,
         std::fs::canonicalize(&root).unwrap()
     );
 

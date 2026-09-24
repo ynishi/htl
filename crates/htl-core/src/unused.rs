@@ -18,7 +18,7 @@
 //! it, in the files `htl test`, `htl build` and `[[contract]]` are pointed at:
 //!
 //! - `src/main.tl` (or `main.tl` at the root), the entry script,
-//! - every test file, as `htl test` discovers them (`*_test.tl`, `tests/**/*.tl`),
+//! - every test file, as `htl test` discovers them (every `.tl` that loads `htl.test`),
 //! - every module directly under a `[[contract]]` directory: those are loaded by name at
 //!   run time, from a mods directory the project does not own,
 //! - anything named in `[build] extra` / `[build] host`, which is where a dynamic
@@ -63,6 +63,9 @@ pub struct Options<'a> {
     pub paths: &'a [PathBuf],
     /// `htl.toml`, already loaded ([`crate::project::config_of`]).
     pub config: &'a Config,
+    /// The project's [model](crate::model) ([`crate::project::model_of`]): what name each
+    /// walked file answers to. `None` names every file from the search path alone.
+    pub model: Option<&'a crate::model::Project>,
     /// The run cache's switches ([`crate::project::cache_options`]): the graph comes from
     /// a check, and a check replays.
     pub cache: cache::Options,
@@ -192,7 +195,7 @@ pub fn unused(opts: &Options<'_>) -> Result<Report> {
     };
     // A patched dependency is the project's code to check but not the project's to judge
     // unused: what reaches it lives upstream.
-    let skip = project::patched(&walk);
+    let skip = project::not_walked(opts.model, &walk, crate::model::Purpose::Own);
     let files = crate::collect_tl_skipping(&walk, &skip)?;
 
     // The graph, from the check that already resolves every `require` — replayed from the
@@ -232,6 +235,15 @@ pub fn unused(opts: &Options<'_>) -> Result<Report> {
         let c = canon(f);
         shown.insert(c.clone(), display(f));
         if crate::is_declaration(f) {
+            continue;
+        }
+        // The model's name when a module holds the file: one name, from the module that
+        // owns it. Below is for a file no module's root holds — a `main.tl` at the root of
+        // a project whose sources are under `src/` — which the search path still reaches
+        // through the root it puts on it.
+        if let Some(n) = opts.model.and_then(|m| m.locate(&c)).map(|p| p.name) {
+            name_of.insert(c.clone(), n.clone());
+            by_name.entry(n).or_insert_with(|| c.clone());
             continue;
         }
         for d in &dirs {
@@ -457,13 +469,10 @@ fn unused_deps(
     edges: &HashMap<PathBuf, Vec<cache::RequireJson>>,
     reached: &HashSet<PathBuf>,
 ) -> Vec<Dependency> {
-    let Some(project) = crate::pkg::Project::find(root) else {
+    let Some(project) = crate::pkg::MluaProject::find(root) else {
         return Vec::new();
     };
-    let Ok(manifest) = crate::pkg::mlua_pkg::manifest::Manifest::from_path(&project.manifest)
-    else {
-        return Vec::new();
-    };
+    let declared = project.declared_deps();
     let mut names: HashSet<String> = HashSet::new();
     let mut paths: Vec<PathBuf> = Vec::new();
     for f in reached {
@@ -476,7 +485,7 @@ fn unused_deps(
         }
     }
     let mut out: Vec<Dependency> = Vec::new();
-    for name in manifest.deps.keys() {
+    for name in &declared {
         let prefix = format!("{name}.");
         if names
             .iter()
@@ -484,20 +493,15 @@ fn unused_deps(
         {
             continue;
         }
-        let mut dirs = vec![canon(&project.vendored.join(name))];
+        // Where install put it — `vendored/<name>`, or its `target_dir` copy — and its
+        // patch when it has one.
+        let mut dirs = vec![canon(&project.placed_at(name))];
         dirs.extend(
             project
                 .patches
                 .iter()
                 .filter(|p| &p.name == name)
                 .map(|p| canon(&p.dir)),
-        );
-        dirs.extend(
-            project
-                .vendored_copies
-                .iter()
-                .filter(|d| d.file_name().and_then(|s| s.to_str()) == Some(name.as_str()))
-                .map(|d| canon(d)),
         );
         if paths.iter().any(|p| dirs.iter().any(|d| p.starts_with(d))) {
             continue;

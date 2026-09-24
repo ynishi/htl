@@ -29,6 +29,8 @@ fn htl(args: &[&str], cwd: &Path) -> (bool, String, String) {
 
 fn project() -> PathBuf {
     let root = scratch("proj");
+    // What makes the directory a project whose `src/` its tests read.
+    write(&root.join("htl.toml"), "");
     write(
         &root.join("src/util.tl"),
         "local record util\nend\nfunction util.twice(n: integer): integer\n   return n * 2\nend\n\

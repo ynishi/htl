@@ -129,9 +129,10 @@ impl DepDecl {
             })
     }
 
-    /// Where it is materialised, given the directory `types/` sits in.
-    pub fn target(&self, root: &Path) -> Result<PathBuf, String> {
-        Ok(root.join("types").join(&self.package).join(self.under()?))
+    /// Where it is materialised, given the project's declaration root (`[layout] types`,
+    /// `types/` unless the project says otherwise).
+    pub fn target(&self, types: &Path) -> Result<PathBuf, String> {
+        Ok(types.join(&self.package).join(self.under()?))
     }
 
     /// `<crate> <version> names <entry> in [package.metadata.htl] dts, which …` — the one
@@ -448,8 +449,9 @@ fn wildcard(pattern: &str, name: &str) -> bool {
     rest.ends_with(last)
 }
 
-/// Write every shipped declaration under `root/types/<crate>/`, and a note beside each
-/// crate's own directory saying where the files came from.
+/// Write every shipped declaration under `types/<crate>/` — `types` being the project's
+/// declaration root, `[layout] types` — and a note beside each crate's own directory
+/// saying where the files came from.
 ///
 /// Returns `(target, written)` pairs in the shape `htl dts` reports, and what could not be
 /// materialised. A crate naming a file it does not ship is a problem rather than a
@@ -461,7 +463,7 @@ fn wildcard(pattern: &str, name: &str) -> bool {
 /// name: there is nothing to configure or silence, and none of it reaches the `Sink`, so
 /// `htl check` neither counts one nor reports one in `--format json`. `htl dts` prints
 /// them under `not written` and exits non-zero on them.
-pub fn materialise(root: &Path, decls: &[DepDecl]) -> (Vec<(PathBuf, bool)>, Vec<String>) {
+pub fn materialise(types: &Path, decls: &[DepDecl]) -> (Vec<(PathBuf, bool)>, Vec<String>) {
     let mut written = Vec::new();
     let mut problems = Vec::new();
     let mut notes: BTreeMap<&str, Note> = BTreeMap::new();
@@ -478,7 +480,7 @@ pub fn materialise(root: &Path, decls: &[DepDecl]) -> (Vec<(PathBuf, bool)>, Vec
             problems.push(d.says("is not a `.d.tl` file"));
             continue;
         }
-        let target = root.join("types").join(&d.package).join(&under);
+        let target = types.join(&d.package).join(&under);
         if let Some(first) = taken.get(&target) {
             problems.push(format!(
                 "{} {} names both {} and {} in [package.metadata.htl] dts, which would be one \
@@ -526,7 +528,7 @@ pub fn materialise(root: &Path, decls: &[DepDecl]) -> (Vec<(PathBuf, bool)>, Vec
     // The note is a record beside the files, not one of them: `.src` notes are written
     // the same way, and reporting it as a declaration would report one file too many.
     for (pkg, note) in &notes {
-        let dir = root.join("types").join(pkg);
+        let dir = types.join(pkg);
         if let Err(e) = crate::write_if_changed(&dir.join(crate::DEP_TYPES_NOTE), &note.text()) {
             problems.push(format!(
                 "writing {}: {e}",
@@ -550,8 +552,7 @@ pub fn materialise(root: &Path, decls: &[DepDecl]) -> (Vec<(PathBuf, bool)>, Vec
 /// that reaches the `Sink` to be counted or reported in `--format json`. `htl dts` prints
 /// them under `left in place` and fails nothing — the file it names is still there and
 /// still checked, exactly as before.
-pub fn orphans(root: &Path, decls: &[DepDecl]) -> Vec<String> {
-    let types = root.join("types");
+pub fn orphans(types: &Path, decls: &[DepDecl]) -> Vec<String> {
     let mut current: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
     for d in decls {
         if let Ok(under) = d.under() {
@@ -562,7 +563,7 @@ pub fn orphans(root: &Path, decls: &[DepDecl]) -> Vec<String> {
         }
     }
     let mut out = Vec::new();
-    for dir in materialised_dirs(&types) {
+    for dir in materialised_dirs(types) {
         let Some(note) = Note::read(&dir) else {
             continue;
         };
@@ -612,7 +613,11 @@ pub fn orphans(root: &Path, decls: &[DepDecl]) -> Vec<String> {
             };
             out.push(format!(
                 "{}: {why}; {advice}",
-                path.strip_prefix(root).unwrap_or(&path).display()
+                // Named from the directory holding the declaration root, so the line reads
+                // `types/<crate>/<file>` the way the project spells it.
+                path.strip_prefix(types.parent().unwrap_or(types))
+                    .unwrap_or(&path)
+                    .display()
             ));
         }
     }
@@ -685,7 +690,7 @@ mod tests {
         assert_eq!(d[0].under(), Ok(PathBuf::from("mq.d.tl")));
         assert_eq!(d[0].source, PathBuf::from("/w/mq/dts/mq.d.tl"));
         assert_eq!(
-            d[0].target(Path::new("/p")),
+            d[0].target(Path::new("/p/types")),
             Ok(PathBuf::from("/p/types/htl-mq/mq.d.tl"))
         );
     }
@@ -837,7 +842,7 @@ mod tests {
             "{d:?}"
         );
         assert_eq!(
-            d[2].target(Path::new("/p")),
+            d[2].target(Path::new("/p/types")),
             Ok(PathBuf::from("/p/types/my-mod/mine/thing.d.tl"))
         );
         assert_eq!(d[2].source, PathBuf::from("/w/d/types/mine/thing.d.tl"));
@@ -920,7 +925,7 @@ mod tests {
         materialised(&dir, crate::batteries::CRATE, &["json.d.tl"]);
         materialised(&dir, "gone", &["gone.d.tl"]);
 
-        let out = orphans(&dir, &[]);
+        let out = orphans(&dir.join("types"), &[]);
         assert_eq!(out.len(), 2, "{out:?}");
         let carried = out
             .iter()
@@ -959,7 +964,7 @@ mod tests {
             dts_root: None,
             source: PathBuf::from("/w/d/dts/dep.d.tl"),
         };
-        let out = orphans(&dir, std::slice::from_ref(&live));
+        let out = orphans(&dir.join("types"), std::slice::from_ref(&live));
         assert_eq!(out.len(), 1, "{out:?}");
         assert!(out[0].contains("types/dep/old.d.tl"), "{out:?}");
         assert!(out[0].contains("dep no longer ships it"), "{out:?}");

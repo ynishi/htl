@@ -232,12 +232,12 @@ Caching: https://github.com/ynishi/htl#caching
         #[arg(long)]
         explain_cache: bool,
     },
-    /// Run tests: `*_test.tl` and `tests/**/*.tl`, one isolated state per file
+    /// Run tests: every `.tl` that requires the test library, one isolated state per file
     ///
     /// README, "Tests": https://github.com/ynishi/htl#tests
     #[command(after_long_help = "\
 Examples:
-  htl test                       every *_test.tl and tests/**/*.tl
+  htl test                       every .tl that requires htl.test
   htl test tests --filter parser only tests whose \"suite > name\" contains it
   htl test --coverage --coverage-lines
                                  which lines of each module the suite never reached
@@ -769,6 +769,7 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
                 source,
                 extra,
                 host,
+                entry_name: None,
             },
             BuildCache {
                 use_cache: !no_cache,
@@ -871,7 +872,8 @@ struct DepReport {
 }
 
 /// Materialise the declarations this project's dependencies ship, under
-/// `<types_root>/types/<crate>/`, and report on what happened to each.
+/// `<declaration root>/<crate>/` — the declaration root of the project at `types_root`,
+/// `types/` unless its `htl.toml` says otherwise — and report on what happened to each.
 ///
 /// The graph comes from `cargo metadata`, so this costs a subprocess on every command that
 /// generates. Nothing is built, and nothing is downloaded for dependencies already fetched.
@@ -887,8 +889,17 @@ fn dep_dts(cargo_root: &Path, types_root: &Path) -> DepReport {
     };
     // Orphans before materialising: the note beside a crate's declarations is what says
     // which crate they came from, and the write below rewrites it.
-    let left_in_place = htl::dep_dts::orphans(types_root, &decls);
-    let (written, not_written) = htl::dep_dts::materialise(types_root, &decls);
+    let types = match decl_root(types_root) {
+        Ok(t) => t,
+        Err(e) => {
+            return DepReport {
+                unresolved: Some(format!("{e:#}")),
+                ..DepReport::default()
+            };
+        }
+    };
+    let left_in_place = htl::dep_dts::orphans(&types, &decls);
+    let (written, not_written) = htl::dep_dts::materialise(&types, &decls);
     DepReport {
         written,
         not_written,
@@ -991,14 +1002,22 @@ fn report_dts(results: &[(PathBuf, bool)], root: &Path) {
     );
 }
 
-/// If `start` is inside an `mlua-pkg.toml` project, expose its vendored deps to the
-/// checker / strict searcher. Returns the project when found.
-fn apply_project(h: &Htl, start: &Path) -> Result<Option<htl::pkg::Project>> {
-    let Some(p) = htl::pkg::Project::find(start) else {
-        return Ok(None);
-    };
-    h.apply_project(&p)?;
-    Ok(Some(p))
+/// The project `start` belongs to, with `h` set up for its sources the way `htl check`
+/// sets up its checker: the model's directories on the search path, its installed
+/// dependencies made reachable. `None`, with nothing on the path, outside a project.
+///
+/// What one file may read beyond that — the test root, for a file under it; its own
+/// directory, for a file in no project — is [`project::file_view`], asked per file.
+fn apply_model(
+    h: &Htl,
+    cfg: &project::Config,
+    start: &Path,
+) -> Result<Option<htl::model::Project>> {
+    let model = project::model_of(cfg, start)?;
+    if let Some(m) = &model {
+        h.apply_model(m, htl::model::View::Source)?;
+    }
+    Ok(model)
 }
 
 /// What the run wrote, and — when a target was asked for by name — what it left alone. The
@@ -1118,15 +1137,25 @@ fn cmd_init(
 ///
 /// mlua-pkg reports a missing manifest as an I/O error that does not name the file, and the
 /// path htl looked for is the whole of the answer, so it is checked here.
-fn pkg_project() -> Result<htl::pkg::Project> {
+fn pkg_project() -> Result<htl::pkg::MluaProject> {
     let cwd = std::env::current_dir()?;
-    htl::pkg::Project::find(&cwd).with_context(|| {
+    htl::pkg::MluaProject::find(&cwd).with_context(|| {
         format!(
             "no {} above {}: `htl pkg` runs in a project",
             htl::pkg::MANIFEST_NAME,
             cwd.display()
         )
     })
+}
+
+/// The declaration root of the project at `root`, from its model: `[layout] types`, which
+/// is `types/` unless `htl.toml` says otherwise — where the declarations htl brings into a
+/// project are written.
+fn decl_root(root: &Path) -> Result<PathBuf> {
+    let cfg = load_config(root)?;
+    Ok(project::model_of(&cfg, root)?
+        .and_then(|m| m.own().roots.decl.clone())
+        .unwrap_or_else(|| root.join("types")))
 }
 
 /// `htl pkg install`: fetch what the manifest declares, then bring in what the deps publish.
@@ -1137,14 +1166,20 @@ fn cmd_pkg_install() -> Result<ExitCode> {
     // Re-read the project: install wrote the lockfile the two reports below are read from.
     // A dep publishes its declarations at `types/` in its package root, which is not where
     // `require` looks, so they are copied in for the checker to see.
-    let project = htl::pkg::Project::at(&project.root);
-    report_types_sync(&project.sync_types()?, &project.root);
+    let project = htl::pkg::MluaProject::at(&project.root);
+    report_types_sync(
+        &project.sync_types(&decl_root(&project.root)?)?,
+        &project.root,
+    );
     report_patch_drift(&project);
     Ok(ExitCode::SUCCESS)
 }
 
 /// What install did, in the shape the other reports use. The library prints nothing.
-fn report_install(report: &htl::pkg::mlua_pkg::ops::InstallReport, project: &htl::pkg::Project) {
+fn report_install(
+    report: &htl::pkg::mlua_pkg::ops::InstallReport,
+    project: &htl::pkg::MluaProject,
+) {
     use htl::pkg::mlua_pkg::ops::Placement;
     for w in &report.warnings {
         // A patch that was not used is reported below in htl's own verbs, where both ways
@@ -1188,7 +1223,8 @@ fn report_install(report: &htl::pkg::mlua_pkg::ops::InstallReport, project: &htl
 fn cmd_pkg_add(spec: htl::pkg::mlua_pkg::ops::AddSpec) -> Result<ExitCode> {
     use htl::pkg::mlua_pkg::ops::AddOutcome;
     let cwd = std::env::current_dir()?;
-    let project = htl::pkg::Project::find(&cwd).unwrap_or_else(|| htl::pkg::Project::at(&cwd));
+    let project =
+        htl::pkg::MluaProject::find(&cwd).unwrap_or_else(|| htl::pkg::MluaProject::at(&cwd));
     let name = spec.name.clone();
     let done = project.add(spec)?;
     let manifest = project
@@ -1245,8 +1281,11 @@ fn cmd_pkg_update(opts: htl::pkg::mlua_pkg::ops::UpdateOpts) -> Result<ExitCode>
     }
     if let Some(install) = &report.install {
         report_install(install, &project);
-        let project = htl::pkg::Project::at(&project.root);
-        report_types_sync(&project.sync_types()?, &project.root);
+        let project = htl::pkg::MluaProject::at(&project.root);
+        report_types_sync(
+            &project.sync_types(&decl_root(&project.root)?)?,
+            &project.root,
+        );
         report_patch_drift(&project);
     }
     Ok(ExitCode::SUCCESS)
@@ -1278,7 +1317,7 @@ fn cmd_pkg_clean(all: bool) -> Result<ExitCode> {
 /// only thing that keeps the copy from being forgotten in the tree is being told about it
 /// each time. Both ways out are named, in htl's verbs: mlua-pkg's own warning points at
 /// `mlua-pkg patch --force`, which skips the question htl asks git before overwriting.
-fn report_patch_drift(project: &htl::pkg::Project) {
+fn report_patch_drift(project: &htl::pkg::MluaProject) {
     let short = |s: &str| s.chars().take(7).collect::<String>();
     for s in project.patch_status() {
         if s.in_use {
@@ -1312,7 +1351,7 @@ fn report_patch_drift(project: &htl::pkg::Project) {
 /// and the `patch_base` bookkeeping are mlua-pkg's. See `Project::patch`.
 fn cmd_pkg_patch(dep: &str, force: bool) -> Result<ExitCode> {
     let cwd = std::env::current_dir()?;
-    let project = htl::pkg::Project::find(&cwd).context(
+    let project = htl::pkg::MluaProject::find(&cwd).context(
         "no mlua-pkg.toml above the current directory: a patch belongs to a project, so this runs in one",
     )?;
     let done = project.patch(dep, force)?;
@@ -1355,12 +1394,13 @@ fn report_types_sync(sync: &htl::pkg::TypesSync, root: &Path) {
 /// see `Project::add_types`.
 fn cmd_types_add(library: &str, from: Option<&Path>, force: bool) -> Result<ExitCode> {
     let cwd = std::env::current_dir()?;
-    let project = htl::pkg::Project::find(&cwd).context(
+    let project = htl::pkg::MluaProject::find(&cwd).context(
         "no mlua-pkg.toml above the current directory: `types/` is a project's, so this runs in one",
     )?;
+    let types = decl_root(&project.root)?;
     let sync = match from {
-        Some(dir) => project.add_types_from(dir, library, "local", force)?,
-        None => project.add_types(library, force)?,
+        Some(dir) => project.add_types_from(dir, library, "local", force, &types)?,
+        None => project.add_types(library, force, &types)?,
     };
     report_types_sync(&sync, &project.root);
     if sync.written.is_empty() && !sync.taken.is_empty() {
@@ -1524,15 +1564,17 @@ fn cmd_test(
     if let Some(first) = paths.first() {
         auto_dts(first)?;
     }
-    // A patched dependency's `*_test.tl` are its suite, not this project's: `htl pkg patch`
+    // A patched dependency's tests are its suite, not this project's: `htl pkg patch`
     // takes the whole package root, tests included, and running them here would report a
     // library's own failures as the project's.
-    let files = htl::testing::discover_tests_skipping(&paths, &project::patched(&paths))?;
+    let cfg = load_config(&paths[0])?;
+    let model = project::model_of(&cfg, &paths[0])?;
+    let skip = project::not_walked(model.as_ref(), &paths, htl::model::Purpose::Test);
+    let files = htl::testing::discover_tests_for(&paths, &skip, lib)?;
     if files.is_empty() {
-        eprintln!("htl test: no test files found (looked for *_test.tl and tests/**/*.tl)");
+        eprintln!("htl test: no test files found (looked for .tl files that require(\"{lib}\"))");
         return Ok(ExitCode::FAILURE);
     }
-    let cfg = load_config(&paths[0])?;
     let opts = project::TestOptions {
         config: &cfg,
         lint,
@@ -1711,7 +1753,7 @@ fn report_patched(paths: &[PathBuf]) {
         .filter_map(|p| std::fs::canonicalize(p).ok())
         .collect();
     let cwd = std::env::current_dir().unwrap_or_default();
-    let Some(project) = paths.first().and_then(|p| htl::pkg::Project::find(p)) else {
+    let Some(project) = paths.first().and_then(|p| htl::pkg::MluaProject::find(p)) else {
         return;
     };
     for p in &project.patches {
@@ -1820,10 +1862,12 @@ fn cmd_fmt(paths: &[PathBuf], check: bool, indent: Option<usize>) -> Result<Exit
         .or_else(|| cfg.as_ref().and_then(|(_, _, c)| c.fmt.indent))
         .unwrap_or(3);
     let h = Htl::new()?;
-    // Not a patched dependency: formatting the copy would turn every one of its files into
-    // a diff against the revision it was taken from, and bury the project's own change
-    // somewhere inside that.
-    let files = htl::collect_tl_skipping(&paths, &project::patched(&paths))?;
+    // Not a dependency's files, a patched one included: formatting the copy would turn
+    // every one of its files into a diff against the revision it was taken from, and bury
+    // the project's own change somewhere inside that.
+    let model = project::model_of(&cfg, &paths[0])?;
+    let skip = project::not_walked(model.as_ref(), &paths, htl::model::Purpose::Own);
+    let files = htl::collect_tl_skipping(&paths, &skip)?;
     let (mut changed, mut failed) = (0usize, 0usize);
     for f in &files {
         let before = fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?;
@@ -1887,13 +1931,8 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
     if !file_spec.is_empty() {
         h.configure_lints(&file_spec)?;
     }
-    if let Some(first) = paths.first() {
-        auto_dts(first)?;
-        apply_project(&h, first)?;
-    }
-    if let Some((root, _, c)) = &cfg {
-        h.apply_config(root, c)?;
-    }
+    auto_dts(&paths[0])?;
+    let model = apply_model(&h, &cfg, &paths[0])?;
     h.install_test_lib()?;
     h.install_std()?;
     let opts = FixOptions {
@@ -1912,7 +1951,9 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
     // Here as well as inside `fix_file`, so a misspelt rule is answered even when the
     // paths hold no `.tl` at all — the request is wrong either way.
     opts.validate()?;
-    let files = htl::collect_tl(&paths)?;
+    let walk_model = project::model_of(&cfg, &paths[0])?;
+    let skip = project::not_walked(walk_model.as_ref(), &paths, htl::model::Purpose::Check);
+    let files = htl::collect_tl_skipping(&paths, &skip)?;
 
     // The working tree is the undo: refuse to rewrite what git could not give back.
     if !flags.dry_run {
@@ -1965,13 +2006,17 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
     let (mut changed, mut deferred, mut reverted, mut errors_remaining) =
         (0usize, 0usize, 0usize, 0usize);
     for f in &files {
-        h.add_layout_paths(f)?;
+        // Put back after each file, as `htl check` does, so a file is fixed against what
+        // it may read and not also against the directories of the files before it.
+        let saved = h.search_path()?;
+        project::file_view(&h, model.as_ref(), f)?;
         let before = if flags.diff {
             std::fs::read_to_string(f).ok()
         } else {
             None
         };
         let out = fix_file(&h, f, &opts)?;
+        h.set_search_path(&saved)?;
         if out.contents.is_some() {
             changed += 1;
         }
@@ -2169,7 +2214,9 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
     // code, and its errors are the project's to fix. Which dependency each directory
     // stands in for is said here, so that an error under it is read as that dependency's
     // without the reader having to know the manifest.
-    let files = htl::collect_tl(&paths)?;
+    let walk_model = project::model_of(&cfg, &paths[0])?;
+    let skip = project::not_walked(walk_model.as_ref(), &paths, htl::model::Purpose::Check);
+    let files = htl::collect_tl_skipping(&paths, &skip)?;
     if !json {
         report_patched(&paths);
     }
@@ -2223,9 +2270,11 @@ fn cmd_unused(paths: &[PathBuf], flags: UnusedFlags) -> Result<ExitCode> {
     // A `.d.tl` written from Rust source is an input to the check the graph comes from,
     // exactly as it is for `htl check`.
     auto_dts(&paths[0])?;
+    let model = project::model_of(&cfg, &paths[0])?;
     let rep = htl::unused::unused(&htl::unused::Options {
         paths: &paths,
         config: &cfg,
+        model: model.as_ref(),
         cache: project::cache_options(use_cache, None, &cfg, explain),
     })?;
     let s = &rep.summary;
@@ -2289,15 +2338,12 @@ fn cmd_resolve(module: &str, path: Option<&Path>, json: bool) -> Result<ExitCode
     // First, so that the project's own directories go in front of it as they do under
     // `htl run`: `add_path` prepends, and the report prints the order it searched.
     h.install_std()?;
-    let project = apply_project(&h, start)?;
-    if let Some((root, _, c)) = &cfg {
-        h.apply_config(root, c)?;
-    }
+    let model = apply_model(&h, &cfg, start)?;
     let rep = htl::resolve::resolve(
         &h,
         module,
         cfg.as_ref().map(|(r, _, _)| r.as_path()),
-        project.as_ref(),
+        model.as_ref(),
     )?;
     if json {
         report::emit(&rep)?;
@@ -2311,14 +2357,22 @@ fn cmd_resolve(module: &str, path: Option<&Path>, json: bool) -> Result<ExitCode
     })
 }
 
-/// The text form of a resolution: a table in search order, then the directories that were
-/// consulted. The order column is the reason one row is read and the others are not, which
+/// The text form of a resolution: a table in search order, then who answered — the project
+/// model, or the search path and the directories it consulted. The order column is the reason one row is read and the others are not, which
 /// is why it is printed rather than left to be looked up.
 fn print_resolution(r: &htl::resolve::Resolution) {
+    let ambiguous = r
+        .candidates
+        .iter()
+        .any(|c| c.status == htl::resolve::Status::Ambiguous);
     match &r.read {
         Some(read) => println!("htl resolve {}: {read}", r.module),
+        None if ambiguous => println!(
+            "htl resolve {}: more than one module implements it, and no order picks one",
+            r.module
+        ),
         None => println!(
-            "htl resolve {}: nothing on the search path answers require(\"{}\")",
+            "htl resolve {}: nothing in the project or on the search path answers require(\"{}\")",
             r.module, r.module
         ),
     }
@@ -2355,7 +2409,14 @@ fn print_resolution(r: &htl::resolve::Resolution) {
         }
     }
     println!();
-    println!("  searched, in order: {}", r.searched.join(", "));
+    match r.answered_by {
+        htl::resolve::AnsweredBy::Model => println!("  answered by the project model"),
+        // The name is not the project's: where the search looked is half the answer, and
+        // all of it when nothing was found.
+        htl::resolve::AnsweredBy::Path => {
+            println!("  searched, in order: {}", r.searched.join(", "))
+        }
+    }
 }
 
 /// `1 module` / `2 modules`: a count whose noun agrees with it, for a line short enough
@@ -2582,19 +2643,12 @@ fn report_check(
 fn cmd_gen(file: &Path, out: Option<&Path>) -> Result<ExitCode> {
     let h = Htl::new()?;
     auto_dts(file)?;
-    apply_project(&h, file)?;
     // The search path `htl check` gives this file, so `htl gen` resolves what `htl check`
-    // resolved: a module under a `[check] paths` directory or under `types/` is on the
-    // path here too, and a file the checker accepts is one this command can emit. Same
-    // call, same position, as `cmd_build`. Only the path gains entries — a `.tl` source
-    // anywhere on it still beats a `.d.tl`.
+    // resolved and a file the checker accepts is one this command can emit. Same calls, in
+    // the same order, as `cmd_run` and `cmd_build`.
     let cfg = load_config(file)?;
-    if let Some((root, _, c)) = &cfg {
-        h.apply_config(root, c)?;
-    }
-    // After the config, as `htl check` does per file: `add_path` prepends, so this leaves
-    // the file's own directory consulted first and the project's directories behind it.
-    h.add_layout_paths(file)?;
+    let model = apply_model(&h, &cfg, file)?;
+    project::file_view(&h, model.as_ref(), file)?;
     h.install_std()?;
     let (code, c) = h.gen_lua(file)?;
     text_sink().checkinfo(&c);
@@ -2615,15 +2669,12 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
     let bytes = fs::read(file).with_context(|| format!("reading {}", file.display()))?;
     let h = Htl::new()?;
     auto_dts(file)?;
-    apply_project(&h, file)?;
     // The search path `htl check` gives this file, so `htl run` resolves what `htl check`
-    // resolved rather than failing on a `require` the checker was happy with. Same call,
-    // same position, as `cmd_build`; it runs before the bundle branch because a bundle
-    // carries its own modules and gains nothing from it either way.
+    // resolved rather than failing on a `require` the checker was happy with. Same calls
+    // as `cmd_gen` and `cmd_build`; before the bundle branch because a bundle carries its
+    // own modules and gains nothing from it either way.
     let cfg = load_config(file)?;
-    if let Some((root, _, c)) = &cfg {
-        h.apply_config(root, c)?;
-    }
+    let model = apply_model(&h, &cfg, file)?;
     h.install_test_lib()?;
     h.install_std()?;
     if Bundle::is_bundle(&bytes) {
@@ -2639,7 +2690,7 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
         });
     }
     // Check first so lints/warnings are visible before the script runs.
-    h.add_layout_paths(file)?;
+    project::file_view(&h, model.as_ref(), file)?;
     h.install_searcher()?;
     h.set_arg(&file.to_string_lossy(), args)?;
     let (code, c) = h.gen_lua(file)?;
@@ -2677,14 +2728,13 @@ fn cmd_build(
 ) -> Result<ExitCode> {
     let h = Htl::new()?;
     auto_dts(entry)?;
-    apply_project(&h, entry)?;
     // `std.*` resolves to its declaration and nothing else, so the linker files it under
     // the host's modules — which is what it is: the binary that runs the bundle preloads
     // it, as `htl run` does before `run_bundle`.
     h.install_std()?;
     let cfg = load_config(entry)?;
-    if let Some((root, _, cfg)) = &cfg {
-        h.apply_config(root, cfg)?;
+    let model = apply_model(&h, &cfg, entry)?;
+    if let Some((_, _, cfg)) = &cfg {
         opts.extra.extend(cfg.build.extra.iter().cloned());
         opts.host.extend(cfg.build.host.iter().cloned());
         // The one thing `[build] target` changes: this command produces the `hb` target and
@@ -2707,7 +2757,10 @@ fn cmd_build(
         }
         return cmd_build_dir(&h, entry, out, main, &opts);
     }
-    h.add_layout_paths(entry)?;
+    project::file_view(&h, model.as_ref(), entry)?;
+    // The name the entry is served under: the one the project's model gives the file,
+    // which is what a `require` of it elsewhere in the project writes.
+    opts.entry_name = model.as_ref().and_then(|m| m.locate(entry).map(|p| p.name));
     // The store: `module` entries keyed the way `htl test` and the macros key them — the
     // file the module is and the lint selection `htl.toml` puts in force — so a module any
     // of them generated is one the build replays, and the reverse. Nothing is swept here:
@@ -2726,7 +2779,10 @@ fn cmd_build(
         &cfg,
         cache_flags.explain,
     );
-    let store = project::store(&root, cache_opts, None, "htl build");
+    let store = project::with_model(
+        project::store(&root, cache_opts, None, "htl build"),
+        model.as_ref(),
+    );
     let link_store = store.as_ref().map(|c| htl::link::LinkStore {
         cache: c,
         lint,
@@ -2742,11 +2798,13 @@ fn cmd_build(
         sink.checkinfo(c);
     }
     let n_err = linked.errors.len();
-    for e in linked
-        .errors
+    // The checks' own errors went through the sink above; what is left is the linker's.
+    let checked: std::collections::HashSet<&String> = linked
+        .checks
         .iter()
-        .filter(|e| e.contains("is not on the search path"))
-    {
+        .flat_map(|(_, c)| c.errors.iter())
+        .collect();
+    for e in linked.errors.iter().filter(|e| !checked.contains(e)) {
         eprintln!("error: {e}");
     }
     if n_err > 0 {

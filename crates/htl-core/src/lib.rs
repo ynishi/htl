@@ -8,6 +8,12 @@
 //! - [`Htl::preload`]: register generated Lua (e.g. from `include_tl!`) under a module name
 //! - [`bundle`]: stripped-bytecode bundles produced by `htl build`
 //!
+//! A project — its own code, its dependencies, the declarations crates ship to it and the
+//! directories it accepts modules from — is described by the `model` module (compiled
+//! with the `pkg` and `dts` features): one `Module` per unit that owns a namespace, each
+//! with its source, test and declaration roots, and one rule for the name a file answers
+//! to.
+//!
 //! Two libraries ship inside the binary rather than on a project's search path, and both
 //! are installed the same way — a `package.preload` entry for the run, a `.d.tl` under
 //! [`lib_dir`] for the checker: `htl.test` ([`Htl::install_test_lib`], `describe` / `it` /
@@ -54,6 +60,14 @@ pub mod fix;
 // these names, so the list is here rather than in `lint.lua`, which is one of the halves.
 pub mod link;
 pub mod lint;
+// The naming rule (a file's module name, and the files a name may be), shared by the
+// project model and a host's `TealResolver`, which is compiled without the model.
+pub mod naming;
+// Which modules a project is made of and what name each file answers to. Reads the
+// mlua-pkg manifest and the notes `htl dts` writes, so it carries the project layer's
+// features.
+#[cfg(all(feature = "pkg", feature = "dts"))]
+pub mod model;
 #[cfg(feature = "pkg")]
 pub mod pkg;
 // The project layer: a walk over many files, the run cache under it, and the decisions
@@ -556,7 +570,7 @@ pub fn declaration_conflict_lints(
         }
         seen.push(&site.module);
         out.push(format!(
-            "{}:{}:{}: {} is declared more than once on the search path: {} is read, {} {} not [htl duplicate-declaration]",
+            "{}:{}:{}: {} is declared more than once: {} is read, {} {} not [htl duplicate-declaration]",
             file.display(),
             site.line,
             site.col,
@@ -836,6 +850,10 @@ pub struct Htl {
     h: Table,
     /// `true` when the checker is another Lua state (`with_checker`).
     split: bool,
+    /// The state the prelude — and so the checker — lives in: `lua` itself, or the
+    /// checker's for a split state. Weak, because the checker is kept alive by whoever
+    /// made it, not by the program states that borrow it.
+    checker: mlua::WeakLua,
 }
 
 /// Checker prelude of another state, kept in a runtime state's app data so the
@@ -932,8 +950,10 @@ end
 -- Idempotent, as the checker prelude's H.add_path is and for the same reason: a
 -- directory already on the path keeps the place whoever put it there gave it, and
 -- `Htl::add_path` calls both states, so the two must agree on the order they produce.
-function R.add_path(dir)
-   local templates = dir .. "/?.lua;" .. dir .. "/?/init.lua;" .. dir .. "/?/?.lua"
+-- The templates are the prelude's `H.templates`: `?/?` only for a directory of packages.
+function R.add_path(dir, packages)
+   local templates = dir .. "/?.lua;" .. dir .. "/?/init.lua"
+   if packages then templates = templates .. ";" .. dir .. "/?/?.lua" end
    if package.path == nil or package.path == "" then
       package.path = templates
       return
@@ -945,6 +965,18 @@ function R.add_path(dir)
       end
    end
    package.path = templates .. ";" .. package.path
+end
+
+-- Drop the entries of package.path that are relative to the working directory (Lua's own
+-- `./?.lua;./?/init.lua`), keeping the rest in order.
+function R.drop_cwd_path()
+   local kept = {}
+   for entry in (package.path or ""):gmatch("[^;]+") do
+      if entry:sub(1, 2) ~= "./" and entry:sub(1, 1) ~= "?" then
+         kept[#kept + 1] = entry
+      end
+   end
+   package.path = table.concat(kept, ";")
 end
 
 function R.reset_path()
@@ -1046,7 +1078,16 @@ impl Htl {
             lua,
             h: checker.h.clone(),
             split: true,
+            checker: checker.checker.clone(),
         })
+    }
+
+    /// The checker's Lua state: where a function the prelude calls has to be made.
+    #[cfg_attr(not(all(feature = "pkg", feature = "dts")), allow(dead_code))]
+    pub(crate) fn checker_lua(&self) -> Result<Lua> {
+        self.checker
+            .try_upgrade()
+            .ok_or_else(|| anyhow!("the checker this state was made from has been dropped"))
     }
 
     fn runtime(&self) -> Result<Table> {
@@ -1178,10 +1219,12 @@ impl Htl {
             .eval()
             .context("loading htl prelude")?;
         lua.set_named_registry_value(PRELUDE_REGISTRY_KEY, h.clone())?;
+        let checker = lua.weak();
         let this = Self {
             lua,
             h,
             split: false,
+            checker,
         };
         // The defaults come from the registry, and this is where a state gets them: the
         // Lua side holds no rule list of its own, so a state nobody configures would
@@ -1286,7 +1329,7 @@ impl Htl {
     ///
     /// Read by the rules that are about a library the project has rather than about its own
     /// code — `htlx-available`, which is silent in a project without htl-x — and by nothing
-    /// else. Called by [`Htl::apply_project`](crate::pkg::Project) with what the lockfile
+    /// else. Called by [`Htl::apply_project`](crate::pkg::MluaProject) with what the lockfile
     /// linked; a state nobody calls it on has none, which is the answer a run outside a
     /// project should get.
     /// The names cross as a sequence and the set is built on the other side, rather than
@@ -1333,33 +1376,51 @@ impl Htl {
         Ok(())
     }
 
-    /// Search paths implied by where `file` sits in the scaffold layout, in the order
-    /// they are consulted: its own directory first, and for a file under `tests/` then
-    /// the project root and `<root>/src` (the test runner's rule, so `htl check tests`
-    /// sees what `htl test` sees).
-    pub fn add_layout_paths(&self, file: &Path) -> Result<()> {
-        let dir = parent_dir(file);
-        let mut dirs = vec![dir.clone()];
-        if dir.file_name().is_some_and(|n| n == "tests")
-            && let Some(root) = dir.parent()
-        {
-            dirs.push(root.to_path_buf());
-            let src = root.join("src");
-            if src.is_dir() {
-                dirs.push(src);
-            }
+    /// Drop the entries of Lua's default search path that are relative to the working
+    /// directory (`./?.lua`, `./?/init.lua`), keeping the rest.
+    ///
+    /// What a name means must not depend on where the command was run. A checker set up
+    /// from a project's model (`model::Project`, with the `pkg` and `dts` features) calls this: the names come from the
+    /// project's roots, and the working directory is none of them. What stays are the
+    /// directories Lua itself was built to search (`/usr/local/share/lua/5.4/…`), where a
+    /// library installed for the machine is found at run time. A host that builds its own
+    /// path from nothing calls [`reset_search_path`](Self::reset_search_path) instead.
+    pub fn drop_cwd_search_path(&self) -> Result<()> {
+        let f: Function = self.h.get("drop_cwd_path")?;
+        f.call::<()>(())?;
+        if self.split {
+            let f: Function = self.runtime()?.get("drop_cwd_path")?;
+            f.call::<()>(())?;
         }
-        self.add_search_paths(&dirs)
+        Ok(())
     }
 
-    /// Prepend `dir/?.tl;dir/?/init.tl` to `package.path` (Teal resolves requires through it).
+    /// Prepend `dir` to `package.path` (Teal resolves requires through it) as a directory
+    /// of modules mounted at the top: `dir/<a>/<b>.tl` is `a.b`, and `dir/<a>/init.tl` is
+    /// `a`. A directory already on the path keeps its place.
+    ///
+    /// A file named after its directory is an ordinary submodule here — `dir/util/util.tl`
+    /// is `util.util`, not `util` ([`naming`]). That spelling belongs to a directory of
+    /// packages: [`add_package_path`](Self::add_package_path).
     pub fn add_path(&self, dir: &Path) -> Result<()> {
+        self.add_path_as(dir, false)
+    }
+
+    /// Prepend `dir` to `package.path` as a directory that holds packages by name — the
+    /// dependency links under `.htl/modules/entries`, the parent of a vendored copy or a
+    /// patch: `dir/<name>/init.tl` is `<name>`, and so is `dir/<name>/<name>.tl`, a flat
+    /// package's entry ([`naming`]).
+    pub fn add_package_path(&self, dir: &Path) -> Result<()> {
+        self.add_path_as(dir, true)
+    }
+
+    fn add_path_as(&self, dir: &Path, packages: bool) -> Result<()> {
         let f: Function = self.h.get("add_path")?;
-        f.call::<()>(path_str(dir))?;
+        f.call::<()>((path_str(dir), packages))?;
         if self.split {
             // The program state resolves plain `.lua` (and `.d.tl` siblings) itself.
             let f: Function = self.runtime()?.get("add_path")?;
-            f.call::<()>(path_str(dir))?;
+            f.call::<()>((path_str(dir), packages))?;
         }
         Ok(())
     }
@@ -1563,6 +1624,21 @@ end
         Ok(bc.iter().take(31).copied().collect())
     }
 
+    /// The module names a Teal source `require`s by literal, read from its syntax alone —
+    /// no type check and no resolution, so asking it of every file in a tree is cheap.
+    /// `None` when the source does not parse: which names it requires is then not known,
+    /// which is a different answer from requiring none.
+    pub fn tl_require_names(&self, src: &str, file: &Path) -> Result<Option<Vec<String>>> {
+        let f: Function = self.h.get("tl_require_names")?;
+        let t: Option<Table> = f.call((src, path_str(file)))?;
+        t.map(|t| {
+            t.sequence_values::<String>()
+                .collect::<mlua::Result<Vec<_>>>()
+        })
+        .transpose()
+        .map_err(Into::into)
+    }
+
     /// Literal `require`s of a plain Lua source, resolved through the checker's path.
     pub fn lua_requires(&self, src: &str, file: &Path) -> Result<Vec<RequireSite>> {
         let f: Function = self.h.get("lua_requires")?;
@@ -1577,6 +1653,14 @@ end
         let f: Function = self.h.get("resolve_module")?;
         let (found, lua): (Option<String>, Option<String>) = f.call(name)?;
         Ok((found.map(PathBuf::from), lua.map(PathBuf::from)))
+    }
+
+    /// Why `name` resolves to nothing although files answer to it: the project model's
+    /// message when more than one of them implements it. `None` when it does not, or when
+    /// no model is installed ([`apply_model`](Self::apply_model)).
+    pub fn ambiguity(&self, name: &str) -> Result<Option<String>> {
+        let f: Function = self.h.get("ambiguity")?;
+        Ok(f.call(name)?)
     }
 
     /// Every file on the search path that could answer `require(name)`, in the order the
@@ -2180,7 +2264,7 @@ pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
 /// whether to walk it depends on what the walk is for ([`patched_dirs`]).
 #[cfg(feature = "pkg")]
 pub fn project_skip_dirs(root: &Path) -> Vec<PathBuf> {
-    match pkg::Project::find(root) {
+    match pkg::MluaProject::find(root) {
         Some(p) => {
             let mut out = vec![p.pkgs_dir];
             out.extend(p.vendored_copies);
@@ -2207,7 +2291,7 @@ pub fn project_skip_dirs(_root: &Path) -> Vec<PathBuf> {
 /// [`collect_tl_skipping`] / [`testing::discover_tests_skipping`] to say so.
 #[cfg(feature = "pkg")]
 pub fn patched_dirs(root: &Path) -> Vec<PathBuf> {
-    match pkg::Project::find(root) {
+    match pkg::MluaProject::find(root) {
         Some(p) => p.patch_dirs(),
         None => Vec::new(),
     }
@@ -2232,7 +2316,7 @@ pub fn patched_dirs(_root: &Path) -> Vec<PathBuf> {
 /// the hash of a file the entry recorded catches a line changing inside one.
 #[cfg(feature = "pkg")]
 pub fn dependency_dirs(root: &Path) -> Vec<PathBuf> {
-    match pkg::Project::find(root) {
+    match pkg::MluaProject::find(root) {
         Some(p) => {
             let mut out = p.patch_search_dirs();
             out.push(p.entries);

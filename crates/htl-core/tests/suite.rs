@@ -21,6 +21,8 @@ fn write(path: &Path, text: &str) {
 
 /// A project with a module, a suite that passes over it, and one that does not.
 fn project(dir: &Path) {
+    // What makes the directory a project whose `src/` its tests read.
+    write(&dir.join("htl.toml"), "");
     write(
         &dir.join("src").join("purse.tl"),
         "local M = {}\n\

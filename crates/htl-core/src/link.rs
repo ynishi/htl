@@ -49,6 +49,16 @@ pub struct LinkOptions {
     /// the search path could answer it — a library that bundles its own module names it
     /// here in the binary's bundle so the two do not carry it twice.
     pub host: Vec<String>,
+    /// The module name the entry is served under in the bundle. `None` derives it from
+    /// the file alone: its stem, or its directory's name for an `init.tl`.
+    ///
+    /// A caller that has the project's model (`model::Project::locate`) passes the name it
+    /// gives the file, which is the one a `require` elsewhere in the project writes —
+    /// `src/app/main.tl` is `app.main` there, and a bundle serving it as `main` would
+    /// answer a name nothing asks for. The file alone cannot say which directory the
+    /// name starts from, so the default is right only for an entry at the top of the
+    /// source root.
+    pub entry_name: Option<String>,
 }
 
 /// The run cache as the linker uses it: the store, plus what the store needs to key and
@@ -200,7 +210,10 @@ pub fn link_with(
     store: Option<LinkStore<'_>>,
 ) -> Result<Linked> {
     let mut out = Linked::default();
-    let entry_name = entry_module_name(entry);
+    let entry_name = opts
+        .entry_name
+        .clone()
+        .unwrap_or_else(|| entry_module_name(entry));
     let host_declared: HashSet<String> = opts.host.iter().cloned().collect();
     let mut host: BTreeSet<String> = BTreeSet::new();
     let mut queued: HashSet<String> = HashSet::new();
@@ -220,6 +233,7 @@ pub fn link_with(
             Target::Missing => out.errors.push(format!(
                 "extra module '{name}' not found on the search path"
             )),
+            Target::Ambiguous(why) => out.errors.push(format!("extra module {why}")),
         }
     }
 
@@ -264,6 +278,13 @@ pub fn link_with(
                     host.insert(r.module.clone());
                 }
                 Target::Missing => out.errors.push(unresolved(&path, r)),
+                // A checked file's `require` of it is already an error of the check, at
+                // the same place; a plain `.lua` is checked by nobody, so it is said here.
+                Target::Ambiguous(why) if !typed => {
+                    out.errors
+                        .push(format!("{}:{}:{}: {why}", path.display(), r.line, r.col))
+                }
+                Target::Ambiguous(_) => {}
             }
         }
         let Some(code) = code else { continue };
@@ -389,6 +410,9 @@ enum Target {
     /// Declared only (`.d.tl` with no `.lua` behind it): the host provides it.
     Host,
     Missing,
+    /// More than one file implements the name: the model's message saying which. Nothing
+    /// is bundled for it, since no order picks one.
+    Ambiguous(String),
 }
 
 /// What a `require(name)` points at for the linker. `found` is the checker's own
@@ -418,7 +442,10 @@ fn classify(h: &Htl, name: &str, found: Option<&Path>) -> Result<Target> {
         None => h.resolve_module(name)?,
     };
     let Some(p) = found else {
-        return Ok(Target::Missing);
+        return Ok(match h.ambiguity(name)? {
+            Some(why) => Target::Ambiguous(why),
+            None => Target::Missing,
+        });
     };
     if !is_decl(&p) {
         return Ok(Target::File(p));

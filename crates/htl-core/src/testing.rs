@@ -145,18 +145,42 @@ impl FileReport {
     }
 }
 
-/// `*_test.tl` anywhere, plus every `.tl` under a directory named `tests`.
-/// Explicit file paths are always included. Does not enter [`crate::SKIP_DIRS`],
-/// dot-directories or the project's mlua-pkg dir (dependencies' tests are theirs).
+/// Every test file under `paths`, with the default test library ([`DEFAULT_LIB`]); see
+/// [`discover_tests_for`].
 pub fn discover_tests(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     discover_tests_skipping(paths, &[])
 }
 
 /// [`discover_tests`], not entering `skip` either — directories named by path rather than
-/// by name ([`crate::patched_dirs`]: a patched dependency's `*_test.tl` are its own suite,
-/// not the project's).
+/// by name ([`crate::patched_dirs`]: a patched dependency's tests are its own suite, not
+/// the project's).
 pub fn discover_tests_skipping(paths: &[PathBuf], skip: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    discover_tests_for(paths, skip, DEFAULT_LIB)
+}
+
+/// The test files under `paths`: every `.tl` that `require`s the test library `lib`.
+///
+/// **A test is a file that loads the test library**, wherever it is and whatever it is
+/// called. That is what makes a file one — `describe` and `it` come from the library, so a
+/// file that does not load it has no tests to run — and it is the question the runner asks
+/// after a file has executed, answered here before instead of after. A file under `tests/`
+/// that does not load it is a helper: its tests `require` it, and it is not run on its own.
+/// Neither the directory nor the name is part of the rule: `tests/` is where a project
+/// keeps tests and the helpers only tests may reach, and `*_test.tl` beside a source file
+/// is a convention that reads well, not a rule.
+///
+/// Which names a file requires is read from its syntax, not from a type check: every
+/// `.tl` in the tree is asked, and parsing is cheap where checking is not. A file that does
+/// not parse cannot say, and is a test when its text names `lib` at all, so that a broken
+/// test file is reported as the failure it is rather than passed over as a helper.
+///
+/// Explicit file paths are always included. Does not enter [`crate::SKIP_DIRS`],
+/// dot-directories or the project's mlua-pkg dir (dependencies' tests are theirs), nor
+/// `skip`.
+pub fn discover_tests_for(paths: &[PathBuf], skip: &[PathBuf], lib: &str) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
+    // Built on the first file that needs asking: a run over explicit files never does.
+    let mut parser: Option<Htl> = None;
     for p in paths {
         if p.is_file() {
             out.push(p.clone());
@@ -175,13 +199,18 @@ pub fn discover_tests_skipping(paths: &[PathBuf], skip: &[PathBuf]) -> Result<Ve
             if !crate::is_tl_source(path) {
                 continue;
             }
-            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            let in_tests_dir = path
-                .strip_prefix(p)
-                .ok()
-                .map(|rel| rel.components().any(|c| c.as_os_str() == "tests"))
-                .unwrap_or(false);
-            if name.ends_with("_test.tl") || in_tests_dir {
+            let Ok(src) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let h = match &parser {
+                Some(h) => h,
+                None => parser.insert(Htl::new()?),
+            };
+            let loads_lib = match h.tl_require_names(&src, path)? {
+                Some(names) => names.iter().any(|n| n == lib),
+                None => src.contains(lib),
+            };
+            if loads_lib {
                 out.push(path.to_path_buf());
             }
         }
@@ -300,8 +329,8 @@ impl SuiteReport {
 /// Run the tests under `paths` — a project root, a directory, or the files themselves —
 /// and hand back what happened.
 ///
-/// Discovery is [`discover_tests_skipping`]'s: `*_test.tl` anywhere and every `.tl` under a
-/// `tests` directory, minus a patched dependency's own suite. `htl.toml` is found from the
+/// Discovery is [`discover_tests_for`]'s: every `.tl` that loads the suite's test library,
+/// minus a patched dependency's own suite. `htl.toml` is found from the
 /// first path, as the command does. Nothing is printed and nothing decides an exit code —
 /// [`SuiteReport`] is the whole answer, and asserting on it is the caller's.
 #[cfg(all(feature = "pkg", feature = "dts"))]
@@ -312,8 +341,11 @@ pub fn run_tests(paths: &[PathBuf], suite: &Suite) -> Result<SuiteReport> {
     } else {
         paths.to_vec()
     };
-    let files = discover_tests_skipping(&paths, &project::patched(&paths))?;
+    let lib = suite.lib.as_deref().unwrap_or(DEFAULT_LIB);
     let cfg = project::config_of(&paths[0])?;
+    let model = project::model_of(&cfg, &paths[0])?;
+    let skip = project::not_walked(model.as_ref(), &paths, crate::model::Purpose::Test);
+    let files = discover_tests_for(&paths, &skip, lib)?;
     let opts = project::TestOptions {
         config: &cfg,
         lint: suite.lint.as_deref(),
@@ -355,6 +387,10 @@ pub struct TestSession {
     lib: String,
     filter: Option<String>,
     opts: RunOptions,
+    /// The project every file belongs to, when the caller said ([`for_project`](Self::for_project)).
+    /// `None` finds each file's own project as the file is run.
+    #[cfg(all(feature = "pkg", feature = "dts"))]
+    project: Option<crate::model::Project>,
 }
 
 impl TestSession {
@@ -377,7 +413,24 @@ impl TestSession {
             lib: lib.to_string(),
             filter: filter.map(String::from),
             opts,
+            #[cfg(all(feature = "pkg", feature = "dts"))]
+            project: None,
         })
+    }
+
+    /// Run every file of this session as a file of `project`, whose
+    /// [model](crate::model) the caller has already built.
+    ///
+    /// A file runs with its project's directories on its search path as a test sees them
+    /// ([`View::Test`](crate::model::View::Test)): the project's sources and declarations,
+    /// its test root, its dependencies. Without this, each file's project is found from the
+    /// file as it runs ([`model::Project::discover`](crate::model::Project::discover)), which
+    /// is the same answer at the cost of reading the project once per file; a file with no
+    /// project above it resolves its `require`s in its own directory.
+    #[cfg(all(feature = "pkg", feature = "dts"))]
+    pub fn for_project(mut self, project: crate::model::Project) -> Self {
+        self.project = Some(project);
+        self
     }
 
     /// The session's checker (for [`Htl::executable_ranges`] on the sources a run touched).
@@ -417,6 +470,16 @@ impl TestSession {
         let started = std::time::Instant::now();
         let saved = self.checker.search_path()?;
         let h = Htl::with_checker(&self.checker)?;
+        #[cfg(all(feature = "pkg", feature = "dts"))]
+        let found;
+        #[cfg(all(feature = "pkg", feature = "dts"))]
+        let project = match &self.project {
+            Some(p) => Some(p),
+            None => {
+                found = crate::model::Project::discover(path)?;
+                found.as_ref()
+            }
+        };
         let mut code = None;
         let out = run_in(
             &h,
@@ -427,6 +490,8 @@ impl TestSession {
                 opts: &self.opts,
                 generated,
                 preload,
+                #[cfg(all(feature = "pkg", feature = "dts"))]
+                project,
             },
             &mut code,
         );
@@ -446,6 +511,9 @@ struct RunIn<'a> {
     generated: Option<(&'a str, &'a CheckInfo)>,
     /// Modules to put in front of the searcher before the file executes.
     preload: &'a [(String, String, PathBuf)],
+    /// The project the file belongs to, when the session has one.
+    #[cfg(all(feature = "pkg", feature = "dts"))]
+    project: Option<&'a crate::model::Project>,
 }
 
 fn run_in(h: &Htl, path: &Path, r: RunIn<'_>, out_code: &mut Option<String>) -> Result<FileReport> {
@@ -455,6 +523,8 @@ fn run_in(h: &Htl, path: &Path, r: RunIn<'_>, out_code: &mut Option<String>) -> 
         opts,
         generated,
         preload,
+        #[cfg(all(feature = "pkg", feature = "dts"))]
+        project,
     } = r;
     let mut rep = FileReport {
         path: path.to_path_buf(),
@@ -476,21 +546,24 @@ fn run_in(h: &Htl, path: &Path, r: RunIn<'_>, out_code: &mut Option<String>) -> 
     h.install_test_lib()?;
     #[cfg(feature = "std")]
     h.install_std()?;
-    let dir = parent_dir(path);
-    h.add_path(&dir)?;
-    #[cfg(feature = "pkg")]
-    if let Some(p) = crate::pkg::Project::find(path) {
-        h.apply_project(&p)?;
+    // What the file may `require`: the project's directories as a test sees them, from
+    // its model. A file that belongs to no project reads its own directory, the one place
+    // it names by itself. A build without the model (`pkg` or `dts` off) has no
+    // dependencies to reach and reads the `htl.toml` directories the config lists.
+    #[cfg(all(feature = "pkg", feature = "dts"))]
+    match project {
+        Some(m) => h.apply_model(m, crate::model::View::Test)?,
+        None => {
+            h.drop_cwd_search_path()?;
+            h.add_path(&parent_dir(path))?
+        }
     }
-    if let Some((cfg_path, cfg)) = crate::config::HtlConfig::find(path)? {
-        h.apply_config(&parent_dir(&cfg_path), &cfg)?;
-    }
-    // tests/foo_test.tl commonly requires modules from the project root or src/.
-    if dir.file_name().is_some_and(|n| n == "tests")
-        && let Some(root) = dir.parent()
+    #[cfg(not(all(feature = "pkg", feature = "dts")))]
     {
-        h.add_path(root)?;
-        h.add_path(&root.join("src"))?;
+        h.add_path(&parent_dir(path))?;
+        if let Some((cfg_path, cfg)) = crate::config::HtlConfig::find(path)? {
+            h.apply_config(&parent_dir(&cfg_path), &cfg)?;
+        }
     }
     h.install_searcher()?;
     // Before the searcher gets a chance to be asked. Position 1 beats position 2.

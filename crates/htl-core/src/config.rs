@@ -20,9 +20,13 @@
 //! [layout]
 //! source = "src"     # this project's own .tl; "." for a flat project
 //! types  = "types"   # hand-written .d.tl for modules something else provides
+//! tests  = "tests"   # tests, and helpers only tests may require
 //!
 //! [check]
 //! paths = ["mods"]   # extra dirs the checker resolves require() from
+//!
+//! [imports]
+//! mathx = "dep:mathx"  # a name the project and a dependency share: which one it means
 //!
 //! [[contract]]
 //! dir = "mods"                 # or "sites/*" for one level of subdirectories
@@ -85,6 +89,67 @@ pub struct HtlConfig {
     /// directly under `dir` must return `type`; checked by the `contract` lint.
     #[serde(default)]
     pub contract: Vec<Contract>,
+    /// `[imports]` — which module a name in the project's own `require`s means, where two
+    /// modules answer to it. See [`ImportTarget`].
+    #[serde(default)]
+    pub imports: std::collections::BTreeMap<String, String>,
+}
+
+/// What an `[imports]` entry points a name at.
+///
+/// ```toml
+/// [imports]
+/// mathx = "dep:mathx"          # `require("mathx")` in the project means the dependency
+/// mathx_local = "own:mathx"    # and the project's own `mathx` goes by another name
+/// ```
+///
+/// A name belongs to one module, and two modules that both answer to one are an error
+/// in `htl check`. Renaming one of them ends it; an entry here ends it without a rename,
+/// by saying which of the two the project means and letting the other be reached under a
+/// name of the project's choosing. The key covers the name and everything under it:
+/// `mathx = "dep:mathx"` sends `require("mathx.vec")` to the dependency as well.
+///
+/// It is the project's say over its own `require`s only. A dependency's `require`s keep
+/// meaning what they mean to the dependency.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportTarget {
+    /// `own:<name>`: the project's own module of that name.
+    Own(String),
+    /// `dep:<name>`: a module of a dependency — `<name>` starts with the dependency's name
+    /// (`dep:mathx`, `dep:mathx.vec`).
+    Dep(String),
+}
+
+impl ImportTarget {
+    /// `own:<name>` or `dep:<name>`, a dotted module name after the colon.
+    pub fn parse(text: &str) -> Result<Self> {
+        let (kind, name) = text.split_once(':').unwrap_or(("", ""));
+        let ok = !name.is_empty()
+            && name.split('.').all(|seg| {
+                !seg.is_empty()
+                    && seg
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+            });
+        match (kind, ok) {
+            ("own", true) => Ok(Self::Own(name.to_string())),
+            ("dep", true) => Ok(Self::Dep(name.to_string())),
+            _ => anyhow::bail!(
+                "[imports] value \"{text}\" is not one: write \"own:<module>\" for the \
+                 project's own module or \"dep:<module>\" for a dependency's"
+            ),
+        }
+    }
+}
+
+impl HtlConfig {
+    /// `[imports]`, each value parsed. The file was refused at parse if one is not.
+    pub fn import_targets(&self) -> Vec<(String, ImportTarget)> {
+        self.imports
+            .iter()
+            .filter_map(|(k, v)| ImportTarget::parse(v).ok().map(|t| (k.clone(), t)))
+            .collect()
+    }
 }
 
 /// `[toolchain]` — the `htl` command a project expects to be checked by.
@@ -313,6 +378,14 @@ pub struct LayoutConfig {
     /// DefinitelyTyped shape. Default `types`.
     #[serde(default = "default_types")]
     pub types: String,
+    /// The project's tests and the helpers only tests may `require`. Default `tests`.
+    ///
+    /// A file here is not a test by being here: a test is a file that loads the test
+    /// library ([`crate::testing::discover_tests_for`]), and one that does not is a
+    /// helper. What the directory decides is who may read it — a test sees the project's
+    /// sources and this directory, the sources do not see this directory.
+    #[serde(default = "default_tests")]
+    pub tests: String,
 }
 
 fn default_source() -> String {
@@ -323,11 +396,16 @@ fn default_types() -> String {
     "types".to_string()
 }
 
+fn default_tests() -> String {
+    "tests".to_string()
+}
+
 impl Default for LayoutConfig {
     fn default() -> Self {
         Self {
             source: default_source(),
             types: default_types(),
+            tests: default_tests(),
         }
     }
 }
@@ -404,6 +482,10 @@ impl HtlConfig {
         // contradiction the file states, so no source has to be read to find it.
         cfg.source_dir_is_the_project_s_alone()
             .context("parsing htl.toml")?;
+        // And an `[imports]` value that points nowhere is wrong in the file itself.
+        for v in cfg.imports.values() {
+            ImportTarget::parse(v).context("parsing htl.toml")?;
+        }
         Ok(cfg)
     }
 
@@ -456,7 +538,7 @@ impl HtlConfig {
     /// file included, and the copy is code the project owns rather than a project of its
     /// own: one root, one store, one lint selection over the whole tree, the patched
     /// directories with it. The question is `pkg::owning_project`'s, asked here and by
-    /// [`Project::find`](crate::pkg::Project::find) so that the manifest and the config
+    /// [`Project::find`](crate::pkg::MluaProject::find) so that the manifest and the config
     /// cannot disagree about where the root is.
     pub fn find(start: &Path) -> Result<Option<(PathBuf, Self)>> {
         let mut dir = if start.is_dir() {

@@ -63,8 +63,10 @@ fn one_candidate_is_reported_as_the_file_that_is_read() {
     assert!(ok, "a name that resolves exits 0: {err}");
     assert!(out.contains("htl resolve util: src/util.tl"), "{out}");
     assert_eq!(row(&out, "src/util.tl"), "1 src/util.tl source read");
-    // The directories are half the answer, so they are printed whatever was found.
-    assert!(out.contains("searched, in order: ., src"), "{out}");
+    // The project's own name is the model's to answer, not a search's: no directory of the
+    // project is on the path any more, so a list of them would be a list of nothing.
+    assert!(out.contains("answered by the project model"), "{out}");
+    assert!(!out.contains("searched"), "{out}");
 }
 
 /// Three declarations of one name, and the order is the whole reason one of them is in
@@ -156,11 +158,19 @@ fn a_name_that_resolves_to_nothing_says_so_and_exits_non_zero() {
         "a name that resolves to nothing exits non-zero: {out}{err}"
     );
     assert!(
-        out.contains("nothing on the search path answers require(\"nope\")"),
+        out.contains("nothing in the project or on the search path answers require(\"nope\")"),
         "{out}"
     );
-    // What was looked at is the useful half of a report with no rows in it.
-    assert!(out.contains("searched, in order: ., src"), "{out}");
+    // What was looked at is the useful half of a report with no rows in it — and outside
+    // the project's own directories, which the model has already said no for.
+    let searched = out
+        .lines()
+        .find(|l| l.contains("searched, in order:"))
+        .unwrap_or_else(|| panic!("no searched line in:\n{out}"));
+    assert!(
+        !searched.contains(" src") && !searched.contains(" types"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -185,12 +195,13 @@ fn the_json_carries_the_same_rows() {
     assert_eq!(c[1]["path"], "types/mq.d.tl");
     assert_eq!(c[1]["status"], "shadowed");
     assert_eq!(c[1]["shadowed_by"], 1);
+    assert_eq!(v["answered_by"], "model");
     assert!(
-        v["searched"]
+        !v["searched"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|d| d == "types"),
+            .any(|d| d == "types" || d == "src"),
         "{out}"
     );
 
@@ -256,4 +267,41 @@ fn a_declaration_a_crate_ships_names_the_crate() {
     // The directory it is attributed to is the one on the path in its own right, not the
     // `types/` above it that a `?/?.lua` template also reaches it through.
     assert_eq!(shipped["dir"], "types/dep");
+}
+
+/// A name the project's files answer to is reported as the project model has it: a file
+/// the search path would find under another name is not a candidate for it, and two
+/// implementations of one name are both reported, as the error they are.
+#[test]
+fn the_rows_are_the_models_and_two_implementations_are_ambiguous() {
+    let root = scratch("model-rows");
+    write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
+    write(&root.join("src/util/util.tl"), "return {}\n");
+    let (ok, out, _) = htl(&["resolve", "util"], &root);
+    assert!(!ok, "`util` is not the file's name: {out}");
+    assert!(!out.contains("src/util/util.tl"), "{out}");
+    let (ok, out, err) = htl(&["resolve", "util.util"], &root);
+    assert!(ok, "{err}");
+    assert_eq!(
+        row(&out, "src/util/util.tl"),
+        "1 src/util/util.tl source read"
+    );
+
+    write(&root.join("src/demo.tl"), "return {}\n");
+    write(&root.join("src/demo/init.tl"), "return {}\n");
+    let (ok, out, _) = htl(&["resolve", "demo"], &root);
+    assert!(!ok, "{out}");
+    assert!(out.contains("more than one module implements it"), "{out}");
+    assert!(
+        row(&out, "src/demo.tl").ends_with("src/demo.tl source ambiguous"),
+        "{out}"
+    );
+    assert!(
+        row(&out, "src/demo/init.tl").ends_with("src/demo/init.tl source ambiguous"),
+        "{out}"
+    );
+    let (_, out, _) = htl(&["resolve", "demo", "--format", "json"], &root);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["summary"]["ok"], false);
+    assert_eq!(v["candidates"][0]["status"], "ambiguous");
 }

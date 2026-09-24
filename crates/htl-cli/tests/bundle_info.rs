@@ -219,3 +219,19 @@ fn a_source_payload_is_terminated_lua_counted_to_the_byte() {
         String::from_utf8_lossy(&m.payload)
     );
 }
+
+/// An entry below the top of the source root is served under the name the project gives
+/// it — `src/app/main.tl` is `app.main`, which is what a `require` of it writes — and
+/// not under its stem alone.
+#[test]
+fn a_nested_entry_is_named_by_its_path_under_the_source_root() {
+    let root = scratch("nested-entry");
+    write(&root.join("htl.toml"), "");
+    write(&root.join("src/app/main.tl"), "print(\"hi\")\n");
+    let (ok, _, stderr) = htl(&["build", "src/app/main.tl", "-o", "app.hb"], &root);
+    assert!(ok, "build: {stderr}");
+    let (ok, stdout, stderr) = htl(&["bundle", "info", "app.hb", "--format", "json"], &root);
+    assert!(ok, "{stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["entry"], "app.main");
+}
