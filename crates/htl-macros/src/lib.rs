@@ -145,6 +145,8 @@ fn parse_str_list(input: syn::parse::ParseStream) -> syn::Result<Vec<String>> {
 struct BundleOut {
     bytes: Vec<u8>,
     inputs: Vec<String>,
+    /// `htl.toml`, absolute, when the project has one: a setting the verdict came from.
+    config: Option<String>,
     /// Typed modules replayed from the run cache, out of how many.
     cached: (usize, usize),
 }
@@ -214,6 +216,7 @@ fn resolve_bundle(
     Ok(BundleOut {
         bytes: bundle.encode(),
         inputs,
+        config: config_input(&ck),
         cached,
     })
 }
@@ -232,11 +235,36 @@ fn expand_bundle(args: &BundleArgs) -> Result<TokenStream, String> {
     explain_cache("include_bundle!", out.cached.0, out.cached.1);
     let lit = Literal::byte_string(&out.bytes);
     let inputs = out.inputs;
+    let settings = settings_tracked(out.config.as_deref());
     Ok(quote! {{
         #( const _: &[u8] = include_bytes!(#inputs); )*
+        #settings
         #lit as &[u8]
     }}
     .into())
+}
+
+/// What the expansion was decided by besides the `.tl` it read, declared so a change to
+/// it expands the macro again: `htl.toml` (the rules, their levels, `strict`) as a tracked
+/// file, and `HTL_LINT` / `HTL_LINTS` through `option_env!`, which rustc records as an
+/// environment dependency of the crate and cargo rebuilds on. Without them a build keeps
+/// the verdict of whichever expansion ran last, until something unrelated is edited.
+fn settings_tracked(config: Option<&str>) -> TokenStream2 {
+    let config = config.map(|c| quote! { const _: &str = include_str!(#c); });
+    quote! {
+        #config
+        const _: ::core::option::Option<&str> = ::core::option_env!("HTL_LINT");
+        const _: ::core::option::Option<&str> = ::core::option_env!("HTL_LINTS");
+    }
+}
+
+/// `htl.toml` as the expansion tracks it: absolute, since `include_str!` resolves relative
+/// to the Rust source file.
+fn config_input(ck: &Checker) -> Option<String> {
+    ck.cfg_path
+        .as_ref()
+        .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 fn manifest_dir() -> Result<PathBuf, String> {
@@ -251,6 +279,8 @@ fn manifest_dir() -> Result<PathBuf, String> {
 struct Included {
     main_abs: String,
     deps: Vec<String>,
+    /// `htl.toml`, absolute, when the project has one: a setting the verdict came from.
+    config: Option<String>,
     payload: Payload,
     /// Whether the check and the Lua came from the run cache.
     cached: bool,
@@ -508,6 +538,7 @@ fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Includ
     Ok(Included {
         main_abs,
         deps,
+        config: config_input(&ck),
         payload,
         cached,
     })
@@ -518,6 +549,7 @@ fn expand_include(rel: &str, bytes: bool) -> Result<TokenStream, String> {
     explain_cache("include_tl!", usize::from(inc.cached), 1);
     let main_abs = inc.main_abs;
     let deps = inc.deps;
+    let settings = settings_tracked(inc.config.as_deref());
     let payload = match inc.payload {
         Payload::Bytes(bc) => {
             let lit = Literal::byte_string(&bc);
@@ -529,6 +561,7 @@ fn expand_include(rel: &str, bytes: bool) -> Result<TokenStream, String> {
     Ok(quote! {{
         const _: &str = include_str!(#main_abs);
         #( const _: &str = include_str!(#deps); )*
+        #settings
         #payload
     }}
     .into())
@@ -1648,6 +1681,39 @@ mod tests {
         );
         let err = resolve_include(&root, "src/main.tl", false).unwrap_err();
         assert!(err.contains("htl lint failed (strict"), "{err}");
+    }
+
+    /// What decides the verdict is declared as an input of the expansion: `htl.toml` as a
+    /// tracked file, `HTL_LINT` / `HTL_LINTS` through `option_env!`, so changing any of
+    /// them expands the macro again instead of keeping the last verdict.
+    #[test]
+    fn the_settings_a_verdict_comes_from_are_tracked() {
+        let root = scratch("settings-tracked");
+        write(&root.join("htl.toml"), "[lint]\nstrict = true\n");
+        write(&root.join("src/main.tl"), "print(1)\n");
+        let toml = std::fs::canonicalize(root.join("htl.toml")).unwrap();
+        let inc = resolve_include(&root, "src/main.tl", false).unwrap();
+        assert_eq!(inc.config.as_deref(), Some(toml.to_str().unwrap()));
+        let opts = htl_core::link::LinkOptions::default();
+        let out = resolve_bundle(&root, "src/main.tl", &opts).unwrap();
+        assert_eq!(out.config.as_deref(), Some(toml.to_str().unwrap()));
+
+        let tokens = settings_tracked(inc.config.as_deref()).to_string();
+        assert!(tokens.contains("include_str !"), "{tokens}");
+        assert!(tokens.contains(toml.to_str().unwrap()), "{tokens}");
+        assert!(tokens.contains("option_env ! (\"HTL_LINT\")"), "{tokens}");
+        assert!(tokens.contains("option_env ! (\"HTL_LINTS\")"), "{tokens}");
+
+        // No htl.toml: nothing to track but the environment.
+        let bare = scratch("settings-bare");
+        write(&bare.join("src/main.tl"), "print(1)\n");
+        assert!(
+            resolve_include(&bare, "src/main.tl", false)
+                .unwrap()
+                .config
+                .is_none()
+        );
+        assert!(!settings_tracked(None).to_string().contains("include_str"));
     }
 
     /// `HTL_LINT` on top of the file: `warn` lets a `deny` through, `deny` fails a `warn`,
