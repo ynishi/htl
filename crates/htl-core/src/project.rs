@@ -1344,11 +1344,20 @@ impl CoverageReport {
 
 /// Coverage over the run: every `.tl` the test files' checks depended on (so a module
 /// no test reached shows 0%), with the executed statements from the line hooks.
+///
+/// With the project's [model](crate::model), only the project's own sources are
+/// reported: what coverage measures is how much of the code the project is answerable
+/// for its tests exercise. A dependency's modules, a patched one's included, are reached
+/// and not owned — the same line `htl fmt` and `htl unused` draw
+/// ([`Purpose::Own`](crate::model::Purpose::Own)) — and a helper under the test root is
+/// test code. Without a model every `.tl` reached is reported, test files and htl's
+/// library aside.
 pub fn coverage_report(
     checker: &Htl,
     test_files: &[PathBuf],
     hits: &HashMap<PathBuf, BTreeSet<usize>>,
     deps: &BTreeSet<PathBuf>,
+    model: Option<&crate::model::Project>,
 ) -> Result<CoverageReport> {
     let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let tests: HashSet<PathBuf> = test_files.iter().map(|p| canon(p)).collect();
@@ -1364,6 +1373,14 @@ pub fn coverage_report(
             || tests.contains(src)
             || name.contains("/htl-lib-")
         {
+            continue;
+        }
+        let owns = |m: &crate::model::Project| {
+            m.locate(src).is_some_and(|p| {
+                p.module.owner == crate::model::Owner::Own && p.role == crate::model::Role::Source
+            })
+        };
+        if model.is_some_and(|m| !owns(m)) {
             continue;
         }
         let (ranges, funcs) = checker.coverage_spans(src)?;
@@ -1658,6 +1675,7 @@ pub fn test<O: Output>(
             &files,
             &cov_hits,
             &cov_deps,
+            model.as_ref(),
         )?)
     } else {
         None

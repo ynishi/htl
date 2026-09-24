@@ -195,3 +195,35 @@ fn coverage_lines_keeps_its_ranges_under_the_names() {
         "{stderr}"
     );
 }
+
+/// Coverage is of the project's own sources. A dependency the tests reach is exercised,
+/// not owned, and does not appear in the table.
+#[test]
+fn a_dependency_the_tests_reach_is_not_in_the_coverage() {
+    let root = project();
+    write(
+        &root.join("mlua-pkg.toml"),
+        "[package]\nname = \"game\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        &root.join(".htl/modules/entries/dice/init.tl"),
+        "local record dice\nend\nfunction dice.roll(): integer\n   return 4\nend\nreturn dice\n",
+    );
+    write(
+        &root.join("tests/dice_test.tl"),
+        "local t = require(\"htl.test\")\nlocal dice = require(\"dice\")\n\
+         t.it(\"rolls\", function() t.expect(dice.roll()):to_equal(4) end)\n",
+    );
+    let (ok, _stdout, stderr) = htl(&["test", "tests", "--coverage"], &root);
+    assert!(ok, "the suite passes: {stderr}");
+    assert!(
+        stderr.contains("combat.tl"),
+        "the project's module is reported: {stderr}"
+    );
+    assert!(
+        !stderr
+            .lines()
+            .any(|l| l.starts_with("coverage:") && l.contains("dice")),
+        "the dependency the tests reached is not: {stderr}"
+    );
+}

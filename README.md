@@ -1826,9 +1826,11 @@ array of strings as its lines (a rendered screen), anything else in a sorted,
 one-entry-per-line form, so the files read well in a review. A name used twice in one
 file is an error.
 
-Coverage: `htl test --coverage` prints, per `.tl` module the tests' checks depended on,
-how many of its statements ran (`executed/all  %`), and a total; a module no test
-reached shows `0/n`. Under a module it names the functions nothing entered, since the
+Coverage: `htl test --coverage` prints, per `.tl` module of the project's own that the
+tests' checks depended on, how many of its statements ran (`executed/all  %`), and a
+total; a module no test reached shows `0/n`. A dependency the tests reach — installed,
+vendored or patched — is not in it, nor is a helper under `tests/`: coverage is of the
+code the project answers for. Under a module it names the functions nothing entered, since the
 percentage says how much was missed and not what:
 
 ```text
