@@ -629,6 +629,125 @@ pub struct Walk<'a> {
     pub lints: &'a crate::lint::Lints,
 }
 
+/// What every file of a run is checked against, resolved once before the first: the lint
+/// selection, the project's contracts, and the Rust crate around it with the module names
+/// its host registers.
+///
+/// `htl check` and `htl fix` build one each, so a file is held to the same rules whichever
+/// of the two looks at it ([`file_findings`], [`project_findings`]).
+pub struct Scope {
+    /// `htl.toml`'s lint spec joined with the caller's, the caller's last so that it wins.
+    /// Part of every cache key: a module checked under one selection is not replayed under
+    /// another.
+    pub spec: String,
+    /// That spec, resolved: which rules report and at what level. An unknown name is
+    /// refused when the scope is built, before anything is checked.
+    pub lints: crate::lint::Lints,
+    /// The `---@contract` markers, read once for the run rather than once per file: they
+    /// are a property of the project, and every file under a contract dir asks the same
+    /// question of them.
+    pub contracts: Vec<crate::contract::Resolved>,
+    /// Markers that could not be turned into a contract.
+    pub contract_problems: Vec<String>,
+    /// The Rust crate around the project: the model's own `host_crate` when there is a
+    /// model, which found it when it was loaded; otherwise the one around the first path.
+    /// It is where the host modules below come from, and where `contract-unenforced`
+    /// looks for enforcement.
+    pub cargo_root: Option<PathBuf>,
+    /// The module names the host registers in `package.preload` with a `#[host_module]`:
+    /// `host-module-shadowed` asks the same question of every require. A project's model
+    /// read them from the crate around its root when it was loaded
+    /// ([`Provider::HostModule`](crate::model::Provider::HostModule)), and its resolver
+    /// already makes a file under one of them an error at the require
+    /// ([`Resolution::HostShadowed`](crate::model::Resolution::HostShadowed)), so the lint
+    /// finds nothing to add there; a file in no project has no model, and scans the crate
+    /// around the first path. No crate means no host.
+    pub host_modules: Vec<String>,
+}
+
+impl Scope {
+    /// The scope of a run over `cfg` and `model`, started at `start` (the first path named,
+    /// or the working directory), with the caller's lint selection `lint` on top of the
+    /// config's.
+    pub fn new(
+        cfg: &Config,
+        model: Option<&crate::model::Project>,
+        start: &Path,
+        lint: Option<&str>,
+    ) -> Result<Self> {
+        let (contracts, contract_problems) = match cfg {
+            Some((r, _, c)) => crate::contract::resolve(r, c),
+            None => (Vec::new(), Vec::new()),
+        };
+        let file_spec = cfg
+            .as_ref()
+            .map(|(_, _, c)| c.lint_spec())
+            .unwrap_or_default();
+        let spec = crate::config::join_specs([file_spec.as_str(), lint.unwrap_or("")]);
+        // One resolution of that spec for the run. The checker is configured from it, so
+        // the rules `lint.lua` runs and the rules this layer asks are the same answer to
+        // the same question.
+        let lints = crate::lint::Lints::parse(&spec)?;
+        let cargo_root = match model {
+            Some(m) => m.host_crate.clone(),
+            None => crate::dts::find_cargo_package_root(start),
+        };
+        let host_modules: Vec<String> = match model {
+            Some(m) => m
+                .provided()
+                .filter(|(_, p)| *p == crate::model::Provider::HostModule)
+                .map(|(n, _)| n.to_string())
+                .collect(),
+            None => cargo_root
+                .as_deref()
+                .map(crate::dts::host_module_names)
+                .unwrap_or_default(),
+        };
+        Ok(Self {
+            spec,
+            lints,
+            contracts,
+            contract_problems,
+            cargo_root,
+            host_modules,
+        })
+    }
+
+    /// What [`check_one`] and [`file_findings`] read, for a run over `cfg` and `model`
+    /// whose dependencies' origins are `origins`.
+    pub fn walk<'a>(
+        &'a self,
+        cfg: &'a Config,
+        model: Option<&'a crate::model::Project>,
+        origins: &'a Origins,
+    ) -> Walk<'a> {
+        Walk {
+            cfg,
+            model,
+            contracts: &self.contracts,
+            origins,
+            host_modules: &self.host_modules,
+            lints: &self.lints,
+        }
+    }
+
+    /// What [`project_findings`] reads, for a run over `cfg` and `model`.
+    pub fn whole<'a>(
+        &'a self,
+        cfg: &'a Config,
+        model: Option<&'a crate::model::Project>,
+    ) -> Whole<'a> {
+        Whole {
+            config: cfg,
+            model,
+            lints: &self.lints,
+            contracts: &self.contracts,
+            contract_problems: &self.contract_problems,
+            cargo_root: self.cargo_root.as_deref(),
+        }
+    }
+}
+
 /// Check one file and collect everything it reported, its contract lints included, and
 /// the errors of what it required after them.
 ///
@@ -641,8 +760,6 @@ pub fn check_one<O: Output>(
     f: &Path,
     w: &Walk<'_>,
 ) -> Result<cache::Module> {
-    let (cfg, contracts, origins, host_modules, lints) =
-        (w.cfg, w.contracts, w.origins, w.host_modules, w.lints);
     // What this file may read beyond the sources' view, and the contract lints, both
     // prepend to the search path, and without putting it back the Nth file would be
     // checked against the directories of the first N-1 as well — so a `require` would
@@ -653,14 +770,49 @@ pub fn check_one<O: Output>(
     let saved = h.search_path()?;
     file_view(h, w.model, f)?;
     let c = h.check(f)?;
-    sink.checkinfo(&c);
+    let lints_said = file_findings(h, sink, f, &c, w)?;
+    h.set_search_path(&saved)?;
+    Ok(cache::Module {
+        // Everything this file put into the sink, and nothing from the files before it:
+        // the previous iteration took its own.
+        diagnostics: sink.take_recorded(),
+        errors: c.errors.len(),
+        warnings: c.warnings.len(),
+        lints: lints_said,
+        deps: c.deps.iter().map(|p| cache::normal(p)).collect(),
+        requires: cache::requires_json(&c),
+        // `htl check` has no use for generated Lua, nor for reading a `CheckInfo` back —
+        // it replays the diagnostics above straight into the sink. `htl test` fills both in.
+        code: None,
+        check: None,
+    })
+}
+
+/// Say, to `sink`, everything a file reports once the checker has checked it as `c`: its
+/// own diagnostics, the lints this layer asks of it (a declaration two files provide, a
+/// file under a name the host registers, a contract it does not satisfy), and the errors
+/// of what it required. Returns how many lints that was.
+///
+/// Asked while the search path `f` was checked under is still in place, since the
+/// declaration lints resolve against it. [`check_one`] is a check plus this; `htl fix`
+/// calls it on the check it ends with, so a file it leaves says what `htl check` would.
+pub fn file_findings<O: Output>(
+    h: &Htl,
+    sink: &mut Sink<O>,
+    f: &Path,
+    c: &CheckInfo,
+    w: &Walk<'_>,
+) -> Result<usize> {
+    let (cfg, contracts, origins, host_modules, lints) =
+        (w.cfg, w.contracts, w.origins, w.host_modules, w.lints);
+    sink.checkinfo(c);
     let mut lints_said = c.lints.len();
     // Two declarations of one module on the path: one was read, the other silently was
     // not. And a require of a name the host registers that landed on a file instead.
     // Asked here, while the path this file was checked under is still in place — and only
     // when the run reports at least one of the two, since one walk answers both.
     if lints.on("duplicate-declaration") || lints.on("host-module-shadowed") {
-        for l in lints.keep(crate::declaration_conflict_lints(h, f, &c, host_modules)?) {
+        for l in lints.keep(crate::declaration_conflict_lints(h, f, c, host_modules)?) {
             sink.diag(Severity::Lint, &l);
             lints_said += 1;
         }
@@ -679,22 +831,8 @@ pub fn check_one<O: Output>(
     // first `require`, so the check says so first. Recorded into this file's entry like
     // its own diagnostics, so a replay carries them and an edit to the dependency — which
     // is among `deps` — invalidates the entry.
-    sink.dependency_errors(&c, &|p| origins.of(p));
-    h.set_search_path(&saved)?;
-    Ok(cache::Module {
-        // Everything this file put into the sink, and nothing from the files before it:
-        // the previous iteration took its own.
-        diagnostics: sink.take_recorded(),
-        errors: c.errors.len(),
-        warnings: c.warnings.len(),
-        lints: lints_said,
-        deps: c.deps.iter().map(|p| cache::normal(p)).collect(),
-        requires: cache::requires_json(&c),
-        // `htl check` has no use for generated Lua, nor for reading a `CheckInfo` back —
-        // it replays the diagnostics above straight into the sink. `htl test` fills both in.
-        code: None,
-        check: None,
-    })
+    sink.dependency_errors(c, &|p| origins.of(p));
+    Ok(lints_said)
 }
 
 /// Widen what a checker set up for the sources' view may read to what `f` itself may.
@@ -979,14 +1117,6 @@ pub fn check<O: Output>(
     let (cfg, cache_opts, model) = (*cfg, *cache_opts, *model);
     let files = files.to_vec();
 
-    // The `---@contract` markers, read once for the run rather than once per file: they
-    // are a property of the project, and every file under a contract dir asks the same
-    // question of them.
-    let (contracts, contract_problems) = match cfg {
-        Some((r, _, c)) => crate::contract::resolve(r, c),
-        None => (Vec::new(), Vec::new()),
-    };
-
     // The Rust crate around the walk, for the host modules it registers: found from the
     // first path, and nothing named at all is the working directory.
     let start = paths
@@ -1003,45 +1133,13 @@ pub fn check<O: Output>(
     // checks itself. The rule applies to replayed entries as much as to fresh checks.
     sink.walking(&files);
 
-    // The lint selection is part of what a module reports, so it is part of every key.
-    let file_spec = cfg
-        .as_ref()
-        .map(|(_, _, c)| c.lint_spec())
-        .unwrap_or_default();
-    let spec = crate::config::join_specs([file_spec.as_str(), lint.unwrap_or("")]);
-    // One resolution of that spec for the run. The checker is configured from it below, so
-    // the rules `lint.lua` runs and the rules this layer asks are the same answer to the
-    // same question — and an unknown name is refused here, before anything is checked.
-    let lints = crate::lint::Lints::parse(&spec)?;
+    // What every file of the run is checked against, resolved once before the first.
+    let scope = Scope::new(cfg, model, start, *lint)?;
+    let (spec, lints, host_modules) = (&scope.spec, &scope.lints, &scope.host_modules);
+    let walk = scope.walk(cfg, model, &origins);
     // The same resolution decides the verdict: a finding under a rule this project set to
     // `deny` fails the run, and the sink counts those as it says them.
     sink.judge_by(lints.selection());
-
-    // The module names the host registers in `package.preload` with a `#[host_module]`:
-    // `host-module-shadowed` asks the same question of every require. A project's model
-    // read them from the crate around its root when it was loaded
-    // ([`Provider::HostModule`](crate::model::Provider::HostModule)), and its resolver
-    // already makes a file under one of them an error at the require
-    // ([`Resolution::HostShadowed`](crate::model::Resolution::HostShadowed)), so the lint
-    // finds nothing to add there; a file in no project has no model, and scans the crate
-    // around the first path. No crate means no host.
-    // That crate is also where `contract-unenforced` looks for enforcement, below: the
-    // model's own `host_crate` when there is a model, which found it when it was loaded.
-    let cargo_root = match model {
-        Some(m) => m.host_crate.clone(),
-        None => crate::dts::find_cargo_package_root(start),
-    };
-    let host_modules: Vec<String> = match model {
-        Some(m) => m
-            .provided()
-            .filter(|(_, p)| *p == crate::model::Provider::HostModule)
-            .map(|(n, _)| n.to_string())
-            .collect(),
-        None => cargo_root
-            .as_deref()
-            .map(crate::dts::host_module_names)
-            .unwrap_or_default(),
-    };
 
     // Look every module up before checking any of them, so that a run where nothing moved
     // never builds a checker at all. The host module names go into the key for the same
@@ -1082,19 +1180,7 @@ pub fn check<O: Output>(
             }
             None => {
                 let h = h.as_ref().expect("a module missed, so a checker was built");
-                let m = check_one(
-                    h,
-                    sink,
-                    f,
-                    &Walk {
-                        cfg,
-                        model,
-                        contracts: &contracts,
-                        origins: &origins,
-                        host_modules: &host_modules,
-                        lints: &lints,
-                    },
-                )?;
+                let m = check_one(h, sink, f, &walk)?;
                 // Per-module entries are written as each one is checked; a whole-run entry
                 // cannot be written until the walk is done, so it happens below.
                 if let Some(c) = &store
@@ -1122,18 +1208,7 @@ pub fn check<O: Output>(
         c.store_run(&run_key, &files, &cfg_inputs, &dirs, &modules);
     }
     // What the project says about itself as a whole, once the files have been checked.
-    let whole = project_findings(
-        sink,
-        &Whole {
-            config: cfg,
-            model,
-            lints: &lints,
-            contracts: &contracts,
-            contract_problems: &contract_problems,
-            cargo_root: cargo_root.as_deref(),
-        },
-        &infos,
-    );
+    let whole = project_findings(sink, &scope.whole(cfg, model), &infos);
     n_err += whole.errors;
     n_lint += whole.lints;
     // Nothing else removes an entry, and this is the only moment the whole set is in hand.
