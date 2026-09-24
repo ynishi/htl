@@ -194,6 +194,13 @@ impl Resolver {
         }
     }
 
+    /// The table for the same project, read from its directories again: what a file added
+    /// since [`new`](Self::new) walked them needs to have a name
+    /// ([`Htl::install_resolver`](crate::Htl::install_resolver)'s `refresh_model`).
+    pub(crate) fn rebuilt(&self) -> Self {
+        Self::new(&self.project)
+    }
+
     /// [`Project::locate`] over the canonical roots taken once in [`new`](Self::new).
     fn placed(&self, file: &Path) -> Option<super::Place<'_>> {
         let (module, role, name) = place(&self.project, &self.roots, &super::canon(file))?;

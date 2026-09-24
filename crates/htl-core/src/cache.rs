@@ -534,7 +534,7 @@ impl Module {
 
 /// The directories an entry for `file` probes when there is no project model: the file's
 /// own, the one place a file outside any project resolves its `require`s in
-/// ([`project::file_view`](crate::project::file_view)).
+/// (`project::file_view`).
 ///
 /// A store with the model probes the model's answers instead
 /// ([`Cache::with_answers`]), and never reads these. Listed whether or not it exists: a

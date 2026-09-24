@@ -6,8 +6,14 @@
 //! (`Project::not_walked`), and a walk is handed that list; the walker does not look for a
 //! manifest itself.
 
-use htl_core::testing::{discover_tests, discover_tests_skipping};
-use htl_core::{collect_tl, collect_tl_skipping, is_skipped_dir};
+use htl_core::testing::discover_tests;
+#[cfg(feature = "dts")]
+use htl_core::testing::discover_tests_skipping;
+use htl_core::{collect_tl, is_skipped_dir};
+// The skip lists come from the model, which needs `dts`; the tests that walk with one are
+// compiled with it, and so is what only they use.
+#[cfg(feature = "dts")]
+use htl_core::collect_tl_skipping;
 use std::path::{Path, PathBuf};
 
 mod common;
@@ -191,6 +197,7 @@ fn project_pkgs_dir_is_skipped_by_path() {
     assert!(!is_skipped_dir(&root.join("src"), &extra));
 }
 
+#[cfg(feature = "dts")]
 /// A project holding a `target_dir` dep: the copy is committed to the repo under a name the
 /// project chose, and `lua/mine.tl` — the project's own — sits beside it under the same
 /// parent. Only the manifest says which is which.

@@ -706,13 +706,24 @@ Three things follow from mlua, not from htl:
 The feature is off by default: it turns on mlua's `async`, and a host with no async
 method should be built as it was without it.
 
-Runtime resolution through mlua-pkg:
+Runtime resolution through mlua-pkg. A host describes the directories it serves once, as
+a project model, and sets up both the checker and the run from that one description
+(features `pkg` and `dts`):
 
 ```rust
+use htl::model::{HostDir, Project, View};
+
+let project = Project::for_host(root, &[
+    HostDir::Modules("scripts".into()),     // scripts/a/b.tl is a.b
+    HostDir::Packages("mods".into()),       // mods/mathx/mathx.tl is mathx, mods/mathx/sub.tl mathx.sub
+    HostDir::Declarations("types".into()),  // types/htl-mq/mq.d.tl is mq
+]);
+h.apply_model(&project, View::Source)?;     // the checker: what every htl command uses
+
 let mut reg = mlua_pkg::Registry::new();
 reg.add(NativeResolver::new().add("host", |lua| { /* Rust table */ }));
-reg.add(htl::pkg::TealResolver::new("scripts")?);     // .tl / init.tl -> check + gen; .d.tl -> type-only table
-reg.add(mlua_pkg::resolvers::FsResolver::new("scripts")?);
+reg.add(htl::pkg::TealResolver::from_project(&project)?); // .tl -> check + gen; .d.tl -> type-only table
+reg.add(mlua_pkg::resolvers::FsResolver::new(root.join("scripts"))?);
 reg.install(h.lua())?;
 // or, with an mlua-pkg.toml: htl::pkg::MluaProject::find(dir)?.registry()
 ```
@@ -721,13 +732,23 @@ A `.tl` that fails its type check is `Some(Err)` in mlua-pkg's terms: it never f
 through to a later resolver. Native modules must be registered *before* the Teal
 resolver and described by a `.d.tl` for the checker.
 
-A `TealResolver` names files the way `htl check` does: under its root, `a/b.tl` is `a.b`,
-`a/init.tl` is `a`, and `util/util.tl` is `util.util` — never `util`. Two implementations
-of one name (`util.tl` beside `util/init.tl`) are an error, not a choice. A directory
-whose children are packages by name, where `<name>/<name>.tl` is a flat package's entry,
-is `TealResolver::new(dir)?.holding_packages()`; `MluaProject::registry` builds its
-resolvers that way. `Htl::add_path` and `Htl::add_package_path` are the checker's side of
-the same two readings.
+Every name is then the same file to the check and to the run, named the way `htl check`
+names files: `a/b.tl` is `a.b`, `a/init.tl` is `a`, `util/util.tl` under `scripts/` is
+`util.util` — never `util` — and under `mods/` a package's `<name>/<name>.tl` is its
+entry while `mods/a/b/a/b.tl` is `a.b.a.b`, not `a.b`. Two implementations of one name
+(`util.tl` beside `util/init.tl`, or a script and a mod of one name) are an error to
+both. The run applies the rule on every `require`, so a mod dropped into a served
+directory while the host runs is found, and its check reads the directories as they are
+by then. A package directory or root added later is a new `Project`.
+
+`Htl::apply_config`, `Htl::add_path`, `Htl::add_package_path` and a `TealResolver` over one
+directory (`TealResolver::new(dir)`, `.holding_packages()`) are still there, for a host
+that does not describe a project. They are two descriptions kept in step by hand, and the
+checker's half reads `package.path` through Lua's templates rather than the naming rule,
+so they part ways: `add_package_path`'s `?/?` template checks `require("a.b")` against
+`pkgs/a/b/a/b.tl`, which the resolver does not serve, and `apply_config` puts `types/`
+and `types/<crate>/` on the path as two roots, so `types/htl-mq/mq.d.tl` checks as `mq`
+and as `htl-mq.mq` while `TealResolver::new("types")` serves only the second (#320).
 
 Teal resolves every `require("literal")` at check time, and htl keeps it that way. When a
 module exists only at run time (the user's `Tasks.tl` that a long-built host loads), the
@@ -763,6 +784,10 @@ present: the module is rejected at `require` naming the nil ones, and a field ad
 the record later stays optional until it is added to the list, so the type can grow
 without breaking the modules already written against it. `.require_all_fields()` takes
 every declared field, for types that are settled.
+
+These settings belong to a resolver over the one directory they hold to the contract,
+registered before `TealResolver::from_project`, which serves the rest of the model; a
+`[[contract]]` in `htl.toml` builds them for you (`htl::pkg::contract_resolvers`).
 
 ### A C ABI for a host that is not Rust (feature `ffi`)
 
