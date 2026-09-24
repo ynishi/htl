@@ -265,6 +265,19 @@ impl Resolver {
         Resolution::Outside
     }
 
+    /// Every file of the model that answers to `name`, whatever its role, in the order
+    /// the model lists its modules — what a report of the name lists. `htl resolve` shows
+    /// these and says which one is read ([`resolve`](Self::resolve)).
+    pub fn claims(&self, name: &str) -> Vec<PathBuf> {
+        let mut entries: Vec<&Entry> = self
+            .table
+            .get(name)
+            .map(|v| v.iter().collect())
+            .unwrap_or_default();
+        entries.sort_by_key(|e| e.module);
+        entries.into_iter().map(|e| e.file.clone()).collect()
+    }
+
     /// The name `[imports]` makes of `name` in the project's own files, if it makes one: the
     /// entry for it or for a name above it, the rest carried across. A `dep:` target comes
     /// back as `@<dependency>/<name>`; an `own:` target as the project's name, with `true`

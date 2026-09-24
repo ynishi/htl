@@ -257,3 +257,40 @@ fn a_declaration_a_crate_ships_names_the_crate() {
     // `types/` above it that a `?/?.lua` template also reaches it through.
     assert_eq!(shipped["dir"], "types/dep");
 }
+
+/// A name the project's files answer to is reported as the project model has it: a file
+/// the search path would find under another name is not a candidate for it, and two
+/// implementations of one name are both reported, as the error they are.
+#[test]
+fn the_rows_are_the_models_and_two_implementations_are_ambiguous() {
+    let root = scratch("model-rows");
+    write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
+    write(&root.join("src/util/util.tl"), "return {}\n");
+    let (ok, out, _) = htl(&["resolve", "util"], &root);
+    assert!(!ok, "`util` is not the file's name: {out}");
+    assert!(!out.contains("src/util/util.tl"), "{out}");
+    let (ok, out, err) = htl(&["resolve", "util.util"], &root);
+    assert!(ok, "{err}");
+    assert_eq!(
+        row(&out, "src/util/util.tl"),
+        "1 src/util/util.tl source read"
+    );
+
+    write(&root.join("src/demo.tl"), "return {}\n");
+    write(&root.join("src/demo/init.tl"), "return {}\n");
+    let (ok, out, _) = htl(&["resolve", "demo"], &root);
+    assert!(!ok, "{out}");
+    assert!(out.contains("more than one module implements it"), "{out}");
+    assert!(
+        row(&out, "src/demo.tl").ends_with("src/demo.tl source ambiguous"),
+        "{out}"
+    );
+    assert!(
+        row(&out, "src/demo/init.tl").ends_with("src/demo/init.tl source ambiguous"),
+        "{out}"
+    );
+    let (_, out, _) = htl(&["resolve", "demo", "--format", "json"], &root);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["summary"]["ok"], false);
+    assert_eq!(v["candidates"][0]["status"], "ambiguous");
+}

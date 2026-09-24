@@ -7,9 +7,13 @@
 //! reach, and frames an override — the thing a search path is for — as a defect. The
 //! ordinary question is the other one. Which of these is in effect, and why that one.
 //!
-//! Nothing here decides anything. The order is [`Htl::module_candidates`]'s, which is the
-//! searchers' own; the winner is [`Htl::resolve_module`]'s, which is what the checker asks;
-//! this walks the two side by side and says which row is which.
+//! Nothing here decides anything. For a name the project model has, the answer is the
+//! model's [`Resolver`](crate::model::Resolver)'s — the one every command resolves with —
+//! and the rows are every file of the model under that name, in the model's order. For a
+//! name the model does not have, the rows are what `package.path` holds for it
+//! ([`Htl::module_candidates`], in the searchers' order) and the winner is what the
+//! checker asks ([`Htl::resolve_module`]); a model file the path would find under a name
+//! the model does not give it is not among them.
 
 use crate::{Htl, ModuleCandidate, ModuleKind, same_file};
 use anyhow::Result;
@@ -25,9 +29,10 @@ pub enum Status {
     /// Reachable, and not read: an earlier candidate answered first.
     Shadowed,
     /// Not read, but not hidden either: the `.lua` implementation a declaration types.
-    /// The check reads the `.d.tl`, and at run time the searcher steps aside for this
-    /// file (`prelude.lua`, `resolve_for_require`).
+    /// The check reads the `.d.tl`, and at run time this file is what loads.
     Runtime,
+    /// One of two implementations of the name, which is an error: no order picks one.
+    Ambiguous,
 }
 
 impl Status {
@@ -38,6 +43,7 @@ impl Status {
             Self::Read => "read",
             Self::Shadowed => "shadowed",
             Self::Runtime => "runtime",
+            Self::Ambiguous => "ambiguous",
         }
     }
 }
@@ -161,46 +167,15 @@ pub fn resolve(
     root: Option<&Path>,
     model: Option<&crate::model::Project>,
 ) -> Result<Resolution> {
-    let candidates = h.module_candidates(name)?;
     let dirs = h.search_path_dirs()?;
-    // The winner is not recomputed here: it is what the checker itself answers, so a row
-    // marked `read` is the file a check reads even if the two walks ever disagreed.
-    let (read, lua) = h.resolve_module(name)?;
-    let read_kind = read.as_deref().map(ModuleKind::of_path);
-    let read_at = read
+    let resolver = model.map(crate::model::Resolver::new);
+    let (rows, read) = match resolver
         .as_ref()
-        .and_then(|r| candidates.iter().position(|c| same_file(&c.path, r)))
-        .map(|i| i + 1);
-
-    let rows = candidates
-        .iter()
-        .enumerate()
-        .map(|(i, c)| {
-            let order = i + 1;
-            let status = if read_at == Some(order) {
-                Status::Read
-            } else if read_kind == Some(ModuleKind::Declaration)
-                && lua.as_ref().is_some_and(|l| same_file(&c.path, l))
-            {
-                // A declaration was read and this is the `.lua` behind it: the run loads
-                // this file. Calling that shadowed would be the wrong answer to the
-                // question the command is for.
-                Status::Runtime
-            } else {
-                Status::Shadowed
-            };
-            let dir = dir_of(c, &dirs);
-            Candidate {
-                order,
-                path: show(&c.path, root),
-                dir: show(&dir, root),
-                kind: c.kind,
-                status,
-                shadowed_by: (status == Status::Shadowed).then_some(read_at).flatten(),
-                origin: origin_of(&c.path, model),
-            }
-        })
-        .collect::<Vec<_>>();
+        .and_then(|r| model_rows(r, name, &dirs, root, model))
+    {
+        Some(answer) => answer,
+        None => path_rows(h, name, &dirs, root, model, resolver.as_ref())?,
+    };
 
     let shadowed = rows.iter().filter(|c| c.status == Status::Shadowed).count();
     // One entry per directory as it is printed: the project root reached through
@@ -238,6 +213,143 @@ impl ModuleKind {
             Self::Lua
         }
     }
+}
+
+/// The rows for a name the model has: every file of the model under it, the one the
+/// resolver answers with marked `read`. `None` when the model does not have the name.
+fn model_rows(
+    r: &crate::model::Resolver,
+    name: &str,
+    dirs: &[PathBuf],
+    root: Option<&Path>,
+    model: Option<&crate::model::Project>,
+) -> Option<(Vec<Candidate>, Option<PathBuf>)> {
+    use crate::model::Resolution as Answer;
+    let (read, lua, ambiguous) = match r.resolve(None, name) {
+        Answer::Found(f) => {
+            let read = f
+                .implementation
+                .clone()
+                .or_else(|| f.declaration.clone())
+                .or_else(|| f.lua.clone());
+            (read, f.lua, Vec::new())
+        }
+        Answer::Ambiguous(claims) => (None, None, claims.into_iter().map(|(_, f)| f).collect()),
+        _ => return None,
+    };
+    let mut files = r.claims(name);
+    // A name only the resolver can spell (`@<dependency>/…`) has no plain claims.
+    for f in read.iter().chain(lua.iter()) {
+        if !files.iter().any(|x| same_file(x, f)) {
+            files.push(f.clone());
+        }
+    }
+    // In the order a name is answered: a source, then a declaration, then plain Lua —
+    // the model's order within each, so the project's own comes first.
+    let rank = |f: &PathBuf| match ModuleKind::of_path(f) {
+        ModuleKind::Source => 0,
+        ModuleKind::Declaration => 1,
+        ModuleKind::Lua => 2,
+    };
+    files.sort_by_key(rank);
+    let read_kind = read.as_deref().map(ModuleKind::of_path);
+    let read_at = read
+        .as_ref()
+        .and_then(|p| files.iter().position(|f| same_file(f, p)))
+        .map(|i| i + 1);
+    let rows = files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let order = i + 1;
+            let status = if read_at == Some(order) {
+                Status::Read
+            } else if ambiguous.iter().any(|a| same_file(a, f)) {
+                Status::Ambiguous
+            } else if read_kind == Some(ModuleKind::Declaration)
+                && lua.as_ref().is_some_and(|l| same_file(f, l))
+            {
+                Status::Runtime
+            } else {
+                Status::Shadowed
+            };
+            Candidate {
+                order,
+                path: show(f, root),
+                dir: show(&dir_holding(f, dirs), root),
+                kind: ModuleKind::of_path(f),
+                status,
+                shadowed_by: (status == Status::Shadowed).then_some(read_at).flatten(),
+                origin: origin_of(f, model),
+            }
+        })
+        .collect();
+    Some((rows, read))
+}
+
+/// The rows for a name outside the model: what `package.path` holds for it, a model file
+/// found under a name the model does not give it left out.
+fn path_rows(
+    h: &Htl,
+    name: &str,
+    dirs: &[PathBuf],
+    root: Option<&Path>,
+    model: Option<&crate::model::Project>,
+    resolver: Option<&crate::model::Resolver>,
+) -> Result<(Vec<Candidate>, Option<PathBuf>)> {
+    let candidates: Vec<ModuleCandidate> = h
+        .module_candidates(name)?
+        .into_iter()
+        .filter(|c| resolver.is_none_or(|r| !r.owns(&c.path)))
+        .collect();
+    // The winner is not recomputed here: it is what the checker itself answers, so a row
+    // marked `read` is the file a check reads even if the two walks ever disagreed.
+    let (read, lua) = h.resolve_module(name)?;
+    let read_kind = read.as_deref().map(ModuleKind::of_path);
+    let read_at = read
+        .as_ref()
+        .and_then(|r| candidates.iter().position(|c| same_file(&c.path, r)))
+        .map(|i| i + 1);
+    let rows = candidates
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let order = i + 1;
+            let status = if read_at == Some(order) {
+                Status::Read
+            } else if read_kind == Some(ModuleKind::Declaration)
+                && lua.as_ref().is_some_and(|l| same_file(&c.path, l))
+            {
+                // A declaration was read and this is the `.lua` behind it: the run loads
+                // this file. Calling that shadowed would be the wrong answer to the
+                // question the command is for.
+                Status::Runtime
+            } else {
+                Status::Shadowed
+            };
+            let dir = dir_of(c, dirs);
+            Candidate {
+                order,
+                path: show(&c.path, root),
+                dir: show(&dir, root),
+                kind: c.kind,
+                status,
+                shadowed_by: (status == Status::Shadowed).then_some(read_at).flatten(),
+                origin: origin_of(&c.path, model),
+            }
+        })
+        .collect();
+    Ok((rows, read))
+}
+
+/// The most specific search-path directory holding `path`, or its parent when none does.
+fn dir_holding(path: &Path, dirs: &[PathBuf]) -> PathBuf {
+    let p = canon(path);
+    dirs.iter()
+        .filter(|d| p.starts_with(canon(d)))
+        .max_by_key(|d| canon(d).components().count())
+        .cloned()
+        .unwrap_or_else(|| crate::parent_dir(path))
 }
 
 /// Which search-path directory a candidate belongs to: the most specific one that holds

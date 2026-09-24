@@ -74,7 +74,7 @@ htl = "0.6"                    # embedding: engine + proc macros in one import
 | `htl build <entry.tl> -o app.hb [--debug] [--source] [--extra a,b] [--host x,y] [--no-cache] [--explain-cache]` | link the entry's `require` closure into one bundle (see Bundles), replaying from the run cache what still holds (see Caching; the directory form is not cached); a bundle is the `hb` target, so a project whose `[build] target` is `bin` or `cdylib` is refused (see Build targets) |
 | `htl bundle info <app.hb> [--format json]` | what a bundle records, without running it: format, the htl that built it, payload kind, the Lua its bytecode is for, entry, modules, host-provided names |
 | `htl unused [paths] [--format json] [--exit-non-zero-on-unused] [--no-cache]` | the complement of the same closure: modules no entry reaches, and `[deps]` no reached module requires (see Unused) |
-| `htl resolve <module> [path] [--format json]` | which file `require("<module>")` resolves to, and the whole chain in search order: what is read, what it shadows, and which crate or dependency each one came from (see `types/`); exits 1 when the name resolves to nothing |
+| `htl resolve <module> [path] [--format json]` | which file `require("<module>")` resolves to: every file of the project that answers to the name, which one is read, and which crate or dependency each came from (see `types/`); exits 1 when the name resolves to nothing, or to two implementations |
 | `htl pkg install` | fetch every dependency `mlua-pkg.toml` declares into `.htl/modules/` and write `mlua-pkg.lock`; the deps' own `types/` are then copied into the project's (see `types/`) |
 | `htl pkg add <name> <git> [--tag t \| --rev r \| --branch b] [--entry dir] [--target-dir dir]` | write the dependency into the manifest (`install` fetches it); a `patch_dir` the entry already declared is kept |
 | `htl pkg update [name] [--dry-run] [--force]` | refresh dependencies and bump the pins that follow releases, then install |
@@ -1490,21 +1490,28 @@ htl resolve mq: src/mq.d.tl
   2      types/mq.d.tl         declaration  shadowed by 1
   3      types/htl-mq/mq.d.tl  declaration  shadowed by 1  (shipped by htl-mq 0.2.0)
 
-  searched, in order: ., src, types, types/htl-mq
+  searched, in order: src, types, types/htl-mq, …
 ```
+
+(`searched` goes on with htl's own library and the directories Lua itself was built to
+search.)
 
 Three answers in one view: what is read, what it hides, and why — the order is the reason,
 and printing it is what makes the answer self-explaining. An override on a search path is
 the mechanism working as intended, so nothing here is a defect and nothing fails.
 
-Every kind the searchers handle is a row: a `.tl` source, a `.d.tl` declaration, a plain
-`.lua`, a dependency installed under `.htl/modules`, a vendored or patched copy, and a
-declaration materialised under `types/<crate>/` — which names the crate and version its
-`.htl-dts` note records. The rows are in the order the searchers consult, which is by kind
-first and position second: a source beats a declaration wherever the two sit, so row 1 is
-not necessarily the earliest directory. A `.lua` under a declaration reads `runtime, typed
-by <n>` rather than `shadowed`: the check reads the declaration and the run loads that
-file, and neither hides the other.
+The rows are every file of the project — its own, a dependency's, a vendored or patched
+copy, a declaration materialised under `types/<crate>/`, which names the crate and version
+its `.htl-dts` note records — that answers to the name, and the answer is the one every
+command resolves with. A file the search path would reach under some other name is not a
+row: `src/util/util.tl` is `util.util`, and `htl resolve util` does not list it. The rows
+are in the order a name is answered, by kind first: a source beats a declaration wherever
+the two sit, so row 1 is not necessarily the earliest directory. A `.lua` under a
+declaration reads `runtime, typed by <n>` rather than `shadowed`: the check reads the
+declaration and the run loads that file, and neither hides the other. Two implementations
+of one name — two modules, or `src/demo.tl` beside `src/demo/init.tl` — are both
+`ambiguous`, and the command fails: no order picks one. A name the project does not have
+is looked up on the search path as Lua would, for a library installed for the machine.
 
 A name that resolves to nothing says so and exits non-zero, so a script can ask. `--format
 json` carries the same rows ("Machine-readable output"). `htl.test` is not on a project's

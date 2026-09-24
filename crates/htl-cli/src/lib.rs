@@ -2361,8 +2361,16 @@ fn cmd_resolve(module: &str, path: Option<&Path>, json: bool) -> Result<ExitCode
 /// consulted. The order column is the reason one row is read and the others are not, which
 /// is why it is printed rather than left to be looked up.
 fn print_resolution(r: &htl::resolve::Resolution) {
+    let ambiguous = r
+        .candidates
+        .iter()
+        .any(|c| c.status == htl::resolve::Status::Ambiguous);
     match &r.read {
         Some(read) => println!("htl resolve {}: {read}", r.module),
+        None if ambiguous => println!(
+            "htl resolve {}: more than one module implements it, and no order picks one",
+            r.module
+        ),
         None => println!(
             "htl resolve {}: nothing on the search path answers require(\"{}\")",
             r.module, r.module
