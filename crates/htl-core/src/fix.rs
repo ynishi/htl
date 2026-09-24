@@ -247,9 +247,10 @@ pub fn fix_file(h: &Htl, path: &Path, opts: &FixOptions) -> Result<FileOutcome> 
     Ok(out)
 }
 
-/// tl's parser errors carry "syntax error" in their text; type errors never do.
+/// Whether the parser rejected the file: the count the check carries, not the wording of
+/// its errors, which only some of the parser's messages share.
 fn has_syntax_error(c: &CheckInfo) -> bool {
-    c.errors.iter().any(|e| e.contains("syntax error"))
+    c.syntax_errors > 0
 }
 
 struct Candidate {

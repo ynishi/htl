@@ -136,6 +136,11 @@ pub const TEAL_VERSION: &str = "0.24.8";
 pub struct CheckInfo {
     /// `file:line:col: message` for syntax and type errors.
     pub errors: Vec<String>,
+    /// How many syntax errors the parser reported. Their text is in `errors`, worded
+    /// however Teal's parser words it (`syntax error, expected ')'`, `expected an
+    /// expression`, `unexpected eof`), so this count, and not the text, is what says the
+    /// parser rejected the file.
+    pub syntax_errors: usize,
     /// `file:line:col: message` for warnings (non-fatal).
     pub warnings: Vec<String>,
     /// Files pulled in via `require` during checking (`.tl` / `.d.tl` / `.lua`).
@@ -2197,6 +2202,7 @@ fn read_checkinfo(t: &Table) -> Result<CheckInfo> {
     };
     Ok(CheckInfo {
         errors,
+        syntax_errors: t.get::<Option<usize>>("syntax_errors")?.unwrap_or(0),
         warnings: seq("warnings")?,
         deps: seq("deps")?.into_iter().map(PathBuf::from).collect(),
         lints,

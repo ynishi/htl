@@ -218,19 +218,33 @@ fn other_type_errors_do_not_block_but_syntax_errors_do() {
         out.check.errors
     );
 
-    write(
-        &dir.join("broken.tl"),
-        "local total = 0\ntotal = total + 1.5\nif total then\n",
-    );
-    let out = fix_file(&h, &dir.join("broken.tl"), &FixOptions::default()).unwrap();
-    assert!(out.applied.is_empty() && out.contents.is_none());
-    assert!(
-        out.skipped
-            .iter()
-            .any(|s| s.reason.contains("syntax error")),
-        "{:?}",
-        out.skipped
-    );
+    // Not all of the parser's messages say "syntax error": the skip goes by the check's
+    // count of them, so each of these is skipped, whatever its wording.
+    for (name, src, says) in [
+        ("broken.tl", "if total then\n", "syntax error"),
+        ("no-expr.tl", "local x =\n", "expected an expression"),
+        ("no-type.tl", "local x: = 1\n", "expected a type"),
+    ] {
+        let file = dir.join(name);
+        write(
+            &file,
+            &format!("local total = 0\ntotal = total + 1.5\n{src}"),
+        );
+        let out = fix_file(&h, &file, &FixOptions::default()).unwrap();
+        assert!(
+            out.check.errors.iter().any(|e| e.contains(says)),
+            "{name}: the parser's own wording: {:?}",
+            out.check.errors
+        );
+        assert!(out.applied.is_empty() && out.contents.is_none(), "{name}");
+        assert!(
+            out.skipped
+                .iter()
+                .any(|s| s.reason.contains("file has a syntax error")),
+            "{name}: {:?}",
+            out.skipped
+        );
+    }
 }
 
 /// A correct fix must survive its own verification pass, and it did not when anything else
