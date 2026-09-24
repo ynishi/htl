@@ -1181,6 +1181,37 @@ fn a_nested_module_is_held_by_the_check_as_at_run_time() {
     assert_eq!(held, ["bad", "foo", "good", "ok", "partial", "sub.x"]);
 }
 
+/// The project holds its contracts: the model a command loads carries each one with the
+/// module declaring its type, the directories it accepts modules from, what those hold
+/// and under which names, and where the type is published.
+#[test]
+fn the_project_model_holds_its_contracts() {
+    let (root, cfg) = project("model");
+    write(
+        &root.join("mods/foo/init.tl"),
+        "return { name = \"n\", hp = 1 }\n",
+    );
+    let p = htl_core::model::Project::load(&root, cfg).unwrap();
+    assert_eq!(p.contracts.len(), 1);
+    let c = &p.contracts[0];
+    assert_eq!(c.terms.type_path, "defs.Mod");
+    assert_eq!(c.declared_as.as_deref(), Some("defs"));
+    assert_eq!(c.dirs, [root.join("mods")]);
+    let names: Vec<&str> = c.held.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["bad", "foo", "good", "partial"]);
+    assert_eq!(
+        c.publish.as_deref(),
+        Some(root.join("types/defs.d.tl").as_path())
+    );
+
+    let (held_by, name) = p.contract_of(&root.join("mods/foo/init.tl")).unwrap();
+    assert_eq!(
+        (held_by.terms.type_path.as_str(), name),
+        ("defs.Mod", "foo")
+    );
+    assert!(p.contract_of(&root.join("src/defs.tl")).is_none());
+}
+
 /// A contract type declared in `types/` — where `htl new` puts hand-written declarations
 /// and where a host publishes the one its mod authors write against. The `contract` lint
 /// resolves it because `contract_lints` goes through `apply_config`; the resolver has to

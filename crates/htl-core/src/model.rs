@@ -195,6 +195,40 @@ pub struct Project {
     /// in name order. Read with [`provides`](Self::provides) and
     /// [`provided`](Self::provided).
     providers: Vec<(String, Provider)>,
+    /// The contracts the project declares, each with the modules it holds: read once, when
+    /// the model is loaded, so that every command, the lints and a host ask the project
+    /// rather than reading the markers again ([`Contract`]).
+    pub contracts: Vec<Contract>,
+}
+
+/// A contract as the project holds it: what its `---@contract` marker says, which module
+/// declares the type, the directories it accepts modules from, the modules those hold and
+/// under what names, and where the type is published for the authors who write them.
+///
+/// Part of the model because a contract is part of the project: its directories are
+/// modules of it ([`Owner::Contract`]), its type is a module of it, and what it holds is
+/// named by the rule every other name comes from ([`crate::contract::held_name`]).
+#[derive(Debug, Clone)]
+pub struct Contract {
+    /// What the marker says, resolved against `htl.toml`: the type, the fields a module
+    /// must set, the module filters, `dts`, `enforced_by`, and where it was written.
+    pub terms: crate::contract::Resolved,
+    /// The name the module declaring the type answers to in this project
+    /// ([`Project::locate`]). `None` when the file the marker is in belongs to no module of
+    /// the project.
+    pub declared_as: Option<String>,
+    /// The directories it accepts modules from, in the order
+    /// [`Resolved::dirs`](crate::contract::Resolved::dirs) gives them: each is the root of
+    /// an [`Owner::Contract`] module of the project.
+    pub dirs: Vec<PathBuf>,
+    /// Every module those directories hold, as `(name, file)`: what a host's resolver for
+    /// them serves, what `htl check` holds to the type, what `htl unused` counts as loaded
+    /// by name.
+    pub held: Vec<(String, PathBuf)>,
+    /// Where the type's declaration is published for outside authors
+    /// ([`crate::contract::dts_target`]); `None` when the marker is itself in a `.d.tl`,
+    /// which is its own publication.
+    pub publish: Option<PathBuf>,
 }
 
 /// Where a name that runs from no file of the project comes from — the sources a
@@ -624,7 +658,7 @@ impl Project {
         });
         let host_crate = crate::dts::find_cargo_package_root(root);
         let providers = providers(host_crate.as_deref(), &config);
-        Ok(Self {
+        let mut project = Self {
             root: root.to_path_buf(),
             config,
             modules,
@@ -632,6 +666,42 @@ impl Project {
             problems,
             host_crate,
             providers,
+            contracts: Vec::new(),
+        };
+        // After the modules: the declaring module is named by the module that holds it.
+        project.contracts = contracts
+            .into_iter()
+            .map(|terms| project.contract(terms))
+            .collect();
+        Ok(project)
+    }
+
+    /// `terms` as this project holds it ([`Contract`]).
+    fn contract(&self, terms: crate::contract::Resolved) -> Contract {
+        let declared_as = self.locate(&terms.declared_in).map(|p| p.name);
+        let dirs = terms.dirs(&self.root);
+        let held = terms.held_modules(&self.root);
+        let publish = crate::contract::dts_target(&self.root, &terms)
+            .filter(|t| !crate::same_file(t, &terms.declared_in));
+        Contract {
+            terms,
+            declared_as,
+            dirs,
+            held,
+            publish,
+        }
+    }
+
+    /// The contract holding `file`, and the name the module there answers to: what the
+    /// `contract` lint holds to the type and a host's resolver serves under that name.
+    /// `None` for a file no contract directory of the project holds.
+    pub fn contract_of(&self, file: &Path) -> Option<(&Contract, &str)> {
+        let target = canon(file);
+        self.contracts.iter().find_map(|c| {
+            c.held
+                .iter()
+                .find(|(_, f)| canon(f) == target)
+                .map(|(n, _)| (c, n.as_str()))
         })
     }
 
@@ -763,6 +833,7 @@ impl Project {
             problems: Vec::new(),
             host_crate: None,
             providers: Vec::new(),
+            contracts: Vec::new(),
         }
     }
 
@@ -1611,6 +1682,7 @@ mod tests {
             problems: Vec::new(),
             host_crate: None,
             providers: Vec::new(),
+            contracts: Vec::new(),
         };
         let d = p.locate(Path::new("/p/scripts/host.d.tl")).unwrap();
         assert_eq!((d.role, d.name.as_str()), (Role::Decl, "host"));
