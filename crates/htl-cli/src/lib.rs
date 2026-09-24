@@ -2400,6 +2400,15 @@ fn print_resolution(r: &htl::resolve::Resolution) {
         .unwrap_or_default();
     match (&r.read, &r.error, &r.provided_by) {
         (_, Some(e), _) => println!("htl resolve {}: error: {e}", r.module),
+        // Declared and nothing else: the environment provides it — a library installed on
+        // the machine, a module registered where the model cannot read it. The declaration
+        // is the file read, and comes first, as any file the name resolves to does.
+        (Some(read), None, Some(by)) if r.provider == Some(htl::model::Provider::Declared) => {
+            println!(
+                "htl resolve {}: {read}, provided by the environment ({by})",
+                r.module
+            )
+        }
         (_, None, Some(by)) => {
             println!(
                 "htl resolve {}: provided by the host ({by}){typed_by}",

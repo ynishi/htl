@@ -18,7 +18,11 @@
 //! A name the host provides ([`Project::provides`](crate::model::Project::provides)) is
 //! answered by no file: the report says which source provides it
 //! ([`Resolution::provided_by`]), and its rows are at most the declaration the checker
-//! types it from. When a file of the model implements the name as well, the model refuses
+//! types it from. So is a name the model has only a declaration for, which the
+//! environment provides ([`Provider::Declared`](crate::model::Provider::Declared)): the
+//! report says which declaration says so, and that declaration is the row read. Both come
+//! from the resolver's [`provides`](crate::model::Resolver::provides), the answer the
+//! linker leaves a name out of a bundle on. When a file of the model implements the name as well, the model refuses
 //! it: those rows are [`Status::Refused`], the report carries the resolver's message
 //! ([`Resolution::error`]), and the verdict is a failure, as for a name two files
 //! implement.
@@ -181,12 +185,21 @@ pub struct Resolution {
     /// the name resolves to nothing at all. In a project none of them is the project's:
     /// the model answers for its own directories.
     pub searched: Vec<String>,
-    /// Where the host's providing the name comes from, when it does — the wording the
-    /// resolver's messages use: `#[host_module] in Cargo.toml's crate`, `[build] host in
-    /// htl.toml`, `htl's std`. Such a name is answered at run time by the host, not by any
-    /// row: a row read for it is the declaration it is typed from.
+    /// Who provides the name at run time, when no file of the project does — the wording
+    /// the resolver's messages use ([`Resolver::provided_by`](crate::model::Resolver::provided_by)):
+    /// `#[host_module] in Cargo.toml's crate`, `[build] host in htl.toml`, `htl's std` for
+    /// the host, `declared by types/socket/http.d.tl` for a name the model has only a
+    /// declaration for, which the environment provides. Such a name is answered at run
+    /// time by the host or the environment, not by any row: a row read for it is the
+    /// declaration it is typed from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provided_by: Option<String>,
+    /// Which of the sources [`provided_by`](Self::provided_by) words, for a reader that
+    /// branches on it rather than on the wording — the text report heads a name the host
+    /// provides differently from one the environment does. Not in the JSON, which carries
+    /// the wording alone.
+    #[serde(skip)]
+    pub provider: Option<crate::model::Provider>,
     /// Why the name is an error, when it is one the model refuses: the resolver's message,
     /// the one a check reports at a `require` of it. Set for a name the host provides that
     /// a file of the model implements as well (the rows marked [`Status::Refused`]).
@@ -223,10 +236,11 @@ pub fn resolve(
             (rows, read, None, AnsweredBy::Path)
         }
     };
+    let provider = resolver.as_ref().and_then(|r| r.provides(name));
     let provided_by = resolver
         .as_ref()
-        .zip(model.and_then(|m| m.provides(name)))
-        .map(|(r, p)| r.provided_by(p));
+        .zip(provider)
+        .map(|(r, p)| r.provided_by(name, p));
 
     let shadowed = rows.iter().filter(|c| c.status == Status::Shadowed).count();
     // One entry per directory as it is printed: the project root reached through
@@ -250,6 +264,7 @@ pub fn resolve(
             ok: error.is_none() && (read.is_some() || provided_by.is_some()),
         },
         provided_by,
+        provider,
         error,
         candidates: rows,
     })

@@ -3,10 +3,11 @@
 //! Starting at the entry, every `require("<literal>")` is followed (only string
 //! literals: a `require(expr)` cannot be resolved statically, list its targets under
 //! `extra`). `.tl` modules are type-checked and generated; plain `.lua` modules (a
-//! vendored dependency, say) are taken as they are. A name that resolves only to a
-//! `.d.tl` declaration is recorded as host-provided, as is anything listed in `host`.
-//! Any other unresolved `require` is an error: the point of a bundle is that "module
-//! not found" happens here, not on the first `require` at the customer's machine.
+//! vendored dependency, say) are taken as they are. A name that runs from no file of the
+//! project — one the host provides, one only a `.d.tl` declares — is recorded as
+//! host-provided, as is anything listed in `host`. Any other unresolved `require` is an
+//! error: the point of a bundle is that "module not found" happens here, not on the
+//! first `require` at the customer's machine.
 //!
 //! # The host's names
 //!
@@ -19,6 +20,19 @@
 //! `require`, and the linker reports it at a plain `.lua`'s, which nothing checks — the
 //! same split as for a name two files implement. The file is never bundled: every run
 //! with the host loads the host's module, which `package.preload` answers first.
+//!
+//! # Declared names
+//!
+//! A name the model has only a declaration for — a `.d.tl` and no `.tl` or `.lua`, like
+//! `types/socket/http.d.tl` for a LuaSocket installed on the machine — is provided by the
+//! environment at run time, and is left out of the bundle the same way. That, too, is the
+//! model's answer (`model::Provider::Declared`, from its resolver's `provides`), which the
+//! linker asks through [`Htl::model_provides`] for a name that resolves to a declaration.
+//! It does not decide it from a lookup of its own, as it did before the model answered
+//! it (#321): only for a file in no project, or a name the model has nothing under, is a
+//! declaration with no `.lua` found behind it on the search path taken to be the host's —
+//! there is no model to ask. The outcome is the same either way; what changed is which of
+//! the two says so.
 //!
 //! # The store
 //!
@@ -56,7 +70,8 @@ pub struct LinkOptions {
     pub source: bool,
     /// Modules to include even if no literal `require` reaches them.
     pub extra: Vec<String>,
-    /// Modules the host provides at run time, besides those declared only by a `.d.tl`.
+    /// Modules the host provides at run time, besides those declared only by a `.d.tl`
+    /// (which the model answers for — see the module doc).
     /// A name here is left out of the bundle and not walked, whether or not a file on
     /// the search path could answer it — a library that bundles its own module names it
     /// here in the binary's bundle so the two do not carry it twice.
@@ -434,7 +449,10 @@ fn unresolved(from: &Path, r: &RequireSite) -> String {
 enum Target {
     /// A file to bundle (`.tl` typed, or a plain `.lua`).
     File(PathBuf),
-    /// Declared only (`.d.tl` with no `.lua` behind it): the host provides it.
+    /// Runs from no file of the project: the model says the host or the environment
+    /// provides it — declared only, by a `.d.tl` with no `.lua` behind it, or named by
+    /// one of the host's sources — or, with no model to ask, it resolves to a `.d.tl` and
+    /// the search path has no `.lua` behind it.
     Host,
     Missing,
     /// More than one file implements the name: the model's message saying which. Nothing
@@ -493,14 +511,28 @@ fn classify(h: &Htl, name: &str, found: Option<&Path>) -> Result<Target> {
     if !is_decl(&p) {
         return Ok(Target::File(p));
     }
-    // A declaration: is there a `.lua` implementation on the path behind it (a vendored
-    // dependency typed by a `.d.tl`)? Then that is what gets bundled.
+    // A declaration. Whether anything of the project runs behind it is the model's to
+    // say: a name it has only this declaration for is the environment's, one the host
+    // provides is the host's, and neither is bundled.
+    let model = h.model_provides(name)?;
+    if let crate::Provision::Provided(_) = model {
+        return Ok(Target::Host);
+    }
+    // Otherwise a `.lua` behind the declaration (a vendored dependency typed by a `.d.tl`)
+    // is what runs, and what gets bundled: the model's own, when it has the name.
     let lua = match lua {
         Some(l) => Some(l),
         None => h.resolve_module(name)?.1,
     };
-    Ok(match lua {
-        Some(l) => Target::File(l),
-        None => Target::Host,
+    Ok(match (lua, model) {
+        (Some(l), _) => Target::File(l),
+        // No model to ask, or a name it has nothing under (a `.d.tl` found on the search
+        // path, outside every root of the project): a declaration with nothing behind it
+        // on the path is taken to be the host's, as it was before the model answered.
+        (None, crate::Provision::Unknown) => Target::Host,
+        // The model has the name and says a file of the project runs for it, and the
+        // lookup found none: the two disagree, which a declared name never makes them
+        // do. Filed with the host's as before rather than failing a build over it.
+        (None, _) => Target::Host,
     })
 }

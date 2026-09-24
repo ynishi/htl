@@ -35,6 +35,15 @@
 //! the answer is [`Resolution::HostShadowed`], an error wherever the name is asked for —
 //! the way two files implementing one name are [`Resolution::Ambiguous`].
 //!
+//! A name the model has only a declaration for, and that none of those sources names, is
+//! provided by the environment ([`Provider::Declared`]): its answer is still
+//! [`Resolution::Found`] with only the declaration, and [`provides`](Resolver::provides)
+//! is what says the environment provides it. That is a fact about the files, which this
+//! table has and the [`Project`] does not, so it is answered here: `provides` and
+//! [`provided`](Resolver::provided) are the project's configured names plus these. The
+//! linker leaves such a name out of a bundle because this says so, and `htl resolve`
+//! names the declaration.
+//!
 //! Names written into generated Lua are the ones [`rewrite`](Resolver::rewrite) gives:
 //! `@<dependency>/<name>` for a dependency's module and `@/<name>` for the project's own,
 //! wherever `[imports]` chose between the two. They mean the same thing whoever asks, so a
@@ -351,7 +360,7 @@ impl Resolver {
         if files.is_empty() {
             return Resolution::Found(found);
         }
-        let from = self.provided_by(provider);
+        let from = self.provided_by(name, provider);
         let shown: Vec<String> = files.iter().map(|f| self.show(f)).collect();
         let (these, them) = if files.len() == 1 {
             ("this file", "it")
@@ -372,12 +381,65 @@ impl Resolver {
         })
     }
 
-    /// Where the model learned that the host provides a name, as a message says it:
-    /// `#[host_module] in Cargo.toml's crate`, `[build] host in htl.toml`, `htl's std`.
+    /// Whether `name` runs from no file of the project, and who provides it: the host, by
+    /// one of the three sources [`Project::provides`] answers, or else the environment,
+    /// when the model has a declaration of the name and nothing else
+    /// ([`Provider::Declared`]). `None` for a name a file of the model implements, and for
+    /// a name the model has nothing under.
+    ///
+    /// Asked as a run-time `require` asks, with no requiring file — the question is what
+    /// runs, and a run carries only the name. So `@<dependency>/<name>` and `@/<name>`,
+    /// which is how generated Lua spells `[imports]` and a dependency's own names, are
+    /// answered as well: `@mathx/mathx.raw` with only `raw.d.tl` behind it is declared.
+    /// The configured sources name no `@`-spelled name, so for those only the files speak.
+    pub fn provides(&self, name: &str) -> Option<Provider> {
+        self.project
+            .provides(name)
+            .or_else(|| self.declaration_only(name).map(|_| Provider::Declared))
+    }
+
+    /// Every name that runs from no file of the project, with who provides it, in name
+    /// order: [`Project::provided`] and every name of the table [`provides`](Self::provides)
+    /// answers [`Provider::Declared`] for. One entry per name, the configured source first
+    /// where a name has both (a `#[host_module]` with its generated `.d.tl` is the host's).
+    pub fn provided(&self) -> Vec<(String, Provider)> {
+        let mut out: BTreeMap<String, Provider> = self
+            .project
+            .provided()
+            .map(|(n, p)| (n.to_string(), p))
+            .collect();
+        for name in self.table.keys() {
+            if !out.contains_key(name) && self.declaration_only(name).is_some() {
+                out.insert(name.clone(), Provider::Declared);
+            }
+        }
+        out.into_iter().collect()
+    }
+
+    /// The declaration `name` is answered by when the model has a declaration of it and no
+    /// implementation — no `.tl`, and no `.lua` in any role: what makes a name
+    /// [`Provider::Declared`] when no configured source names it. Asked with no requiring
+    /// file, as [`provides`](Self::provides) says.
+    fn declaration_only(&self, name: &str) -> Option<PathBuf> {
+        match self.resolve(None, name) {
+            Resolution::Found(Found {
+                implementation: None,
+                lua: None,
+                declaration,
+                ..
+            }) => declaration,
+            _ => None,
+        }
+    }
+
+    /// Who provides a name, as a message says it: `#[host_module] in Cargo.toml's crate`,
+    /// `[build] host in htl.toml`, `htl's std`, and for a name the environment provides,
+    /// the declaration that says so — `declared by types/socket/http.d.tl`, shown as
+    /// [`show`](Self::show) shows a file. `name` is only read for that last one.
     ///
     /// The one wording for it, so the error [`Resolution::HostShadowed`] carries and
     /// `htl resolve`'s report of a provided name name the source the same way.
-    pub fn provided_by(&self, provider: Provider) -> String {
+    pub fn provided_by(&self, name: &str, provider: Provider) -> String {
         match provider {
             Provider::HostModule => {
                 let cargo = self
@@ -390,6 +452,12 @@ impl Resolver {
             }
             Provider::Build => format!("[build] host in {}", crate::config::CONFIG_NAME),
             Provider::Std => "htl's std".into(),
+            Provider::Declared => match self.declaration_only(name) {
+                Some(d) => format!("declared by {}", self.show(&d)),
+                // Asked of a name that has more than its declaration: say what the
+                // variant means rather than name a file that is not the reason.
+                None => "a declaration".into(),
+            },
         }
     }
 
@@ -758,6 +826,94 @@ mod tests {
         // The same file under a name the host does not provide is only a module.
         let r = Resolver::new(&Project::load(&root, HtlConfig::default()).unwrap());
         assert!(matches!(r.resolve(None, "game"), Resolution::Found(_)));
+    }
+
+    #[test]
+    fn a_name_with_only_a_declaration_is_provided_by_the_environment() {
+        let root = scratch("declared");
+        // Declared: a hand-written declaration in the declaration root, and one beside the
+        // sources, neither with anything behind it.
+        write(&root.join("types/socket/http.d.tl"), "");
+        write(&root.join("src/native.d.tl"), "");
+        // Not declared: a `.lua` behind the declaration is what runs, and is bundled.
+        write(&root.join("types/mq.d.tl"), "");
+        write(&root.join("src/mq.lua"), "");
+        // Not declared: an implementation.
+        write(&root.join("src/util.tl"), "");
+        // A name the host provides keeps its source, declaration or not: a
+        // `#[host_module]` with the `.d.tl` it generates beside the sources, and `[build]
+        // host`.
+        write(
+            &root.join("Cargo.toml"),
+            "[package]\nname = \"game\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        );
+        write(
+            &root.join("src/lib.rs"),
+            "use htl::host_module;\n\npub struct Host;\n\n\
+             #[host_module(name = \"host\", dts = \"src/host.d.tl\")]\n\
+             impl Host {\n    pub fn greet(&self) {}\n}\n",
+        );
+        write(&root.join("src/host.d.tl"), "");
+        write(&root.join("src/game.d.tl"), "");
+        let cfg = HtlConfig::parse("[build]\nhost = [\"game\", \"remote\"]\n").unwrap();
+        let r = Resolver::new(&Project::load(&root, cfg).unwrap());
+
+        assert_eq!(r.provides("socket.http"), Some(Provider::Declared));
+        assert_eq!(
+            r.provided_by("socket.http", Provider::Declared),
+            "declared by types/socket/http.d.tl"
+        );
+        assert_eq!(r.provides("native"), Some(Provider::Declared));
+        assert_eq!(
+            r.provided_by("native", Provider::Declared),
+            "declared by src/native.d.tl"
+        );
+        assert_eq!(r.provides("mq"), None, "the .lua is what runs");
+        assert_eq!(r.provides("util"), None);
+        assert_eq!(
+            r.provides("host"),
+            Some(Provider::HostModule),
+            "HostModule wins"
+        );
+        assert_eq!(
+            r.provides("game"),
+            Some(Provider::Build),
+            "the host's, not declared"
+        );
+        assert_eq!(
+            r.provides("remote"),
+            Some(Provider::Build),
+            "with no file at all"
+        );
+        assert_eq!(r.provides("nothing"), None);
+        // The project's own table is the three configured sources, and knows no file.
+        let p = Project::load(&root, HtlConfig::default()).unwrap();
+        assert_eq!(p.provides("socket.http"), None);
+
+        let listed: Vec<(String, Provider)> = r
+            .provided()
+            .into_iter()
+            .filter(|(n, _)| !n.starts_with("std") && !n.starts_with("htl"))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                ("game".to_string(), Provider::Build),
+                ("host".to_string(), Provider::HostModule),
+                ("native".to_string(), Provider::Declared),
+                ("remote".to_string(), Provider::Build),
+                ("socket.http".to_string(), Provider::Declared),
+            ]
+        );
+        // A declared name is found as any declaration is, never shadowed.
+        assert!(matches!(
+            r.resolve(None, "socket.http"),
+            Resolution::Found(Found {
+                implementation: None,
+                lua: None,
+                ..
+            })
+        ));
     }
 
     #[test]

@@ -312,6 +312,22 @@ impl std::fmt::Display for ModuleKind {
     }
 }
 
+/// What the project model says about a name that may run from no file of the project
+/// ([`Htl::model_provides`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Provision {
+    /// The model has nothing to say: none is installed, or it has nothing under the name.
+    Unknown,
+    /// The model answers the name, and not as provided: a file of the project is what
+    /// runs for it — an implementation, or the `.lua` a declaration types — or two files
+    /// claim it and no order picks one.
+    Files,
+    /// Nothing of the project runs for the name, and this is who provides it, as the
+    /// model's `Provider` tags it: `host_module`, `build` and `std` for the host,
+    /// `declared` for the environment — a name the model has only a declaration for.
+    Provided(String),
+}
+
 /// One file `require(name)` could have resolved to. See [`Htl::module_candidates`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleCandidate {
@@ -1711,6 +1727,27 @@ end
     pub fn host_shadowing(&self, name: &str) -> Result<Option<String>> {
         let f: Function = self.h.get("host_shadowing")?;
         Ok(f.call(name)?)
+    }
+
+    /// Whether `name` runs from no file of the project, as the project model says it: the
+    /// model's resolver's `provides` (`model::Resolver::provides`) — a name the host
+    /// provides, or one the model has only a declaration for, which the environment
+    /// provides. [`Provision::Unknown`] when no model is installed (`Htl::apply_model`)
+    /// or the model has nothing under the name; the caller's own search is then the one
+    /// that answers, as it is for [`resolve_module`](Self::resolve_module).
+    ///
+    /// What the linker asks before it leaves a declared name out of a bundle, rather than
+    /// deciding that from a lookup of its own ([`link`]).
+    pub fn model_provides(&self, name: &str) -> Result<Provision> {
+        let Some(f) = self.h.get::<Option<Function>>("provides_name")? else {
+            return Ok(Provision::Unknown);
+        };
+        let tag: Option<String> = f.call(name)?;
+        Ok(match tag.as_deref() {
+            None => Provision::Unknown,
+            Some("none") => Provision::Files,
+            Some(_) => Provision::Provided(tag.unwrap_or_default()),
+        })
     }
 
     /// Every file on the search path that could answer `require(name)`, in the order the

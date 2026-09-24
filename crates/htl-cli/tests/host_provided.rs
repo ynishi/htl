@@ -406,3 +406,90 @@ fn unused_counts_a_host_module_name_as_the_hosts() {
     assert!(!stderr.contains("src/host.tl"), "{stderr}");
     assert!(stderr.contains("module: src/orphan.tl"), "{stderr}");
 }
+
+// ------------------------------------------------ a name the environment provides
+
+/// A LuaSocket-shaped declaration, hand-written for a library installed on the machine.
+const HTTP_DTL: &str =
+    "local record http\n   request: function(url: string): string\nend\n\nreturn http\n";
+
+/// A project with no host crate and no `[build] host`, whose `src/main.tl` requires
+/// `socket.http`, declared by `decl` (a path under the project) and implemented by nothing.
+fn declared_project(name: &str, decl: &str) -> PathBuf {
+    let root = scratch(name);
+    write(&root.join("htl.toml"), "");
+    write(&root.join(decl), HTTP_DTL);
+    write(
+        &root.join("src/main.tl"),
+        "local http = require(\"socket.http\")\nprint(http.request(\"x\"))\n",
+    );
+    root
+}
+
+/// The model's answer for a name only a declaration has, through every command that asks
+/// it: the check types the `require` from the declaration, the bundle files the name with
+/// the host's, and `htl resolve` says the environment provides it and which declaration
+/// says so — with no configuration beside the `.d.tl`.
+fn assert_provided_by_the_environment(root: &Path, decl: &str) {
+    let (ok, diags) = check(root);
+    assert!(ok, "{diags:#?}");
+
+    let out = htl(root, &["build", "src/main.tl", "-o", "out.hb"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let info = htl(root, &["bundle", "info", "out.hb", "--format", "json"]);
+    assert!(info.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&info.stdout).unwrap();
+    assert_eq!(
+        v["host_modules"],
+        serde_json::json!(["socket.http"]),
+        "{v:#}"
+    );
+    let modules: Vec<&str> = v["modules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["name"].as_str())
+        .collect();
+    assert_eq!(modules, vec!["main"], "not bundled: {v:#}");
+
+    let out = htl(root, &["resolve", "socket.http"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(
+        stdout.starts_with(&format!(
+            "htl resolve socket.http: {decl}, provided by the environment (declared by {decl})\n"
+        )),
+        "{stdout}"
+    );
+    let out = htl(root, &["resolve", "socket.http", "--format", "json"]);
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        v["provided_by"].as_str(),
+        Some(format!("declared by {decl}").as_str()),
+        "{v:#}"
+    );
+    assert_eq!(v["read"].as_str(), Some(decl), "{v:#}");
+    assert!(v.get("error").is_none(), "{v:#}");
+    assert_eq!(v["summary"]["ok"], serde_json::json!(true), "{v:#}");
+}
+
+/// A hand-written declaration in the declaration root, for a library installed on the
+/// machine: the environment provides the name.
+#[test]
+fn a_declaration_in_the_types_root_is_provided_by_the_environment() {
+    let root = declared_project("declared-types", "types/socket/http.d.tl");
+    assert_provided_by_the_environment(&root, "types/socket/http.d.tl");
+}
+
+/// The same declaration beside the sources, with no implementation: the same answer.
+/// Where the declaration sits is not what makes the name the environment's.
+#[test]
+fn a_declaration_beside_the_sources_is_provided_by_the_environment() {
+    let root = declared_project("declared-src", "src/socket/http.d.tl");
+    assert_provided_by_the_environment(&root, "src/socket/http.d.tl");
+}
