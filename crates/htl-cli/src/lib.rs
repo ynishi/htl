@@ -2357,8 +2357,8 @@ fn cmd_resolve(module: &str, path: Option<&Path>, json: bool) -> Result<ExitCode
     })
 }
 
-/// The text form of a resolution: a table in search order, then the directories that were
-/// consulted. The order column is the reason one row is read and the others are not, which
+/// The text form of a resolution: a table in search order, then who answered — the project
+/// model, or the search path and the directories it consulted. The order column is the reason one row is read and the others are not, which
 /// is why it is printed rather than left to be looked up.
 fn print_resolution(r: &htl::resolve::Resolution) {
     let ambiguous = r
@@ -2372,7 +2372,7 @@ fn print_resolution(r: &htl::resolve::Resolution) {
             r.module
         ),
         None => println!(
-            "htl resolve {}: nothing on the search path answers require(\"{}\")",
+            "htl resolve {}: nothing in the project or on the search path answers require(\"{}\")",
             r.module, r.module
         ),
     }
@@ -2409,7 +2409,14 @@ fn print_resolution(r: &htl::resolve::Resolution) {
         }
     }
     println!();
-    println!("  searched, in order: {}", r.searched.join(", "));
+    match r.answered_by {
+        htl::resolve::AnsweredBy::Model => println!("  answered by the project model"),
+        // The name is not the project's: where the search looked is half the answer, and
+        // all of it when nothing was found.
+        htl::resolve::AnsweredBy::Path => {
+            println!("  searched, in order: {}", r.searched.join(", "))
+        }
+    }
 }
 
 /// `1 module` / `2 modules`: a count whose noun agrees with it, for a line short enough

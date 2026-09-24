@@ -62,21 +62,27 @@
 //! ([`Purpose`], [`Project::not_walked`]): never a dependency an install writes, a
 //! patched dependency only to check it.
 //!
-//! # What this module does not do yet
+//! # Where a name is answered
 //!
-//! A name still resolves through `package.path`: the model decides which directories go
-//! on it ([`Project::search_dirs`]), but every name the model has is answered by its
-//! [`Resolver`] first, and a file the search finds under a name the model does not give it
-//! is not found. Every command
-//! that checks, runs or bundles a file sets its checker up from the model — `htl check`,
-//! `test`, `fix`, `gen`, `run`, `build`, `resolve` and the `include_tl!` /
-//! `include_bundle!` macros — and a file that belongs to no project reads its own
-//! directory instead ([`project::file_view`](crate::project::file_view)). The run cache
-//! records, for each entry, what the resolver answers for every name the module required
-//! ([`with_model`](crate::project::with_model)), and replays the entry only while those
-//! answers stand. Host modules — the `.d.tl` a Rust host generates from
-//! `#[host_module]` — are not loaded here: they are known to whoever compiled the host,
-//! and enter a project through the file they are written to.
+//! By the model's [`Resolver`], for every name the model has: the checker, the run-time
+//! searcher, the linker and `htl resolve` all ask it, and none of the model's directories
+//! is on `package.path` ([`Htl::apply_model`](crate::Htl::apply_model)). The path is left
+//! to what the model does not have — the directories Lua searches for libraries installed
+//! on the machine. Every command that checks, runs or bundles a file sets its checker up
+//! from the model — `htl check`, `test`, `fix`, `gen`, `run`, `build`, `resolve` and the
+//! `include_tl!` / `include_bundle!` macros — and a file that belongs to no project reads
+//! its own directory instead ([`project::file_view`](crate::project::file_view)). The run
+//! cache records, for each entry, what the resolver answers for every name the module
+//! required ([`with_model`](crate::project::with_model)), and replays the entry only while
+//! those answers stand.
+//!
+//! # What this module does not do
+//!
+//! Host modules — the `.d.tl` a Rust host generates from `#[host_module]` — are not loaded
+//! here: they are known to whoever compiled the host, and enter a project through the file
+//! they are written to. A host that serves modules itself does so with a
+//! [`TealResolver`](crate::pkg::TealResolver), which names files by the same rule
+//! ([`naming`](crate::naming)) without a model.
 
 pub mod resolver;
 pub use resolver::{Found, Resolution, Resolver};
@@ -105,10 +111,9 @@ pub struct Project {
     pub modules: Vec<Module>,
     /// The directory of entry links an install writes (`.htl/modules/entries`), one per
     /// installed dependency, each at the dependency's require root. `None` without an
-    /// `mlua-pkg.toml`. On the search path whenever the project has one
-    /// ([`search_dirs`](Self::search_dirs)): it is the one directory through which every
-    /// installed dependency — linked under `vendored/` or copied to a `target_dir` —
-    /// answers to its name.
+    /// `mlua-pkg.toml`. The one directory through which every installed dependency —
+    /// linked under `vendored/` or copied to a `target_dir` — answers to its name, and what
+    /// the run cache keys a dependency's files on.
     pub links: Option<PathBuf>,
     /// What reading the project could not make sense of, as messages. The model is built
     /// from the rest; nothing here stops a load. Today these come from `---@contract`
@@ -271,10 +276,6 @@ impl Module {
     /// that made both canonical once (the [`Resolver`] places thousands of files).
     pub(crate) fn name_of_relative(&self, rel: &Path) -> Option<String> {
         crate::naming::name_of(&self.mount, rel)
-    }
-
-    fn mount_last(&self) -> &str {
-        crate::naming::mount_last(&self.mount)
     }
 }
 
@@ -465,109 +466,6 @@ pub enum View {
     Source,
     /// A test file: the sources' view plus the project's test root.
     Test,
-}
-
-impl Project {
-    /// The directories to put on `package.path` for `view`, in the order they are
-    /// consulted.
-    ///
-    /// This is where the model meets Lua's search: each module contributes the
-    /// directories that make its files answer to the names [`Module::name_of`] gives
-    /// them. For a module mounted at the top that is its roots themselves. For a
-    /// dependency mounted at `x` it is the directory *holding* a directory named `x` —
-    /// `package.path`'s templates are `<dir>/?.lua` and `<dir>/?/init.lua`, so only a
-    /// directory named after the mount turns `x.sub` into a file. An installed
-    /// dependency's link `entries/x` is named so, and `entries/` goes on the path once
-    /// for all of them; a vendored copy is its own directory named after the dependency;
-    /// a patched copy's entry is named after it in the usual layout (`src/x`), and is its
-    /// own directory otherwise, which resolves `x` to `<entry>/x.tl` and nothing below
-    /// it — the one mount a path cannot express.
-    ///
-    /// Contract directories are not listed. Each holds modules written against one record,
-    /// and a `sites/*` contract is a row of directories holding the *same* names — one
-    /// `one.tl` per site — so on one path they would hide each other. A contract directory
-    /// is checked on its own, against its contract.
-    ///
-    /// The order is the project's own roots, then shipped declarations, then
-    /// dependencies, then `[check] paths`. It decides nothing the
-    /// model does not already decide, except between two files in different modules that
-    /// answer one name. That is a conflict the model does not report yet; until it does,
-    /// the order is what picks, and it picks the project's own file first.
-    ///
-    /// htl's own library is not listed: [`install_test_lib`](crate::Htl::install_test_lib)
-    /// and `install_std` write it and put it on the path themselves. Directories are
-    /// listed whether or not they exist, because the run cache keys an entry on them and a
-    /// directory created later changes what a name means.
-    pub fn search_dirs(&self, view: View) -> Vec<PathBuf> {
-        let own = self.own();
-        let mut out: Vec<PathBuf> = Vec::new();
-        out.extend(own.roots.source.clone());
-        out.extend(own.roots.decl.clone());
-        if view == View::Test {
-            out.extend(own.roots.test.clone());
-        }
-        let owned_by = |o: fn(&Owner) -> bool| self.modules.iter().filter(move |m| o(&m.owner));
-        for m in owned_by(|o| matches!(o, Owner::Crate { .. })) {
-            out.extend(m.roots.decl.clone());
-        }
-        // The links first: a dependency an install placed answers through its link, at its
-        // require root, whatever that root is called. The directories below are for what
-        // a link cannot cover — a patch or a copy in a tree nobody has installed in.
-        out.extend(self.links.clone());
-        for m in owned_by(|o| matches!(o, Owner::Patched | Owner::Vendored | Owner::Installed)) {
-            let Some(root) = &m.roots.source else {
-                continue;
-            };
-            match package_parent(m, root) {
-                Some(up) => out.push(up),
-                None => out.push(root.clone()),
-            }
-        }
-        for m in owned_by(|o| matches!(o, Owner::External)) {
-            out.extend(m.roots.source.clone());
-        }
-        let mut seen: Vec<PathBuf> = Vec::new();
-        out.retain(|d| {
-            let c = canon(d);
-            let fresh = !seen.contains(&c);
-            seen.push(c);
-            fresh
-        });
-        out
-    }
-}
-
-impl Project {
-    /// The directories of [`search_dirs`](Self::search_dirs) that hold packages by name —
-    /// the dependency links, and the parent of a dependency's root named after it (a
-    /// patch's `src/<name>`, a copy's `lua/<name>`) — where a flat package's
-    /// `<name>/<name>.tl` is `<name>` ([`naming`](crate::naming)). Every other directory
-    /// on the path is a root of modules mounted at the top, where that file is
-    /// `<name>.<name>`; the checker's path spells the two differently
-    /// ([`Htl::add_package_path`](crate::Htl::add_package_path)).
-    pub fn package_dirs(&self) -> Vec<PathBuf> {
-        let mut out: Vec<PathBuf> = self.links.iter().cloned().collect();
-        for m in self
-            .modules
-            .iter()
-            .filter(|m| matches!(m.owner, Owner::Patched | Owner::Vendored | Owner::Installed))
-        {
-            if let Some(up) = m.roots.source.as_ref().and_then(|r| package_parent(m, r)) {
-                out.push(up);
-            }
-        }
-        out
-    }
-}
-
-/// The directory holding a dependency's source `root` as a child named after the
-/// dependency, when it is one: consulted as `<dir>/<name>`, it resolves the dependency
-/// the way its link does.
-fn package_parent(m: &Module, root: &Path) -> Option<PathBuf> {
-    let named_after_mount = root.file_name().is_some_and(|f| f == m.mount_last());
-    named_after_mount
-        .then(|| root.parent().map(Path::to_path_buf))
-        .flatten()
 }
 
 /// What a walk over a project's files is for, which decides whose files it enters.
@@ -770,11 +668,19 @@ impl crate::Htl {
     /// Set this checker up for `project`, as `view` sees it: the working directory off the
     /// path ([`drop_cwd_search_path`](crate::Htl::drop_cwd_search_path)), its installed
     /// dependencies made reachable ([`prepare_deps`](crate::Htl::prepare_deps), when the
-    /// project has an `mlua-pkg.toml`), the model's [`Resolver`] answering every name
-    /// ([`install_resolver`](Self::install_resolver)), then the model's directories on the
-    /// search path in the order they are consulted ([`Project::search_dirs`]), a directory
-    /// of packages ([`Project::package_dirs`]) with a flat package's spelling and every
-    /// other one without it.
+    /// project has an `mlua-pkg.toml`), and the model's [`Resolver`] answering every name
+    /// ([`install_resolver`](Self::install_resolver)).
+    ///
+    /// None of the model's directories goes on `package.path`. A directory on the path is
+    /// read through templates that do not know whose files they find — the reason the
+    /// model exists — and with the resolver answering first they could only ever answer
+    /// what the model does not have, under a name the model does not give. What stays on
+    /// the path is what Lua was built to search (`/usr/local/share/lua/5.4/…`), for a
+    /// library installed on the machine.
+    ///
+    /// `view` is kept for the callers' sake: which roots a file may read is the resolver's
+    /// to decide, from the requiring file, and a test sees the test root because it is
+    /// under it.
     pub fn apply_model(&self, project: &Project, view: View) -> Result<()> {
         // The names come from the project's roots, so the working directory is not one of
         // the places they are looked for.
@@ -782,27 +688,24 @@ impl crate::Htl {
         if project.root.join(pkg::MANIFEST_NAME).is_file() {
             self.prepare_deps(&pkg::MluaProject::at(&project.root))?;
         }
-        self.install_resolver(Resolver::new(project))?;
-        // Back to front, as `add_search_paths` does, each directory spelled as what it is.
-        let packages: Vec<PathBuf> = project.package_dirs().iter().map(|d| canon(d)).collect();
-        for d in project.search_dirs(view).iter().rev() {
-            if packages.contains(&canon(d)) {
-                self.add_package_path(d)?;
-            } else {
-                self.add_path(d)?;
-            }
-        }
-        Ok(())
+        // No directory of the model goes on the path: the resolver answers every name the
+        // model has, from the file the model names, and the path is left to what the model
+        // does not have — the directories Lua itself searches for libraries installed on
+        // the machine. `view` is the resolver's to apply, from the requiring file.
+        let _ = view;
+        self.install_resolver(Resolver::new(project))
     }
 
     /// Have the checker ask `resolver` for every module name.
     ///
-    /// Three functions go into the prelude, made in the checker's state: `resolve_name`
+    /// Four functions go into the prelude, made in the checker's state: `resolve_name`
     /// (requirer, name) → kind and files, which the prelude's `tl.search_module` asks
     /// first; `rewrite_name` (requirer, name) → the name a `require` is to be written as,
     /// which its `tl.parse` wrapper applies; and `owns_file` (path) → whether a file is the
     /// model's, which holds a `package.path` search for a name the model does not have to
-    /// the files outside it. The kinds are `found`, `ambiguous`, `missing`, `outside` and
+    /// the files outside it; and `claims_name` (name) → every file of the model under the
+    /// name ([`Resolver::claims`]), which `duplicate-declaration` lists declarations from.
+    /// The kinds are `found`, `ambiguous`, `missing`, `outside` and
     /// `hidden` ([`Resolution`]).
     pub fn install_resolver(&self, resolver: Resolver) -> Result<()> {
         let lua = self.checker_lua()?;
@@ -849,7 +752,17 @@ impl crate::Htl {
                 Ok(r.rewrite(Path::new(&requirer), &name))
             })?
         };
+        let claims = {
+            let r = r.clone();
+            lua.create_function(move |_, name: String| {
+                Ok(r.claims(&name)
+                    .into_iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>())
+            })?
+        };
         let owns = lua.create_function(move |_, path: String| Ok(r.owns(Path::new(&path))))?;
+        self.h.set("claims_name", claims)?;
         self.h.set("resolve_name", resolve)?;
         self.h.set("rewrite_name", rewrite)?;
         self.h.set("owns_file", owns)?;
@@ -1177,61 +1090,6 @@ mod tests {
         assert_eq!((d.role, d.name.as_str()), (Role::Decl, "host"));
         let s = p.locate(Path::new("/p/scripts/main.tl")).unwrap();
         assert_eq!((s.role, s.name.as_str()), (Role::Source, "main"));
-    }
-
-    #[test]
-    fn search_dirs_put_a_dependency_s_parent_on_the_path_and_tests_only_for_tests() {
-        let root = scratch("search");
-        write(
-            &root.join(pkg::MANIFEST_NAME),
-            "[package]\nname = \"game\"\nversion = \"0.1.0\"\n\n\
-             [deps.lshape]\ngit = \"https://example.invalid/lshape\"\ntag = \"v1\"\ntarget_dir = \"lua/lshape\"\n",
-        );
-        write(&root.join("lua/lshape/init.tl"), "");
-        write(&root.join(".htl/modules/entries/mq/init.tl"), "");
-        let p = Project::load(&root, HtlConfig::default()).unwrap();
-
-        let src = p.search_dirs(View::Source);
-        assert_eq!(src[0], root.join("src"));
-        assert_eq!(src[1], root.join("types"));
-        assert!(src.contains(&root.join("lua")), "{src:?}");
-        assert!(src.contains(&root.join(".htl/modules/entries")), "{src:?}");
-        assert!(!src.contains(&root.join("tests")), "{src:?}");
-        assert!(
-            !src.contains(&root),
-            "the root is not a source root: {src:?}"
-        );
-        let test = p.search_dirs(View::Test);
-        assert!(test.contains(&root.join("tests")), "{test:?}");
-    }
-
-    #[test]
-    fn contract_directories_stay_off_the_search_path() {
-        let module = |name: &str, owner: Owner, dir: &str| Module {
-            name: name.into(),
-            owner,
-            mount: String::new(),
-            roots: Roots {
-                source: Some(PathBuf::from(dir)),
-                ..Roots::default()
-            },
-            home: Some(PathBuf::from(dir)),
-        };
-        let p = Project {
-            root: PathBuf::from("/p"),
-            config: HtlConfig::default(),
-            modules: vec![
-                module("p", Owner::Own, "/p/src"),
-                module("sites/a", Owner::Contract, "/p/sites/a"),
-                module("sites/b", Owner::Contract, "/p/sites/b"),
-                module("vendor", Owner::External, "/p/vendor"),
-            ],
-            links: None,
-            problems: Vec::new(),
-        };
-        let dirs = p.search_dirs(View::Source);
-        assert!(!dirs.iter().any(|d| d.starts_with("/p/sites")), "{dirs:?}");
-        assert!(dirs.contains(&PathBuf::from("/p/vendor")), "{dirs:?}");
     }
 
     #[test]

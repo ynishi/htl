@@ -118,6 +118,20 @@ pub struct Candidate {
     pub origin: Option<Origin>,
 }
 
+/// Who answered: the project model, or — for a name the model does not have — the search
+/// path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AnsweredBy {
+    /// The project model's [`Resolver`](crate::model::Resolver): the rows are every file of
+    /// the model under the name.
+    Model,
+    /// `package.path`, which holds only what the model does not have — the directories
+    /// Lua searches for libraries installed on the machine, or, outside a project, the
+    /// directory of the file asked from.
+    Path,
+}
+
 /// The counts a summary line is made of, and the verdict an exit code reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Summary {
@@ -145,9 +159,13 @@ pub struct Resolution {
     /// them — the read one among them rather than pulled out, because its place in the
     /// order is the explanation.
     pub candidates: Vec<Candidate>,
+    /// Who answered. The rows of a model answer are the model's files, and `searched` has
+    /// nothing to do with them.
+    pub answered_by: AnsweredBy,
     /// Every directory the search path consults, in order, whether or not it held
     /// anything for this name. A directory that holds nothing is half the answer when
-    /// the name resolves to nothing at all.
+    /// the name resolves to nothing at all. In a project none of them is the project's:
+    /// the model answers for its own directories.
     pub searched: Vec<String>,
     /// The counts and the verdict, for a caller that wants the answer without walking the
     /// rows.
@@ -169,12 +187,16 @@ pub fn resolve(
 ) -> Result<Resolution> {
     let dirs = h.search_path_dirs()?;
     let resolver = model.map(crate::model::Resolver::new);
-    let (rows, read) = match resolver
+    let (rows, read, answered_by) = match resolver
         .as_ref()
-        .and_then(|r| model_rows(r, name, &dirs, root, model))
+        .zip(model)
+        .and_then(|(r, m)| model_rows(r, name, root, m))
     {
-        Some(answer) => answer,
-        None => path_rows(h, name, &dirs, root, model, resolver.as_ref())?,
+        Some((rows, read)) => (rows, read, AnsweredBy::Model),
+        None => {
+            let (rows, read) = path_rows(h, name, &dirs, root, model, resolver.as_ref())?;
+            (rows, read, AnsweredBy::Path)
+        }
     };
 
     let shadowed = rows.iter().filter(|c| c.status == Status::Shadowed).count();
@@ -191,6 +213,7 @@ pub fn resolve(
     Ok(Resolution {
         module: name.to_string(),
         read: read.as_ref().map(|p| show(p, root)),
+        answered_by,
         searched,
         summary: Summary {
             candidates: rows.len(),
@@ -220,9 +243,8 @@ impl ModuleKind {
 fn model_rows(
     r: &crate::model::Resolver,
     name: &str,
-    dirs: &[PathBuf],
     root: Option<&Path>,
-    model: Option<&crate::model::Project>,
+    model: &crate::model::Project,
 ) -> Option<(Vec<Candidate>, Option<PathBuf>)> {
     use crate::model::Resolution as Answer;
     let (read, lua, ambiguous) = match r.resolve(None, name) {
@@ -276,11 +298,11 @@ fn model_rows(
             Candidate {
                 order,
                 path: show(f, root),
-                dir: show(&dir_holding(f, dirs), root),
+                dir: show(&root_holding(f, model), root),
                 kind: ModuleKind::of_path(f),
                 status,
                 shadowed_by: (status == Status::Shadowed).then_some(read_at).flatten(),
-                origin: origin_of(f, model),
+                origin: origin_of(f, Some(model)),
             }
         })
         .collect();
@@ -342,13 +364,16 @@ fn path_rows(
     Ok((rows, read))
 }
 
-/// The most specific search-path directory holding `path`, or its parent when none does.
-fn dir_holding(path: &Path, dirs: &[PathBuf]) -> PathBuf {
+/// The model's root that holds `path` — the most specific one, the root that names it —
+/// or its parent when none does.
+fn root_holding(path: &Path, model: &crate::model::Project) -> PathBuf {
     let p = canon(path);
-    dirs.iter()
-        .filter(|d| p.starts_with(canon(d)))
-        .max_by_key(|d| canon(d).components().count())
-        .cloned()
+    model
+        .modules
+        .iter()
+        .flat_map(|m| m.roots.iter().map(|(_, r)| r.to_path_buf()))
+        .filter(|r| p.starts_with(canon(r)))
+        .max_by_key(|r| canon(r).components().count())
         .unwrap_or_else(|| crate::parent_dir(path))
 }
 

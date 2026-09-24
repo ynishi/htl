@@ -63,8 +63,10 @@ fn one_candidate_is_reported_as_the_file_that_is_read() {
     assert!(ok, "a name that resolves exits 0: {err}");
     assert!(out.contains("htl resolve util: src/util.tl"), "{out}");
     assert_eq!(row(&out, "src/util.tl"), "1 src/util.tl source read");
-    // The directories are half the answer, so they are printed whatever was found.
-    assert!(out.contains("searched, in order: src, types"), "{out}");
+    // The project's own name is the model's to answer, not a search's: no directory of the
+    // project is on the path any more, so a list of them would be a list of nothing.
+    assert!(out.contains("answered by the project model"), "{out}");
+    assert!(!out.contains("searched"), "{out}");
 }
 
 /// Three declarations of one name, and the order is the whole reason one of them is in
@@ -156,11 +158,19 @@ fn a_name_that_resolves_to_nothing_says_so_and_exits_non_zero() {
         "a name that resolves to nothing exits non-zero: {out}{err}"
     );
     assert!(
-        out.contains("nothing on the search path answers require(\"nope\")"),
+        out.contains("nothing in the project or on the search path answers require(\"nope\")"),
         "{out}"
     );
-    // What was looked at is the useful half of a report with no rows in it.
-    assert!(out.contains("searched, in order: src, types"), "{out}");
+    // What was looked at is the useful half of a report with no rows in it — and outside
+    // the project's own directories, which the model has already said no for.
+    let searched = out
+        .lines()
+        .find(|l| l.contains("searched, in order:"))
+        .unwrap_or_else(|| panic!("no searched line in:\n{out}"));
+    assert!(
+        !searched.contains(" src") && !searched.contains(" types"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -185,12 +195,13 @@ fn the_json_carries_the_same_rows() {
     assert_eq!(c[1]["path"], "types/mq.d.tl");
     assert_eq!(c[1]["status"], "shadowed");
     assert_eq!(c[1]["shadowed_by"], 1);
+    assert_eq!(v["answered_by"], "model");
     assert!(
-        v["searched"]
+        !v["searched"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|d| d == "types"),
+            .any(|d| d == "types" || d == "src"),
         "{out}"
     );
 

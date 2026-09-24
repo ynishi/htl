@@ -123,9 +123,9 @@ error: .htl/modules/entries/mathx/init.tl:12:8: in local declaration: got string
 requirer's own diagnostics. Paths read against the directory the command ran in, whether
 the walk or a `require` found the file, and one that lies outside it is written in full
 rather than as a stack of `..`. `htl run` would refuse the module at that `require`; the
-check says so first. A file under the project's `tests/` is checked with the project's
-sources and `tests/` itself on the search path, the same as `htl test`, so `htl check
-tests` and `htl test` agree; the project's sources cannot `require` what is under
+check says so first. A file under the project's `tests/` may read the project's sources
+and `tests/` itself, the same as under `htl test`, so `htl check tests` and `htl test`
+agree; the project's sources cannot `require` what is under
 `tests/`. A file with neither an `htl.toml` nor an `mlua-pkg.toml` above it belongs to
 no project, and resolves its `require`s in its own directory.
 
@@ -866,7 +866,7 @@ no-any = "warn"           # allow by default; see it while you migrate, without 
 | `no-any` | allow | explicit `any` annotations and `as any` casts |
 | `explicit-number` | allow | `local n = 0` (inferred `integer`) that is later assigned a number expression (`n = n * 1.5`, `n = a / b`): names the declaration and the assignment; write `local n: number = 0`. Plain integer counters are not reported |
 | `class-record` | allow | a record declaring metamethods (`metamethod __index: Actor` = a class): its metatable is attached by `setmetatable` at run time and is not part of the value, so serialization and the Rust boundary drop it; keep such records out of saved data and host signatures |
-| `duplicate-declaration` | warn | two `.d.tl` for one module both reachable on the search path: position alone decides which is read, and nothing wrote that order down. Names the one read and the one that was not (see "Project config") |
+| `duplicate-declaration` | warn | two `.d.tl` for one module: an order decides which is read — the project's own first, then dependencies', crates', `[check] paths` — and nothing in either file says so. Names the one read and the one that was not (see "Project config") |
 | `host-module-shadowed` | warn | a `require` of a name a `#[host_module]` in the surrounding crate registers that resolved to a Teal file of that name: `package.preload` beats the path searcher at run time, so the file is what is checked and the host is what runs. Reported at the require, naming both (see "Rust host") |
 | `contract` | warn | a module under a `[[contract]]` directory that does not satisfy the contract's type or its `---@required` fields, and a `---@contract` marker that cannot be turned into a contract or published (see "Data from outside the program") |
 | `contract-unenforced` | warn | a contract the host never builds resolvers for, so it is documentation rather than a run-time guarantee. Say where the enforcement lives with `[[contract]] enforced_by` when the scan cannot see it |
@@ -1430,8 +1430,8 @@ ships in its manifest (`[package.metadata.htl] dts = ["dts/mq.d.tl"]`, see "Embe
 Rust"). `htl dts` — and `check` / `run` / `test`, which generate before they work —
 resolves the crate graph with `cargo metadata` and writes each of those files to
 `types/<crate>/<file>`, reported like the project's own (`wrote types/htl-mq/mq.d.tl`) and
-committed like them. That directory is on the search path in its own right, so the module
-keeps the name it was declared under whatever the crate is called: `htl-mq`'s `mq.d.tl` is
+committed like them. That directory is a root of its own, so the module keeps the name it
+was declared under whatever the crate is called: `htl-mq`'s `mq.d.tl` is
 `require("mq")`. A crate whose modules have a namespace keeps that too, by naming the
 directory its paths start at (`dts_root`, see "Shipping the declaration to your users"). A
 note beside them (`.htl-dts`) records which crate and version they came from, and is what
@@ -1470,14 +1470,13 @@ publishing a module of the same name is a real situation, and there is no regist
 arbitrate it with.
 
 Source beats declaration: when both `defs.tl` and a `defs.d.tl` are reachable, the
-checker reads the `.tl`, wherever the two sit on the path (Teal's own order is `.d.tl`
-first). So a `.d.tl` a host writes out for external script authors never shadows the
+checker reads the `.tl`, wherever the two sit (Teal's own order is `.d.tl` first). So a `.d.tl` a host writes out for external script authors never shadows the
 source it was made from inside the repo, and a check that runs before the host has
 rewritten it still sees the current types.
 
-Between two *declarations* of one module there is no such rule, only position: the
-directories above are consulted in the order they are listed, and the first hit is the
-one read. `duplicate-declaration` reports it — a project that keeps a hand-written
+Between two *declarations* of one module there is no such rule, only an order: the
+project's own comes first, then its dependencies', then the declarations crates ship, then
+`[check] paths`, and the first is the one read. `duplicate-declaration` reports it — a project that keeps a hand-written
 `xlib.d.tl` under `types/` and also has one arriving from a `[check] paths` directory is
 told which is in effect and which is not, rather than being left to work out why a type
 is not what the file in front of it says.
@@ -1498,15 +1497,13 @@ htl resolve mq: src/mq.d.tl
   2      types/mq.d.tl         declaration  shadowed by 1
   3      types/htl-mq/mq.d.tl  declaration  shadowed by 1  (shipped by htl-mq 0.2.0)
 
-  searched, in order: src, types, types/htl-mq, …
+  answered by the project model
 ```
 
-(`searched` goes on with htl's own library and the directories Lua itself was built to
-search.)
-
 Three answers in one view: what is read, what it hides, and why — the order is the reason,
-and printing it is what makes the answer self-explaining. An override on a search path is
-the mechanism working as intended, so nothing here is a defect and nothing fails.
+and printing it is what makes the answer self-explaining. One declaration overriding
+another is the mechanism working as intended, so nothing here is a defect and nothing
+fails.
 
 The rows are every file of the project — its own, a dependency's, a vendored or patched
 copy, a declaration materialised under `types/<crate>/`, which names the crate and version
@@ -1519,11 +1516,14 @@ declaration reads `runtime, typed by <n>` rather than `shadowed`: the check read
 declaration and the run loads that file, and neither hides the other. Two implementations
 of one name — two modules, or `src/demo.tl` beside `src/demo/init.tl` — are both
 `ambiguous`, and the command fails: no order picks one. A name the project does not have
-is looked up on the search path as Lua would, for a library installed for the machine.
+is looked up on the search path as Lua would, for a library installed for the machine, and
+the report ends with the directories it searched instead (`searched, in order: …`). None
+of them is the project's: the project's directories are the model's to answer for, and
+are not on Lua's search path at all.
 
 A name that resolves to nothing says so and exits non-zero, so a script can ask. `--format
-json` carries the same rows ("Machine-readable output"). `htl.test` is not on a project's
-search path — `htl test` preloads it into the state it runs — so it is not a name to ask
+json` carries the same rows ("Machine-readable output"). `htl.test` is not a project's
+module — `htl test` preloads it into the state it runs — so it is not a name to ask
 about here.
 
 ### Data from outside the program (`---@contract`)
@@ -2006,9 +2006,12 @@ names are stable; fields may be added, not renamed.
   none. `check_errors` is what the check behind the graph reported: a file that does not
   check contributes no edges, so a report from a run with any is a guess.
 - `resolve`: `{ module, read?, candidates: [{ order, path, dir, kind:
-  "source"|"declaration"|"lua", status: "read"|"shadowed"|"runtime", shadowed_by?,
+  "source"|"declaration"|"lua", status: "read"|"shadowed"|"runtime"|"ambiguous", shadowed_by?,
   origin?: { kind: "crate"|"dependency"|"vendored"|"patched", name, version? } }],
-  searched: [dir], summary: { candidates, shadowed, ok } }`. `order` is the position in
+  answered_by: "model"|"path", searched: [dir], summary: { candidates, shadowed, ok } }`.
+  `answered_by` says whether the rows are the project model's files under the name or what
+  Lua's search path found for a name the project does not have; `searched` is that path's
+  directories either way. `order` is the position in
   the search order, and `status` what became of that candidate: `read` is the file the
   checker reads, `shadowed` names the `order` that is read instead (`shadowed_by`), and
   `runtime` is the `.lua` a declaration types — loaded by the run, hidden by nothing.

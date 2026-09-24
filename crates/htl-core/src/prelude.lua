@@ -1669,10 +1669,18 @@ function H.search_dirs()
    return out
 end
 
--- Every `<name>.d.tl` reachable on the current `package.path`, in the order the path is
--- consulted: the declarations of `module_candidates`, which is the same walk.
+-- Every `<name>.d.tl` there is: with the project model (`H.claims_name`), every
+-- declaration a module of the model has under the name, the project's first; without
+-- one, every one reachable on the current `package.path`, in the order the path is
+-- consulted — the declarations of `module_candidates`, which is the same walk.
 function H.declaration_sites(name)
    local out = {}
+   if H.claims_name then
+      for _, p in ipairs(H.claims_name(name)) do
+         if p:sub(-5) == ".d.tl" then out[#out + 1] = p end
+      end
+      return out
+   end
    for _, c in ipairs(H.module_candidates(name)) do
       if c.kind == "declaration" then
          out[#out + 1] = c.path

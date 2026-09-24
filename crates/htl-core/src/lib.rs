@@ -570,7 +570,7 @@ pub fn declaration_conflict_lints(
         }
         seen.push(&site.module);
         out.push(format!(
-            "{}:{}:{}: {} is declared more than once on the search path: {} is read, {} {} not [htl duplicate-declaration]",
+            "{}:{}:{}: {} is declared more than once: {} is read, {} {} not [htl duplicate-declaration]",
             file.display(),
             site.line,
             site.col,

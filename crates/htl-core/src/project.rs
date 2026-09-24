@@ -734,24 +734,15 @@ pub fn check_one<O: Output>(
     })
 }
 
-/// Widen the search path of a checker set up for the sources' view to what `f` itself may
-/// read.
+/// Widen what a checker set up for the sources' view may read to what `f` itself may.
 ///
-/// In a project that is the test root, for a file the model places under it: a test may
-/// `require` a helper beside it, the sources may not. Outside a project there is no model
-/// to ask, and a file given on its own resolves its `require`s in its own directory — the
-/// one place a single file names by itself — and not in the working directory.
+/// In a project nothing: the model's resolver decides from the requiring file, and a test
+/// reads the test root because it is under it. Outside a project there is no model to
+/// ask, and a file given on its own resolves its `require`s in its own directory — the one
+/// place a single file names by itself — and not in the working directory.
 pub fn file_view(h: &Htl, model: Option<&crate::model::Project>, f: &Path) -> Result<()> {
     match model {
-        Some(m) => {
-            if m.locate(f)
-                .is_some_and(|p| p.role == crate::model::Role::Test)
-                && let Some(t) = &m.own().roots.test
-            {
-                h.add_path(t)?;
-            }
-            Ok(())
-        }
+        Some(_) => Ok(()),
         None => {
             // Beside the file, not beside wherever the command ran.
             h.drop_cwd_search_path()?;
