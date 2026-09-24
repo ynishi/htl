@@ -15,8 +15,16 @@
 //! ([`Policy::resolve`]), so that the default lives here and not in each command. A command
 //! that judges differently on purpose says so as a field of [`Policy`], not with a
 //! predicate of its own.
+//!
+//! One default for every command and for the macros: a finding is advice until a rule is
+//! at `deny` or the run is `strict`. The macros used to fail a build on any lint, levels
+//! unread; a build path stricter than the checker is the shape that broke builds
+//! elsewhere (Rust's `#![deny(warnings)]` under a new compiler, a bundler that failed on
+//! lints the editor called warnings), and the answer that held there is this one — one
+//! severity model, and strictness a knob the invoker turns ([`Policy::with_env`]).
 
 use crate::config::HtlConfig;
+use crate::lint::{Level, Selection};
 
 /// What a run said, counted: the input to [`verdict`].
 ///
@@ -39,8 +47,13 @@ pub struct Findings {
 /// How a run judges its findings.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Policy {
-    /// Every finding the run reports counts as `deny` (`[lint] strict`, `--strict`).
+    /// Every finding the run reports counts as `deny` (`[lint] strict`, `--strict`,
+    /// `HTL_LINT=deny`).
     pub strict: bool,
+    /// No finding fails the run, whatever its level: only an error does. `HTL_LINT=warn`,
+    /// the environment's way to let a build through that a project's `deny` would stop —
+    /// a cap on levels, as `--cap-lints` is for rustc, rather than a second default.
+    pub capped: bool,
 }
 
 impl Policy {
@@ -51,23 +64,80 @@ impl Policy {
     pub fn resolve(config: Option<&HtlConfig>, strict_flag: bool) -> Self {
         Self {
             strict: strict_flag || config.and_then(|c| c.lint.strict).unwrap_or(false),
+            capped: false,
         }
     }
+
+    /// This policy with `HTL_LINT` applied, given its value (`None` when unset): `deny`
+    /// makes the run strict, `warn` caps it. Anything else is refused rather than read as
+    /// one of the two — a misspelt `deny` would otherwise be a build that passed.
+    pub fn with_env(self, htl_lint: Option<&str>) -> Result<Self, String> {
+        match htl_lint {
+            None => Ok(self),
+            Some("deny") => Ok(Self {
+                strict: true,
+                capped: false,
+            }),
+            Some("warn") => Ok(Self {
+                strict: false,
+                capped: true,
+            }),
+            Some(other) => Err(format!(
+                "HTL_LINT={other:?}: expected \"warn\" (no finding fails) or \"deny\" (every \
+                 finding fails)"
+            )),
+        }
+    }
+}
+
+impl Findings {
+    /// The findings of a run that holds them as text: Teal's `warnings` and htl's `lints`,
+    /// each counted as `denied` too when its rule is at `deny` in `levels`. What a caller
+    /// with no [`Sink`](crate::project::Sink) counts, by the reading the sink uses.
+    pub fn of(warnings: &[String], lints: &[String], levels: &Selection) -> Self {
+        Self {
+            errors: 0,
+            warnings: warnings.len(),
+            lints: lints.len(),
+            denied: warnings
+                .iter()
+                .chain(lints)
+                .filter(|t| is_denied(t, levels))
+                .count(),
+        }
+    }
+}
+
+/// Whether a warning or lint, as printed, was said under a rule at `deny` in `levels`: the
+/// rule is the `[htl <rule>]` name it ends with. An error has no rule and no level.
+pub fn is_denied(text: &str, levels: &Selection) -> bool {
+    crate::diagnostic::rule_of(text).is_some_and(|rule| levels.level_of(rule) == Level::Deny)
 }
 
 /// Whether a run with `findings`, judged by `policy`, fails.
 pub fn verdict(findings: &Findings, policy: &Policy) -> bool {
     findings.errors > 0
-        || findings.denied > 0
-        || (policy.strict && (findings.warnings > 0 || findings.lints > 0))
+        || (!policy.capped
+            && (findings.denied > 0
+                || (policy.strict && (findings.warnings > 0 || findings.lints > 0))))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ADVISORY: Policy = Policy { strict: false };
-    const STRICT: Policy = Policy { strict: true };
+    const ADVISORY: Policy = Policy {
+        strict: false,
+        capped: false,
+    };
+    const STRICT: Policy = Policy {
+        strict: true,
+        capped: false,
+    };
+    const CAPPED: Policy = Policy {
+        strict: false,
+        capped: true,
+    };
 
     fn f(errors: usize, warnings: usize, lints: usize, denied: usize) -> Findings {
         Findings {
@@ -118,5 +188,34 @@ mod tests {
         assert_eq!(Policy::resolve(Some(&file(Some(true))), false), STRICT);
         assert_eq!(Policy::resolve(Some(&file(Some(false))), true), STRICT);
         assert_eq!(Policy::resolve(Some(&file(Some(false))), false), ADVISORY);
+    }
+
+    #[test]
+    fn htl_lint_raises_caps_or_is_refused() {
+        assert_eq!(ADVISORY.with_env(None), Ok(ADVISORY));
+        assert_eq!(ADVISORY.with_env(Some("deny")), Ok(STRICT));
+        assert_eq!(STRICT.with_env(Some("warn")), Ok(CAPPED));
+        assert!(ADVISORY.with_env(Some("error")).is_err());
+    }
+
+    #[test]
+    fn a_cap_lets_findings_through_and_never_an_error() {
+        assert!(!verdict(&f(0, 1, 1, 2), &CAPPED));
+        assert!(verdict(&f(1, 0, 0, 0), &CAPPED));
+    }
+
+    #[test]
+    fn findings_of_text_count_deny_by_the_rule_each_ends_with() {
+        let levels = crate::lint::Lints::parse("require-cycle=deny")
+            .unwrap()
+            .selection()
+            .clone();
+        let lints = vec![
+            "a.tl:1:1: x [htl require-cycle]".to_string(),
+            "a.tl:2:1: y [htl nil-index]".to_string(),
+        ];
+        let found = Findings::of(&[], &lints, &levels);
+        assert_eq!(found, f(0, 0, 2, 1));
+        assert!(verdict(&found, &ADVISORY));
     }
 }

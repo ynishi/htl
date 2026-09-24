@@ -5,8 +5,8 @@
 //! htl = "0.4"               # the htl command this project expects; a mismatch is refused
 //!
 //! [lint]
-//! strict = true             # for this run, every `warn` counts as `deny` (htl check
-//!                           # only); lints also fail include_tl!
+//! strict = true             # every `warn` counts as `deny`: fails htl check, htl fix
+//!                           # and include_tl! (not htl test)
 //!
 //! [lint.rules]              # a level per rule: allow (not reported) / warn (reported,
 //! nil-index = "deny"        # advisory) / deny (reported, fails htl check)
@@ -327,10 +327,10 @@ pub struct LintConfig {
     #[serde(default)]
     pub rules: std::collections::BTreeMap<String, lint::Level>,
     /// `true`: every finding this run reports at `warn` counts as `deny`, so Teal's
-    /// warnings and htl's lints fail `htl check`; lints also fail `include_tl!` (the macro
-    /// reports Teal's warnings and builds anyway). `false`: advisory everywhere (including
-    /// the macro, whose built-in default is strict), except for a rule the project set to
-    /// `deny`, which fails `htl check` with or without this key.
+    /// warnings and htl's lints fail `htl check`, `htl fix` and the macros. `false`, or
+    /// absent: advisory everywhere, except for a rule the project set to `deny`, which
+    /// fails all of them with or without this key. One default for the command and the
+    /// build ([`crate::verdict`]); `HTL_LINT` overrides it for a build.
     ///
     /// A run-wide promotion rather than a concept of its own: `strict` and a `[lint.rules]`
     /// level are the same question asked at two grains.
