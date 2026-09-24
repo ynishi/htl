@@ -1017,8 +1017,11 @@ pub fn check<O: Output>(
     // The module names the host registers in `package.preload` with a `#[host_module]`:
     // `host-module-shadowed` asks the same question of every require. A project's model
     // read them from the crate around its root when it was loaded
-    // ([`Provider::HostModule`](crate::model::Provider::HostModule)); a file in no project
-    // has no model, and scans the crate around the first path. No crate means no host.
+    // ([`Provider::HostModule`](crate::model::Provider::HostModule)), and its resolver
+    // already makes a file under one of them an error at the require
+    // ([`Resolution::HostShadowed`](crate::model::Resolution::HostShadowed)), so the lint
+    // finds nothing to add there; a file in no project has no model, and scans the crate
+    // around the first path. No crate means no host.
     // That crate is also where `contract-unenforced` looks for enforcement, below.
     let cargo_root = crate::dts::find_cargo_package_root(start);
     let host_modules: Vec<String> = match model {

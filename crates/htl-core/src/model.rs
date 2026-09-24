@@ -95,21 +95,27 @@
 //! file of whichever module's root it is written under, and is named there like any other
 //! declaration.
 //!
+//! A file of the model that implements a name the host provides — a `src/host.tl` or
+//! `src/host.lua` beside `#[host_module(name = "host")]` — is an error: the check would
+//! read the file and a run with the host would load the host's module. The
+//! [`Resolver`] answers such a name with [`Resolution::HostShadowed`], which `htl check`
+//! reports at every `require` of the name and `htl run` / `htl test` raise at run time, the
+//! way a name two files implement is an error in both. A `.d.tl` of the name is not an
+//! implementation; it is how the host module is typed, and the checker reads it.
+//!
 //! # What this module does not do
 //!
-//! It does not load a host module's files, and it does not decide what a name the host
-//! provides means when a file of the project answers to it as well. It knows the names and
-//! where each comes from; `htl check`'s `host-module-shadowed` lint reads them from here
-//! (#321), and the other places that ask which names the host provides — the linker,
-//! `htl unused`, the macros, the run time — still answer from their own sources until they
-//! are moved onto this table.
+//! It does not load a host module's files. The check and the run time read the host's
+//! names from here through the resolver; the linker, `htl unused` and the macros still
+//! decide which names the host provides from their own sources (`[build] host`,
+//! `include_bundle!(host = [..])`) until they are moved onto this table.
 //!
 //! A host that serves modules itself does so with a
 //! [`TealResolver`](crate::pkg::TealResolver), which names files by the same rule
 //! ([`naming`](crate::naming)) without a model.
 
 pub mod resolver;
-pub use resolver::{Found, Resolution, Resolver};
+pub use resolver::{Found, HostShadowed, Resolution, Resolver};
 
 use crate::config::{CONFIG_NAME, HtlConfig, resolve_path};
 use crate::pkg;
@@ -888,8 +894,9 @@ impl crate::Htl {
     /// model's, which holds a `package.path` search for a name the model does not have to
     /// the files outside it; and `claims_name` (name) → every file of the model under the
     /// name ([`Resolver::claims`]), which `duplicate-declaration` lists declarations from.
-    /// The kinds are `found`, `ambiguous`, `missing`, `outside` and
-    /// `hidden` ([`Resolution`]).
+    /// The kinds are `found`, `ambiguous`, `missing`, `outside`, `hidden` and `shadowed`
+    /// ([`Resolution`]). `shadowed` carries the error and the name's declaration, when it
+    /// has one, which is what the checker types the `require` from.
     pub fn install_resolver(&self, resolver: Resolver) -> Result<()> {
         let lua = self.checker_lua()?;
         let r = std::sync::Arc::new(resolver);
@@ -924,6 +931,9 @@ impl crate::Htl {
                     Resolution::Outside => ("outside".into(), None, None, None),
                     Resolution::NotVisible(file, msg) => {
                         ("hidden".into(), Some(msg), s(Some(file)), None)
+                    }
+                    Resolution::HostShadowed(h) => {
+                        ("shadowed".into(), Some(h.message), s(h.declaration), None)
                     }
                 };
                 Ok(answer)

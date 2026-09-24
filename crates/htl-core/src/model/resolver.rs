@@ -25,13 +25,23 @@
 //! again, so that answer is also asked for where every file passes once — the prelude's
 //! `tl.parse` wrapper — and reported there, at the `require`.
 //!
+//! A name the host provides ([`Project::provides`]) is answered by no file: the host puts
+//! it in `package.preload`, which Lua consults before any searcher. The model may still
+//! hold a declaration of it — that is how a host module is typed — and the answer is then
+//! [`Resolution::Found`] with only the declaration, as for any declared name. What it may
+//! not hold is an implementation: a `.tl` or a `.lua` under the name would be what the
+//! checker reads and what a run without the host loads, while every run with the host
+//! loads the host's module instead. No order between the two is right in every phase, so
+//! the answer is [`Resolution::HostShadowed`], an error wherever the name is asked for —
+//! the way two files implementing one name are [`Resolution::Ambiguous`].
+//!
 //! Names written into generated Lua are the ones [`rewrite`](Resolver::rewrite) gives:
 //! `@<dependency>/<name>` for a dependency's module and `@/<name>` for the project's own,
 //! wherever `[imports]` chose between the two. They mean the same thing whoever asks, so a
 //! run-time `require`, which carries no requiring file, is answered the way the checker
 //! was.
 
-use super::{Owner, Project, Role};
+use super::{Owner, Project, Provider, Role};
 use crate::config::ImportTarget;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -59,6 +69,23 @@ pub struct Found {
     pub lua: Option<PathBuf>,
 }
 
+/// A name the host provides that a file of the model implements as well: what
+/// [`Resolution::HostShadowed`] carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostShadowed {
+    /// Where the model learned that the host provides the name.
+    pub provider: Provider,
+    /// The name's `.d.tl`, when the model has one: the host module's types, which the
+    /// checker still reads for it.
+    pub declaration: Option<PathBuf>,
+    /// The implementations — a `.tl`, a `.lua`, or both — that would be checked, or run
+    /// by a run without the host, in place of the host's module.
+    pub files: Vec<PathBuf>,
+    /// The error that says so, with the files as a message names them
+    /// ([`Resolver::show`]): what `htl check` reports at the `require` and a run raises.
+    pub message: String,
+}
+
 /// The answer to one `require`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolution {
@@ -76,6 +103,12 @@ pub enum Resolution {
     /// A dependency asked for a name only the project's own module has: the file it would
     /// have read, and the error that says so.
     NotVisible(PathBuf, String),
+    /// The host provides the name ([`Project::provides`]) and a file of the model
+    /// implements it too. An error in every phase: the check would read the file, a run
+    /// with the host would load the host's module, and neither is the other. A
+    /// declaration alone is not this — it is [`Found`](Resolution::Found), and how a
+    /// host module gets its types.
+    HostShadowed(HostShadowed),
 }
 
 /// The model's name → file table, and how a requiring file changes a name.
@@ -266,6 +299,7 @@ impl Resolver {
         let others = |e: &Entry| !dependency || !own_only(e);
         match self.pick(&name, |e| sees(e) && others(e)) {
             Resolution::Missing => {}
+            Resolution::Found(f) => return self.unless_provided(&name, f),
             r => return r,
         }
         if dependency
@@ -289,6 +323,58 @@ impl Resolver {
             );
         }
         Resolution::Outside
+    }
+
+    /// `found` as the answer for `name`, unless the host provides the name and `found`
+    /// has an implementation of it — then [`Resolution::HostShadowed`].
+    ///
+    /// Asked only for a plain name. `@/<name>` and `@<dependency>/<name>` are what
+    /// `[imports]` and a dependency's own names are written as, and no host registers a
+    /// name under either spelling, so a file answering one of them is what runs.
+    fn unless_provided(&self, name: &str, found: Found) -> Resolution {
+        let Some(provider) = self.project.provides(name) else {
+            return Resolution::Found(found);
+        };
+        let files: Vec<PathBuf> = found
+            .implementation
+            .iter()
+            .chain(found.lua.iter())
+            .cloned()
+            .collect();
+        if files.is_empty() {
+            return Resolution::Found(found);
+        }
+        let from = match provider {
+            Provider::HostModule => {
+                let cargo = self
+                    .project
+                    .host_crate
+                    .as_deref()
+                    .map(|c| self.show(&c.join("Cargo.toml")))
+                    .unwrap_or_else(|| "Cargo.toml".into());
+                format!("#[host_module] in {cargo}'s crate")
+            }
+            Provider::Build => format!("[build] host in {}", crate::config::CONFIG_NAME),
+            Provider::Std => "htl's std".into(),
+        };
+        let shown: Vec<String> = files.iter().map(|f| self.show(f)).collect();
+        let (these, them) = if files.len() == 1 {
+            ("this file", "it")
+        } else {
+            ("these files", "them")
+        };
+        let message = format!(
+            "'{name}' is provided by the host ({from}) and also implemented by {}: the \
+             host's module is what runs, so {these} would be checked and never run — rename \
+             {them}, or stop providing the name",
+            shown.join(" and ")
+        );
+        Resolution::HostShadowed(HostShadowed {
+            provider,
+            declaration: found.declaration,
+            files,
+            message,
+        })
     }
 
     /// [`resolve`](Self::resolve)'s answer as a string that changes whenever the answer
@@ -318,6 +404,19 @@ impl Resolver {
             Resolution::Missing => "missing".into(),
             Resolution::Outside => "outside".into(),
             Resolution::NotVisible(f, _) => format!("hidden\0{}", f.display()),
+            Resolution::HostShadowed(h) => {
+                let files: Vec<String> = h
+                    .files
+                    .iter()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .collect();
+                format!(
+                    "shadowed\0{:?}\0{}\0{}",
+                    h.provider,
+                    s(&h.declaration),
+                    files.join("\0")
+                )
+            }
         }
     }
 
@@ -587,6 +686,62 @@ mod tests {
             r.resolve(Some(&root.join("src/main.tl")), "util"),
             Resolution::Found(_)
         ));
+    }
+
+    #[test]
+    fn a_file_under_a_name_the_host_provides_is_shadowed_and_a_declaration_is_not() {
+        let root = scratch("host");
+        write(&root.join("src/game.d.tl"), "");
+        let cfg = || HtlConfig::parse("[build]\nhost = [\"game\"]\n").unwrap();
+        let main = root.join("src/main.tl");
+
+        // The declaration alone is how the host's module is typed.
+        let r = Resolver::new(&Project::load(&root, cfg()).unwrap());
+        match r.resolve(Some(&main), "game") {
+            Resolution::Found(f) => {
+                assert_eq!(f.declaration, Some(root.join("src/game.d.tl")));
+                assert_eq!((f.implementation, f.lua), (None, None));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(r.fingerprint(None, "game").starts_with("found\0"));
+
+        // An implementation beside it — `.tl` and `.lua` both — is the error.
+        write(&root.join("src/game.tl"), "");
+        write(&root.join("src/game.lua"), "");
+        let r = Resolver::new(&Project::load(&root, cfg()).unwrap());
+        let answer = r.resolve(None, "game");
+        assert_eq!(
+            answer,
+            r.resolve(Some(&main), "game"),
+            "asked from anywhere"
+        );
+        match answer {
+            Resolution::HostShadowed(h) => {
+                assert_eq!(h.provider, Provider::Build);
+                assert_eq!(h.declaration, Some(root.join("src/game.d.tl")));
+                assert_eq!(
+                    h.files,
+                    vec![root.join("src/game.tl"), root.join("src/game.lua")]
+                );
+                assert_eq!(
+                    h.message,
+                    "'game' is provided by the host ([build] host in htl.toml) and also \
+                     implemented by src/game.tl and src/game.lua: the host's module is what \
+                     runs, so these files would be checked and never run — rename them, or \
+                     stop providing the name"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            r.fingerprint(None, "game").starts_with("shadowed\0"),
+            "the run cache keys on its own answer"
+        );
+
+        // The same file under a name the host does not provide is only a module.
+        let r = Resolver::new(&Project::load(&root, HtlConfig::default()).unwrap());
+        assert!(matches!(r.resolve(None, "game"), Resolution::Found(_)));
     }
 
     #[test]

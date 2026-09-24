@@ -521,6 +521,17 @@ pub fn contract_lints(
 /// declaration is how a host module is given types at all, and `htl dts` writes exactly
 /// that file, so the two agree by construction.
 ///
+/// In a project this lint has nothing left to say, and says nothing. The model knows the
+/// names the host provides ([`model::Project::provides`]), and its resolver answers a name
+/// a file of the project implements as well with
+/// [`Resolution::HostShadowed`](model::Resolution::HostShadowed): an error at the
+/// `require`, in the check and at run time, and a search that yields the name's
+/// declaration or nothing — never the file. So the require this lint looks for, one of a
+/// host module name that landed on a file, does not occur, and the error is what reports
+/// the state. The lint stays for a file in no project, which has no model: there
+/// `host_modules` is the scan of the crate around the file, and a warning is all that
+/// scan can back. The rule stays registered either way, since configs name it.
+///
 /// Call it with the search path the file was checked under: the answer depends on it.
 pub fn declaration_conflict_lints(
     h: &Htl,

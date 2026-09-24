@@ -79,14 +79,23 @@ fn round_trip(root: &Path, target: &str, rule: &str, at_the_site: bool) {
 
     // 2. The name as a key of `[lint.rules]`, at `allow`.
     let cfg = root.join("htl.toml");
-    let before = std::fs::read_to_string(&cfg).unwrap_or_default();
+    let before = std::fs::read_to_string(&cfg).ok();
     write(
         &cfg,
-        &format!("{before}\n[lint.rules]\n{rule:?} = \"allow\"\n"),
+        &format!(
+            "{}\n[lint.rules]\n{rule:?} = \"allow\"\n",
+            before.as_deref().unwrap_or_default()
+        ),
     );
     let off = under(root, target, rule, &[]);
     assert!(off.is_empty(), "[lint.rules] allow left {rule}: {off:?}");
-    write(&cfg, &before);
+    // Put back what was there, and take away what was not: an `htl.toml` makes the
+    // directory a project, and a file in a project is checked against its model — which
+    // for `host-module-shadowed` reports an error in the lint's place.
+    match &before {
+        Some(text) => write(&cfg, text),
+        None => std::fs::remove_file(&cfg).unwrap(),
+    }
     if !at_the_site {
         return;
     }

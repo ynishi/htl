@@ -450,12 +450,26 @@ from `#[derive(TealRecord)]` structs and enums in the same source file, types fr
 other modules via `uses = [Name]` + their own `.d.tl`.
 
 The name a host module registers is a name the Teal sources no longer own. The host puts
-it in `package.preload`, which Lua consults before any path searcher, so a `scripts/host.tl`
-sitting beside `#[host_module(name = "host")]` is the file the check reads and never the
-module the program runs — green check, successful build, `attempt to call a nil value` at
-the first function the two do not share. `host-module-shadowed` reports that at the
-`require`, naming both. It is a lint rather than a fix: which of the two should give up the
-name is the project's decision, and htl moves neither resolution order.
+it in `package.preload`, which Lua consults before any path searcher, so a `src/host.tl`
+sitting beside `#[host_module(name = "host")]` would be the file the check reads and never
+the module the program runs — green check, `attempt to call a nil value` at the first
+function the two do not share. In a project (a directory with `htl.toml` or
+`mlua-pkg.toml`) that is an error, reported at every `require` of the name:
+
+```text
+src/main.tl:1:14: 'host' is provided by the host (#[host_module] in Cargo.toml's crate)
+and also implemented by src/host.tl: the host's module is what runs, so this file would be
+checked and never run — rename it, or stop providing the name
+```
+
+The same holds for a `src/host.lua`, with or without a `.d.tl` beside it, and for a name
+the host provides by the other two routes: `[build] host` in `htl.toml` (the message says
+`[build] host in htl.toml`) and `std.*` (`htl's std`). `htl run` and `htl test` refuse the
+file at its `require` with the same message rather than run it. The host's `.d.tl` is not
+an implementation: it is how the module is typed, and the check reads it. Which of the two
+gives up the name is the project's decision — rename the file, or stop providing the name.
+A file in no project has no model to ask, and is reported by the `host-module-shadowed`
+lint instead (see "Lints").
 
 ### Your own `Lua`
 
@@ -869,7 +883,7 @@ no-any = "warn"           # allow by default; see it while you migrate, without 
 | `explicit-number` | allow | `local n = 0` (inferred `integer`) that is later assigned a number expression (`n = n * 1.5`, `n = a / b`): names the declaration and the assignment; write `local n: number = 0`. Plain integer counters are not reported |
 | `class-record` | allow | a record declaring metamethods (`metamethod __index: Actor` = a class): its metatable is attached by `setmetatable` at run time and is not part of the value, so serialization and the Rust boundary drop it; keep such records out of saved data and host signatures |
 | `duplicate-declaration` | warn | two `.d.tl` for one module: an order decides which is read — the project's own first, then dependencies', crates', `[check] paths` — and nothing in either file says so. Names the one read and the one that was not (see "Project config") |
-| `host-module-shadowed` | warn | a `require` of a name a `#[host_module]` in the surrounding crate registers that resolved to a Teal file of that name: `package.preload` beats the path searcher at run time, so the file is what is checked and the host is what runs. Reported at the require, naming both (see "Rust host") |
+| `host-module-shadowed` | warn | for a file in no project (no `htl.toml` or `mlua-pkg.toml` above it): a `require` of a name a `#[host_module]` in the surrounding crate registers that resolved to a Teal file of that name: `package.preload` beats the path searcher at run time, so the file is what is checked and the host is what runs. Reported at the require, naming both. In a project the same state is an error rather than this lint (see "Embedding in Rust") |
 | `contract` | warn | a module under a `[[contract]]` directory that does not satisfy the contract's type or its `---@required` fields, and a `---@contract` marker that cannot be turned into a contract or published (see "Data from outside the program") |
 | `contract-unenforced` | warn | a contract the host never builds resolvers for, so it is documentation rather than a run-time guarantee. Say where the enforcement lives with `[[contract]] enforced_by` when the scan cannot see it |
 | `require-cycle` | warn | a loop in the require graph of the files `htl check <dir>` just checked, e.g. `a.tl -> b.tl -> a.tl`. Teal types the back edge as an opaque circular require, so without this the symptom is "cannot index" somewhere else |
@@ -2072,7 +2086,9 @@ and is refused up front, naming them, if one is missing.
   fingerprint) says it was not recorded.
 - A dynamic `require(expr)` cannot be followed: list its targets under `[build] extra`
   in `htl.toml` (or `--extra`). Modules the host provides without a `.d.tl` go under
-  `[build] host` (or `--host`).
+  `[build] host` (or `--host`). A name in `[build] host` is the host's for the check and
+  the run as well: a `.tl` or `.lua` of the project under it is an error (see
+  "Embedding in Rust").
 - Bundled modules are installed as `package.preload` entries, the same place a host
   puts its own (a name the host preloaded first is left alone: the host wins). So
   everything that defers to preload, a `.d.tl` stepping aside for the implementation
