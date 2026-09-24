@@ -335,8 +335,8 @@ if __name__ == "__main__":
 # Command-line flags and HTL_LINTS / HTL_LINT override it.
 
 [lint]
-# strict = true   # warnings and lints fail htl check (not htl test); lints fail
-#                   include_tl!; false makes the macro advisory
+# strict = true   # warnings and lints fail htl check, htl fix and include_tl!
+#                   (not htl test); a rule at deny fails them without it
 
 # Per rule: htl check --list-lints names every rule with the level it has by
 # default, and the README's "Lints" section says how to change one.

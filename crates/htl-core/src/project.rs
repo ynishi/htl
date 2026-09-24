@@ -287,8 +287,7 @@ impl<O: Output> Sink<O> {
         // of the rule that said it, and that name has a level.
         if severity != Severity::Error
             && let Some(levels) = &self.levels
-            && let Some(rule) = crate::diagnostic::rule_of(text.as_ref())
-            && levels.level_of(rule) == crate::lint::Level::Deny
+            && crate::verdict::is_denied(text.as_ref(), levels)
         {
             self.denied += 1;
         }
@@ -1088,7 +1087,13 @@ impl Report {
     /// Whether the run counts as a failure under `strict`: [`crate::verdict::verdict`] of
     /// its [`findings`](Self::findings), which says what that means.
     pub fn failed(&self, strict: bool) -> bool {
-        crate::verdict::verdict(&self.findings(), &crate::verdict::Policy { strict })
+        crate::verdict::verdict(
+            &self.findings(),
+            &crate::verdict::Policy {
+                strict,
+                capped: false,
+            },
+        )
     }
 
     /// Every module came from the store, so no checker was built.

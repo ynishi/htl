@@ -6,8 +6,10 @@
 //! - `#[host_module(name = "...")]`  -> `UserData` impl + Teal `.d.tl` from a plain `impl` block
 //! - `#[c_export(prefix = "...")]`   -> `extern "C"` wrappers + C header from the same `impl` block
 //!
-//! Paths are relative to `CARGO_MANIFEST_DIR`. Teal type errors (and htl lints, unless
-//! `HTL_LINT=warn`) become `compile_error!`s. Every `.tl` consulted is registered with
+//! Paths are relative to `CARGO_MANIFEST_DIR`. Teal type errors become `compile_error!`s,
+//! and so do the warnings and lints `htl check` would fail on — a rule at `deny`, or any
+//! under `[lint] strict` (`htl_core::verdict`); the rest are printed and the build goes on.
+//! `HTL_LINT=deny` makes every one fail, `HTL_LINT=warn` none. Every `.tl` consulted is registered with
 //! `include_str!` so edits trigger a rebuild. Generated code refers to `::htl::...`, so
 //! use these through the `htl` umbrella crate.
 //!
@@ -181,23 +183,18 @@ fn resolve_bundle(
         .map_err(|e| format!("include_bundle!: {e:#}"))?;
     let typed = linked.modules.iter().filter(|m| m.typed).count();
     let cached = (linked.cached, typed);
-    for (_, ci) in &linked.checks {
-        for w in &ci.warnings {
-            eprintln!("include_bundle! warning: {w}");
-        }
-    }
-    if !linked.lints.is_empty() {
-        if lenient(cfg) {
-            for l in &linked.lints {
-                eprintln!("include_bundle! lint: {l}");
-            }
-        } else {
-            return Err(format!(
-                "htl lint failed (set HTL_LINT=warn to downgrade):\n{}",
-                linked.lints.join("\n")
-            ));
-        }
-    }
+    let warnings: Vec<String> = linked
+        .checks
+        .iter()
+        .flat_map(|(_, ci)| ci.warnings.iter().cloned())
+        .collect();
+    judge(
+        "include_bundle!",
+        &ck,
+        &warnings,
+        &linked.lints,
+        std::env::var("HTL_LINT").ok().as_deref(),
+    )?;
     let inputs: Vec<String> = linked
         .inputs()
         .into_iter()
@@ -387,12 +384,52 @@ fn checker_for(tag: &str, manifest_dir: &Path, path: &Path) -> Result<Checker, S
     })
 }
 
-/// Lints fail the build unless `HTL_LINT=warn`, else `htl.toml` `strict = false`.
-fn lenient(cfg: &Option<htl_core::config::HtlConfig>) -> bool {
-    match std::env::var("HTL_LINT") {
-        Ok(v) => v == "warn",
-        Err(_) => cfg.as_ref().and_then(|c| c.lint.strict) == Some(false),
+/// Judge a build's warnings and lints as `htl check` judges a run's: the levels the
+/// checker was configured with, the policy of `htl.toml`, `HTL_LINT` (`htl_lint`, its value
+/// when set) on top. What fails the build is the error; what does not is printed and the
+/// build goes on.
+///
+/// The build and the check share one default so that a project quiet under `htl check`
+/// builds, and a rule the project put at `deny` stops both. A new release that adds a lint
+/// at `warn` therefore reports it here without breaking a build that passed before.
+fn judge(
+    tag: &str,
+    ck: &Checker,
+    warnings: &[String],
+    lints: &[String],
+    htl_lint: Option<&str>,
+) -> Result<(), String> {
+    use htl_core::verdict::{Findings, Policy, is_denied, verdict};
+    let levels = htl_core::lint::Lints::parse(&ck.spec)
+        .map_err(|e| format!("{tag}: lint spec {:?}: {e:#}", ck.spec))?;
+    let levels = levels.selection();
+    let policy = Policy::resolve(ck.cfg.as_ref(), false)
+        .with_env(htl_lint)
+        .map_err(|e| format!("{tag}: {e}"))?;
+    if verdict(&Findings::of(warnings, lints, levels), &policy) {
+        let failing: Vec<&str> = warnings
+            .iter()
+            .chain(lints)
+            .filter(|t| policy.strict || is_denied(t, levels))
+            .map(String::as_str)
+            .collect();
+        let why = if policy.strict {
+            "strict: every warning and lint fails the build"
+        } else {
+            "a rule at deny fails the build"
+        };
+        return Err(format!(
+            "htl lint failed ({why}; HTL_LINT=warn lets it through):\n{}",
+            failing.join("\n")
+        ));
     }
+    for w in warnings {
+        eprintln!("{tag} warning: {w}");
+    }
+    for l in lints {
+        eprintln!("{tag} lint: {l}");
+    }
+    Ok(())
 }
 
 fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Included, String> {
@@ -401,7 +438,7 @@ fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Includ
         return Err(format!("include_tl!: no such file: {}", path.display()));
     }
     let ck = checker_for("include_tl!", manifest_dir, &path)?;
-    let (h, cfg) = (&ck.h, &ck.cfg);
+    let h = &ck.h;
     // One module, through the same store the linker uses: its `gen` entry, if it still
     // holds, is the check and the Lua.
     let store = ck.store();
@@ -412,9 +449,6 @@ fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Includ
     } = htl_core::link::generate(h, &path, ck.link_store(store.as_ref()))
         .map_err(|e| format!("include_tl!: {e:#}"))?;
 
-    for w in &ci.warnings {
-        eprintln!("include_tl! warning: {w}");
-    }
     let Some(code) = code else {
         return Err(format!("Teal type check failed:\n{}", ci.errors.join("\n")));
     };
@@ -432,18 +466,13 @@ fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Includ
             lines.join("\n")
         ));
     }
-    if !ci.lints.is_empty() {
-        if lenient(cfg) {
-            for l in &ci.lints {
-                eprintln!("include_tl! lint: {l}");
-            }
-        } else {
-            return Err(format!(
-                "htl lint failed (set HTL_LINT=warn to downgrade):\n{}",
-                ci.lints.join("\n")
-            ));
-        }
-    }
+    judge(
+        "include_tl!",
+        &ck,
+        &ci.warnings,
+        &ci.lints,
+        std::env::var("HTL_LINT").ok().as_deref(),
+    )?;
 
     let main_abs = path.to_string_lossy().into_owned();
     // `include_str!` resolves relative to the *Rust* source file, so every tracked dep
@@ -1593,27 +1622,56 @@ mod tests {
         );
     }
 
-    /// `htl.toml` drives the macro too: `[lint] enable` turns a rule on, and
-    /// `strict = false` makes its findings advisory instead of a compile error.
+    /// `htl.toml` drives the macro as it drives `htl check`: a rule's level turns it on
+    /// and says what it is worth, and `strict` promotes every finding. A lint at `warn` is
+    /// advice in both; at `deny`, or under `strict`, it fails both.
     #[test]
-    fn include_reads_htl_toml_lint_settings() {
+    fn include_judges_by_htl_toml_levels_as_check_does() {
         let root = scratch("htl-toml");
         // `no-any` is off by default; the script only trips when htl.toml enables it.
         write(&root.join("src/main.tl"), "local x: any = 1\nprint(x)\n");
         resolve_include(&root, "src/main.tl", false).expect("no-any is off by default");
 
         write(&root.join("htl.toml"), "[lint.rules]\nno-any = \"warn\"\n");
+        resolve_include(&root, "src/main.tl", false).expect("a lint at warn is advice");
+
+        write(&root.join("htl.toml"), "[lint.rules]\nno-any = \"deny\"\n");
         let err = resolve_include(&root, "src/main.tl", false).unwrap_err();
         assert!(
-            err.contains("htl lint failed") && err.contains("no-any"),
+            err.contains("htl lint failed (a rule at deny") && err.contains("no-any"),
             "{err}"
         );
 
         write(
             &root.join("htl.toml"),
-            "[lint]\nstrict = false\n\n[lint.rules]\nno-any = \"warn\"\n",
+            "[lint]\nstrict = true\n\n[lint.rules]\nno-any = \"warn\"\n",
         );
-        resolve_include(&root, "src/main.tl", false).expect("strict = false downgrades lints");
+        let err = resolve_include(&root, "src/main.tl", false).unwrap_err();
+        assert!(err.contains("htl lint failed (strict"), "{err}");
+    }
+
+    /// `HTL_LINT` on top of the file: `warn` lets a `deny` through, `deny` fails a `warn`,
+    /// and anything else is refused. Passed as the value, not set in the environment,
+    /// which the tests of this crate share.
+    #[test]
+    fn htl_lint_caps_raises_or_is_refused() {
+        let root = scratch("htl-lint-env");
+        write(&root.join("src/main.tl"), "local x: any = 1\nprint(x)\n");
+        let path = root.join("src/main.tl");
+        let lints = vec![format!("{}:1:7: x is any [htl no-any]", path.display())];
+        let judged = |toml: &str, env: Option<&str>| {
+            write(&root.join("htl.toml"), toml);
+            let ck = checker_for("include_tl!", &root, &path).unwrap();
+            judge("include_tl!", &ck, &[], &lints, env)
+        };
+        let deny = "[lint.rules]\nno-any = \"deny\"\n";
+        let warn = "[lint.rules]\nno-any = \"warn\"\n";
+        assert!(judged(deny, None).is_err());
+        assert!(judged(deny, Some("warn")).is_ok());
+        assert!(judged(warn, None).is_ok());
+        assert!(judged(warn, Some("deny")).is_err());
+        let err = judged(warn, Some("error")).unwrap_err();
+        assert!(err.contains("HTL_LINT=\"error\""), "{err}");
     }
 
     /// Both macros read the run cache under the project root: the second expansion

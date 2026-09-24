@@ -962,11 +962,14 @@ one line: a local over a required module is both a redeclaration and the thing
 line — one that a name is shadowed, the other which module it was — which is the whole of
 why both are still reported there and nowhere else.
 
-`include_tl!` treats lints as errors (`HTL_LINT=warn` downgrades, `[lint] strict = false`
-downgrades, `HTL_LINTS=no-any=warn,-shadow-local` configures which rules run). Teal's
-warnings it reports and builds anyway. The macro reads which rules are on and not what
-level they are at: a rule at `deny` fails `htl check` and is a lint like any other inside
-the macro, whose own switch is `strict` / `HTL_LINT`.
+`include_tl!` and `include_bundle!` judge their warnings and lints as `htl check` does:
+a rule at `deny`, or any finding under `[lint] strict`, fails the build; the rest are
+printed and the build goes on. `HTL_LINTS=no-any=warn,-shadow-local` configures which
+rules run and at what level, as `--lint` does for the command. `HTL_LINT=deny` makes every
+finding fail the build, the environment's `strict`; `HTL_LINT=warn` lets the build through
+whatever the levels say, a cap for a build that has to go out; any other value is refused.
+The default is the checker's, so a new release that reports one more lint at `warn` says
+so in the build output and does not break a build that passed before.
 
 Everything `htl` prints with an `[htl <rule>]` name is a finding about your code — a lint
 of htl's own, or a warning the vendored compiler raised. `htl dts`'s `not written` and
@@ -1351,8 +1354,8 @@ commented one).
 htl = "0.6"               # the htl command this project expects; a mismatch is refused
 
 [lint]
-strict = true             # for this run, every warn counts as deny (htl check only);
-                          # lints also fail include_tl!, and false makes the macro advisory
+strict = true             # every warn counts as deny: fails htl check, htl fix and
+                          # include_tl! (not htl test)
 
 [lint.rules]              # allow = not reported, warn = reported, deny = fails the run
 nil-index = "deny"
