@@ -1132,6 +1132,14 @@ impl crate::Htl {
     /// calls it before it checks a file the table does not have, so the check of a module
     /// dropped in after the host started reads the host's directories as they are now, as
     /// the run does. No `htl` command calls it: a command's tree does not change under it.
+    ///
+    /// That covers the file being served, not what it requires: a module the table has
+    /// had since the host started may require one dropped in since, and the check asks
+    /// `resolve_name` for that name, not the resolver. So the last one, `watch_model` (),
+    /// has `resolve_name` do the same for a name the table answers `outside` or `missing`
+    /// when a directory of the model now has a file under it (a `stat` per spelling of
+    /// the name per root, not a walk). `TealResolver::from_project` calls it; a command,
+    /// which does not, asks nothing more than the table.
     pub fn install_resolver(&self, resolver: Resolver) -> Result<()> {
         let lua = self.checker_lua()?;
         let r = std::sync::Arc::new(std::sync::RwLock::new(resolver));
@@ -1141,12 +1149,27 @@ impl crate::Htl {
             r.read().unwrap_or_else(std::sync::PoisonError::into_inner)
         }
         let s = |p: Option<PathBuf>| p.map(|p| p.to_string_lossy().into_owned());
+        // Set by `watch_model`: the table is a running host's, whose directories gain files.
+        let live = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let resolve = {
             let r = r.clone();
+            let live = live.clone();
             lua.create_function(move |_, (requirer, name): (Option<String>, String)| {
                 type Answer = (String, Option<String>, Option<String>, Option<String>);
+                let requirer = requirer.as_deref().map(Path::new);
+                let mut resolution = read(&r).resolve(requirer, &name);
+                // A module the host has had since it started may require one dropped in
+                // since: the name is outside the table, and in the directory.
+                if matches!(resolution, Resolution::Outside | Resolution::Missing)
+                    && live.load(std::sync::atomic::Ordering::Relaxed)
+                    && read(&r).gained(&name)
+                {
+                    let fresh = read(&r).rebuilt();
+                    *r.write().unwrap_or_else(std::sync::PoisonError::into_inner) = fresh;
+                    resolution = read(&r).resolve(requirer, &name);
+                }
                 let r = read(&r);
-                let answer: Answer = match r.resolve(requirer.as_deref().map(Path::new), &name) {
+                let answer: Answer = match resolution {
                     Resolution::Found(f) => (
                         "found".into(),
                         s(f.implementation),
@@ -1222,12 +1245,17 @@ impl crate::Htl {
             *r.write().unwrap_or_else(std::sync::PoisonError::into_inner) = fresh;
             Ok(())
         })?;
+        let watch = lua.create_function(move |_, ()| {
+            live.store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        })?;
         self.h.set("claims_name", claims)?;
         self.h.set("resolve_name", resolve)?;
         self.h.set("rewrite_name", rewrite)?;
         self.h.set("owns_file", owns)?;
         self.h.set("provides_name", provides)?;
         self.h.set("refresh_model", refresh)?;
+        self.h.set("watch_model", watch)?;
         Ok(())
     }
 }

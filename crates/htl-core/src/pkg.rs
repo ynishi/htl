@@ -2251,8 +2251,10 @@ impl Resolver for TealResolver {
 }
 
 /// Have the model's checker read its directories again when it does not have `file`
-/// ([`Htl::install_resolver`](crate::Htl::install_resolver)'s `refresh_model`). A checker
-/// with no model installed has neither function, and nothing to refresh.
+/// ([`Htl::install_resolver`](crate::Htl::install_resolver)'s `refresh_model`), and tell it
+/// that its table is a running host's (`watch_model`), so that a name `file` requires that
+/// was dropped in since is read again too. A checker with no model installed has none of
+/// these functions, and nothing to refresh.
 fn refresh_if_unknown(h: &Table, file: &Path) -> mlua::Result<()> {
     let (Ok(owns), Ok(refresh)) = (
         h.get::<Function>("owns_file"),
@@ -2260,6 +2262,9 @@ fn refresh_if_unknown(h: &Table, file: &Path) -> mlua::Result<()> {
     ) else {
         return Ok(());
     };
+    if let Ok(watch) = h.get::<Function>("watch_model") {
+        watch.call::<()>(())?;
+    }
     if !owns.call::<bool>(file.to_string_lossy().as_ref())? {
         refresh.call::<()>(())?;
     }
