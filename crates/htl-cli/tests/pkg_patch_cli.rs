@@ -2,8 +2,9 @@
 //! which leave it alone.
 //!
 //! The copy is the project's code — `htl check` reads it and names the dependency it
-//! stands for — but it is also a diff against the revision it came from, so `htl fmt` does
-//! not rewrite it and `htl test` does not run the dependency's suite as the project's.
+//! stands for — but it is also a diff against the revision it came from, so `htl fmt` and
+//! `htl fix` do not rewrite it and `htl test` does not run the dependency's suite as the
+//! project's.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -136,6 +137,40 @@ fn fmt_leaves_the_patched_copy_alone() {
          to change: {err}"
     );
     assert!(err.contains("1 file(s)"), "only the project's own: {err}");
+}
+
+/// `htl fix` rewrites files, so it walks as `htl fmt` does. The copy holds an error that
+/// carries a safe fix, and `htl check` offers it — which is what makes the copy left as it
+/// was a decision rather than a fix that found nothing to do.
+#[test]
+fn fix_leaves_the_patched_copy_alone() {
+    let root = patched_project("fix");
+    let fwd = root.join("patches/mathx/src/fwd.tl");
+    let text = "local record R\nend\nfunction R.a(): integer return R.b() end\n\
+                function R.b(): integer return 1 end\nreturn R\n";
+    write(&fwd, text);
+    git(&root, &["init", "-q"]);
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-qm", "patched"]);
+
+    let (_, _, err) = htl(&["check"], &root);
+    assert!(
+        err.contains("patches/mathx/src/fwd.tl") && err.contains("(fixable: htl fix)"),
+        "the copy has something to fix: {err}"
+    );
+
+    let (ok, _, err) = htl(&["fix"], &root);
+    assert!(ok, "{err}");
+    assert_eq!(
+        std::fs::read_to_string(&fwd).unwrap(),
+        text,
+        "the copy is a diff against the revision it came from, and a fix nobody wrote is \
+         not this project's to add to it: {err}"
+    );
+    assert!(
+        err.contains("htl fix: 1 file(s), 0 changed"),
+        "only the project's own: {err}"
+    );
 }
 
 /// The copy's `*_test.tl` is the dependency's suite. A project whose own `tests/` is empty

@@ -109,7 +109,7 @@ chose, so nothing about the path tells it apart from the project's own code besi
 errors as the project's, `htl fmt` would write a diff against upstream that the next
 install undoes, and its `*_test.tl` are a dependency's suite (Go's `./...` has excluded
 `vendor/` since 1.9 for the same reason). A `patch_dir` dependency is the one thing in
-between: `check` reads it, `fmt` and `test` do not (see Patched dependencies). What is
+between: `check` reads it, `fmt`, `fix` and `test` do not (see Patched dependencies). What is
 not walked is still checked: a dependency is checked through the `require` that reaches
 it, and a type error in it is reported as an error with the dependency's own path and
 the file that required it —
@@ -1773,9 +1773,10 @@ manifest declared the `patch_dir`, and it keeps the only `.htl/`.
 
 **What is checked, and what is not.** The copy is committed, project-owned code whose
 errors are the project's to fix, so `htl check` walks it and names the dependency each
-directory stands in for. `htl fmt` and `htl test` do not touch it: formatting it would
-turn every file into a diff against its base and hide the change inside it, and its
-`*_test.tl` are the dependency's suite rather than the project's. `.htl/modules` is not
+directory stands in for. `htl fmt`, `htl fix` and `htl test` do not touch it: formatting
+it would turn every file into a diff against its base and hide the change inside it, a
+fix would be a line of that diff nobody wrote (what `htl check` reports there is fixed by
+hand), and its `*_test.tl` are the dependency's suite rather than the project's. `.htl/modules` is not
 descended into at all, patched or otherwise; its modules are checked through the
 `require` that reaches them and their errors reported against the requirer, never offered
 to `htl fix` (a fix there would go at the next install — patching is how a dependency is

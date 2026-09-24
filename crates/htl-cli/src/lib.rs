@@ -1963,8 +1963,11 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
     // Here as well as inside `fix_file`, so a misspelt rule is answered even when the
     // paths hold no `.tl` at all — the request is wrong either way.
     opts.validate()?;
+    // Walked as `htl fmt` walks, not as `htl check` does: this command rewrites files, so a
+    // patched dependency is left alone whatever the fixes would be. An edit there belongs
+    // in the diff the project makes against the revision it took, written by a person.
     let walk_model = project::model_of(&cfg, &paths[0])?;
-    let skip = project::not_walked(walk_model.as_ref(), &paths, htl::model::Purpose::Check);
+    let skip = project::not_walked(walk_model.as_ref(), &paths, htl::model::Purpose::Own);
     let files = htl::collect_tl_skipping(&paths, &skip)?;
 
     // The working tree is the undo: refuse to rewrite what git could not give back.

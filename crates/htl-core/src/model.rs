@@ -58,8 +58,8 @@
 //!
 //! A module's roots are where its names are read from; its home ([`Module::home`]) is the
 //! directory it owns as a whole. A walk over the tree — the files `htl check` checks,
-//! `htl fmt` formats, `htl test` runs — decides whose files it enters by owner
-//! ([`Purpose`], [`Project::not_walked`]): never a dependency an install writes, a
+//! `htl fmt` and `htl fix` rewrite, `htl test` runs — decides whose files it enters by
+//! owner ([`Purpose`], [`Project::not_walked`]): never a dependency an install writes, a
 //! patched dependency only to check it.
 //!
 //! # Where a name is answered
@@ -882,12 +882,14 @@ pub enum View {
 /// What a walk over a project's files is for, which decides whose files it enters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Purpose {
-    /// Reporting what is wrong: `htl check`, `htl fix`. A patched dependency is entered —
-    /// the copy is the project's code, and its errors are the project's to fix.
+    /// Reporting what is wrong: `htl check`. A patched dependency is entered — the copy is
+    /// the project's code, and its errors are the project's to fix.
     Check,
-    /// Changing or judging the project's own code: `htl fmt`, `htl unused`. A patched
-    /// dependency is left alone — its change is a diff against the revision it came from,
-    /// and a reformatting of every file would bury it; what reaches it lives upstream.
+    /// Changing or judging the project's own code: `htl fmt`, `htl fix`, `htl unused`. A
+    /// patched dependency is left alone — its change is a diff against the revision it came
+    /// from, and a rewrite no person asked for would bury it; what reaches it lives
+    /// upstream. A command that rewrites files walks as this one, whatever it checks on
+    /// the way.
     Own,
     /// Running the project's tests: `htl test`. A patched dependency's tests are its own
     /// suite, and running them would report a library's failures as the project's.
