@@ -386,15 +386,14 @@ fn entries(
             }
         }
     }
-    if let Some((r, _, c)) = cfg {
+    if let Some((_, _, c)) = cfg {
         // A module under a contract dir is loaded by name at run time, from a directory
         // the project does not own. Every module there is an entry, the `exclude`d ones
         // too: `exclude` says a module is not held to the contract, not that nothing
         // loads it.
-        let (contracts, _) = crate::contract::resolve(r, c);
-        for con in &contracts {
-            for (_, p) in con.held_modules(root) {
-                add(canon(&p), EntryKind::Contract);
+        for con in opts.model.iter().flat_map(|m| &m.contracts) {
+            for (_, p) in &con.held {
+                add(canon(p), EntryKind::Contract);
             }
         }
         // A dynamic `require(expr)` has already had to list its targets for `htl build`;

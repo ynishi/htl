@@ -862,7 +862,9 @@ fn config_lints(h: &Htl, cfg: &project::Config) -> Result<htl::lint::Lints> {
 fn auto_dts(start: &Path) -> Result<()> {
     let mut project = None;
     if let Some((root, _, cfg)) = load_config(start)? {
-        let (contracts, _) = htl::contract::resolve(&root, &cfg);
+        // The contracts the project's model holds, published from there.
+        let model = htl::model::Project::load(&root, cfg)?;
+        let contracts: Vec<_> = model.contracts.iter().map(|c| c.terms.clone()).collect();
         let (results, problems) = htl::contract::publish(&root, &contracts);
         announce_dts(&results, &root);
         for p in &problems {
@@ -979,7 +981,8 @@ fn cmd_dts(dir: Option<&Path>) -> Result<ExitCode> {
     let mut failed = false;
     let mut project = None;
     if let Some((croot, _, cfg)) = load_config(&start)? {
-        let (contracts, _) = htl::contract::resolve(&croot, &cfg);
+        let model = htl::model::Project::load(&croot, cfg)?;
+        let contracts: Vec<_> = model.contracts.iter().map(|c| c.terms.clone()).collect();
         let (published, problems) = htl::contract::publish(&croot, &contracts);
         for p in &problems {
             eprintln!("  {p}");

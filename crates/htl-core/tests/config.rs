@@ -1212,6 +1212,21 @@ fn the_project_model_holds_its_contracts() {
     assert!(p.contract_of(&root.join("src/defs.tl")).is_none());
 }
 
+/// A host that has the project's model asks it for the resolvers, and gets the contract
+/// `contract_resolvers(root, &cfg)` gives: the same modules refused, the same served.
+#[test]
+fn a_host_with_the_model_gets_the_same_contract_from_it() {
+    let (root, cfg) = project("from-model");
+    let p = htl_core::model::Project::load(&root, cfg).unwrap();
+    let h = Htl::new().unwrap();
+    let [good, partial] = verdicts(&h, htl_core::pkg::project_contract_resolvers(&p).unwrap());
+    assert!(good.is_ok(), "conforming mod: {good:?}");
+    assert!(
+        partial.as_ref().is_err_and(|e| e.contains("hp")),
+        "missing field named: {partial:?}"
+    );
+}
+
 /// A contract type declared in `types/` — where `htl new` puts hand-written declarations
 /// and where a host publishes the one its mod authors write against. The `contract` lint
 /// resolves it because `contract_lints` goes through `apply_config`; the resolver has to

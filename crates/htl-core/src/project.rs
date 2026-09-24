@@ -674,8 +674,13 @@ impl Scope {
         start: &Path,
         lint: Option<&str>,
     ) -> Result<Self> {
-        let (contracts, contract_problems) = match cfg {
-            Some((r, _, c)) => crate::contract::resolve(r, c),
+        // The project's contracts and the markers it could not make one of: the model's,
+        // read when it was loaded. A run with no `htl.toml` has no model and no contracts.
+        let (contracts, contract_problems) = match model {
+            Some(m) => (
+                m.contracts.iter().map(|c| c.terms.clone()).collect(),
+                m.problems.clone(),
+            ),
             None => (Vec::new(), Vec::new()),
         };
         let file_spec = cfg
