@@ -1369,6 +1369,20 @@ impl Htl {
         Ok(())
     }
 
+    /// Tell the checker the name each of the project's files answers to (`files` and
+    /// `names`, index for index), from the project model (`model::Project::names`), which
+    /// its `apply_model` calls this with. A search that finds one of these files under any
+    /// other name — through a `package.path` template, or through a directory that holds
+    /// another module's — finds nothing. A file not listed (a library installed for the
+    /// machine, a contract directory's module) is found as before.
+    ///
+    /// Sequences across the state line, for the reason [`set_deps`](Self::set_deps) gives.
+    pub fn set_names(&self, files: &[String], names: &[String]) -> Result<()> {
+        let f: Function = self.h.get("set_names")?;
+        f.call::<()>((files.to_vec(), names.to_vec()))?;
+        Ok(())
+    }
+
     /// Names of all lint rules (enabled or not), the project layer's among them.
     pub fn lint_rules(&self) -> Result<Vec<String>> {
         Ok(lint::rule_names().into_iter().map(str::to_string).collect())

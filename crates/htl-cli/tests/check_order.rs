@@ -312,3 +312,35 @@ fn imports_say_which_module_a_shared_name_means() {
         "{d:?}"
     );
 }
+
+/// A file answers to the name the project model gives it and to no other. The search
+/// path's `<dir>/?/?.lua` template would make `src/util/util.tl` answer to `util`, and
+/// `types/` on the path would make a crate's `types/<crate>/mq.d.tl` answer to
+/// `<crate>.mq` as well as to `mq`; neither is the file's name.
+#[test]
+fn a_file_answers_to_its_model_name_only() {
+    let root = scratch("model-names");
+    write(&root.join("htl.toml"), "");
+    write(&root.join("src/util/util.tl"), "return { n = 1 }\n");
+    write(
+        &root.join("types/shipper").join(".htl-dts"),
+        "crate = \"shipper\"\nversion = \"0.1.0\"\nfiles = [\"mq.d.tl\"]\n",
+    );
+    write(
+        &root.join("types/shipper/mq.d.tl"),
+        "local record mq\n   n: integer\nend\nreturn mq\n",
+    );
+    write(
+        &root.join("src/main.tl"),
+        "local a = require(\"util\")\nlocal b = require(\"shipper.mq\")\n\
+         local c = require(\"util.util\")\nlocal d = require(\"mq\")\nprint(a, b, c, d)\n",
+    );
+    let d = diagnostics(&["."], &root);
+    let missing: Vec<&String> = d
+        .iter()
+        .filter(|l| l.contains("module not found"))
+        .collect();
+    assert_eq!(missing.len(), 2, "{d:?}");
+    assert!(missing.iter().any(|l| l.contains("'util'")), "{d:?}");
+    assert!(missing.iter().any(|l| l.contains("'shipper.mq'")), "{d:?}");
+}

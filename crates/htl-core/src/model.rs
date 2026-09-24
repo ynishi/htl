@@ -65,7 +65,9 @@
 //! # What this module does not do yet
 //!
 //! A name still resolves through `package.path`: the model decides which directories go
-//! on it ([`Project::search_dirs`]), and the Teal checker searches them. Every command
+//! on it ([`Project::search_dirs`]), and the Teal checker searches them — held to the
+//! model's names ([`Project::names`]), so a file the search finds under a name the model
+//! does not give it is not found. Every command
 //! that checks, runs or bundles a file sets its checker up from the model — `htl check`,
 //! `test`, `fix`, `gen`, `run`, `build`, `resolve` and the `include_tl!` /
 //! `include_bundle!` macros — and a file that belongs to no project reads its own
@@ -771,6 +773,62 @@ impl Project {
     }
 }
 
+impl Project {
+    /// Every file of every module a view can reach, with the name the model gives it —
+    /// two sequences, index for index, the files spelled as the search path reaches them.
+    ///
+    /// What the checker holds a search result to ([`Htl::set_names`](crate::Htl::set_names)):
+    /// `package.path` answers a name with the first file any template turns it into, and a
+    /// template does not know whose file it is. `<dir>/?/?.lua` makes the project's own
+    /// `src/util/util.tl` answer to `util`, and `types/` on the path makes a crate's
+    /// `types/htl-mq/mq.d.tl` answer to `htl-mq.mq` as well as to the `mq` it declares. A
+    /// file answers to its model name and no other.
+    ///
+    /// A dependency's files are listed twice when it is reached both through its entry
+    /// link and through its own directory, once in each spelling. Contract directories are
+    /// left out: each holds the same names as the next, and is checked on its own.
+    pub fn names(&self) -> (Vec<String>, Vec<String>) {
+        let mut files = Vec::new();
+        let mut names = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for m in self.modules.iter().filter(|m| m.owner != Owner::Contract) {
+            let mut dirs: Vec<PathBuf> = m.roots.iter().map(|(_, r)| r.to_path_buf()).collect();
+            if matches!(m.owner, Owner::Installed | Owner::Vendored | Owner::Patched)
+                && let Some(links) = &self.links
+            {
+                dirs.push(links.join(&m.name));
+            }
+            for dir in dirs {
+                let top = dir.clone();
+                let walker = walkdir::WalkDir::new(&dir)
+                    .sort_by_file_name()
+                    .into_iter()
+                    .filter_entry(move |e| {
+                        e.path() == top || !crate::is_skipped_dir(e.path(), &[])
+                    });
+                for e in walker.flatten() {
+                    let file = e.path();
+                    let base = file.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                    if !e.file_type().is_file()
+                        || !(base.ends_with(".tl") || base.ends_with(".lua"))
+                    {
+                        continue;
+                    }
+                    let spelled = file.to_string_lossy().into_owned();
+                    if !seen.insert(spelled.clone()) {
+                        continue;
+                    }
+                    if let Some(place) = self.locate(file) {
+                        files.push(spelled);
+                        names.push(place.name);
+                    }
+                }
+            }
+        }
+        (files, names)
+    }
+}
+
 /// How the project's `[imports]` rewrite `require`s ([`Project::rewrites`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Rewrites {
@@ -856,6 +914,8 @@ impl crate::Htl {
         self.set_views(&v.own, &v.not_own, &v.dep_dirs, &v.dep_names, &project.root)?;
         let r = project.rewrites();
         self.set_imports(&r.from, &r.to, &r.deps)?;
+        let (files, names) = project.names();
+        self.set_names(&files, &names)?;
         self.add_search_paths(&project.search_dirs(view))
     }
 }

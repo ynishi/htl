@@ -1370,6 +1370,12 @@ declarations of other people's / modules it did not write), and a directory cann
 two of them. Spelling does not get around it: `lib`, `./lib` and `./lib/.` are one
 directory.
 
+A file answers to one name: its path below the root that holds it, with `init.tl` naming
+its directory. `src/util/util.tl` is `util.util`, not `util`, and a crate's
+`types/htl-mq/mq.d.tl` is `mq`, not `htl-mq.mq` — Lua's search path would find either
+under the other name, and htl does not. The `<name>/<name>.tl` spelling is a
+dependency's, for the entry of a flat package (see "Layout of a project").
+
 A module name belongs to one module. When two implement it — the project's own
 `src/mathx.tl` and a dependency `mathx`, or a module under `[check] paths` of the same
 name — `htl check` reports an error at each file, naming both, rather than letting the

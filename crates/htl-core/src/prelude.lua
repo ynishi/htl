@@ -50,10 +50,18 @@ do
          return search_dep(module_name, search_all and { ".tl", ".d.tl", ".lua" } or { ".tl" })
       end
       local found, fd, tried = tl_search(module_name, false) -- `.tl` only
-      if found or not search_all then
-         return found, fd, tried
+      if not found and search_all then
+         found, fd, tried = tl_search(module_name, true) -- `.d.tl`, then `.lua`
       end
-      return tl_search(module_name, true) -- `.d.tl`, then `.lua`
+      -- A file answers to the name the project model gives it and no other
+      -- (`H.answers`, set up with the model's names below).
+      if found and H.answers and not H.answers(found, module_name) then
+         if fd then fd:close() end
+         tried = tried or {}
+         tried[#tried + 1] = "'" .. found .. "' is not the module '" .. module_name .. "'"
+         return nil, nil, tried
+      end
+      return found, fd, tried
    end
 end
 
@@ -943,6 +951,24 @@ function H.set_views(own, not_own, dep_dirs, dep_names, root, cwd)
       root = root and normal(root, cwd),
       cwd = cwd,
    }
+end
+
+-- The name each of the project's files answers to, keyed by the file made absolute
+-- (`Htl::set_names`, from the project model). Empty until set.
+H.file_names = {}
+
+function H.set_names(files, names)
+   local t = {}
+   for i, f in ipairs(files or {}) do t[normal(f, H.views.cwd)] = names[i] end
+   H.file_names = t
+end
+
+-- Whether `path`, found for `module_name`, is that module: a file the model names
+-- answers to its name alone; a file it does not (a library installed for the machine, a
+-- contract directory's module) answers as the search found it.
+function H.answers(path, module_name)
+   local name = H.file_names[normal(path, H.views.cwd)]
+   return name == nil or name == module_name
 end
 
 -- `path` as the project spells it: below the root, without a `./` a flat layout leaves.
