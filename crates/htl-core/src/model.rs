@@ -79,6 +79,9 @@
 //! `#[host_module]` — are not loaded here: they are known to whoever compiled the host,
 //! and enter a project through the file they are written to.
 
+pub mod resolver;
+pub use resolver::{Found, Resolution, Resolver};
+
 use crate::config::{CONFIG_NAME, HtlConfig, resolve_path};
 use crate::pkg;
 use anyhow::{Result, bail};
