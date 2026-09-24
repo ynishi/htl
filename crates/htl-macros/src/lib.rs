@@ -160,12 +160,10 @@ fn resolve_bundle(
     }
     // The name the entry is served under, from the project's model, as `htl build` does:
     // the one a `require` of the file elsewhere in the project writes.
-    let model = match (&ck.cfg_path, cfg) {
-        (Some(_), Some(c)) => htl_core::model::Project::load(&ck.root, c.clone()).map(Some),
-        _ => htl_core::model::Project::discover(&path),
-    }
-    .map_err(|e| format!("include_bundle!: {e:#}"))?;
-    opts.entry_name = model.and_then(|m| m.locate(&path).map(|p| p.name));
+    opts.entry_name = ck
+        .model
+        .as_ref()
+        .and_then(|m| m.locate(&path).map(|p| p.name));
     let store = ck.store();
     let linked = htl_core::link::link_with(h, &path, &opts, ck.link_store(store.as_ref()))
         .map_err(|e| format!("include_bundle!: {e:#}"))?;
@@ -305,7 +303,7 @@ impl Checker {
             htl_core::project::store(
                 &self.root,
                 htl_core::cache::Options::from_env(),
-                htl_core::project::store_refusal(&self.root, self.cfg_path.is_some()).as_deref(),
+                htl_core::project::store_refusal(&self.root, self.model.is_some()).as_deref(),
                 "the macro expansion",
             ),
             self.model.as_ref(),
@@ -330,11 +328,14 @@ impl Checker {
 
 fn checker_for(tag: &str, manifest_dir: &Path, path: &Path) -> Result<Checker, String> {
     let h = htl_core::Htl::new().map_err(|e| format!("{tag}: {e:#}"))?;
-    // htl.toml `[lint]` first, then HTL_LINTS, so the env var wins.
-    let cfg = htl_core::config::HtlConfig::find(path).map_err(|e| format!("{tag}: {e:#}"))?;
-    let cfg_root = cfg.as_ref().map(|(p, _)| htl_core::parent_dir(p));
-    let cfg_path = cfg.as_ref().map(|(p, _)| p.clone());
-    let cfg = cfg.map(|(_, c)| c);
+    // The project the file is in, found the way every command finds it — the one walk up
+    // for a manifest, which refuses an `htl.toml` and an `mlua-pkg.toml` naming different
+    // roots. htl.toml `[lint]` first, then HTL_LINTS, so the env var wins.
+    let found = htl_core::model::Project::find_root(path).map_err(|e| format!("{tag}: {e:#}"))?;
+    let cfg_path = found.as_ref().and_then(|r| r.config_file.clone());
+    let cfg = cfg_path
+        .as_ref()
+        .and(found.as_ref().map(|r| r.config.clone()));
     let file_spec = cfg.as_ref().map(|c| c.lint_spec()).unwrap_or_default();
     let env_spec = std::env::var("HTL_LINTS").unwrap_or_default();
     let spec = htl_core::config::join_specs([file_spec.as_str(), env_spec.as_str()]);
@@ -347,11 +348,10 @@ fn checker_for(tag: &str, manifest_dir: &Path, path: &Path) -> Result<Checker, S
     // names. What the file may read is the project model's, as `htl check` has it; a file
     // in no project reads its own directory.
     h.reset_search_path().map_err(|e| format!("{tag}: {e:#}"))?;
-    let model = match (&cfg_root, &cfg) {
-        (Some(root), Some(c)) => htl_core::model::Project::load(root, c.clone()).map(Some),
-        _ => htl_core::model::Project::discover(path),
-    }
-    .map_err(|e| format!("{tag}: {e:#}"))?;
+    let model = found
+        .map(|r| htl_core::model::Project::load(&r.root, r.config))
+        .transpose()
+        .map_err(|e| format!("{tag}: {e:#}"))?;
     if let Some(m) = &model {
         h.apply_model(m, htl_core::model::View::Source)
             .map_err(|e| format!("{tag}: {e:#}"))?;
@@ -359,7 +359,12 @@ fn checker_for(tag: &str, manifest_dir: &Path, path: &Path) -> Result<Checker, S
     htl_core::project::file_view(&h, model.as_ref(), path).map_err(|e| format!("{tag}: {e:#}"))?;
     h.install_test_lib().map_err(|e| format!("{tag}: {e:#}"))?;
     h.install_std().map_err(|e| format!("{tag}: {e:#}"))?;
-    let root = cfg_root.unwrap_or_else(|| manifest_dir.to_path_buf());
+    // The project's root, where its store is — as for every command — and the crate's
+    // manifest directory for a crate in no project, which keeps no store.
+    let root = model
+        .as_ref()
+        .map(|m| m.root.clone())
+        .unwrap_or_else(|| manifest_dir.to_path_buf());
     Ok(Checker {
         h,
         cfg,
@@ -1347,6 +1352,71 @@ mod tests {
     fn write(path: &Path, text: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
+    }
+
+    /// `include_tl!` and `htl check` resolve a name the same way: the file the macro's
+    /// check read for `helper` is the one `htl check`'s read.
+    ///
+    /// The case is the one where they used to differ. A file in `src/sub/` requires
+    /// `helper`, and there is a `helper.tl` beside it as well as in `src/`. `htl check`
+    /// consulted the file's own directory first and read `src/sub/helper.tl`; the macro
+    /// consulted it last and read `src/helper.tl`. Both set their checker up from the
+    /// project model now, where `src/sub/helper.tl` is `sub.helper` and `helper` is
+    /// `src/helper.tl`.
+    #[test]
+    fn include_tl_and_htl_check_read_the_same_file_for_a_name() {
+        let root = scratch("same-as-check");
+        write(&root.join("htl.toml"), "");
+        write(
+            &root.join("src/helper.tl"),
+            "local record helper\n   n: integer\nend\nreturn helper\n",
+        );
+        write(
+            &root.join("src/sub/helper.tl"),
+            "local record helper\n   s: string\nend\nreturn helper\n",
+        );
+        let main = root.join("src/sub/main.tl");
+        write(
+            &main,
+            "local helper = require(\"helper\")\nprint(helper.n)\n",
+        );
+
+        let inc = resolve_include(&root, "src/sub/main.tl", false).expect("the macro's check");
+        let by_macro: Vec<PathBuf> = inc
+            .deps
+            .iter()
+            .filter(|d| d.ends_with("helper.tl"))
+            .map(|d| std::fs::canonicalize(d).unwrap())
+            .collect();
+
+        let files = vec![main.clone()];
+        let cfg = htl_core::project::config_of(&main).unwrap();
+        let model = htl_core::project::model_of(&cfg, &main).unwrap();
+        let mut sink = htl_core::project::Sink::new(htl_core::project::Collect::default());
+        let checked = htl_core::project::check(
+            &mut sink,
+            &files,
+            &htl_core::project::Options {
+                paths: &files,
+                config: &cfg,
+                model: model.as_ref(),
+                lint: None,
+                cache: htl_core::project::cache_options(false, None, &cfg, false),
+            },
+        )
+        .unwrap();
+        let by_check: Vec<PathBuf> = checked
+            .requires
+            .iter()
+            .flat_map(|(_, reqs)| reqs.iter())
+            .filter(|r| r.module == "helper")
+            .filter_map(|r| r.path.as_ref())
+            .map(|p| std::fs::canonicalize(p).unwrap())
+            .collect();
+
+        let expected = std::fs::canonicalize(root.join("src/helper.tl")).unwrap();
+        assert_eq!(by_check, vec![expected.clone()], "htl check");
+        assert_eq!(by_macro, vec![expected], "include_tl!");
     }
 
     /// The macro must see the same tree as the CLI: an installed dependency, reached at its

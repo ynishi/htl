@@ -1133,19 +1133,23 @@ fn cmd_init(
     Ok(ExitCode::SUCCESS)
 }
 
-/// The project `htl pkg` acts on: the nearest one above the working directory.
+/// The project `htl pkg` acts on: the one above the working directory, found the way
+/// every command finds it ([`htl::model::Project::find_root`]), with its `mlua-pkg.toml`.
 ///
 /// mlua-pkg reports a missing manifest as an I/O error that does not name the file, and the
 /// path htl looked for is the whole of the answer, so it is checked here.
 fn pkg_project() -> Result<htl::pkg::MluaProject> {
     let cwd = std::env::current_dir()?;
-    htl::pkg::MluaProject::find(&cwd).with_context(|| {
-        format!(
-            "no {} above {}: `htl pkg` runs in a project",
-            htl::pkg::MANIFEST_NAME,
-            cwd.display()
-        )
-    })
+    let root = htl::model::Project::find_root(&cwd)?.map(|r| r.root);
+    root.filter(|r| r.join(htl::pkg::MANIFEST_NAME).is_file())
+        .map(|r| htl::pkg::MluaProject::at(&r))
+        .with_context(|| {
+            format!(
+                "no {} above {}: `htl pkg` runs in a project",
+                htl::pkg::MANIFEST_NAME,
+                cwd.display()
+            )
+        })
 }
 
 /// The declaration root of the project at `root`, from its model: `[layout] types`, which
@@ -1219,12 +1223,17 @@ fn report_install(
 /// `htl pkg add <name> <git>`: the manifest entry, without fetching anything.
 ///
 /// This is the one verb that may run outside a project: mlua-pkg writes a manifest when
-/// there is none, and the directory it writes it in is the working one.
+/// there is none. It writes it at the project's root — beside `htl.toml`, when the working
+/// directory is in a project that has one — and in the working directory only outside any
+/// project. Written in a subdirectory, it would give the project a second root, which
+/// every command then refuses.
 fn cmd_pkg_add(spec: htl::pkg::mlua_pkg::ops::AddSpec) -> Result<ExitCode> {
     use htl::pkg::mlua_pkg::ops::AddOutcome;
     let cwd = std::env::current_dir()?;
-    let project =
-        htl::pkg::MluaProject::find(&cwd).unwrap_or_else(|| htl::pkg::MluaProject::at(&cwd));
+    let root = htl::model::Project::find_root(&cwd)?
+        .map(|r| r.root)
+        .unwrap_or(cwd);
+    let project = htl::pkg::MluaProject::at(&root);
     let name = spec.name.clone();
     let done = project.add(spec)?;
     let manifest = project
@@ -1350,10 +1359,7 @@ fn report_patch_drift(project: &htl::pkg::MluaProject) {
 /// the manifest and answers the "may this be overwritten" question against git; the copy
 /// and the `patch_base` bookkeeping are mlua-pkg's. See `Project::patch`.
 fn cmd_pkg_patch(dep: &str, force: bool) -> Result<ExitCode> {
-    let cwd = std::env::current_dir()?;
-    let project = htl::pkg::MluaProject::find(&cwd).context(
-        "no mlua-pkg.toml above the current directory: a patch belongs to a project, so this runs in one",
-    )?;
+    let project = pkg_project().context("a patch belongs to a project, so this runs in one")?;
     let done = project.patch(dep, force)?;
     let report = &done.report;
     let rel = report
@@ -1393,10 +1399,7 @@ fn report_types_sync(sync: &htl::pkg::TypesSync, root: &Path) {
 /// that has them. The revision is recorded because nothing else in that ecosystem does —
 /// see `Project::add_types`.
 fn cmd_types_add(library: &str, from: Option<&Path>, force: bool) -> Result<ExitCode> {
-    let cwd = std::env::current_dir()?;
-    let project = htl::pkg::MluaProject::find(&cwd).context(
-        "no mlua-pkg.toml above the current directory: `types/` is a project's, so this runs in one",
-    )?;
+    let project = pkg_project().context("`types/` is a project's, so this runs in one")?;
     let types = decl_root(&project.root)?;
     let sync = match from {
         Some(dir) => project.add_types_from(dir, library, "local", force, &types)?,
@@ -1577,6 +1580,7 @@ fn cmd_test(
     }
     let opts = project::TestOptions {
         config: &cfg,
+        model: model.as_ref(),
         lint,
         lib,
         filter,
@@ -1753,7 +1757,15 @@ fn report_patched(paths: &[PathBuf]) {
         .filter_map(|p| std::fs::canonicalize(p).ok())
         .collect();
     let cwd = std::env::current_dir().unwrap_or_default();
-    let Some(project) = paths.first().and_then(|p| htl::pkg::MluaProject::find(p)) else {
+    // The project found the way every command finds it; a failure to find one was said by
+    // the command itself, which ran first.
+    let Some(project) = paths
+        .first()
+        .and_then(|p| htl::model::Project::find_root(p).ok().flatten())
+        .map(|r| r.root)
+        .filter(|r| r.join(htl::pkg::MANIFEST_NAME).is_file())
+        .map(|r| htl::pkg::MluaProject::at(&r))
+    else {
         return;
     };
     for p in &project.patches {
@@ -1992,15 +2004,7 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
     // Dependencies are reported as `htl check` reports them and never rewritten: a fix
     // under `.htl/` goes at the next install, one under `[check] paths` is not this
     // project's. `fix_file` only ever writes the file it was given.
-    let fix_root = cfg
-        .as_ref()
-        .map(|(r, _, _)| r.clone())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let contracts = match &cfg {
-        Some((r, _, c)) => htl::contract::resolve(r, c).0,
-        None => Vec::new(),
-    };
-    let origins = project::Origins::new(&paths[0], &fix_root, &cfg, &contracts);
+    let origins = project::Origins::new(walk_model.as_ref());
     sink.walking(&files);
     let (mut applied, mut skipped, mut json_files) = (Vec::new(), Vec::new(), Vec::new());
     let (mut changed, mut deferred, mut reverted, mut errors_remaining) =
@@ -2215,6 +2219,26 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
     // stands in for is said here, so that an error under it is read as that dependency's
     // without the reader having to know the manifest.
     let walk_model = project::model_of(&cfg, &paths[0])?;
+    // A directory is checked as a project: which of its files is which module, and what
+    // they may read, is the project's to say. With none there is no answer to give, and
+    // checking each file as a thing on its own would answer a different question without
+    // saying so. A file named on its own is that question, asked outright, and is checked.
+    if walk_model.is_none()
+        && let Some(dir) = paths.iter().find(|p| p.is_dir())
+    {
+        bail!(
+            "no {} or {} in {} or any directory above it: a directory is checked as a \
+             project. Run `htl init` there to make it one, or name the .tl files to check \
+             each on its own",
+            htl::config::CONFIG_NAME,
+            htl::pkg::MANIFEST_NAME,
+            // Absolute: where the search started is the whole of the answer, and `.`
+            // relative to itself would say nothing.
+            fs::canonicalize(dir)
+                .unwrap_or_else(|_| dir.clone())
+                .display()
+        );
+    }
     let skip = project::not_walked(walk_model.as_ref(), &paths, htl::model::Purpose::Check);
     let files = htl::collect_tl_skipping(&paths, &skip)?;
     if !json {
@@ -2230,6 +2254,7 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
         &project::Options {
             paths: &paths,
             config: &cfg,
+            model: walk_model.as_ref(),
             lint,
             cache: project::cache_options(use_cache, cache_mode, &cfg, explain),
         },
@@ -2239,7 +2264,7 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
         json,
         &rep,
         strict,
-        patched_files(&paths, &rep.files),
+        patched_files(walk_model.as_ref(), &rep.files),
     )?;
     Ok(if fail {
         ExitCode::FAILURE
@@ -2283,7 +2308,7 @@ fn cmd_unused(paths: &[PathBuf], flags: UnusedFlags) -> Result<ExitCode> {
     } else if s.no_entry {
         eprintln!(
             "htl unused: nothing to start from, so nothing is reported. An entry is \
-             src/main.tl, a test file, a module under a [[contract]] directory, or a name \
+             main.tl in the source root ([layout] source) or beside the manifest, a test file, a module under a [[contract]] directory, or a name \
              in [build] extra / host"
         );
     } else {
@@ -2435,10 +2460,7 @@ fn count(n: usize, one: &str, many: &str) -> String {
 /// live there, and the path is built here rather than taken from an argument, so there is
 /// no spelling of the command that removes anything else.
 fn cmd_cache_clear(path: Option<&Path>) -> Result<ExitCode> {
-    let start = path.unwrap_or(Path::new("."));
-    let root = load_config(start)?
-        .map(|(r, _, _)| r)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let root = cache_root(path)?;
     let dir = root.join(".htl").join("cache");
     if !dir.is_dir() {
         eprintln!("htl cache: nothing stored at {}", dir.display());
@@ -2460,11 +2482,12 @@ fn cmd_cache_clear(path: Option<&Path>) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// The project root a cache command works on: beside `htl.toml`, or the working directory.
+/// The directory a cache command works on: the project's root, as every command keeps its
+/// store there ([`project::store_root`]), or the working directory outside a project.
 fn cache_root(path: Option<&Path>) -> Result<PathBuf> {
     let start = path.unwrap_or(Path::new("."));
-    Ok(cache::root_for(start)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))))
+    let model = htl::model::Project::find_root(start)?.map(|r| r.root);
+    Ok(model.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))))
 }
 
 /// Say what the store holds.
@@ -2548,27 +2571,28 @@ fn human_age(secs: u64) -> String {
     }
 }
 
-/// How many of the files a walk visited came out of a patched dependency.
-///
-/// The prefix test a diagnostic's `origin` is decided by, asked of the file list instead,
-/// and canonicalised on both sides for the same reason it is there: the walk spells a file
-/// the way the command line spelled the root it started from (`htl check .` gives
-/// `./patches/mathx/src/mathx.tl`), while the `patch_dir` the manifest declares is
-/// absolute. Zero for a project with no patch, which is what keeps the summary line below
-/// unchanged for everyone who has never run `htl pkg patch`.
-fn patched_files(paths: &[PathBuf], files: &[PathBuf]) -> usize {
-    let dirs: Vec<PathBuf> = project::patched(paths)
-        .into_iter()
-        .map(|d| fs::canonicalize(&d).unwrap_or(d))
-        .collect();
-    if dirs.is_empty() {
+/// How many of the files a walk visited came out of a patched dependency: the files in the
+/// home of a module the project owns as a patch ([`htl::model::Project::home_of`]) — its
+/// tests included, which no name reaches. Zero outside a project and for a
+/// project with no patch, which is what keeps the summary line below unchanged for
+/// everyone who has never run `htl pkg patch`.
+fn patched_files(model: Option<&htl::model::Project>, files: &[PathBuf]) -> usize {
+    let Some(model) = model else {
+        return 0;
+    };
+    if !model
+        .modules
+        .iter()
+        .any(|m| m.owner == htl::model::Owner::Patched)
+    {
         return 0;
     }
     files
         .iter()
         .filter(|f| {
-            let f = fs::canonicalize(f).unwrap_or_else(|_| (*f).to_path_buf());
-            dirs.iter().any(|d| f.starts_with(d))
+            model
+                .home_of(f)
+                .is_some_and(|m| m.owner == htl::model::Owner::Patched)
         })
         .count()
 }
@@ -2755,7 +2779,14 @@ fn cmd_build(
         if cache_flags.explain {
             eprintln!("htl cache: the directory form of `htl build` is not cached");
         }
-        return cmd_build_dir(&h, entry, out, main, &opts);
+        // Not into an installed or vendored copy — a dependency's files, which the model
+        // knows — and into a patch, which is the project's code.
+        let skip = project::not_walked(
+            model.as_ref(),
+            &[entry.to_path_buf()],
+            htl::model::Purpose::Check,
+        );
+        return cmd_build_dir(&h, entry, out, main, &opts, &skip);
     }
     project::file_view(&h, model.as_ref(), entry)?;
     // The name the entry is served under: the one the project's model gives the file,
@@ -2766,8 +2797,7 @@ fn cmd_build(
     // of them generated is one the build replays, and the reverse. Nothing is swept here:
     // a build sees one closure, and only `htl check`, which sees the project, bounds the
     // store (`cache.rs`).
-    let root = cache::root_for(entry)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let root = project::store_root(model.as_ref());
     let spec = cfg
         .as_ref()
         .map(|(_, _, c)| c.lint_spec())
@@ -2852,9 +2882,10 @@ fn cmd_build_dir(
     out: &Path,
     entry: &str,
     opts: &htl::link::LinkOptions,
+    skip: &[PathBuf],
 ) -> Result<ExitCode> {
     h.add_path(dir)?;
-    let files = htl::collect_tl(&[dir.to_path_buf()])?;
+    let files = htl::collect_tl_skipping(&[dir.to_path_buf()], skip)?;
     let mut b = Bundle {
         entry: entry.to_string(),
         htl_version: env!("CARGO_PKG_VERSION").into(),
@@ -2863,7 +2894,10 @@ fn cmd_build_dir(
     let mut n_err = 0usize;
     let mut sink = text_sink();
     for f in &files {
-        let name = htl::module_name(dir, f)?;
+        // Named against the directory the bundle is built from, by the naming rule.
+        let rel = f.strip_prefix(dir).unwrap_or(f);
+        let name = htl::naming::name_of("", rel)
+            .with_context(|| format!("cannot derive a module name for {}", f.display()))?;
         let (code, c) = h.gen_lua(f)?;
         sink.checkinfo(&c);
         n_err += c.errors.len();

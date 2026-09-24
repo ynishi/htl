@@ -186,8 +186,7 @@ pub fn discover_tests_for(paths: &[PathBuf], skip: &[PathBuf], lib: &str) -> Res
             out.push(p.clone());
             continue;
         }
-        let mut extra = crate::project_skip_dirs(p);
-        extra.extend(skip.iter().cloned());
+        let extra = skip.to_vec();
         let root = p.clone();
         let walker = walkdir::WalkDir::new(p)
             .sort_by_file_name()
@@ -348,6 +347,7 @@ pub fn run_tests(paths: &[PathBuf], suite: &Suite) -> Result<SuiteReport> {
     let files = discover_tests_for(&paths, &skip, lib)?;
     let opts = project::TestOptions {
         config: &cfg,
+        model: model.as_ref(),
         lint: suite.lint.as_deref(),
         lib: suite.lib.as_deref().unwrap_or(DEFAULT_LIB),
         filter: suite.filter.as_deref(),

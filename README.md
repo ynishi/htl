@@ -127,7 +127,9 @@ check says so first. A file under the project's `tests/` may read the project's 
 and `tests/` itself, the same as under `htl test`, so `htl check tests` and `htl test`
 agree; the project's sources cannot `require` what is under
 `tests/`. A file with neither an `htl.toml` nor an `mlua-pkg.toml` above it belongs to
-no project, and resolves its `require`s in its own directory.
+no project, and resolves its `require`s in its own directory. `htl check <file>` checks
+it; `htl check <dir>` with neither above the directory is an error that says what it
+looked for — a directory is checked as a project, and `htl init` makes it one.
 
 A failure at run time names Teal, not the Lua htl generated — the file and the line that
 raised, and the same for every frame that reached it. `htl run boom.tl`, where `boom.tl`
@@ -1993,8 +1995,11 @@ names are stable; fields may be added, not renamed.
   at `deny` — a count of levels, so it overlaps those two rather than adding to them, and
   `ok` is false whenever it is not zero. An error in a module the check reached through `require` has `file` set
   to that module and `required_by` to the file that required it; `origin` is
-  `"dependency"` (installed under `.htl/modules`, or a vendored copy) or `"external"`
-  (a `[check] paths` or contract directory), and absent for a file of the project's own.
+  `"dependency"` (installed under `.htl/modules`, a vendored copy, or the declarations a
+  crate ships under `types/<crate>/`) or `"external"` (a `[check] paths` or contract
+  directory), and absent for a file of the project's own, a patched dependency included.
+  It is decided by the module whose directory holds the file — the same module `htl
+  resolve` names a file's origin from.
 - `test`: `{ files: [{ path, ok, diagnostics, error?, file_level, passed, failed,
   failures, tests: [{ name, ok, ms }], duration_ms, snapshots_written,
   snapshots_updated }], summary: { files, files_run, passed, failed, files_with_errors,
@@ -2130,7 +2135,8 @@ nothing moved.
 per framework to work out where a project starts; here the project has already said, in
 the files `htl test`, `htl build`, `[[contract]]` and a Rust host are pointed at:
 
-- `src/main.tl` (or `main.tl` at the root);
+- `main.tl` in the source root (`[layout] source`, `src/` by default), or beside the
+  manifest;
 - every test file, as `htl test` discovers them — so a module used only by a test is
   reached, not reported;
 - every module directly under a `[[contract]]` directory: those are loaded by name at run

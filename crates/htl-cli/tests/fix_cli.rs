@@ -167,6 +167,7 @@ const STRUCT_SITE: &str =
 #[test]
 fn a_suggestion_is_shown_and_never_written() {
     let dir = scratch("suggest");
+    write(&dir.join("htl.toml"), "");
     write(&dir.join("src/defs.tl"), STRUCT_DEFS);
     write(&dir.join("src/mod.tl"), STRUCT_SITE);
 

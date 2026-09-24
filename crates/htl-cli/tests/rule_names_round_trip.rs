@@ -299,6 +299,7 @@ fn the_listing_accounts_for_every_rule() {
 #[test]
 fn the_listing_does_not_name_what_only_a_fix_takes() {
     let dir = scratch("surfaces");
+    write(&dir.join("htl.toml"), "");
     write(&dir.join("src/a.tl"), "return {}\n");
     let listing = Command::new(common::htl_bin())
         .args(["check", "--list-lints"])
@@ -328,6 +329,7 @@ fn the_listing_does_not_name_what_only_a_fix_takes() {
 #[test]
 fn an_unknown_name_is_still_an_error() {
     let dir = scratch("unknown");
+    write(&dir.join("htl.toml"), "");
     write(&dir.join("src/a.tl"), "return {}\n");
     let out = Command::new(common::htl_bin())
         .args(["check", "src", "--no-cache", "--lint", "-contrct"])

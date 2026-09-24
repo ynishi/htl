@@ -532,36 +532,17 @@ impl Module {
     }
 }
 
-/// Directories a `require` could resolve in, listed whether or not they exist yet.
+/// The directories an entry for `file` probes when there is no project model: the file's
+/// own, the one place a file outside any project resolves its `require`s in
+/// ([`project::file_view`](crate::project::file_view)).
 ///
-/// The ones that do not exist matter most: a `types/` created after an entry was written
-/// changes what a module name resolves to while every file the entry recorded still hashes
-/// the same. Recording only the directories that happened to exist is the hole ccache
-/// documents in its direct mode, and an empty directory hashes differently from one holding
-/// the name, so a probe over a directory that is not there yet is what catches its arrival.
-///
-/// `cfg` is the project's `htl.toml` with the directory it was found in, for the extra
-/// `[check] paths` it names.
-///
-/// In an `mlua-pkg.toml` project the directories its installed deps resolve from are
-/// listed too — the same ones `Htl::apply_project` puts on the path — so that `htl pkg
-/// install` bringing a dependency in, after an entry recorded that the name resolved
-/// nowhere, is seen as the change it is rather than replayed as `module not found`.
-pub fn search_dirs(
-    file: &Path,
-    root: &Path,
-    cfg: Option<(&Path, &crate::config::HtlConfig)>,
-) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = file.parent().map(Path::to_path_buf).into_iter().collect();
-    out.push(root.to_path_buf());
-    out.push(root.join("src"));
-    out.push(root.join("types"));
-    out.extend(crate::materialised_types_dirs(&root.join("types")));
-    if let Some((r, c)) = cfg {
-        out.extend(c.search_paths(r));
-    }
-    out.extend(crate::dependency_dirs(root));
-    out
+/// A store with the model probes the model's answers instead
+/// ([`Cache::with_answers`]), and never reads these. Listed whether or not it exists: a
+/// module appearing beside the file after an entry was written changes what a name
+/// resolves to while every file the entry recorded still hashes the same — the hole
+/// ccache documents in its direct mode.
+pub fn search_dirs(file: &Path) -> Vec<PathBuf> {
+    file.parent().map(Path::to_path_buf).into_iter().collect()
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -834,20 +815,6 @@ impl Options {
                 .and_then(|v| v.to_str().and_then(|s| s.parse().ok())),
         }
     }
-}
-
-/// Where a project's store lives: beside the `htl.toml` found from `path`, or nowhere.
-///
-/// One project, one store: every reader — `htl check`, `htl test`, `htl build`, the proc
-/// macros — resolves it through here, so they find each other's entries. A directory with
-/// no `htl.toml` has not opted into the layout (`htl init` / `htl new` write the file and
-/// gitignore `.htl/`); the CLI falls back to the working directory for its own commands,
-/// the macros to no store at all.
-pub fn root_for(path: &Path) -> Option<PathBuf> {
-    crate::config::HtlConfig::find(path)
-        .ok()
-        .flatten()
-        .map(|(file, _)| crate::parent_dir(&file))
 }
 
 /// Why nothing may be written under `root`, if nothing may — build scratch, named.

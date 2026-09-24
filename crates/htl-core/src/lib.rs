@@ -2249,90 +2249,6 @@ pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Extra directories to skip below `root`, when `root` is inside an `mlua-pkg.toml`
-/// project: where it installed its deps, and each copy a `target_dir` dep put in the tree.
-///
-/// Both hold a dependency's own sources and tests rather than the project's. The copies
-/// need saying because they are *in* the repo and committed — nothing about the path tells
-/// one apart from the project's own code beside it, and only the manifest knows. `mlua-pkg
-/// install` rewrites them every time it runs, so checking one reports someone else's
-/// errors, formatting it writes a diff against upstream that the next install undoes, and
-/// running its tests runs a dependency's suite. Go settled the same question the same way:
-/// `./...` has excluded `vendor/` since 1.9.
-///
-/// A `patch_dir` dep is the other case and is not here: the project owns that copy, so
-/// whether to walk it depends on what the walk is for ([`patched_dirs`]).
-#[cfg(feature = "pkg")]
-pub fn project_skip_dirs(root: &Path) -> Vec<PathBuf> {
-    match pkg::MluaProject::find(root) {
-        Some(p) => {
-            let mut out = vec![p.pkgs_dir];
-            out.extend(p.vendored_copies);
-            out
-        }
-        None => Vec::new(),
-    }
-}
-
-/// Without `pkg` there are no projects, so there is nothing to skip.
-#[cfg(not(feature = "pkg"))]
-pub fn project_skip_dirs(_root: &Path) -> Vec<PathBuf> {
-    Vec::new()
-}
-
-/// The `patch_dir` deps below `root`: a dependency's source taken into the tree, which the
-/// project edits and commits (`htl pkg patch`).
-///
-/// Not in [`project_skip_dirs`], because whether to walk one depends on what the walk is
-/// for. Its errors are the project's to fix, so `htl check` reports them; but the change
-/// it holds is a diff against the revision it was taken from, so `htl fmt` would bury that
-/// change under a reformatting of every file, and its `*_test.tl` are the dependency's
-/// suite rather than the project's. Those two skip it, and pass this to
-/// [`collect_tl_skipping`] / [`testing::discover_tests_skipping`] to say so.
-#[cfg(feature = "pkg")]
-pub fn patched_dirs(root: &Path) -> Vec<PathBuf> {
-    match pkg::MluaProject::find(root) {
-        Some(p) => p.patch_dirs(),
-        None => Vec::new(),
-    }
-}
-
-/// Without `pkg` there are no projects, so no `patch_dir` copies either.
-#[cfg(not(feature = "pkg"))]
-pub fn patched_dirs(_root: &Path) -> Vec<PathBuf> {
-    Vec::new()
-}
-
-/// The directories a `require` in the project at `root` resolves its deps from: the
-/// search directory of each `patch_dir` copy, the entry links under `.htl/modules`, and
-/// the parents of `target_dir` copies — what [`Htl::apply_project`] puts on the path, in
-/// the same order, listed whether or not they exist yet, for the cache's probes
-/// ([`cache::search_dirs`]).
-///
-/// One list, read by the two that must agree. A patched dependency is the project's own
-/// code and a person edits it there, so an entry replayed from the store while the copy
-/// has moved on would be the wrong answer to a question the user just changed: the probe
-/// over its entry directory is what catches a module appearing in or leaving the copy, as
-/// the hash of a file the entry recorded catches a line changing inside one.
-#[cfg(feature = "pkg")]
-pub fn dependency_dirs(root: &Path) -> Vec<PathBuf> {
-    match pkg::MluaProject::find(root) {
-        Some(p) => {
-            let mut out = p.patch_search_dirs();
-            out.push(p.entries);
-            out.extend(p.target_dirs);
-            out
-        }
-        None => Vec::new(),
-    }
-}
-
-/// Without `pkg` there are no projects, so a `require` has no dependency directories.
-#[cfg(not(feature = "pkg"))]
-pub fn dependency_dirs(_root: &Path) -> Vec<PathBuf> {
-    Vec::new()
-}
-
 /// Collect `.tl` sources from files and directories (sorted, recursive). Directories in
 /// [`SKIP_DIRS`], dot-directories and the project's package dir are not entered unless
 /// given as a root themselves.
@@ -2346,8 +2262,7 @@ pub fn collect_tl_skipping(paths: &[PathBuf], skip: &[PathBuf]) -> Result<Vec<Pa
     let mut out = Vec::new();
     for p in paths {
         if p.is_dir() {
-            let mut extra = project_skip_dirs(p);
-            extra.extend(skip.iter().cloned());
+            let extra = skip.to_vec();
             let root = p.clone();
             let walker = walkdir::WalkDir::new(p)
                 .sort_by_file_name()
@@ -2366,22 +2281,6 @@ pub fn collect_tl_skipping(paths: &[PathBuf], skip: &[PathBuf]) -> Result<Vec<Pa
         }
     }
     Ok(out)
-}
-
-/// `root/foo/bar.tl` -> `foo.bar`, `root/foo/init.tl` -> `foo`.
-pub fn module_name(root: &Path, file: &Path) -> Result<String> {
-    let rel = file.strip_prefix(root)?.with_extension("");
-    let mut parts: Vec<String> = rel
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect();
-    if parts.last().map(|s| s == "init").unwrap_or(false) {
-        parts.pop();
-    }
-    if parts.is_empty() {
-        bail!("cannot derive module name for {}", file.display());
-    }
-    Ok(parts.join("."))
 }
 
 #[cfg(test)]

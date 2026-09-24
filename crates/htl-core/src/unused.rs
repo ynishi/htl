@@ -17,7 +17,8 @@
 //! The hard part elsewhere is guessing where to start; here the project has already said
 //! it, in the files `htl test`, `htl build` and `[[contract]]` are pointed at:
 //!
-//! - `src/main.tl` (or `main.tl` at the root), the entry script,
+//! - `main.tl` in the source root (`[layout] source`, `src/` by default) or beside the
+//!   manifest, the entry script,
 //! - every test file, as `htl test` discovers them (every `.tl` that loads `htl.test`),
 //! - every module directly under a `[[contract]]` directory: those are loaded by name at
 //!   run time, from a mods directory the project does not own,
@@ -75,7 +76,7 @@ pub struct Options<'a> {
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum EntryKind {
-    /// `src/main.tl`, or `main.tl` at the project root.
+    /// `main.tl` in the source root (`[layout] source`), or beside the manifest.
     Main,
     /// A test file, as `htl test` discovers them.
     Test,
@@ -209,6 +210,7 @@ pub fn unused(opts: &Options<'_>) -> Result<Report> {
         &project::Options {
             paths: &walk,
             config: opts.config,
+            model: opts.model,
             lint: None,
             cache: opts.cache,
         },
@@ -223,11 +225,10 @@ pub fn unused(opts: &Options<'_>) -> Result<Report> {
     }
 
     // Every walked file by its canonical path, with the spelling to report it under and
-    // the name a `require` reaches it by.
-    let dirs: Vec<PathBuf> = match opts.config {
-        Some((r, _, c)) => c.search_paths(r).iter().map(|d| canon(d)).collect(),
-        None => vec![canon(&root)],
-    };
+    // the name a `require` reaches it by: the model's, or — outside any project — the
+    // naming rule's against the walk's root. A file the model gives no name (a script
+    // beside `htl.toml`, outside every root) has none: no `require` reaches it.
+    let bare_root = canon(&root);
     let mut shown: HashMap<PathBuf, String> = HashMap::new();
     let mut name_of: HashMap<PathBuf, String> = HashMap::new();
     let mut by_name: HashMap<String, PathBuf> = HashMap::new();
@@ -237,35 +238,20 @@ pub fn unused(opts: &Options<'_>) -> Result<Report> {
         if crate::is_declaration(f) {
             continue;
         }
-        // The model's name when a module holds the file: one name, from the module that
-        // owns it. Below is for a file no module's root holds — a `main.tl` at the root of
-        // a project whose sources are under `src/` — which the search path still reaches
-        // through the root it puts on it.
-        if let Some(n) = opts.model.and_then(|m| m.locate(&c)).map(|p| p.name) {
+        let name = match opts.model {
+            Some(m) => m.locate(&c).map(|p| p.name),
+            None => c
+                .strip_prefix(&bare_root)
+                .ok()
+                .and_then(|rel| crate::naming::name_of("", rel)),
+        };
+        if let Some(n) = name {
             name_of.insert(c.clone(), n.clone());
-            by_name.entry(n).or_insert_with(|| c.clone());
-            continue;
-        }
-        for d in &dirs {
-            if !c.starts_with(d) {
-                continue;
-            }
-            let Ok(n) = crate::module_name(d, &c) else {
-                continue;
-            };
-            // The shortest name wins the display: `src/` is on the search path as well as
-            // the root, and `foo` is what a `require` says, not `src.foo`.
-            match name_of.get(&c) {
-                Some(prev) if prev.len() <= n.len() => {}
-                _ => {
-                    name_of.insert(c.clone(), n.clone());
-                }
-            }
             by_name.entry(n).or_insert_with(|| c.clone());
         }
     }
 
-    let entries = entries(opts.config, &root, &walk, &skip, &shown, &by_name)?;
+    let entries = entries(opts, &root, &walk, &skip, &shown, &by_name)?;
     let mut reached: HashSet<PathBuf> = HashSet::new();
     let mut queue: VecDeque<PathBuf> = VecDeque::new();
     for (file, _) in &entries {
@@ -311,7 +297,7 @@ pub fn unused(opts: &Options<'_>) -> Result<Report> {
     let dependencies = if no_entry {
         Vec::new()
     } else {
-        unused_deps(&root, &edges, &reached)
+        unused_deps(opts.model, &edges, &reached)
     };
 
     let summary = Summary {
@@ -343,7 +329,7 @@ pub fn unused(opts: &Options<'_>) -> Result<Report> {
 /// walk itself covered: an entry outside it contributes no edges, so counting it would
 /// claim a closure that was never followed.
 fn entries(
-    cfg: &Config,
+    opts: &Options<'_>,
     root: &Path,
     walk: &[PathBuf],
     skip: &[PathBuf],
@@ -358,7 +344,14 @@ fn entries(
         }
     };
 
-    for p in [root.join("src").join("main.tl"), root.join("main.tl")] {
+    let cfg = opts.config;
+    // `main.tl` in the project's source root, which `[layout] source` names; and one beside
+    // the manifest, a script `htl run` is given directly.
+    let source = opts
+        .model
+        .and_then(|m| m.own().roots.source.clone())
+        .unwrap_or_else(|| root.join("src"));
+    for p in [source.join("main.tl"), root.join("main.tl")] {
         if p.is_file() {
             add(canon(&p), EntryKind::Main);
         }
@@ -464,15 +457,22 @@ fn first_literal(rest: &str) -> Option<&str> {
 /// `target_dir` copy in the tree, or a `patch_dir` the project took over. Both, because a
 /// dependency that is declared but not installed resolves to nothing and is still
 /// required by name.
+///
+/// The declared names are the manifest's at the model's root; where each dependency's
+/// files are is the model's — the homes of its modules — not worked out again here.
 fn unused_deps(
-    root: &Path,
+    model: Option<&crate::model::Project>,
     edges: &HashMap<PathBuf, Vec<cache::RequireJson>>,
     reached: &HashSet<PathBuf>,
 ) -> Vec<Dependency> {
-    let Some(project) = crate::pkg::MluaProject::find(root) else {
+    use crate::model::Owner;
+    let Some(model) = model else {
         return Vec::new();
     };
-    let declared = project.declared_deps();
+    if !model.root.join(crate::pkg::MANIFEST_NAME).is_file() {
+        return Vec::new();
+    }
+    let declared = crate::pkg::MluaProject::at(&model.root).declared_deps();
     let mut names: HashSet<String> = HashSet::new();
     let mut paths: Vec<PathBuf> = Vec::new();
     for f in reached {
@@ -493,16 +493,16 @@ fn unused_deps(
         {
             continue;
         }
-        // Where install put it — `vendored/<name>`, or its `target_dir` copy — and its
-        // patch when it has one.
-        let mut dirs = vec![canon(&project.placed_at(name))];
-        dirs.extend(
-            project
-                .patches
-                .iter()
-                .filter(|p| &p.name == name)
-                .map(|p| canon(&p.dir)),
-        );
+        // Where its modules are — the installed copy, a `target_dir` copy, a patch.
+        let dirs: Vec<PathBuf> = model
+            .modules
+            .iter()
+            .filter(|m| {
+                &m.name == name
+                    && matches!(m.owner, Owner::Installed | Owner::Vendored | Owner::Patched)
+            })
+            .filter_map(|m| m.home.as_deref().map(canon))
+            .collect();
         if paths.iter().any(|p| dirs.iter().any(|d| p.starts_with(d))) {
             continue;
         }

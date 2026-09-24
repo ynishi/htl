@@ -1,11 +1,24 @@
 //! Source collection must not walk into installed packages, build output or tool state:
 //! `htl check .` / `htl fmt .` / `htl test` operate on the project's own files.
+//!
+//! Build output and dot-directories are the walker's own rule. Which directories are a
+//! dependency's — a `target_dir` copy, a patch — is the project model's to say
+//! (`Project::not_walked`), and a walk is handed that list; the walker does not look for a
+//! manifest itself.
 
 use htl_core::testing::{discover_tests, discover_tests_skipping};
-use htl_core::{collect_tl, collect_tl_skipping, is_skipped_dir, patched_dirs};
+use htl_core::{collect_tl, collect_tl_skipping, is_skipped_dir};
 use std::path::{Path, PathBuf};
 
 mod common;
+
+/// What the project model leaves out of a walk over `root` for `purpose`.
+#[cfg(feature = "dts")]
+fn not_walked(root: &Path, purpose: htl_core::model::Purpose) -> Vec<PathBuf> {
+    htl_core::model::Project::load(root, Default::default())
+        .unwrap()
+        .not_walked(purpose)
+}
 
 fn scratch(name: &str) -> PathBuf {
     common::scratch("htl-core-skip", name)
@@ -137,10 +150,11 @@ fn a_patched_dependency_is_checked_with_the_project() {
 /// What the copy holds is a diff against the revision it was taken from: reformatting it
 /// would turn every file into a diff and bury the change, and its `*_test.tl` are the
 /// dependency's suite rather than the project's.
+#[cfg(feature = "dts")]
 #[test]
 fn fmt_and_test_leave_a_patched_dependency_alone() {
     let root = patched_project();
-    let skip = patched_dirs(&root);
+    let skip = not_walked(&root, htl_core::model::Purpose::Own);
     assert_eq!(skip.len(), 1, "{skip:?}");
     assert!(skip[0].ends_with("patches/mathx"), "{skip:?}");
 
@@ -158,10 +172,11 @@ fn fmt_and_test_leave_a_patched_dependency_alone() {
 
 /// A dependency with no `patch_dir` contributes nothing to skip: the walkers are unchanged
 /// for a project that has patched nothing.
+#[cfg(feature = "dts")]
 #[test]
 fn a_project_with_no_patches_skips_nothing_extra() {
     let root = project();
-    assert!(patched_dirs(&root).is_empty());
+    assert!(not_walked(&root, htl_core::model::Purpose::Own).is_empty());
 }
 
 /// A pkgs dir named by path is skipped even under a plain name: `extra` says what a name
@@ -204,10 +219,12 @@ fn target_dir_project() -> PathBuf {
 
 /// Install rewrites the copy every time it runs, so its errors are not the project's to fix
 /// and an edit made there does not survive — `htl check` and `htl fmt` stay out of it.
+#[cfg(feature = "dts")]
 #[test]
 fn a_target_dir_copy_is_not_the_projects_to_check() {
     let root = target_dir_project();
-    let files = collect_tl(std::slice::from_ref(&root)).unwrap();
+    let skip = not_walked(&root, htl_core::model::Purpose::Check);
+    let files = collect_tl_skipping(std::slice::from_ref(&root), &skip).unwrap();
     assert_eq!(
         rel(&root, &files),
         vec!["lua/mine.tl", "src/main.tl", "tests/main_test.tl"],
@@ -216,21 +233,23 @@ fn a_target_dir_copy_is_not_the_projects_to_check() {
 }
 
 /// And the `*_test.tl` in there are the dependency's suite rather than the project's.
+#[cfg(feature = "dts")]
 #[test]
 fn a_target_dir_copys_tests_are_not_the_projects() {
     let root = target_dir_project();
-    let files = discover_tests(std::slice::from_ref(&root)).unwrap();
+    let skip = not_walked(&root, htl_core::model::Purpose::Test);
+    let files = discover_tests_skipping(std::slice::from_ref(&root), &skip).unwrap();
     assert_eq!(rel(&root, &files), vec!["tests/main_test.tl"]);
 }
 
 /// A dependency with no `target_dir` contributes nothing: the walkers are unchanged for a
-/// project that vendors nothing.
+/// project that vendors nothing. The installed packages under `.htl/` are left out by the
+/// walker's dot-directory rule, not by a list.
+#[cfg(feature = "dts")]
 #[test]
 fn a_project_with_no_target_dir_copies_skips_nothing_extra() {
     let root = project();
-    let skip = htl_core::project_skip_dirs(&root);
-    assert_eq!(skip.len(), 1, "just the pkgs dir: {skip:?}");
-    assert!(skip[0].ends_with(".htl/modules"), "{skip:?}");
+    assert!(not_walked(&root, htl_core::model::Purpose::Check).is_empty());
 }
 
 /// A test is a file that loads the test library: wherever it sits, whatever it is called.

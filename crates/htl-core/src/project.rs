@@ -398,9 +398,16 @@ fn lexical(p: &Path) -> PathBuf {
 /// here so the signatures below read.
 pub type Config = Option<(PathBuf, PathBuf, HtlConfig)>;
 
-/// Nearest `htl.toml` above `first`, in the shape everything below expects.
+/// The `htl.toml` of the project above `first`, in the shape everything below expects;
+/// `None` when that project has none (an `mlua-pkg.toml` alone) or there is no project.
+///
+/// Found by [`model::Project::find_root`](crate::model::Project::find_root), the one walk
+/// up for a manifest, so a config whose directory is not the project's root — an
+/// `mlua-pkg.toml` above it, or beside some other `htl.toml` — is refused here as it is
+/// wherever the model is built.
 pub fn config_of(first: &Path) -> Result<Config> {
-    Ok(HtlConfig::find(first)?.map(|(p, c)| (crate::parent_dir(&p), p, c)))
+    Ok(crate::model::Project::find_root(first)?
+        .and_then(|r| r.config_file.map(|f| (r.root, f, r.config))))
 }
 
 /// The [model](crate::model) of the project `config` was loaded for, or of the mlua-pkg
@@ -417,36 +424,20 @@ pub fn model_of(config: &Config, first: &Path) -> Result<Option<crate::model::Pr
     }
 }
 
-/// The directories a walk over `paths` for `purpose` does not enter: the project model's
-/// answer ([`crate::model::Project::not_walked`]) when there is a model, and outside a
-/// project the patched dependencies below `paths` for any purpose but checking.
+/// The directories a walk for `purpose` does not enter: the project model's answer
+/// ([`crate::model::Project::not_walked`]). Outside a project there is no dependency to
+/// leave out, and nothing is skipped beyond the walker's own rule
+/// ([`crate::is_skipped_dir`]).
+///
+/// `paths` is unused: which directories are a dependency's is the model's to say, not
+/// something a walk works out again from where it starts.
 pub fn not_walked(
     model: Option<&crate::model::Project>,
     paths: &[PathBuf],
     purpose: crate::model::Purpose,
 ) -> Vec<PathBuf> {
-    match model {
-        Some(m) => m.not_walked(purpose),
-        None if purpose == crate::model::Purpose::Check => Vec::new(),
-        None => patched(paths),
-    }
-}
-
-/// The patched dependencies below `paths` — `patch_dir` deps, as directories.
-///
-/// What a check walks and formatting or a test run does not: the copy is the project's
-/// code, so its type errors are the project's to fix, but rewriting it or running its
-/// tests is doing a dependency's work in the project's name.
-pub fn patched(paths: &[PathBuf]) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    for p in paths {
-        for d in crate::patched_dirs(p) {
-            if !out.contains(&d) {
-                out.push(d);
-            }
-        }
-    }
-    out
+    let _ = paths;
+    model.map(|m| m.not_walked(purpose)).unwrap_or_default()
 }
 
 /// `store`, probing with `model`'s answers when there is a model
@@ -468,18 +459,28 @@ pub fn with_model(
     )
 }
 
+/// The directory whose `.htl/` holds the store: the project's root, wherever the command
+/// ran from — where its installed dependencies live too (`.htl/modules`), so a project has
+/// one `.htl/`. Outside any project, the working directory: a person asking for a check
+/// of a loose file keeps a store where they stand.
+pub fn store_root(model: Option<&crate::model::Project>) -> PathBuf {
+    model
+        .map(|m| m.root.clone())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
 /// Why a run must not keep a store under `root`, when it must not.
 ///
 /// A person standing in a project and asking for a check never trips this: the store goes
-/// beside `htl.toml`, or in the working directory. A macro expands wherever cargo compiles
-/// the crate, which is not always somewhere a store belongs — the crate may not have opted
-/// into the layout at all (`htl init` / `htl new` write `htl.toml` and gitignore `.htl/`),
-/// or it may be building in build scratch, which is [`cache::scratch_root`]'s to define
-/// and to explain: this is the store's half of a rule that covers the whole `.htl/`, the
-/// entry links included.
-pub fn store_refusal(root: &Path, has_config: bool) -> Option<String> {
-    if !has_config {
-        return Some("no htl.toml".to_string());
+/// at the project root ([`store_root`]), or in the working directory. A macro expands
+/// wherever cargo compiles the crate, which is not always somewhere a store belongs — the
+/// crate may be in no project at all (`htl init` / `htl new` write `htl.toml` and gitignore
+/// `.htl/`), or it may be building in build scratch, which is [`cache::scratch_root`]'s to
+/// define and to explain: this is the store's half of a rule that covers the whole `.htl/`,
+/// the entry links included.
+pub fn store_refusal(root: &Path, in_project: bool) -> Option<String> {
+    if !in_project {
+        return Some("no project".to_string());
     }
     cache::scratch_root(root).map(str::to_string)
 }
@@ -544,15 +545,10 @@ pub fn cache_options(
     }
 }
 
-/// Directories a `require` could resolve in, listed whether or not they exist yet.
-///
-/// The ones that do not exist matter most: a `types/` created after an entry was written
-/// changes what a module name resolves to while every file the entry recorded still hashes
-/// the same. Recording only the directories that happened to exist is the hole ccache
-/// documents in its direct mode, and an empty directory hashes differently from one holding
-/// a module, so listing it now is what closes it.
-pub fn search_dirs(file: &Path, root: &Path, cfg: &Config) -> Vec<PathBuf> {
-    cache::search_dirs(file, root, cfg.as_ref().map(|(r, _, c)| (r.as_path(), c)))
+/// Directories a `require` from `file` could resolve in, for an entry's probes when the
+/// store has no project model ([`cache::search_dirs`]).
+pub fn search_dirs(file: &Path) -> Vec<PathBuf> {
+    cache::search_dirs(file)
 }
 
 // ------------------------------------------------------------------ the checker
@@ -582,62 +578,29 @@ pub fn checker(model: Option<&crate::model::Project>, sel: &crate::lint::Selecti
 
 /// Where a file a check pulled in lives, for the `origin` a dependency diagnostic carries.
 ///
-/// Decided by the directory and reported, never enforced: every file with errors is
-/// reported whatever this says. `dependency` is the installed-deps directory
-/// (`.htl/modules`) and the vendored copies the manifest declares; `external` is a
-/// `[check] paths` or contract directory, supplied from outside the project; anything else
-/// is the project's own and carries no origin. A consumer that counts a dependency's
-/// errors apart from the project's reads this field rather than parsing paths.
+/// Decided by the module of the project model whose home holds the file
+/// ([`home_of`](crate::model::Project::home_of)), by its owner
+/// ([`Owner::origin`](crate::model::Owner::origin)) — the same module `htl resolve` names
+/// the file's origin from — and reported, never enforced: every file with errors is
+/// reported whatever this says. A consumer that counts a dependency's errors apart from
+/// the project's reads this field rather than parsing paths. Outside a project every file
+/// is the caller's own.
 pub struct Origins {
-    dependency: Vec<PathBuf>,
-    external: Vec<PathBuf>,
+    model: Option<crate::model::Project>,
 }
 
 impl Origins {
-    /// Work out the two sets of directories once, from where the walk started, where the
-    /// project root is, the config, and the resolved contracts — so that classifying a
-    /// file afterwards is a prefix test rather than a fresh look at the filesystem.
-    pub fn new(
-        start: &Path,
-        root: &Path,
-        cfg: &Config,
-        contracts: &[crate::contract::Resolved],
-    ) -> Self {
-        let canon = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
-        let mut dependency = Vec::new();
-        if let Some(p) = crate::pkg::MluaProject::find(start) {
-            dependency.push(canon(p.pkgs_dir.clone()));
-            dependency.extend(p.target_dirs.iter().cloned().map(canon));
-        }
-        let mut external = Vec::new();
-        if let Some((r, _, c)) = cfg {
-            external.extend(
-                c.check
-                    .paths
-                    .iter()
-                    .map(|p| canon(crate::config::resolve_path(r, p))),
-            );
-            for c in contracts {
-                external.extend(c.dirs(root).into_iter().map(canon));
-            }
-        }
+    /// Origins as `model` has them.
+    pub fn new(model: Option<&crate::model::Project>) -> Self {
         Self {
-            dependency,
-            external,
+            model: model.cloned(),
         }
     }
 
     /// Which origin `file` has, or `None` for the project's own — the word a dependency
     /// diagnostic carries as its `origin`.
     pub fn of(&self, file: &Path) -> Option<&'static str> {
-        let file = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
-        if self.dependency.iter().any(|d| file.starts_with(d)) {
-            Some("dependency")
-        } else if self.external.iter().any(|d| file.starts_with(d)) {
-            Some("external")
-        } else {
-            None
-        }
+        self.model.as_ref()?.home_of(file)?.owner.origin()
     }
 }
 
@@ -773,10 +736,6 @@ pub struct Harvest<'a> {
     /// `htl.toml`'s own path, recorded as an input of every entry: a config change invalidates
     /// what was generated under it.
     pub cfg_inputs: &'a [PathBuf],
-    /// The project root, for the search directories an entry records.
-    pub root: &'a Path,
-    /// The config, read for those same search directories.
-    pub cfg: &'a Config,
     /// The project's [model](crate::model): the directories the test file was checked
     /// against, put back for the harvest.
     pub model: Option<&'a crate::model::Project>,
@@ -804,8 +763,6 @@ pub fn harvest_modules(h: &Harvest<'_>, check: &CheckInfo, test_file: &Path) {
         store,
         session,
         cfg_inputs,
-        root,
-        cfg,
         model,
         lint,
         opts,
@@ -863,7 +820,7 @@ pub fn harvest_modules(h: &Harvest<'_>, check: &CheckInfo, test_file: &Path) {
             &cache::module_gen_key(&path, lint),
             &path,
             cfg_inputs,
-            &search_dirs(&path, root, cfg),
+            &search_dirs(&path),
             &m,
         );
     }
@@ -935,6 +892,11 @@ pub struct Options<'a> {
     /// `htl.toml`, already loaded — the caller needs it for its own decisions (`strict`)
     /// and reading it twice would be reading it twice.
     pub config: &'a Config,
+    /// The project the files belong to ([`model_of`]), built by the caller from where the
+    /// run started: which module each file is, what it may read, where the store lives.
+    /// Handed in rather than found again from the files, so the run and its caller cannot
+    /// be about two projects. `None` outside any project.
+    pub model: Option<&'a crate::model::Project>,
     /// A lint selection from the caller, merged after the file's own so that it wins.
     pub lint: Option<&'a str>,
     /// The run cache's switches ([`cache_options`]).
@@ -1007,10 +969,11 @@ pub fn check<O: Output>(
     let Options {
         paths,
         config: cfg,
+        model,
         lint,
         cache: cache_opts,
     } = opts;
-    let (cfg, cache_opts) = (*cfg, *cache_opts);
+    let (cfg, cache_opts, model) = (*cfg, *cache_opts, *model);
     let files = files.to_vec();
 
     // The `---@contract` markers, read once for the run rather than once per file: they
@@ -1021,24 +984,18 @@ pub fn check<O: Output>(
         None => (Vec::new(), Vec::new()),
     };
 
-    // The store lives at the project root, so invocations from different directories in
-    // one project share it; what separates them is the key, which carries the working
-    // directory and each path as written.
-    let root = cfg
-        .as_ref()
-        .map(|(r, _, _)| r.clone())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    // The project the walk belongs to is the first path's. Nothing named at all is the
-    // working directory, which is what a command line with no argument already means.
+    // The Rust crate around the walk, for the host modules it registers: found from the
+    // first path, and nothing named at all is the working directory.
     let start = paths
         .first()
         .map(PathBuf::as_path)
         .unwrap_or(Path::new("."));
-    let origins = Origins::new(start, &root, cfg, &contracts);
-    // Which module each file belongs to, and so what it may read: built once for the walk,
-    // from the config already loaded.
-    let model = model_of(cfg, start)?;
-    let store = with_model(store(&root, cache_opts, None, "htl check"), model.as_ref());
+    let origins = Origins::new(model);
+    // The store lives at the project root, so invocations from different directories in
+    // one project share it; what separates them is the key, which carries the working
+    // directory and each path as written.
+    let root = store_root(model);
+    let store = with_model(store(&root, cache_opts, None, "htl check"), model);
     // A dependency error is said once per run, and not on behalf of a file the walk
     // checks itself. The rule applies to replayed entries as much as to fresh checks.
     sink.walking(&files);
@@ -1087,7 +1044,7 @@ pub fn check<O: Output>(
     let to_check = hits.iter().filter(|h| h.is_none()).count();
 
     let h = if to_check > 0 {
-        Some(checker(model.as_ref(), lints.selection())?)
+        Some(checker(model, lints.selection())?)
     } else {
         None
     };
@@ -1111,7 +1068,7 @@ pub fn check<O: Output>(
                     f,
                     &Walk {
                         cfg,
-                        model: model.as_ref(),
+                        model,
                         contracts: &contracts,
                         origins: &origins,
                         host_modules: &host_modules,
@@ -1123,7 +1080,7 @@ pub fn check<O: Output>(
                 if let Some(c) = &store
                     && c.mode() == cache::Mode::PerModule
                 {
-                    c.store_module(key, f, &cfg_inputs, &search_dirs(f, &root, cfg), &m);
+                    c.store_module(key, f, &cfg_inputs, &search_dirs(f), &m);
                 }
                 m
             }
@@ -1141,10 +1098,7 @@ pub fn check<O: Output>(
         && c.mode() == cache::Mode::WholeRun
         && to_check > 0
     {
-        let dirs: Vec<PathBuf> = files
-            .iter()
-            .flat_map(|f| search_dirs(f, &root, cfg))
-            .collect();
+        let dirs: Vec<PathBuf> = files.iter().flat_map(|f| search_dirs(f)).collect();
         c.store_run(&run_key, &files, &cfg_inputs, &dirs, &modules);
     }
     // Project-level: cycles in the require graph of the files just checked.
@@ -1457,10 +1411,12 @@ pub fn coverage_report(
 
 /// What a test run needs beyond the files themselves.
 pub struct TestOptions<'a> {
-    /// `htl.toml`, already loaded ([`config_of`]) — it names the project the run belongs
-    /// to (the root the store lives at), the caller reads it for its own decisions, and
-    /// reading it twice would be reading it twice.
+    /// `htl.toml`, already loaded ([`config_of`]) — the caller reads it for its own
+    /// decisions, and reading it twice would be reading it twice.
     pub config: &'a Config,
+    /// The project the run belongs to ([`model_of`]), built by the caller: what each file
+    /// may read, and the root the store lives at. `None` outside any project.
+    pub model: Option<&'a crate::model::Project>,
     /// A lint selection from the caller, merged after the file's own so that it wins.
     pub lint: Option<&'a str>,
     /// Module name of the assertion library to ask for the verdict
@@ -1537,13 +1493,14 @@ pub fn test<O: Output>(
 ) -> Result<TestReport> {
     let TestOptions {
         config: cfg,
+        model,
         lint,
         lib,
         filter,
         run,
         cache: cache_opts,
     } = opts;
-    let (cfg, cache_opts) = (*cfg, *cache_opts);
+    let (cfg, cache_opts, model) = (*cfg, *cache_opts, *model);
     let files = files.to_vec();
 
     // Given, or drawn once for the whole run and reported. Drawn from the clock rather
@@ -1579,28 +1536,18 @@ pub fn test<O: Output>(
     let (mut passed, mut failed, mut bad_files, mut ran_files) = (0usize, 0usize, 0usize, 0usize);
     let started = std::time::Instant::now();
     // One checker for the run; each file still gets a fresh program state. The project's
-    // model says what every file may read, built once from the config already loaded.
-    let model_root = cfg.as_ref().map(|(r, _, _)| r.clone()).unwrap_or_else(|| {
-        files
-            .first()
-            .map(|f| crate::parent_dir(f))
-            .unwrap_or_else(|| PathBuf::from("."))
-    });
-    let model = model_of(cfg, &model_root)?;
+    // model says what every file may read.
     let mut session = TestSession::new(lint, lib, *filter, run)?;
     if let Some(m) = &model {
-        session = session.for_project(m.clone());
+        session = session.for_project((*m).clone());
     }
 
     // Checking a test file and generating its Lua is most of what a run costs — the tests
     // themselves are a few percent of it — and none of that work depends on the outcome, so
     // it is reusable in exactly the way a check's is. Running is not: a test has to run to
     // say whether it passes, every time.
-    let root = cfg
-        .as_ref()
-        .map(|(r, _, _)| r.clone())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let store = with_model(store(&root, cache_opts, None, "htl test"), model.as_ref());
+    let root = store_root(model);
+    let store = with_model(store(&root, cache_opts, None, "htl test"), model);
     let keys: Vec<cache::Key> = files.iter().map(|f| cache::gen_key(f, lint)).collect();
     let cfg_inputs: Vec<PathBuf> = cfg.iter().map(|(_, p, _)| p.clone()).collect();
 
@@ -1609,9 +1556,7 @@ pub fn test<O: Output>(
         store: c,
         session: &session,
         cfg_inputs: &cfg_inputs,
-        root: &root,
-        cfg,
-        model: model.as_ref(),
+        model,
         lint,
         opts: cache_opts,
         done: RefCell::new(Default::default()),
@@ -1642,7 +1587,7 @@ pub fn test<O: Output>(
                 // and storing that would replay an empty run as if it were a result.
                 if let (Some(c), Some(code)) = (&store, code) {
                     let m = cache::Module::generated(&rep.check, code);
-                    c.store_module(key, f, &cfg_inputs, &search_dirs(f, &root, cfg), &m);
+                    c.store_module(key, f, &cfg_inputs, &search_dirs(f), &m);
                     // And the modules it reached, so the next run can preload them. The
                     // checker's store is warm here, so this generates rather than re-checks.
                     if let Some(h) = &harvest {
@@ -1685,7 +1630,7 @@ pub fn test<O: Output>(
             &files,
             &cov_hits,
             &cov_deps,
-            model.as_ref(),
+            model,
         )?)
     } else {
         None
