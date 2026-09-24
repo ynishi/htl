@@ -937,17 +937,20 @@ pub struct Report {
 }
 
 impl Report {
-    /// Whether the run counts as a failure: **an error, or a finding at `deny` — and
-    /// under `strict` every finding the run reported counts as `deny`.**
-    ///
-    /// That is the whole of what a level means to an exit code, and `strict` is the
-    /// run-wide form of the same statement: everything a run reports is at `warn` or
-    /// `deny` (`allow` is not reported), so promoting `warn` leaves nothing advisory. It
-    /// is also what the predicate did before levels existed, said in the vocabulary that
-    /// now exists for it — with no rule defaulting to `deny`, a project that writes no
-    /// configuration fails on exactly what it failed on before.
+    /// What the run said, counted: the input to [`crate::verdict::verdict`].
+    pub fn findings(&self) -> crate::verdict::Findings {
+        crate::verdict::Findings {
+            errors: self.errors,
+            warnings: self.warnings,
+            lints: self.lints,
+            denied: self.denied,
+        }
+    }
+
+    /// Whether the run counts as a failure under `strict`: [`crate::verdict::verdict`] of
+    /// its [`findings`](Self::findings), which says what that means.
     pub fn failed(&self, strict: bool) -> bool {
-        self.errors > 0 || self.denied > 0 || (strict && (self.warnings > 0 || self.lints > 0))
+        crate::verdict::verdict(&self.findings(), &crate::verdict::Policy { strict })
     }
 
     /// Every module came from the store, so no checker was built.

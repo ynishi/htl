@@ -94,6 +94,8 @@ pub mod testing;
 // whose check hands it the graph, so it carries that layer's features.
 #[cfg(all(feature = "pkg", feature = "dts"))]
 pub mod unused;
+// Whether a run fails: the one predicate every command's exit code comes from.
+pub mod verdict;
 
 pub use build_target::BuildTarget;
 pub use diagnostic::{Diagnostic, Severity};
