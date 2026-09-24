@@ -2206,11 +2206,7 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
     // htl.toml first, then --lint, so the flag wins; `strict` from the file unless flagged.
     let cfg = load_config(&paths[0])?;
     warn_cargo_htl_mismatch(&paths[0]);
-    let strict = flags.strict
-        || cfg
-            .as_ref()
-            .and_then(|(_, _, c)| c.lint.strict)
-            .unwrap_or(false);
+    let policy = htl::verdict::Policy::resolve(cfg.as_ref().map(|(_, _, c)| c), flags.strict);
     // `.d.tl` written from Rust source is an input to the check, so it is regenerated
     // before anything hashes the tree: a hit computed over stale declarations would be a
     // hit on a different question from the one being asked.
@@ -2266,7 +2262,7 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
         sink.out(),
         json,
         &rep,
-        strict,
+        &policy,
         patched_files(walk_model.as_ref(), &rep.files),
     )?;
     Ok(if fail {
@@ -2636,12 +2632,13 @@ fn report_check(
     out: &mut report::Out,
     json: bool,
     rep: &project::Report,
-    strict: bool,
+    policy: &htl::verdict::Policy,
     patched: usize,
 ) -> Result<bool> {
     let (files, replayed) = (rep.files.len(), rep.replayed);
     let (errors, warnings, lints) = (rep.errors, rep.warnings, rep.lints);
-    let fail = rep.failed(strict);
+    let strict = policy.strict;
+    let fail = htl::verdict::verdict(&rep.findings(), policy);
     let all_cached = rep.all_cached();
     if json {
         report::emit(&report::CheckReport {
