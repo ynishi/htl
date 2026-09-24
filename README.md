@@ -1644,8 +1644,10 @@ end
 return defs
 ```
 
-Every module directly under `mods/` must return a value assignable to `defs.Mod` and set
-the three marked fields. `factions` and `npcs` are for the mods that want them, and that
+Every module under `mods/` must return a value assignable to `defs.Mod` and set the three
+marked fields — `mods/foo.tl`, and as much `mods/foo/init.tl` (named `foo`) or
+`mods/sub/x.tl` (named `sub.x`), the names a `require` writes and the host's resolver
+serves them under. `factions` and `npcs` are for the mods that want them, and that
 asymmetry is the point: a record cannot say which of its own fields are mandatory (every
 Teal record field is nilable and there is no `?` for them), and holding modules to *all*
 of them would break every one written before a field was added. Marking the mandatory
@@ -2259,7 +2261,7 @@ the files `htl test`, `htl build`, `[[contract]]` and a Rust host are pointed at
   manifest;
 - every test file, as `htl test` discovers them — so a module used only by a test is
   reached, not reported;
-- every module directly under a `[[contract]]` directory: those are loaded by name at run
+- every module under a `[[contract]]` directory, nested ones included: those are loaded by name at run
   time, from a mods directory the project does not own. The `exclude`d ones too —
   `exclude` says a module is not held to the contract, not that nothing loads it;
 - anything named in `[build] extra`, which is where a dynamic `require(expr)` already has

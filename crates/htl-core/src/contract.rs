@@ -12,7 +12,7 @@
 //! return defs
 //! ```
 //!
-//! Every module directly under `mods/` must return a value assignable to `defs.Mod` and
+//! Every module under `mods/` (`foo.tl`, `foo/init.tl`, `sub/x.tl`: see [`held_name`]) must return a value assignable to `defs.Mod` and
 //! set `name` and `monsters`; `factions` is there for the mods that want it. That last
 //! part is why the fields are marked rather than counted: a record cannot say which of
 //! its own fields are mandatory (every Teal record field is nilable and there is no `?`
@@ -100,8 +100,32 @@ impl Resolved {
         acc
     }
 
-    /// Is `module` (a file stem under a contract dir) held to this contract? The module
-    /// that declares the type is not held to it.
+    /// Every module the directories of this contract hold, as `(name, file)`, each
+    /// directory walked in order and each in file-name order: what the host's resolver
+    /// serves from them ([`crate::pkg::TealResolver::for_contract`]) and what `htl check`
+    /// holds to the contract. The modules `exclude` names are among them — `exclude` says a
+    /// module is not held to the type, not that the directory does not serve it.
+    pub fn held_modules(&self, root: &Path) -> Vec<(String, PathBuf)> {
+        let mut out = Vec::new();
+        for dir in self.dirs(root) {
+            let top = dir.clone();
+            let walker = walkdir::WalkDir::new(&dir)
+                .sort_by_file_name()
+                .into_iter()
+                .filter_entry(move |e| e.path() == top || !crate::is_skipped_dir(e.path(), &[]));
+            for e in walker.flatten() {
+                if let Some(name) = held_name(&dir, e.path()) {
+                    out.push((name, e.path().to_path_buf()));
+                }
+            }
+        }
+        out
+    }
+
+    /// Is the module named `module` under a contract dir held to this contract? The name
+    /// is the one it is required under ([`held_name`]): `foo` for `foo.tl` and
+    /// `foo/init.tl`, `sub.x` for `sub/x.tl`. The module that declares the type is not
+    /// held to it.
     pub fn applies_to(&self, module: &str) -> bool {
         if self
             .type_path
@@ -118,6 +142,35 @@ impl Resolved {
             None => true,
         }
     }
+}
+
+/// The name the Teal module at `file` answers to when the contract directory `dir` serves
+/// it: the naming rule every other name in htl comes from ([`crate::naming::name_of`], the
+/// directory mounted at the top), so `foo.tl` and `foo/init.tl` are `foo` and `sub/x.tl`
+/// is `sub.x` — what `require` writes, and what the host's resolver for `dir` serves the
+/// file under.
+///
+/// `None` for a file the directory does not serve as a module: outside `dir`, below a
+/// directory no walk enters ([`crate::is_skipped_dir`]: build output, dot-directories), or
+/// not a `.tl` implementation (a `.d.tl` declares, it is not a module a host loads).
+///
+/// The one answer to "which files, under which names, does a contract hold": the
+/// `contract` lint, [`Resolved::held_modules`] and `htl unused` all read it.
+pub fn held_name(dir: &Path, file: &Path) -> Option<String> {
+    let rel = file.strip_prefix(dir).ok()?;
+    if !crate::is_tl_source(file) {
+        return None;
+    }
+    let mut at = dir.to_path_buf();
+    if let Some(parent) = rel.parent() {
+        for c in parent.components() {
+            at.push(c);
+            if crate::is_skipped_dir(&at, &[]) {
+                return None;
+            }
+        }
+    }
+    crate::naming::name_of("", rel)
 }
 
 /// What the `---@contract` on one record says, before the directory is settled.

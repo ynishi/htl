@@ -1118,6 +1118,69 @@ fn contract_resolvers_enforce_the_same_contract_at_run_time() {
     assert!(partial.contains("hp"), "missing field named: {partial}");
 }
 
+/// A module below the top of a contract directory — `foo/init.tl`, `sub/x.tl` — is held
+/// by `htl check` exactly as the host's resolver holds it at run time: under the name a
+/// `require` writes (`foo`, `sub.x`), whichever way it is laid out. The lint used to take a
+/// file only when its parent *was* the directory, so these two passed the check and failed
+/// the run.
+#[test]
+fn a_nested_module_is_held_by_the_check_as_at_run_time() {
+    let (root, cfg) = project("nested");
+    write(
+        &root.join("mods/foo/init.tl"),
+        "return { name = \"broken\", hp = \"lots\" }\n",
+    );
+    write(&root.join("mods/sub/x.tl"), "return { name = \"half\" }\n");
+    write(
+        &root.join("mods/ok/init.tl"),
+        "return { name = \"fine\", hp = 1 }\n",
+    );
+    // Under a directory no walk enters: not a module the directory serves.
+    write(&root.join("mods/target/y.tl"), "return 1\n");
+    let h = Htl::new().unwrap();
+
+    let foo = lints_for(&h, &root, &cfg, "mods/foo/init.tl");
+    assert!(
+        foo.len() == 1 && foo[0].contains("does not satisfy contract defs.Mod"),
+        "{foo:?}"
+    );
+    let x = lints_for(&h, &root, &cfg, "mods/sub/x.tl");
+    assert!(
+        x.len() == 1 && x[0].contains("lacks declared field(s) of defs.Mod: hp"),
+        "{x:?}"
+    );
+    assert!(lints_for(&h, &root, &cfg, "mods/ok/init.tl").is_empty());
+    assert!(lints_for(&h, &root, &cfg, "mods/target/y.tl").is_empty());
+
+    let rt = Htl::new().unwrap();
+    let mut reg = htl_core::pkg::mlua_pkg::Registry::new();
+    for r in htl_core::pkg::contract_resolvers(&root, &cfg).unwrap() {
+        reg.add(r);
+    }
+    reg.install(rt.lua()).unwrap();
+    let load = |name: &str| {
+        rt.lua()
+            .load(format!("return require('{name}')"))
+            .eval::<mlua::Value>()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    };
+    assert!(load("foo").is_err_and(|e| e.contains("does not satisfy defs.Mod")));
+    assert!(load("sub.x").is_err_and(|e| e.contains("hp")));
+    assert!(load("ok").is_ok());
+    // What the directory does not hold, it does not serve: not a module loaded around the
+    // contract.
+    assert!(load("target.y").is_err_and(|e| !e.contains("defs.Mod")));
+
+    // And the one list both are read from.
+    let held: Vec<String> = contracts(&root, &cfg)[0]
+        .held_modules(&root)
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    assert_eq!(held, ["bad", "foo", "good", "ok", "partial", "sub.x"]);
+}
+
 /// A contract type declared in `types/` — where `htl new` puts hand-written declarations
 /// and where a host publishes the one its mod authors write against. The `contract` lint
 /// resolves it because `contract_lints` goes through `apply_config`; the resolver has to

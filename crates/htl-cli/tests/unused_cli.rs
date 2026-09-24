@@ -143,11 +143,23 @@ fn a_module_under_a_contract_dir_is_an_entry() {
         &root.join("mods/goblin.tl"),
         "local defs = require(\"defs\")\nlocal m: defs.Mod = { name = \"goblin\" }\nreturn m\n",
     );
-    let (_, _, err) = htl(&["unused"], &root);
-    assert!(
-        !err.contains("mods/goblin.tl"),
-        "a contract module is loaded by name at run time: {err}"
+    // Below the top of the directory too: the host's resolver serves these as `orc` and
+    // `pack.troll`, so they are loaded by name exactly as `goblin` is.
+    write(
+        &root.join("mods/orc/init.tl"),
+        "local defs = require(\"defs\")\nlocal m: defs.Mod = { name = \"orc\" }\nreturn m\n",
     );
+    write(
+        &root.join("mods/pack/troll.tl"),
+        "local defs = require(\"defs\")\nlocal m: defs.Mod = { name = \"troll\" }\nreturn m\n",
+    );
+    let (_, _, err) = htl(&["unused"], &root);
+    for m in ["mods/goblin.tl", "mods/orc/init.tl", "mods/pack/troll.tl"] {
+        assert!(
+            !err.contains(m),
+            "a contract module is loaded by name at run time: {m}: {err}"
+        );
+    }
     // And it reaches what it requires: `defs` is not orphaned by having no other caller.
     assert!(!err.contains("src/defs.tl"), "{err}");
 }
