@@ -1934,19 +1934,13 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
     } else {
         paths.to_vec()
     };
-    let h = Htl::new()?;
     let cfg = load_config(&paths[0])?;
-    let file_spec = cfg
-        .as_ref()
-        .map(|(_, _, c)| c.lint_spec())
-        .unwrap_or_default();
-    if !file_spec.is_empty() {
-        h.configure_lints(&file_spec)?;
-    }
     auto_dts(&paths[0])?;
-    let model = apply_model(&h, &cfg, &paths[0])?;
-    h.install_test_lib()?;
-    h.install_std()?;
+    let model = project::model_of(&cfg, &paths[0])?;
+    // What `htl check` holds a file to, resolved the same way and read by the same checker,
+    // so a file this run leaves reports what a check of it would.
+    let scope = project::Scope::new(&cfg, model.as_ref(), &paths[0], None)?;
+    let h = project::checker(model.as_ref(), scope.lints.selection())?;
     let opts = FixOptions {
         unsafe_fixes: flags.unsafe_fixes,
         promoted: cfg
@@ -1963,12 +1957,19 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
     // Here as well as inside `fix_file`, so a misspelt rule is answered even when the
     // paths hold no `.tl` at all — the request is wrong either way.
     opts.validate()?;
-    // Walked as `htl fmt` walks, not as `htl check` does: this command rewrites files, so a
+    // Written as `htl fmt` walks, not as `htl check` does: this command rewrites files, so a
     // patched dependency is left alone whatever the fixes would be. An edit there belongs
     // in the diff the project makes against the revision it took, written by a person.
-    let walk_model = project::model_of(&cfg, &paths[0])?;
-    let skip = project::not_walked(walk_model.as_ref(), &paths, htl::model::Purpose::Own);
+    let skip = project::not_walked(model.as_ref(), &paths, htl::model::Purpose::Own);
     let files = htl::collect_tl_skipping(&paths, &skip)?;
+    // But checked as `htl check` walks: the copy is still the project's code, and what is
+    // wrong in it is what the two commands both judge the tree by. Only checked, never
+    // handed to `fix_file`.
+    let check_skip = project::not_walked(model.as_ref(), &paths, htl::model::Purpose::Check);
+    let checked_only: Vec<PathBuf> = htl::collect_tl_skipping(&paths, &check_skip)?
+        .into_iter()
+        .filter(|f| !files.contains(f))
+        .collect();
 
     // The working tree is the undo: refuse to rewrite what git could not give back.
     if !flags.dry_run {
@@ -2004,14 +2005,19 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
     }
 
     let mut sink = project::Sink::new(report::Out::new(flags.json));
+    // Judged by the levels `htl check` judges by: a finding under a rule at `deny` fails.
+    sink.judge_by(scope.lints.selection());
     // Dependencies are reported as `htl check` reports them and never rewritten: a fix
     // under `.htl/` goes at the next install, one under `[check] paths` is not this
     // project's. `fix_file` only ever writes the file it was given.
-    let origins = project::Origins::new(walk_model.as_ref());
-    sink.walking(&files);
+    let origins = project::Origins::new(model.as_ref());
+    let walk = scope.walk(&cfg, model.as_ref(), &origins);
+    let walked: Vec<PathBuf> = files.iter().chain(&checked_only).cloned().collect();
+    sink.walking(&walked);
     let (mut applied, mut skipped, mut json_files) = (Vec::new(), Vec::new(), Vec::new());
-    let (mut changed, mut deferred, mut reverted, mut errors_remaining) =
-        (0usize, 0usize, 0usize, 0usize);
+    let (mut changed, mut deferred, mut reverted) = (0usize, 0usize, 0usize);
+    let mut found = htl::verdict::Findings::default();
+    let mut infos: Vec<(PathBuf, htl::CheckInfo)> = Vec::with_capacity(walked.len());
     for f in &files {
         // Put back after each file, as `htl check` does, so a file is fixed against what
         // it may read and not also against the directories of the files before it.
@@ -2023,7 +2029,6 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
             None
         };
         let out = fix_file(&h, f, &opts)?;
-        h.set_search_path(&saved)?;
         if out.contents.is_some() {
             changed += 1;
         }
@@ -2031,7 +2036,6 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
         if out.reverted.is_some() {
             reverted += 1;
         }
-        errors_remaining += out.check.errors.len();
         if !flags.json {
             for a in &out.applied {
                 eprintln!(
@@ -2084,8 +2088,13 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
                 );
             }
         }
-        sink.checkinfo(&out.check);
-        sink.dependency_errors(&out.check, &|p| origins.of(p));
+        // What the file says as it is left, the way `htl check` would say it: the checker's
+        // result and this layer's lints, while the path it was checked under is in place.
+        found.lints += project::file_findings(&h, &mut sink, f, &out.check, &walk)?;
+        h.set_search_path(&saved)?;
+        found.errors += out.check.errors.len();
+        found.warnings += out.check.warnings.len();
+        infos.push((f.clone(), out.check.clone()));
         if flags.json {
             applied.extend(out.applied.iter().map(|a| report::FixApplied {
                 file: f.display().to_string(),
@@ -2110,11 +2119,43 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
             });
         }
     }
+    // A patched copy: checked as `htl check` checks it, and not fixed.
+    for f in &checked_only {
+        let m = project::check_one(&h, &mut sink, f, &walk)?;
+        found.errors += m.errors;
+        found.warnings += m.warnings;
+        found.lints += m.lints;
+        infos.push((f.clone(), m.requires_only()));
+        if flags.json {
+            json_files.push(report::FixFile {
+                path: f.display().to_string(),
+                changed: false,
+                deferred: 0,
+                reverted: None,
+                oscillation: None,
+                diagnostics: sink.out().take(),
+            });
+        }
+    }
+    // What the project says about itself as a whole.
+    let w = project::project_findings(&mut sink, &scope.whole(&cfg, model.as_ref()), &infos);
+    found.errors += w.errors;
+    found.lints += w.lints;
+    let project_diagnostics = if flags.json {
+        sink.out().take()
+    } else {
+        Vec::new()
+    };
     // A broken dependency is an error `htl fix` cannot remove; it remains, as `htl check`
-    // would count it, so the two exit the same way on the same tree.
-    errors_remaining += sink.dependency_error_count();
+    // would count it.
+    found.errors += sink.dependency_error_count();
+    found.denied = sink.denied();
+    // Judged as `htl check` judges the same tree: the same findings, the same policy.
+    let policy = htl::verdict::Policy::resolve(cfg.as_ref().map(|(_, _, c)| c), false);
+    let errors_remaining = found.errors;
     let n_applied = if flags.json { applied.len() } else { 0 };
-    let fail = errors_remaining > 0 || (flags.exit_non_zero_on_fix && changed > 0);
+    let fail =
+        htl::verdict::verdict(&found, &policy) || (flags.exit_non_zero_on_fix && changed > 0);
     if flags.json {
         let n_skipped = skipped.len();
         report::emit(&report::FixReport {
@@ -2130,13 +2171,36 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
                 deferred,
                 reverted,
                 errors_remaining,
+                warnings: found.warnings,
+                lints: found.lints,
+                denied: found.denied,
+                strict: policy.strict,
                 ok: !fail,
             },
+            diagnostics: project_diagnostics,
         })?;
     } else {
+        // What else the verdict counted, said only when it did: a finding at `deny`, and
+        // under `strict` every warning and lint. Without it a run that failed on a lint
+        // would end in `0 error(s) remaining`.
+        let mut judged = String::new();
+        if found.denied > 0 {
+            judged.push_str(&format!(", {} at deny", found.denied));
+        }
+        if policy.strict && found.warnings + found.lints > 0 {
+            judged.push_str(&format!(
+                ", {} warning(s) and {} lint(s) under strict",
+                found.warnings, found.lints
+            ));
+        }
         eprintln!(
-            "htl fix: {} file(s), {} changed{}, {} error(s) remaining{}",
+            "htl fix: {} file(s){}, {} changed{}, {} error(s) remaining{}{}",
             files.len(),
+            if checked_only.is_empty() {
+                String::new()
+            } else {
+                format!(" + {} checked in patched dependencies", checked_only.len())
+            },
             changed,
             if flags.dry_run {
                 " (dry run, nothing written)"
@@ -2144,6 +2208,7 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
                 ""
             },
             errors_remaining,
+            judged,
             if deferred > 0 {
                 format!(", {deferred} deferred")
             } else {

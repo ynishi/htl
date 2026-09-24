@@ -1775,8 +1775,8 @@ manifest declared the `patch_dir`, and it keeps the only `.htl/`.
 errors are the project's to fix, so `htl check` walks it and names the dependency each
 directory stands in for. `htl fmt`, `htl fix` and `htl test` do not touch it: formatting
 it would turn every file into a diff against its base and hide the change inside it, a
-fix would be a line of that diff nobody wrote (what `htl check` reports there is fixed by
-hand), and its `*_test.tl` are the dependency's suite rather than the project's. `.htl/modules` is not
+fix would be a line of that diff nobody wrote (what `htl check` reports there — and `htl
+fix` reports it too, without fixing it — is fixed by hand), and its `*_test.tl` are the dependency's suite rather than the project's. `.htl/modules` is not
 descended into at all, patched or otherwise; its modules are checked through the
 `require` that reaches them and their errors reported against the requirer, never offered
 to `htl fix` (a fix there would go at the next install — patching is how a dependency is
@@ -2059,7 +2059,13 @@ and `--format json` carries the edits. `htl fix [paths]` applies them:
   next pass; passes are capped at 4; two passes producing the same edits are reported
   as fixes undoing each other.
 - Everything applied is listed (`fixed: file:line: rule (safe)`), as is everything
-  skipped and why. Exit code as `htl check` (remaining errors → 1);
+  skipped and why. What is left is reported and judged as `htl check` reports and judges
+  it — each file's diagnostics and htl's own lints on it, a patched dependency's copy
+  (checked, never fixed), and what the project says about itself as a whole (a name with
+  two owners, a require cycle, a contract problem) — so the two exit the same on the same
+  tree: an error, a finding at `deny`, or under `[lint] strict` any warning or lint → 1.
+  The summary line says which it was (`1 at deny`, `... under strict`). Like `htl check`,
+  it first regenerates the `.d.tl` declarations the project publishes, `--dry-run` or not.
   `--exit-non-zero-on-fix` also fails when a file changed, for CI.
 
 ## Machine-readable output
