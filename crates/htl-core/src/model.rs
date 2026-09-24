@@ -65,9 +65,9 @@
 //! # What this module does not do yet
 //!
 //! A name still resolves through `package.path`: the model decides which directories go
-//! on it ([`Project::search_dirs`]), and the Teal checker searches them — held to the
-//! model's names ([`Project::names`]), so a file the search finds under a name the model
-//! does not give it is not found. Every command
+//! on it ([`Project::search_dirs`]), but every name the model has is answered by its
+//! [`Resolver`] first, and a file the search finds under a name the model does not give it
+//! is not found. Every command
 //! that checks, runs or bundles a file sets its checker up from the model — `htl check`,
 //! `test`, `fix`, `gen`, `run`, `build`, `resolve` and the `include_tl!` /
 //! `include_bundle!` macros — and a file that belongs to no project reads its own
@@ -727,128 +727,6 @@ impl Project {
     }
 }
 
-/// What the checker needs to hold a dependency to its own view ([`Project::views`]).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Views {
-    /// The project's own module's roots.
-    pub own: Vec<String>,
-    /// Every other module's roots, and the directory of entry links: a file under one of
-    /// these is not the project's own even when it sits inside one of its roots.
-    pub not_own: Vec<String>,
-    /// The directories a dependency's files are reached through — its roots, and its entry
-    /// link — one entry per directory.
-    pub dep_dirs: Vec<String>,
-    /// The dependency each of [`dep_dirs`](Self::dep_dirs) belongs to, index for index.
-    pub dep_names: Vec<String>,
-}
-
-impl Project {
-    /// The directories that decide what a dependency's files may read: none of the
-    /// project's own. Spelled as the search path spells them ([`search_dirs`](Self::search_dirs)
-    /// is built from the same roots), since that is how the checker names the files it
-    /// finds.
-    pub fn views(&self) -> Views {
-        let s = |p: &Path| p.to_string_lossy().into_owned();
-        let mut v = Views::default();
-        for m in &self.modules {
-            let roots: Vec<String> = m.roots.iter().map(|(_, r)| s(r)).collect();
-            if m.owner == Owner::Own {
-                v.own.extend(roots);
-                continue;
-            }
-            v.not_own.extend(roots.iter().cloned());
-            if matches!(m.owner, Owner::Installed | Owner::Vendored | Owner::Patched) {
-                let mut dirs = roots;
-                if let Some(links) = &self.links {
-                    dirs.push(s(&links.join(&m.name)));
-                }
-                // An installed dependency's root is its link: one directory, said once.
-                for d in dirs {
-                    if !v.dep_dirs.contains(&d) {
-                        v.dep_dirs.push(d);
-                        v.dep_names.push(m.name.clone());
-                    }
-                }
-            }
-        }
-        v.not_own.extend(self.links.as_deref().map(s));
-        v
-    }
-}
-
-impl Project {
-    /// Every file of every module a view can reach, with the name the model gives it —
-    /// two sequences, index for index, the files spelled as the search path reaches them.
-    ///
-    /// What the checker holds a search result to ([`Htl::set_names`](crate::Htl::set_names)):
-    /// `package.path` answers a name with the first file any template turns it into, and a
-    /// template does not know whose file it is. `<dir>/?/?.lua` makes the project's own
-    /// `src/util/util.tl` answer to `util`, and `types/` on the path makes a crate's
-    /// `types/htl-mq/mq.d.tl` answer to `htl-mq.mq` as well as to the `mq` it declares. A
-    /// file answers to its model name and no other.
-    ///
-    /// A dependency's files are listed twice when it is reached both through its entry
-    /// link and through its own directory, once in each spelling. Contract directories are
-    /// left out: each holds the same names as the next, and is checked on its own.
-    pub fn names(&self) -> (Vec<String>, Vec<String>) {
-        let mut files = Vec::new();
-        let mut names = Vec::new();
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for m in self.modules.iter().filter(|m| m.owner != Owner::Contract) {
-            let mut dirs: Vec<PathBuf> = m.roots.iter().map(|(_, r)| r.to_path_buf()).collect();
-            if matches!(m.owner, Owner::Installed | Owner::Vendored | Owner::Patched)
-                && let Some(links) = &self.links
-            {
-                dirs.push(links.join(&m.name));
-            }
-            for dir in dirs {
-                let top = dir.clone();
-                let walker = walkdir::WalkDir::new(&dir)
-                    .sort_by_file_name()
-                    .into_iter()
-                    .filter_entry(move |e| {
-                        e.path() == top || !crate::is_skipped_dir(e.path(), &[])
-                    });
-                for e in walker.flatten() {
-                    let file = e.path();
-                    let base = file.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                    if !e.file_type().is_file()
-                        || !(base.ends_with(".tl") || base.ends_with(".lua"))
-                    {
-                        continue;
-                    }
-                    let spelled = file.to_string_lossy().into_owned();
-                    if !seen.insert(spelled.clone()) {
-                        continue;
-                    }
-                    if let Some(place) = self.locate(file) {
-                        files.push(spelled);
-                        names.push(place.name);
-                    }
-                }
-            }
-        }
-        (files, names)
-    }
-}
-
-/// How the project's `[imports]` rewrite `require`s ([`Project::rewrites`]).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Rewrites {
-    /// Names as the project writes them, index for index with [`to`](Self::to). Each
-    /// covers itself and every name under it.
-    pub from: Vec<String>,
-    /// What each becomes: the project's own module's name for `own:`, and for `dep:` the
-    /// dependency's module under a name only that dependency answers to,
-    /// `@<dependency>/<name>`.
-    pub to: Vec<String>,
-    /// The dependencies an `[imports]` entry points at. A name one of them answers to may
-    /// also be one the project's own module answers to, so in these dependencies' own
-    /// files a `require` of a name under the dependency's name is rewritten to
-    /// `@<dependency>/<name>` too — the dependency's file keeps meaning its own module.
-    pub deps: Vec<String>,
-}
-
 impl Project {
     /// What `[imports]` gets wrong about this project: a `dep:` target naming no
     /// dependency.
@@ -877,35 +755,15 @@ impl Project {
             })
             .collect()
     }
-
-    /// The `require` rewrites `[imports]` asks for.
-    pub fn rewrites(&self) -> Rewrites {
-        let mut r = Rewrites::default();
-        for (key, t) in self.config.import_targets() {
-            let to = match t {
-                crate::config::ImportTarget::Own(name) => name,
-                crate::config::ImportTarget::Dep(name) => {
-                    let dep = name.split('.').next().unwrap_or(&name).to_string();
-                    if !r.deps.contains(&dep) {
-                        r.deps.push(dep.clone());
-                    }
-                    format!("@{dep}/{name}")
-                }
-            };
-            r.from.push(key);
-            r.to.push(to);
-        }
-        r
-    }
 }
 
 impl crate::Htl {
     /// Set this checker up for `project`, as `view` sees it: the working directory off the
-    /// path ([`drop_cwd_search_path`](crate::Htl::drop_cwd_search_path)), what a
-    /// dependency may read ([`Project::views`]), its installed dependencies
-    /// made reachable ([`prepare_deps`](crate::Htl::prepare_deps), when the project has an
-    /// `mlua-pkg.toml`), then the model's directories on the search path in the order they
-    /// are consulted ([`Project::search_dirs`]).
+    /// path ([`drop_cwd_search_path`](crate::Htl::drop_cwd_search_path)), its installed
+    /// dependencies made reachable ([`prepare_deps`](crate::Htl::prepare_deps), when the
+    /// project has an `mlua-pkg.toml`), the model's [`Resolver`] answering every name
+    /// ([`install_resolver`](Self::install_resolver)), then the model's directories on the
+    /// search path in the order they are consulted ([`Project::search_dirs`]).
     pub fn apply_model(&self, project: &Project, view: View) -> Result<()> {
         // The names come from the project's roots, so the working directory is not one of
         // the places they are looked for.
@@ -913,13 +771,69 @@ impl crate::Htl {
         if project.root.join(pkg::MANIFEST_NAME).is_file() {
             self.prepare_deps(&pkg::MluaProject::at(&project.root))?;
         }
-        let v = project.views();
-        self.set_views(&v.own, &v.not_own, &v.dep_dirs, &v.dep_names, &project.root)?;
-        let r = project.rewrites();
-        self.set_imports(&r.from, &r.to, &r.deps)?;
-        let (files, names) = project.names();
-        self.set_names(&files, &names)?;
+        self.install_resolver(Resolver::new(project))?;
         self.add_search_paths(&project.search_dirs(view))
+    }
+
+    /// Have the checker ask `resolver` for every module name.
+    ///
+    /// Three functions go into the prelude, made in the checker's state: `resolve_name`
+    /// (requirer, name) → kind and files, which the prelude's `tl.search_module` asks
+    /// first; `rewrite_name` (requirer, name) → the name a `require` is to be written as,
+    /// which its `tl.parse` wrapper applies; and `owns_file` (path) → whether a file is the
+    /// model's, which holds a `package.path` search for a name the model does not have to
+    /// the files outside it. The kinds are `found`, `ambiguous`, `missing`, `outside` and
+    /// `hidden` ([`Resolution`]).
+    pub fn install_resolver(&self, resolver: Resolver) -> Result<()> {
+        let lua = self.checker_lua()?;
+        let r = std::sync::Arc::new(resolver);
+        let s = |p: Option<PathBuf>| p.map(|p| p.to_string_lossy().into_owned());
+        let resolve = {
+            let r = r.clone();
+            lua.create_function(move |_, (requirer, name): (Option<String>, String)| {
+                type Answer = (String, Option<String>, Option<String>, Option<String>);
+                let answer: Answer = match r.resolve(requirer.as_deref().map(Path::new), &name) {
+                    Resolution::Found(f) => (
+                        "found".into(),
+                        s(f.implementation),
+                        s(f.declaration),
+                        s(f.lua),
+                    ),
+                    Resolution::Ambiguous(claims) => {
+                        let who: Vec<String> = claims
+                            .iter()
+                            .map(|(m, f)| format!("{m} ({})", f.display()))
+                            .collect();
+                        (
+                            "ambiguous".into(),
+                            Some(format!(
+                                "'{name}' is implemented by more than one file: {}",
+                                who.join(", ")
+                            )),
+                            None,
+                            None,
+                        )
+                    }
+                    Resolution::Missing => ("missing".into(), None, None, None),
+                    Resolution::Outside => ("outside".into(), None, None, None),
+                    Resolution::NotVisible(file, msg) => {
+                        ("hidden".into(), Some(msg), s(Some(file)), None)
+                    }
+                };
+                Ok(answer)
+            })?
+        };
+        let rewrite = {
+            let r = r.clone();
+            lua.create_function(move |_, (requirer, name): (String, String)| {
+                Ok(r.rewrite(Path::new(&requirer), &name))
+            })?
+        };
+        let owns = lua.create_function(move |_, path: String| Ok(r.owns(Path::new(&path))))?;
+        self.h.set("resolve_name", resolve)?;
+        self.h.set("rewrite_name", rewrite)?;
+        self.h.set("owns_file", owns)?;
+        Ok(())
     }
 }
 
@@ -1351,43 +1265,6 @@ mod tests {
             .map(|c| &c.module.owner)
             .collect();
         assert_eq!(owners, [&Owner::Own, &Owner::Installed]);
-    }
-
-    #[test]
-    fn views_carve_other_modules_out_of_the_projects_own_directories() {
-        let root = scratch("views");
-        write(
-            &root.join(pkg::MANIFEST_NAME),
-            "[package]\nname = \"game\"\nversion = \"0.1.0\"\n",
-        );
-        write(
-            &root.join("types/htl-mq").join(crate::DEP_TYPES_NOTE),
-            "crate = \"htl-mq\"\nversion = \"0.2.0\"\nfiles = []\n",
-        );
-        write(&root.join(".htl/modules/entries/mathx/init.tl"), "");
-        let p = Project::load(&root, HtlConfig::default()).unwrap();
-        let v = p.views();
-        let s = |p: PathBuf| p.to_string_lossy().into_owned();
-
-        assert!(v.own.contains(&s(root.join("src"))), "{v:?}");
-        assert!(v.own.contains(&s(root.join("types"))), "{v:?}");
-        assert!(v.not_own.contains(&s(root.join("types/htl-mq"))), "{v:?}");
-        assert!(
-            v.not_own.contains(&s(root.join(".htl/modules/entries"))),
-            "{v:?}"
-        );
-        let mathx: Vec<&String> = v
-            .dep_dirs
-            .iter()
-            .zip(&v.dep_names)
-            .filter(|(_, n)| n.as_str() == "mathx")
-            .map(|(d, _)| d)
-            .collect();
-        assert_eq!(
-            mathx,
-            [&s(root.join(".htl/modules/entries/mathx"))],
-            "{v:?}"
-        );
     }
 
     #[test]

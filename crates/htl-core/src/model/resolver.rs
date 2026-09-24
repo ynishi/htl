@@ -19,10 +19,17 @@
 //! the caller's own search — for libraries installed for the machine — the one that
 //! answers.
 //!
-//! What a file may *see* is not decided here. Teal caches a module by its name and answers
-//! a second `require` of it without asking again, so a rule about which file asked can
-//! only be enforced where every file passes once: the prelude's `tl.parse` wrapper, from
-//! the model's [views](super::Project::views).
+//! A dependency's file does not see the project that uses it: asked from one, a name only
+//! the project's own module has is [`Resolution::NotVisible`], with the error to report.
+//! Teal caches a module by its name and answers a second `require` of it without asking
+//! again, so that answer is also asked for where every file passes once — the prelude's
+//! `tl.parse` wrapper — and reported there, at the `require`.
+//!
+//! Names written into generated Lua are the ones [`rewrite`](Resolver::rewrite) gives:
+//! `@<dependency>/<name>` for a dependency's module and `@/<name>` for the project's own,
+//! wherever `[imports]` chose between the two. They mean the same thing whoever asks, so a
+//! run-time `require`, which carries no requiring file, is answered the way the checker
+//! was.
 
 use super::{Owner, Project, Role};
 use crate::config::ImportTarget;
@@ -66,6 +73,9 @@ pub enum Resolution {
     /// A name no module of the model has. The caller may look for it elsewhere: a library
     /// installed for the machine is found by Lua's own search path.
     Outside,
+    /// A dependency asked for a name only the project's own module has: the file it would
+    /// have read, and the error that says so.
+    NotVisible(PathBuf, String),
 }
 
 /// The model's name → file table, and how a requiring file changes a name.
@@ -75,6 +85,8 @@ pub struct Resolver {
     project: Project,
     table: BTreeMap<String, Vec<Entry>>,
     imports: Vec<(String, ImportTarget)>,
+    /// Every file in the table, canonical: what [`owns`](Self::owns) is asked about.
+    known: std::collections::HashSet<PathBuf>,
 }
 
 impl Resolver {
@@ -135,6 +147,43 @@ impl Resolver {
             project: project.clone(),
             table,
             imports: project.config.import_targets(),
+            // Every file placed: what `owns` answers from.
+            known: seen,
+        }
+    }
+
+    /// Whether `file` is one of the model's: a search that found it under a name the
+    /// model did not give it found the wrong thing (a `package.path` template's alias).
+    pub fn owns(&self, file: &Path) -> bool {
+        self.known.contains(&super::canon(file))
+    }
+
+    /// The name a `require` in `requirer` is to be written as, when it is not the name it
+    /// was written as: what `[imports]` makes of it in the project's own files, and, in
+    /// the files of a dependency an `[imports]` entry points at, `@<dependency>/<name>`
+    /// for a name under the dependency's own name — so that the dependency keeps meaning
+    /// its own module where the project's has the same name.
+    ///
+    /// What comes back is a name every asker resolves the same way, since it is what the
+    /// generated Lua and a bundle carry, and a run-time `require` carries no requirer.
+    pub fn rewrite(&self, requirer: &Path, name: &str) -> Option<String> {
+        if name.starts_with('@') {
+            return None;
+        }
+        let from = self.project.locate(requirer)?;
+        match from.module.owner {
+            Owner::Own => self
+                .imported(name)
+                .map(|(n, own)| if own { format!("@/{n}") } else { n }),
+            Owner::Installed | Owner::Vendored | Owner::Patched => {
+                let dep = &from.module.name;
+                let named = self.imports.iter().any(|(_, t)| {
+                    matches!(t, ImportTarget::Dep(n) if n.split('.').next() == Some(dep.as_str()))
+                });
+                let under = name == dep || name.starts_with(&format!("{dep}."));
+                (named && under).then(|| format!("@{dep}/{name}"))
+            }
+            _ => None,
         }
     }
 
@@ -149,14 +198,22 @@ impl Resolver {
         let from = requirer.and_then(|r| self.project.locate(r));
         let own = from.as_ref().is_some_and(|p| p.module.owner == Owner::Own);
         let test = from.as_ref().is_some_and(|p| p.role == Role::Test);
-        let (name, own_only) = match own.then(|| self.imported(name)).flatten() {
-            Some((rewritten, own_only)) => (rewritten, own_only),
+        let dependency = from.as_ref().is_some_and(|p| {
+            matches!(
+                p.module.owner,
+                Owner::Installed | Owner::Vendored | Owner::Patched
+            )
+        });
+        let own_only = |e: &Entry| self.project.modules[e.module].owner == Owner::Own;
+        let (name, only_own) = match own.then(|| self.imported(name)).flatten() {
+            Some((rewritten, only_own)) => (rewritten, only_own),
             None => (name.to_string(), false),
         };
-        if own_only {
-            return self.pick(&name, |e| {
-                self.project.modules[e.module].owner == Owner::Own
-            });
+        if only_own {
+            return self.pick(&name, own_only);
+        }
+        if let Some(own_name) = name.strip_prefix("@/") {
+            return self.pick(own_name, own_only);
         }
         if let Some(rest) = name.strip_prefix('@') {
             let Some((dep, inner)) = rest.split_once('/') else {
@@ -171,10 +228,41 @@ impl Resolver {
         // The test root is read by tests. A requirer the caller could not name is let
         // through: a run-time `require` inside a test carries no file.
         let sees = |e: &Entry| e.role != Role::Test || test || requirer.is_none() || from.is_none();
-        match self.pick(&name, sees) {
-            Resolution::Missing => Resolution::Outside,
-            r => r,
+        // A dependency sees its own modules and what it depends on, not the project using
+        // it.
+        let others = |e: &Entry| !dependency || !own_only(e);
+        match self.pick(&name, |e| sees(e) && others(e)) {
+            Resolution::Missing => {}
+            r => return r,
         }
+        if dependency
+            && let Some(hidden) = self
+                .table
+                .get(&name)
+                .and_then(|v| v.iter().find(|e| own_only(e) && e.role != Role::Test))
+        {
+            let dep = from
+                .as_ref()
+                .map(|p| p.module.name.clone())
+                .unwrap_or_default();
+            let shown: PathBuf = hidden
+                .file
+                .strip_prefix(&self.project.root)
+                .unwrap_or(&hidden.file)
+                .components()
+                .filter(|c| !matches!(c, std::path::Component::CurDir))
+                .collect();
+            return Resolution::NotVisible(
+                hidden.file.clone(),
+                format!(
+                    "require(\"{name}\") in dependency {dep} reaches this project's own {}: a \
+                     dependency sees its own modules and what it depends on, not the project \
+                     using it",
+                    shown.display()
+                ),
+            );
+        }
+        Resolution::Outside
     }
 
     /// The name `[imports]` makes of `name` in the project's own files, if it makes one: the
@@ -210,11 +298,15 @@ impl Resolver {
 
     /// The entries of `name` that `keep` admits, as one answer.
     fn pick(&self, name: &str, keep: impl Fn(&Entry) -> bool) -> Resolution {
-        let entries: Vec<&Entry> = self
+        // In the order the model lists its modules — the project's own first — whatever
+        // order the walk met the files in: of two declarations of one name, the project's
+        // is the one read, and `duplicate-declaration` says which was not.
+        let mut entries: Vec<&Entry> = self
             .table
             .get(name)
             .map(|v| v.iter().filter(|e| keep(e)).collect())
             .unwrap_or_default();
+        entries.sort_by_key(|e| e.module);
         if entries.is_empty() {
             return Resolution::Missing;
         }
@@ -378,6 +470,38 @@ mod tests {
         }
         assert_eq!(r.resolve(None, "@mathx/mathx.nope"), Resolution::Missing);
         assert_eq!(r.resolve(None, "@nosuch/x"), Resolution::Missing);
+    }
+
+    #[test]
+    fn a_dependency_does_not_see_the_projects_own_modules() {
+        let root = scratch("dep-view");
+        write(
+            &root.join(pkg::MANIFEST_NAME),
+            "[package]\nname = \"game\"\nversion = \"0.1.0\"\n",
+        );
+        write(&root.join(".htl/modules/entries/mathx/init.tl"), "");
+        write(&root.join(".htl/modules/entries/other/init.tl"), "");
+        write(&root.join("src/util.tl"), "");
+        let r = Resolver::new(&Project::load(&root, HtlConfig::default()).unwrap());
+        let dep = root.join(".htl/modules/entries/mathx/init.tl");
+        match r.resolve(Some(&dep), "util") {
+            Resolution::NotVisible(file, msg) => {
+                assert_eq!(file, root.join("src/util.tl"));
+                assert!(
+                    msg.contains("in dependency mathx reaches this project's own src/util.tl"),
+                    "{msg}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            r.resolve(Some(&dep), "other"),
+            Resolution::Found(_)
+        ));
+        assert!(matches!(
+            r.resolve(Some(&root.join("src/main.tl")), "util"),
+            Resolution::Found(_)
+        ));
     }
 
     #[test]

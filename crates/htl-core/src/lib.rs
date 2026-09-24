@@ -847,6 +847,10 @@ pub struct Htl {
     h: Table,
     /// `true` when the checker is another Lua state (`with_checker`).
     split: bool,
+    /// The state the prelude — and so the checker — lives in: `lua` itself, or the
+    /// checker's for a split state. Weak, because the checker is kept alive by whoever
+    /// made it, not by the program states that borrow it.
+    checker: mlua::WeakLua,
 }
 
 /// Checker prelude of another state, kept in a runtime state's app data so the
@@ -1069,7 +1073,16 @@ impl Htl {
             lua,
             h: checker.h.clone(),
             split: true,
+            checker: checker.checker.clone(),
         })
+    }
+
+    /// The checker's Lua state: where a function the prelude calls has to be made.
+    #[cfg_attr(not(all(feature = "pkg", feature = "dts")), allow(dead_code))]
+    pub(crate) fn checker_lua(&self) -> Result<Lua> {
+        self.checker
+            .try_upgrade()
+            .ok_or_else(|| anyhow!("the checker this state was made from has been dropped"))
     }
 
     fn runtime(&self) -> Result<Table> {
@@ -1201,10 +1214,12 @@ impl Htl {
             .eval()
             .context("loading htl prelude")?;
         lua.set_named_registry_value(PRELUDE_REGISTRY_KEY, h.clone())?;
+        let checker = lua.weak();
         let this = Self {
             lua,
             h,
             split: false,
+            checker,
         };
         // The defaults come from the registry, and this is where a state gets them: the
         // Lua side holds no rule list of its own, so a state nobody configures would
@@ -1321,65 +1336,6 @@ impl Htl {
     pub fn set_deps(&self, names: &[String]) -> Result<()> {
         let f: Function = self.h.get("set_deps")?;
         f.call::<()>(names.to_vec())?;
-        Ok(())
-    }
-
-    /// Tell the checker which directories are the project's own, which of the directories
-    /// inside them belong to another module (`not_own`), and which a dependency's files
-    /// are reached through (with the dependency's name, index for index), and the project
-    /// root the error names a file relative to, so that a
-    /// `require` in a dependency that resolves into the project's own directories is an
-    /// error at the call. The project model (`model::Project::views`) says which; its
-    /// `apply_model` calls this.
-    ///
-    /// Sequences across the state line, for the reason [`set_deps`](Self::set_deps) gives.
-    pub fn set_views(
-        &self,
-        own: &[String],
-        not_own: &[String],
-        dep_dirs: &[String],
-        dep_names: &[String],
-        root: &Path,
-    ) -> Result<()> {
-        let f: Function = self.h.get("set_views")?;
-        f.call::<()>((
-            own.to_vec(),
-            not_own.to_vec(),
-            dep_dirs.to_vec(),
-            dep_names.to_vec(),
-            path_str(root),
-            // What a file the command line named relatively is relative to.
-            std::env::current_dir()
-                .map(|d| path_str(&d))
-                .unwrap_or_default(),
-        ))?;
-        Ok(())
-    }
-
-    /// Tell the checker how the project's `[imports]` rewrite `require`s: each name in
-    /// `from` (and every name under it) becomes the one at the same index of `to`, in the
-    /// project's own files; in the files of each dependency in `deps`, a name under the
-    /// dependency's own name becomes `@<dependency>/<name>`. The project model
-    /// (`model::Project::rewrites`) says which; its `apply_model` calls this.
-    ///
-    /// Sequences across the state line, for the reason [`set_deps`](Self::set_deps) gives.
-    pub fn set_imports(&self, from: &[String], to: &[String], deps: &[String]) -> Result<()> {
-        let f: Function = self.h.get("set_imports")?;
-        f.call::<()>((from.to_vec(), to.to_vec(), deps.to_vec()))?;
-        Ok(())
-    }
-
-    /// Tell the checker the name each of the project's files answers to (`files` and
-    /// `names`, index for index), from the project model (`model::Project::names`), which
-    /// its `apply_model` calls this with. A search that finds one of these files under any
-    /// other name — through a `package.path` template, or through a directory that holds
-    /// another module's — finds nothing. A file not listed (a library installed for the
-    /// machine, a contract directory's module) is found as before.
-    ///
-    /// Sequences across the state line, for the reason [`set_deps`](Self::set_deps) gives.
-    pub fn set_names(&self, files: &[String], names: &[String]) -> Result<()> {
-        let f: Function = self.h.get("set_names")?;
-        f.call::<()>((files.to_vec(), names.to_vec()))?;
         Ok(())
     }
 
