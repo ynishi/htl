@@ -971,6 +971,12 @@ whatever the levels say, a cap for a build that has to go out; any other value i
 The default is the checker's, so a new release that reports one more lint at `warn` says
 so in the build output and does not break a build that passed before.
 
+`htl build` judges the bundle's closure the same way, by the same `[lint.rules]` — a rule
+the project turned off is not reported there either — and writes no bundle when the
+closure fails. `htl run` and `htl gen` report every warning and lint and stop on errors
+alone: their verdict is the program, as `htl test`'s is its tests, and `htl check` is
+where the rest is judged.
+
 Everything `htl` prints with an `[htl <rule>]` name is a finding about your code — a lint
 of htl's own, or a warning the vendored compiler raised. `htl dts`'s `not written` and
 `left in place` lines are the command reporting on the declarations it was asked to write,
@@ -1354,8 +1360,8 @@ commented one).
 htl = "0.6"               # the htl command this project expects; a mismatch is refused
 
 [lint]
-strict = true             # every warn counts as deny: fails htl check, htl fix and
-                          # include_tl! (not htl test)
+strict = true             # every warn counts as deny: fails htl check, htl fix,
+                          # htl build and include_tl! (not htl test / run / gen)
 
 [lint.rules]              # allow = not reported, warn = reported, deny = fails the run
 nil-index = "deny"
