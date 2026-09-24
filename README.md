@@ -2133,7 +2133,8 @@ nothing moved.
 per framework to work out where a project starts; here the project has already said, in
 the files `htl test`, `htl build`, `[[contract]]` and a Rust host are pointed at:
 
-- `src/main.tl` (or `main.tl` at the root);
+- `main.tl` in the source root (`[layout] source`, `src/` by default), or beside the
+  manifest;
 - every test file, as `htl test` discovers them — so a module used only by a test is
   reached, not reported;
 - every module directly under a `[[contract]]` directory: those are loaded by name at run

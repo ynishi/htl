@@ -2286,7 +2286,7 @@ fn cmd_unused(paths: &[PathBuf], flags: UnusedFlags) -> Result<ExitCode> {
     } else if s.no_entry {
         eprintln!(
             "htl unused: nothing to start from, so nothing is reported. An entry is \
-             src/main.tl, a test file, a module under a [[contract]] directory, or a name \
+             main.tl in the source root ([layout] source) or beside the manifest, a test file, a module under a [[contract]] directory, or a name \
              in [build] extra / host"
         );
     } else {
@@ -2872,7 +2872,10 @@ fn cmd_build_dir(
     let mut n_err = 0usize;
     let mut sink = text_sink();
     for f in &files {
-        let name = htl::module_name(dir, f)?;
+        // Named against the directory the bundle is built from, by the naming rule.
+        let rel = f.strip_prefix(dir).unwrap_or(f);
+        let name = htl::naming::name_of("", rel)
+            .with_context(|| format!("cannot derive a module name for {}", f.display()))?;
         let (code, c) = h.gen_lua(f)?;
         sink.checkinfo(&c);
         n_err += c.errors.len();

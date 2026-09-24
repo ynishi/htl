@@ -411,27 +411,25 @@ enum Target {
     Ambiguous(String),
 }
 
-/// What a `require(name)` points at for the linker. `found` is the checker's own
-/// resolution when already known (a require site); otherwise it is looked up.
-/// The module name an entry file answers to: its stem, except that `<dir>/init.tl` is
-/// the module `<dir>` — the name a `require` of it is written as, and so the name a
-/// bundle has to serve it under once a host has installed the bundle and a program asks
-/// for it. `htl build src/main.tl` is `main` as before; `include_bundle!("src/pkg/init.tl")`
-/// is `pkg`, not `init`.
+/// The module name an entry file answers to when the project model does not name it — an
+/// entry outside every project: the naming rule ([`crate::naming`]) against the file's own
+/// directory, so its stem, except that `<dir>/init.tl` is the module `<dir>` — the name a
+/// `require` of it is written as, and so the name a bundle has to serve it under once a
+/// host has installed the bundle and a program asks for it. An entry the model names is
+/// served under that name ([`LinkOptions::entry_name`]).
 fn entry_module_name(entry: &Path) -> String {
-    let stem = entry.file_stem().and_then(|s| s.to_str());
-    match stem {
-        Some("init") => entry
-            .parent()
-            .and_then(|d| d.file_name())
-            .and_then(|s| s.to_str())
-            .map(str::to_string)
-            .unwrap_or_else(|| "init".into()),
-        Some(s) => s.to_string(),
-        None => "main".into(),
-    }
+    // Named against its own directory — the one place a file outside every project
+    // names by itself — which leaves `<dir>/init.tl` nothing to be named by but `<dir>`.
+    let file = entry.file_name().map(PathBuf::from).unwrap_or_default();
+    let rel = match (file.to_str(), entry.parent().and_then(|d| d.file_name())) {
+        (Some("init.tl"), Some(dir)) => Path::new(dir).join(&file),
+        _ => file,
+    };
+    crate::naming::name_of("", &rel).unwrap_or_else(|| "main".into())
 }
 
+/// What a `require(name)` points at for the linker. `found` is the checker's own
+/// resolution when already known (a require site); otherwise it is looked up.
 fn classify(h: &Htl, name: &str, found: Option<&Path>) -> Result<Target> {
     let (found, lua) = match found {
         Some(p) => (Some(p.to_path_buf()), None),

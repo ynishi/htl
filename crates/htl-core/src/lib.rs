@@ -2283,22 +2283,6 @@ pub fn collect_tl_skipping(paths: &[PathBuf], skip: &[PathBuf]) -> Result<Vec<Pa
     Ok(out)
 }
 
-/// `root/foo/bar.tl` -> `foo.bar`, `root/foo/init.tl` -> `foo`.
-pub fn module_name(root: &Path, file: &Path) -> Result<String> {
-    let rel = file.strip_prefix(root)?.with_extension("");
-    let mut parts: Vec<String> = rel
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect();
-    if parts.last().map(|s| s == "init").unwrap_or(false) {
-        parts.pop();
-    }
-    if parts.is_empty() {
-        bail!("cannot derive module name for {}", file.display());
-    }
-    Ok(parts.join("."))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

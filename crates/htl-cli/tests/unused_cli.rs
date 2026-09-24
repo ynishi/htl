@@ -317,3 +317,24 @@ fn a_clean_project_exits_zero_and_says_so_and_the_flag_fails_on_a_finding() {
     let (ok, _, _) = htl(&["unused"], &root);
     assert!(ok);
 }
+
+/// The entry script is `main.tl` in the source root `[layout] source` names — not
+/// `src/main.tl` whatever the layout says. With `source = "lib"` the project's
+/// `lib/main.tl` is where the walk starts, so what it requires is reached and what nothing
+/// requires is reported.
+#[test]
+fn the_entry_is_main_tl_in_the_source_root_the_layout_names() {
+    let root = scratch("layout-main");
+    write(&root.join("htl.toml"), "[layout]\nsource = \"lib\"\n");
+    write(
+        &root.join("lib/main.tl"),
+        "local a = require(\"a\")\nprint(a.n)\n",
+    );
+    write(&root.join("lib/a.tl"), "return { n = 1 }\n");
+    write(&root.join("lib/b.tl"), "return { n = 2 }\n");
+    let (ok, _, err) = htl(&["unused"], &root);
+    assert!(ok, "{err}");
+    assert!(!err.contains("nothing to start from"), "{err}");
+    assert!(err.contains("lib/b.tl"), "b is required by nothing: {err}");
+    assert!(!err.contains("lib/a.tl"), "a is reached from main: {err}");
+}
