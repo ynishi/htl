@@ -398,9 +398,16 @@ fn lexical(p: &Path) -> PathBuf {
 /// here so the signatures below read.
 pub type Config = Option<(PathBuf, PathBuf, HtlConfig)>;
 
-/// Nearest `htl.toml` above `first`, in the shape everything below expects.
+/// The `htl.toml` of the project above `first`, in the shape everything below expects;
+/// `None` when that project has none (an `mlua-pkg.toml` alone) or there is no project.
+///
+/// Found by [`model::Project::find_root`](crate::model::Project::find_root), the one walk
+/// up for a manifest, so a config whose directory is not the project's root — an
+/// `mlua-pkg.toml` above it, or beside some other `htl.toml` — is refused here as it is
+/// wherever the model is built.
 pub fn config_of(first: &Path) -> Result<Config> {
-    Ok(HtlConfig::find(first)?.map(|(p, c)| (crate::parent_dir(&p), p, c)))
+    Ok(crate::model::Project::find_root(first)?
+        .and_then(|r| r.config_file.map(|f| (r.root, f, r.config))))
 }
 
 /// The [model](crate::model) of the project `config` was loaded for, or of the mlua-pkg

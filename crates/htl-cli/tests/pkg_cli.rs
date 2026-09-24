@@ -238,3 +238,49 @@ fn pkg_help_lists_the_verbs() {
         assert!(out.contains(verb), "{verb} missing from:\n{out}");
     }
 }
+
+/// `htl pkg add` in a subdirectory of a project that has an `htl.toml` and no
+/// `mlua-pkg.toml` yet writes the manifest at the project's root. Written in the working
+/// directory, it would give the project a second root.
+#[test]
+fn add_below_the_root_writes_the_manifest_at_the_root() {
+    let root = scratch("add-below-root");
+    write(&root.join("htl.toml"), "");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    let (ok, _, err) = htl(
+        &[
+            "pkg",
+            "add",
+            "vec2",
+            "https://example.invalid/vec2",
+            "--tag",
+            "v1.0",
+        ],
+        &root.join("src"),
+    );
+    assert!(ok, "{err}");
+    assert!(root.join("mlua-pkg.toml").is_file(), "{err}");
+    assert!(!root.join("src/mlua-pkg.toml").exists(), "{err}");
+}
+
+/// An `htl.toml` and an `mlua-pkg.toml` that name different roots are one project with two
+/// answers to every relative path, and every command refuses them — `htl check` as well
+/// as the commands that already built the model from `mlua-pkg.toml`.
+#[test]
+fn two_manifests_naming_two_roots_are_refused_by_check() {
+    let root = scratch("two-roots");
+    write(
+        &root.join("mlua-pkg.toml"),
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\n",
+    );
+    write(&root.join("sub/htl.toml"), "");
+    write(&root.join("sub/src/a.tl"), "print(1)\n");
+    for args in [&["check", "sub"][..], &["test", "sub"][..]] {
+        let (ok, out, err) = htl(args, &root);
+        assert!(!ok, "{args:?}: {out}{err}");
+        assert!(
+            err.contains("name different project roots"),
+            "{args:?}: {err}"
+        );
+    }
+}

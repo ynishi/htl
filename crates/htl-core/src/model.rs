@@ -92,6 +92,18 @@ use crate::pkg;
 use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};
 
+/// Where a project is, as [`Project::find_root`] found it: before its modules are read.
+#[derive(Debug, Clone)]
+pub struct ProjectRoot {
+    /// The directory holding its `htl.toml` and / or `mlua-pkg.toml`.
+    pub root: PathBuf,
+    /// Its `htl.toml`, when it has one: a project described by `mlua-pkg.toml` alone is
+    /// configured by the defaults.
+    pub config_file: Option<PathBuf>,
+    /// What `htl.toml` says, or the defaults.
+    pub config: HtlConfig,
+}
+
 /// A project: its root, its configuration, and the modules it is made of.
 ///
 /// Built by [`Project::load`] from a root that has already been found, or by
@@ -303,9 +315,24 @@ impl Project {
     /// they have to name the same directory, because one project with two roots is two
     /// answers to every relative path in it.
     pub fn discover(start: &Path) -> Result<Option<Self>> {
+        match Self::find_root(start)? {
+            Some(r) => Self::load(&r.root, r.config).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Where the project above `start` is, without building it: its root, its `htl.toml`
+    /// when it has one, and the configuration — the walk [`discover`](Self::discover) does,
+    /// for a caller that needs the root or the config before, or instead of, the model.
+    ///
+    /// This is the one walk up for a manifest. Everything that asks "which project is
+    /// this" asks it here, so an `htl.toml` and an `mlua-pkg.toml` naming two different
+    /// roots are refused by every command rather than only by those that happened to build
+    /// the model this way.
+    pub fn find_root(start: &Path) -> Result<Option<ProjectRoot>> {
         let config = HtlConfig::find(start)?;
         let manifest = pkg::MluaProject::find(start);
-        let (root, config) = match (config, manifest) {
+        let found = match (config, manifest) {
             (None, None) => return Ok(None),
             (Some((path, cfg)), m) => {
                 let root = crate::parent_dir(&path);
@@ -321,11 +348,19 @@ impl Project {
                         m.root.display()
                     );
                 }
-                (root, cfg)
+                ProjectRoot {
+                    root,
+                    config_file: Some(path),
+                    config: cfg,
+                }
             }
-            (None, Some(m)) => (m.root, HtlConfig::default()),
+            (None, Some(m)) => ProjectRoot {
+                root: m.root,
+                config_file: None,
+                config: HtlConfig::default(),
+            },
         };
-        Self::load(&root, config).map(Some)
+        Ok(Some(found))
     }
 
     /// The model of the project rooted at `root`, configured by `config`.

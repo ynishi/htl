@@ -1133,19 +1133,23 @@ fn cmd_init(
     Ok(ExitCode::SUCCESS)
 }
 
-/// The project `htl pkg` acts on: the nearest one above the working directory.
+/// The project `htl pkg` acts on: the one above the working directory, found the way
+/// every command finds it ([`htl::model::Project::find_root`]), with its `mlua-pkg.toml`.
 ///
 /// mlua-pkg reports a missing manifest as an I/O error that does not name the file, and the
 /// path htl looked for is the whole of the answer, so it is checked here.
 fn pkg_project() -> Result<htl::pkg::MluaProject> {
     let cwd = std::env::current_dir()?;
-    htl::pkg::MluaProject::find(&cwd).with_context(|| {
-        format!(
-            "no {} above {}: `htl pkg` runs in a project",
-            htl::pkg::MANIFEST_NAME,
-            cwd.display()
-        )
-    })
+    let root = htl::model::Project::find_root(&cwd)?.map(|r| r.root);
+    root.filter(|r| r.join(htl::pkg::MANIFEST_NAME).is_file())
+        .map(|r| htl::pkg::MluaProject::at(&r))
+        .with_context(|| {
+            format!(
+                "no {} above {}: `htl pkg` runs in a project",
+                htl::pkg::MANIFEST_NAME,
+                cwd.display()
+            )
+        })
 }
 
 /// The declaration root of the project at `root`, from its model: `[layout] types`, which
@@ -1219,12 +1223,17 @@ fn report_install(
 /// `htl pkg add <name> <git>`: the manifest entry, without fetching anything.
 ///
 /// This is the one verb that may run outside a project: mlua-pkg writes a manifest when
-/// there is none, and the directory it writes it in is the working one.
+/// there is none. It writes it at the project's root — beside `htl.toml`, when the working
+/// directory is in a project that has one — and in the working directory only outside any
+/// project. Written in a subdirectory, it would give the project a second root, which
+/// every command then refuses.
 fn cmd_pkg_add(spec: htl::pkg::mlua_pkg::ops::AddSpec) -> Result<ExitCode> {
     use htl::pkg::mlua_pkg::ops::AddOutcome;
     let cwd = std::env::current_dir()?;
-    let project =
-        htl::pkg::MluaProject::find(&cwd).unwrap_or_else(|| htl::pkg::MluaProject::at(&cwd));
+    let root = htl::model::Project::find_root(&cwd)?
+        .map(|r| r.root)
+        .unwrap_or(cwd);
+    let project = htl::pkg::MluaProject::at(&root);
     let name = spec.name.clone();
     let done = project.add(spec)?;
     let manifest = project
@@ -1350,10 +1359,7 @@ fn report_patch_drift(project: &htl::pkg::MluaProject) {
 /// the manifest and answers the "may this be overwritten" question against git; the copy
 /// and the `patch_base` bookkeeping are mlua-pkg's. See `Project::patch`.
 fn cmd_pkg_patch(dep: &str, force: bool) -> Result<ExitCode> {
-    let cwd = std::env::current_dir()?;
-    let project = htl::pkg::MluaProject::find(&cwd).context(
-        "no mlua-pkg.toml above the current directory: a patch belongs to a project, so this runs in one",
-    )?;
+    let project = pkg_project().context("a patch belongs to a project, so this runs in one")?;
     let done = project.patch(dep, force)?;
     let report = &done.report;
     let rel = report
@@ -1393,10 +1399,7 @@ fn report_types_sync(sync: &htl::pkg::TypesSync, root: &Path) {
 /// that has them. The revision is recorded because nothing else in that ecosystem does —
 /// see `Project::add_types`.
 fn cmd_types_add(library: &str, from: Option<&Path>, force: bool) -> Result<ExitCode> {
-    let cwd = std::env::current_dir()?;
-    let project = htl::pkg::MluaProject::find(&cwd).context(
-        "no mlua-pkg.toml above the current directory: `types/` is a project's, so this runs in one",
-    )?;
+    let project = pkg_project().context("`types/` is a project's, so this runs in one")?;
     let types = decl_root(&project.root)?;
     let sync = match from {
         Some(dir) => project.add_types_from(dir, library, "local", force, &types)?,
@@ -1753,7 +1756,15 @@ fn report_patched(paths: &[PathBuf]) {
         .filter_map(|p| std::fs::canonicalize(p).ok())
         .collect();
     let cwd = std::env::current_dir().unwrap_or_default();
-    let Some(project) = paths.first().and_then(|p| htl::pkg::MluaProject::find(p)) else {
+    // The project found the way every command finds it; a failure to find one was said by
+    // the command itself, which ran first.
+    let Some(project) = paths
+        .first()
+        .and_then(|p| htl::model::Project::find_root(p).ok().flatten())
+        .map(|r| r.root)
+        .filter(|r| r.join(htl::pkg::MANIFEST_NAME).is_file())
+        .map(|r| htl::pkg::MluaProject::at(&r))
+    else {
         return;
     };
     for p in &project.patches {

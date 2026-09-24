@@ -160,12 +160,10 @@ fn resolve_bundle(
     }
     // The name the entry is served under, from the project's model, as `htl build` does:
     // the one a `require` of the file elsewhere in the project writes.
-    let model = match (&ck.cfg_path, cfg) {
-        (Some(_), Some(c)) => htl_core::model::Project::load(&ck.root, c.clone()).map(Some),
-        _ => htl_core::model::Project::discover(&path),
-    }
-    .map_err(|e| format!("include_bundle!: {e:#}"))?;
-    opts.entry_name = model.and_then(|m| m.locate(&path).map(|p| p.name));
+    opts.entry_name = ck
+        .model
+        .as_ref()
+        .and_then(|m| m.locate(&path).map(|p| p.name));
     let store = ck.store();
     let linked = htl_core::link::link_with(h, &path, &opts, ck.link_store(store.as_ref()))
         .map_err(|e| format!("include_bundle!: {e:#}"))?;
@@ -330,11 +328,17 @@ impl Checker {
 
 fn checker_for(tag: &str, manifest_dir: &Path, path: &Path) -> Result<Checker, String> {
     let h = htl_core::Htl::new().map_err(|e| format!("{tag}: {e:#}"))?;
-    // htl.toml `[lint]` first, then HTL_LINTS, so the env var wins.
-    let cfg = htl_core::config::HtlConfig::find(path).map_err(|e| format!("{tag}: {e:#}"))?;
-    let cfg_root = cfg.as_ref().map(|(p, _)| htl_core::parent_dir(p));
-    let cfg_path = cfg.as_ref().map(|(p, _)| p.clone());
-    let cfg = cfg.map(|(_, c)| c);
+    // The project the file is in, found the way every command finds it — the one walk up
+    // for a manifest, which refuses an `htl.toml` and an `mlua-pkg.toml` naming different
+    // roots. htl.toml `[lint]` first, then HTL_LINTS, so the env var wins.
+    let found = htl_core::model::Project::find_root(path).map_err(|e| format!("{tag}: {e:#}"))?;
+    let cfg_path = found.as_ref().and_then(|r| r.config_file.clone());
+    let cfg_root = cfg_path
+        .as_ref()
+        .and(found.as_ref().map(|r| r.root.clone()));
+    let cfg = cfg_path
+        .as_ref()
+        .and(found.as_ref().map(|r| r.config.clone()));
     let file_spec = cfg.as_ref().map(|c| c.lint_spec()).unwrap_or_default();
     let env_spec = std::env::var("HTL_LINTS").unwrap_or_default();
     let spec = htl_core::config::join_specs([file_spec.as_str(), env_spec.as_str()]);
@@ -347,11 +351,10 @@ fn checker_for(tag: &str, manifest_dir: &Path, path: &Path) -> Result<Checker, S
     // names. What the file may read is the project model's, as `htl check` has it; a file
     // in no project reads its own directory.
     h.reset_search_path().map_err(|e| format!("{tag}: {e:#}"))?;
-    let model = match (&cfg_root, &cfg) {
-        (Some(root), Some(c)) => htl_core::model::Project::load(root, c.clone()).map(Some),
-        _ => htl_core::model::Project::discover(path),
-    }
-    .map_err(|e| format!("{tag}: {e:#}"))?;
+    let model = found
+        .map(|r| htl_core::model::Project::load(&r.root, r.config))
+        .transpose()
+        .map_err(|e| format!("{tag}: {e:#}"))?;
     if let Some(m) = &model {
         h.apply_model(m, htl_core::model::View::Source)
             .map_err(|e| format!("{tag}: {e:#}"))?;
