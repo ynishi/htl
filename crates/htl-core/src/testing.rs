@@ -152,8 +152,8 @@ pub fn discover_tests(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
 }
 
 /// [`discover_tests`], not entering `skip` either — directories named by path rather than
-/// by name ([`crate::patched_dirs`]: a patched dependency's tests are its own suite, not
-/// the project's).
+/// by name — the project model's `Project::not_walked`: a patched dependency's tests are
+/// its own suite, not the project's.
 pub fn discover_tests_skipping(paths: &[PathBuf], skip: &[PathBuf]) -> Result<Vec<PathBuf>> {
     discover_tests_for(paths, skip, DEFAULT_LIB)
 }

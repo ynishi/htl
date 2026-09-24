@@ -2257,7 +2257,8 @@ pub fn collect_tl(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
 }
 
 /// [`collect_tl`], not entering `skip` either — directories named by path rather than by
-/// name, for what the caller knows and a name cannot say ([`patched_dirs`]).
+/// name, for what the caller knows and a name cannot say — the project model's
+/// `Project::not_walked`.
 pub fn collect_tl_skipping(paths: &[PathBuf], skip: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for p in paths {
