@@ -450,9 +450,11 @@ impl Htl {
     }
 }
 
-/// `contract` lint for one file: when `file` sits directly under the directory a
-/// contract holds (relative to `root`, the directory holding `htl.toml`), check it
-/// against that contract statically. Returns lint lines (empty when none applies).
+/// `contract` lint for one file: when a directory a contract holds serves `file` as a
+/// module ([`contract::held_name`]: anywhere under it, by the name `require` writes —
+/// `foo` for `foo/init.tl`, `sub.x` for `sub/x.tl`), check it against that contract
+/// statically, as the host's resolver for the directory holds it at run time. `root` is
+/// the directory holding `htl.toml`. Returns lint lines (empty when none applies).
 ///
 /// `contracts` comes from [`contract::resolve`], which reads the `---@contract` markers;
 /// resolving once per run rather than once per file is the caller's job.
@@ -469,17 +471,12 @@ pub fn contract_lints(
     if !is_tl_source(&file_abs) {
         return Ok(out);
     }
-    let modname = file_abs
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_string();
     for c in contracts {
-        let Some(dir) = c
+        let Some((dir, modname)) = c
             .dirs(root)
             .into_iter()
             .map(|d| canon(&d))
-            .find(|d| file_abs.parent() == Some(d.as_path()))
+            .find_map(|d| contract::held_name(&d, &file_abs).map(|n| (d, n)))
         else {
             continue;
         };

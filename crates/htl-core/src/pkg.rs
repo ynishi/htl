@@ -94,6 +94,10 @@ pub struct TealResolver {
     exclude: Vec<String>,
     /// When set, `expect_type` / `require_fields` apply to this module name only.
     only_module: Option<String>,
+    /// Serves a `[[contract]]` directory ([`for_contract_dir`](Self::for_contract_dir)):
+    /// only the files [`crate::contract::held_name`] says the directory holds, under that
+    /// name — the answer `htl check` holds to the contract and `htl unused` counts.
+    contract: bool,
 }
 
 impl TealResolver {
@@ -119,6 +123,7 @@ impl TealResolver {
             checker_paths: Vec::new(),
             exclude: Vec::new(),
             only_module: None,
+            contract: false,
         })
     }
 
@@ -137,6 +142,7 @@ impl TealResolver {
             checker_paths: Vec::new(),
             exclude: Vec::new(),
             only_module: None,
+            contract: false,
         })
     }
 
@@ -155,6 +161,7 @@ impl TealResolver {
             checker_paths: Vec::new(),
             exclude: Vec::new(),
             only_module: None,
+            contract: false,
         }
     }
 
@@ -300,6 +307,7 @@ impl TealResolver {
         let mut r = Self::new_symlink_aware(dir)?
             .expect_type(c.type_path.clone())
             .exclude_modules(c.exclude.iter().cloned());
+        r.contract = true;
         // The same paths the `contract` lint checks through (`Htl::apply_config`), so a
         // contract type declared in `types/` resolves in the run as well as in the check.
         for p in cfg.search_paths(root) {
@@ -2098,6 +2106,7 @@ impl TealResolver {
             checker_paths: Vec::new(),
             exclude: Vec::new(),
             only_module: None,
+            contract: false,
         })
     }
 }
@@ -2132,6 +2141,16 @@ impl Resolver for TealResolver {
         let mut implementations = Vec::new();
         for (s, cs) in &candidates {
             for c in cs.iter().filter(|c| is(c, ".tl") && !is(c, ".d.tl")) {
+                // A contract directory serves what it holds, and nothing it does not: a file
+                // under `target/` spelled as `target.x` is no module of the directory, and
+                // is not loaded around the contract either.
+                if self.contract
+                    && let Some(dir) = &self.root
+                    && crate::contract::held_name(dir, &dir.join(c)).as_deref()
+                        != Some(dotted.as_str())
+                {
+                    continue;
+                }
                 match read(s, c) {
                     Ok(Some(file)) => implementations.push((s.module, file)),
                     Ok(None) => {}

@@ -20,7 +20,7 @@
 //! - `main.tl` in the source root (`[layout] source`, `src/` by default) or beside the
 //!   manifest, the entry script,
 //! - every test file, as `htl test` discovers them (every `.tl` that loads `htl.test`),
-//! - every module directly under a `[[contract]]` directory: those are loaded by name at
+//! - every module under a `[[contract]]` directory, nested ones included: those are loaded by name at
 //!   run time, from a mods directory the project does not own,
 //! - anything named in `[build] extra`, which is where a dynamic `require(expr)` has to
 //!   list its targets for `htl build` to bundle them, and every name the host provides —
@@ -83,7 +83,7 @@ pub enum EntryKind {
     Main,
     /// A test file, as `htl test` discovers them.
     Test,
-    /// A module directly under a `[[contract]]` directory.
+    /// A module under a `[[contract]]` directory ([`crate::contract::held_name`]).
     Contract,
     /// Named in `[build] extra`, or a name the host provides: the project model's
     /// (`#[host_module]`, `[build] host`, `std.*`), and `[build] host` without a model.
@@ -393,19 +393,8 @@ fn entries(
         // loads it.
         let (contracts, _) = crate::contract::resolve(r, c);
         for con in &contracts {
-            for dir in con.dirs(root) {
-                let Ok(rd) = std::fs::read_dir(&dir) else {
-                    continue;
-                };
-                let mut found: Vec<PathBuf> = rd
-                    .flatten()
-                    .map(|e| e.path())
-                    .filter(|p| p.is_file() && crate::is_tl_source(p) && !crate::is_declaration(p))
-                    .collect();
-                found.sort();
-                for p in found {
-                    add(canon(&p), EntryKind::Contract);
-                }
+            for (_, p) in con.held_modules(root) {
+                add(canon(&p), EntryKind::Contract);
             }
         }
         // A dynamic `require(expr)` has already had to list its targets for `htl build`;
