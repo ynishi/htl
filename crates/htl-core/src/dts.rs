@@ -340,11 +340,15 @@ pub fn parse_attr_metas(metas: impl IntoIterator<Item = Meta>) -> Result<TealAtt
     Ok(out)
 }
 
-fn parse_named_attr(attrs: &[Attribute], name: &str) -> Result<Option<TealAttrs>, String> {
+/// Every `#[<name>(..)]` in `attrs`, merged. `is` says which attribute paths are `name`.
+fn parse_named_attr(
+    attrs: &[Attribute],
+    is: impl Fn(&syn::Path) -> bool,
+) -> Result<Option<TealAttrs>, String> {
     let mut metas = Vec::new();
     let mut found = false;
     for a in attrs {
-        if a.path().is_ident(name) {
+        if is(a.path()) {
             found = true;
             if let Meta::List(_) = &a.meta {
                 let list = a
@@ -361,13 +365,24 @@ fn parse_named_attr(attrs: &[Attribute], name: &str) -> Result<Option<TealAttrs>
 }
 
 /// `#[teal(...)]` on a struct or enum (absent -> defaults).
+///
+/// Only the bare name: `teal` is a helper attribute of `#[derive(TealRecord)]`, and Rust
+/// does not accept a helper written with a path, so `#[htl::teal(..)]` never compiles.
 pub fn parse_teal_attrs(attrs: &[Attribute]) -> Result<TealAttrs, String> {
-    Ok(parse_named_attr(attrs, "teal")?.unwrap_or_default())
+    Ok(parse_named_attr(attrs, |p| p.is_ident("teal"))?.unwrap_or_default())
 }
 
 /// `#[host_module(...)]` on an impl block, or `None` when the attribute is absent.
+///
+/// Matched by the path's last segment, as `derive(TealRecord)` is: the attribute macro
+/// compiles as `#[host_module]` after `use htl::host_module` and as `#[htl::host_module]`
+/// without it, and the host registers the module either way. Which crate the path names
+/// is not checked — a source is read, not resolved — so another crate's attribute called
+/// `host_module` is taken for htl's.
 pub fn parse_host_module_attr(attrs: &[Attribute]) -> Result<Option<TealAttrs>, String> {
-    parse_named_attr(attrs, "host_module")
+    parse_named_attr(attrs, |p| {
+        p.segments.last().is_some_and(|s| s.ident == "host_module")
+    })
 }
 
 /// `true` if `#[derive(..., TealRecord, ...)]` is present.
@@ -1645,5 +1660,45 @@ mod tests {
                 && e.contains("uses = [Pt]"),
             "{e}"
         );
+    }
+
+    /// `#[htl::host_module(..)]` is the same attribute as `#[host_module(..)]` after
+    /// `use htl::host_module`: the model's scan names the module, and `htl dts` writes its
+    /// declaration, for either spelling (#327).
+    #[test]
+    fn a_host_module_is_read_with_or_without_its_crate_path() {
+        for (tag, attr) in [
+            (
+                "bare",
+                "#[host_module(name = \"host\", dts = \"src/host.d.tl\")]",
+            ),
+            (
+                "path",
+                "#[htl::host_module(name = \"host\", dts = \"src/host.d.tl\")]",
+            ),
+        ] {
+            let dir = std::env::temp_dir()
+                .join(format!("htl-dts-attr-path-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("src")).unwrap();
+            let lib = dir.join("src/lib.rs");
+            std::fs::write(
+                &lib,
+                format!(
+                    "pub struct Host;\n{attr}\nimpl Host {{\n    pub fn ping(&self) -> i64 {{ 1 }}\n}}\n"
+                ),
+            )
+            .unwrap();
+            assert_eq!(host_module_names(&dir), vec!["host".to_string()], "{tag}");
+            let generated = scan_rust_file(&lib, &dir).unwrap();
+            assert_eq!(generated.len(), 1, "{tag}");
+            assert_eq!(generated[0].target, dir.join("src/host.d.tl"), "{tag}");
+            assert!(
+                generated[0].text.contains("ping"),
+                "{tag}: {}",
+                generated[0].text
+            );
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
     }
 }
