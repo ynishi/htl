@@ -344,19 +344,7 @@ impl Resolver {
         if files.is_empty() {
             return Resolution::Found(found);
         }
-        let from = match provider {
-            Provider::HostModule => {
-                let cargo = self
-                    .project
-                    .host_crate
-                    .as_deref()
-                    .map(|c| self.show(&c.join("Cargo.toml")))
-                    .unwrap_or_else(|| "Cargo.toml".into());
-                format!("#[host_module] in {cargo}'s crate")
-            }
-            Provider::Build => format!("[build] host in {}", crate::config::CONFIG_NAME),
-            Provider::Std => "htl's std".into(),
-        };
+        let from = self.provided_by(provider);
         let shown: Vec<String> = files.iter().map(|f| self.show(f)).collect();
         let (these, them) = if files.len() == 1 {
             ("this file", "it")
@@ -375,6 +363,27 @@ impl Resolver {
             files,
             message,
         })
+    }
+
+    /// Where the model learned that the host provides a name, as a message says it:
+    /// `#[host_module] in Cargo.toml's crate`, `[build] host in htl.toml`, `htl's std`.
+    ///
+    /// The one wording for it, so the error [`Resolution::HostShadowed`] carries and
+    /// `htl resolve`'s report of a provided name name the source the same way.
+    pub fn provided_by(&self, provider: Provider) -> String {
+        match provider {
+            Provider::HostModule => {
+                let cargo = self
+                    .project
+                    .host_crate
+                    .as_deref()
+                    .map(|c| self.show(&c.join("Cargo.toml")))
+                    .unwrap_or_else(|| "Cargo.toml".into());
+                format!("#[host_module] in {cargo}'s crate")
+            }
+            Provider::Build => format!("[build] host in {}", crate::config::CONFIG_NAME),
+            Provider::Std => "htl's std".into(),
+        }
     }
 
     /// [`resolve`](Self::resolve)'s answer as a string that changes whenever the answer

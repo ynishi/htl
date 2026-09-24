@@ -1650,6 +1650,17 @@ function H.ambiguity(name)
    return nil
 end
 
+-- The model's message when the host provides `name` and a file of the model implements
+-- it too (kind `shadowed`), else nil. `H.resolve_module` answers such a name with its
+-- declaration or nothing, which alone reads as a host module or a missing one; this is
+-- what tells the linker it is neither, for a `require` no check has seen (a plain `.lua`).
+function H.host_shadowing(name)
+   if not H.resolve_name then return nil end
+   local kind, msg = H.resolve_name(nil, name)
+   if kind == "shadowed" then return msg end
+   return nil
+end
+
 -- Every file on the current `package.path` that could answer `require(name)`, in the
 -- order the searchers consult them: sources across the whole path, then declarations,
 -- then plain Lua — the order the wrapper at the top of this file gives `tl.search_module`,

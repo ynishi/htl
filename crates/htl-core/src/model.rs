@@ -105,10 +105,12 @@
 //!
 //! # What this module does not do
 //!
-//! It does not load a host module's files. The check and the run time read the host's
-//! names from here through the resolver; the linker, `htl unused` and the macros still
-//! decide which names the host provides from their own sources (`[build] host`,
-//! `include_bundle!(host = [..])`) until they are moved onto this table.
+//! It does not load a host module's files. Everything that asks which names the host
+//! provides reads this table: the check and the run time through the resolver, and
+//! `htl build`, `include_bundle!`, `htl unused` and `htl resolve` through
+//! [`Project::provided`] / [`Project::provides`]. `--host` and `include_bundle!(host =
+//! [..])` add names a caller knows and the model cannot read (a module registered by
+//! hand, or by another crate); they do not replace it.
 //!
 //! A host that serves modules itself does so with a
 //! [`TealResolver`](crate::pkg::TealResolver), which names files by the same rule

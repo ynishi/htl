@@ -1022,8 +1022,12 @@ pub fn check<O: Output>(
     // ([`Resolution::HostShadowed`](crate::model::Resolution::HostShadowed)), so the lint
     // finds nothing to add there; a file in no project has no model, and scans the crate
     // around the first path. No crate means no host.
-    // That crate is also where `contract-unenforced` looks for enforcement, below.
-    let cargo_root = crate::dts::find_cargo_package_root(start);
+    // That crate is also where `contract-unenforced` looks for enforcement, below: the
+    // model's own `host_crate` when there is a model, which found it when it was loaded.
+    let cargo_root = match model {
+        Some(m) => m.host_crate.clone(),
+        None => crate::dts::find_cargo_package_root(start),
+    };
     let host_modules: Vec<String> = match model {
         Some(m) => m
             .provided()

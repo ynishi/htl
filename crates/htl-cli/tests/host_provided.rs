@@ -239,3 +239,170 @@ fn a_file_under_a_build_host_name_is_an_error() {
     assert!(!ok, "{diags:#?}");
     assert_shadowed(&diags, "game", "[build] host in htl.toml", "src/game.tl");
 }
+
+// ------------------------------------------------------------------ build, resolve, unused
+//
+// The linker, `htl resolve` and `htl unused` read the host's names from the same model:
+// nothing has to restate a `#[host_module]` in `[build] host` or `--host`.
+
+/// The shadowing message for `file`, as the resolver words it for the crate's
+/// `#[host_module(name = "host")]`.
+fn host_message(file: &str) -> String {
+    format!(
+        "'host' is provided by the host (#[host_module] in Cargo.toml's crate) and also \
+         implemented by {file}: the host's module is what runs, so this file would be \
+         checked and never run — rename it, or stop providing the name"
+    )
+}
+
+/// `htl build` with no `--host` and no `[build] host`: the `#[host_module]` name is a host
+/// module of the bundle, not a module in it.
+#[test]
+fn build_leaves_a_host_module_name_to_the_host_without_it_being_listed() {
+    let root = host_project("build");
+    let out = htl(&root, &["build", "src/main.tl", "-o", "out.hb"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+
+    let info = htl(&root, &["bundle", "info", "out.hb", "--format", "json"]);
+    assert!(info.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&info.stdout).unwrap();
+    assert_eq!(v["host_modules"], serde_json::json!(["host"]), "{v:#}");
+    let modules: Vec<&str> = v["modules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["name"].as_str())
+        .collect();
+    assert_eq!(modules, vec!["main"], "{v:#}");
+}
+
+/// A plain `.lua` the check never reads, requiring a name the host provides that a file
+/// of the project implements: the linker refuses it at that `require`, and writes nothing.
+#[test]
+fn build_refuses_a_plain_lua_require_of_a_shadowed_host_name() {
+    let root = host_project("build-shadowed");
+    write(&root.join("src/host.lua"), "return {}\n");
+    write(
+        &root.join("src/helper.d.tl"),
+        "local record helper\n   n: integer\nend\nreturn helper\n",
+    );
+    write(
+        &root.join("src/helper.lua"),
+        "local host = require(\"host\")\nreturn { n = 1, host = host }\n",
+    );
+    write(
+        &root.join("src/main.tl"),
+        "local helper = require(\"helper\")\nprint(helper.n)\n",
+    );
+    let out = htl(&root, &["build", "src/main.tl", "-o", "out.hb"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    let line = stderr
+        .lines()
+        .find(|l| l.contains(&host_message("src/host.lua")))
+        .unwrap_or_else(|| panic!("the resolver's message: {stderr}"));
+    assert!(
+        line.contains("src/helper.lua:1:21:"),
+        "at helper.lua's require: {line}"
+    );
+    assert_eq!(
+        stderr.matches(&host_message("src/host.lua")).count(),
+        1,
+        "said once: {stderr}"
+    );
+    assert!(!root.join("out.hb").exists(), "no bundle written");
+}
+
+/// `htl resolve` names the source a provided name comes from, and succeeds; with a file
+/// under the name, the header is the error, the file's row is `refused`, and it fails.
+#[test]
+fn resolve_says_the_host_provides_a_name_and_refuses_a_file_under_it() {
+    let root = host_project("resolve");
+    let out = htl(&root, &["resolve", "host"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(
+        stdout.starts_with(
+            "htl resolve host: provided by the host (#[host_module] in Cargo.toml's crate), \
+             typed by src/host.d.tl\n"
+        ),
+        "{stdout}"
+    );
+    let out = htl(&root, &["resolve", "host", "--format", "json"]);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        v["provided_by"].as_str(),
+        Some("#[host_module] in Cargo.toml's crate"),
+        "{v:#}"
+    );
+    assert!(v.get("error").is_none(), "{v:#}");
+    assert_eq!(v["summary"]["ok"], serde_json::json!(true), "{v:#}");
+
+    write(
+        &root.join("src/host.tl"),
+        "local record host\nend\nreturn host\n",
+    );
+    let out = htl(&root, &["resolve", "host"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    assert!(
+        stdout.starts_with(&format!(
+            "htl resolve host: error: {}\n",
+            host_message("src/host.tl")
+        )),
+        "{stdout}"
+    );
+    let row = |file: &str| {
+        stdout
+            .lines()
+            .find(|l| l.contains(file))
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(
+        row("src/host.tl ").trim_end().ends_with("refused"),
+        "{stdout}"
+    );
+    assert!(
+        row("src/host.d.tl").trim_end().ends_with("read"),
+        "{stdout}"
+    );
+
+    let out = htl(&root, &["resolve", "host", "--format", "json"]);
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        v["error"].as_str(),
+        Some(host_message("src/host.tl").as_str())
+    );
+    assert_eq!(v["read"].as_str(), Some("src/host.d.tl"), "{v:#}");
+    let status = |path: &str| {
+        v["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["path"].as_str() == Some(path))
+            .map(|c| c["status"].clone())
+    };
+    assert_eq!(status("src/host.tl"), Some(serde_json::json!("refused")));
+    assert_eq!(status("src/host.d.tl"), Some(serde_json::json!("read")));
+    assert_eq!(v["summary"]["ok"], serde_json::json!(false), "{v:#}");
+}
+
+/// `htl unused` counts a `#[host_module]` name as the host's, as it does a `[build] host`
+/// one: the file under it is the check's error, not a module nothing reaches.
+#[test]
+fn unused_counts_a_host_module_name_as_the_hosts() {
+    let root = host_project("unused");
+    write(
+        &root.join("src/host.tl"),
+        "local record host\nend\nreturn host\n",
+    );
+    write(&root.join("src/orphan.tl"), "return {}\n");
+    let out = htl(&root, &["unused"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(!stderr.contains("src/host.tl"), "{stderr}");
+    assert!(stderr.contains("module: src/orphan.tl"), "{stderr}");
+}

@@ -1674,6 +1674,21 @@ end
         Ok(f.call(name)?)
     }
 
+    /// Why `name` is refused although the host provides it: the project model's message
+    /// when a file of the model implements the name as well (the model's
+    /// `Resolution::HostShadowed`). `None` when no file
+    /// does, when the host does not provide the name, or when no model is installed
+    /// ([`apply_model`](Self::apply_model)).
+    ///
+    /// [`resolve_module`](Self::resolve_module) answers such a name with its declaration,
+    /// or with nothing, never with the file — which on its own reads as a host module, or
+    /// as a missing one. This is what says it is neither: an error wherever the name is
+    /// required, the way [`ambiguity`](Self::ambiguity) says it for two implementations.
+    pub fn host_shadowing(&self, name: &str) -> Result<Option<String>> {
+        let f: Function = self.h.get("host_shadowing")?;
+        Ok(f.call(name)?)
+    }
+
     /// Every file on the search path that could answer `require(name)`, in the order the
     /// searchers consult them — so the first is the one [`resolve_module`](Self::resolve_module)
     /// answers with, and the rest are what it hides.

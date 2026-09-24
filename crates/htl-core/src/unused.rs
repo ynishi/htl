@@ -22,8 +22,10 @@
 //! - every test file, as `htl test` discovers them (every `.tl` that loads `htl.test`),
 //! - every module directly under a `[[contract]]` directory: those are loaded by name at
 //!   run time, from a mods directory the project does not own,
-//! - anything named in `[build] extra` / `[build] host`, which is where a dynamic
-//!   `require(expr)` has to list its targets for `htl build` to bundle them,
+//! - anything named in `[build] extra`, which is where a dynamic `require(expr)` has to
+//!   list its targets for `htl build` to bundle them, and every name the host provides —
+//!   the project model's list (`#[host_module]`s in the crate around the project,
+//!   `[build] host`, `std.*`), the one `htl build` leaves out of a bundle,
 //! - the file a Rust host embeds — the first argument of an `include_bundle!` /
 //!   `include_tl!` / `include_tl_bytes!` in the crate around the project. A project whose
 //!   `main` is in Rust has no `src/main.tl`, and its entry is named in Rust rather than in
@@ -82,7 +84,8 @@ pub enum EntryKind {
     Test,
     /// A module directly under a `[[contract]]` directory.
     Contract,
-    /// Named in `[build] extra` or `[build] host`.
+    /// Named in `[build] extra`, or a name the host provides: the project model's
+    /// (`#[host_module]`, `[build] host`, `std.*`), and `[build] host` without a model.
     Build,
     /// Embedded by a Rust host: the first argument of an `include_bundle!` /
     /// `include_tl!` / `include_tl_bytes!` in the crate around the project.
@@ -359,8 +362,25 @@ fn entries(
     for t in crate::testing::discover_tests_skipping(walk, skip)? {
         add(canon(&t), EntryKind::Test);
     }
-    for p in host_entries(root) {
+    // The crate around the project: the model's when there is one, which found it when it
+    // was loaded; otherwise looked for from the root the same way.
+    let host_crate = match opts.model {
+        Some(m) => m.host_crate.clone(),
+        None => crate::dts::find_cargo_package_root(root),
+    };
+    for p in host_entries(host_crate.as_deref()) {
         add(canon(&p), EntryKind::Host);
+    }
+    // Every name the host provides, as the model lists it — the list `htl build` and
+    // `include_bundle!` leave out of a bundle. A file of the project under one of them is
+    // already an error of the check (the host's module is what runs); it is the host's
+    // name, and not reported again as a module nothing reaches.
+    if let Some(m) = opts.model {
+        for (name, _) in m.provided() {
+            if let Some(p) = by_name.get(name) {
+                add(p.clone(), EntryKind::Build);
+            }
+        }
     }
     if let Some((r, _, c)) = cfg {
         // A module under a contract dir is loaded by name at run time, from a directory
@@ -407,9 +427,9 @@ fn entries(
 /// name in a comment costs at most an entry for a file that exists, which makes the
 /// report quieter, and a call whose first argument is not a literal is not one the macro
 /// accepts either.
-fn host_entries(root: &Path) -> Vec<PathBuf> {
+fn host_entries(crate_root: Option<&Path>) -> Vec<PathBuf> {
     const CALLS: [&str; 3] = ["include_bundle!", "include_tl!", "include_tl_bytes!"];
-    let Some(crate_root) = crate::dts::find_cargo_package_root(root) else {
+    let Some(crate_root) = crate_root.map(Path::to_path_buf) else {
         return Vec::new();
     };
     let mut out: Vec<PathBuf> = Vec::new();

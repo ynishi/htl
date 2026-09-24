@@ -14,6 +14,14 @@
 //! ([`Htl::module_candidates`], in the searchers' order) and the winner is what the
 //! checker asks ([`Htl::resolve_module`]); a model file the path would find under a name
 //! the model does not give it is not among them.
+//!
+//! A name the host provides ([`Project::provides`](crate::model::Project::provides)) is
+//! answered by no file: the report says which source provides it
+//! ([`Resolution::provided_by`]), and its rows are at most the declaration the checker
+//! types it from. When a file of the model implements the name as well, the model refuses
+//! it: those rows are [`Status::Refused`], the report carries the resolver's message
+//! ([`Resolution::error`]), and the verdict is a failure, as for a name two files
+//! implement.
 
 use crate::{Htl, ModuleCandidate, ModuleKind, same_file};
 use anyhow::Result;
@@ -33,6 +41,10 @@ pub enum Status {
     Runtime,
     /// One of two implementations of the name, which is an error: no order picks one.
     Ambiguous,
+    /// An implementation of a name the host provides, which is an error: every run with
+    /// the host loads the host's module, so this file would be checked and never run. The
+    /// check reads the name's declaration, when it has one, and never this.
+    Refused,
 }
 
 impl Status {
@@ -44,6 +56,7 @@ impl Status {
             Self::Shadowed => "shadowed",
             Self::Runtime => "runtime",
             Self::Ambiguous => "ambiguous",
+            Self::Refused => "refused",
         }
     }
 }
@@ -142,7 +155,8 @@ pub struct Summary {
     /// override is what a search path is for, and this is the number that says one is
     /// happening.
     pub shadowed: usize,
-    /// The name resolves to a file. What the exit code says.
+    /// The name resolves to a file, or the host provides it, and the model does not
+    /// refuse it. What the exit code says.
     pub ok: bool,
 }
 
@@ -167,6 +181,17 @@ pub struct Resolution {
     /// the name resolves to nothing at all. In a project none of them is the project's:
     /// the model answers for its own directories.
     pub searched: Vec<String>,
+    /// Where the host's providing the name comes from, when it does — the wording the
+    /// resolver's messages use: `#[host_module] in Cargo.toml's crate`, `[build] host in
+    /// htl.toml`, `htl's std`. Such a name is answered at run time by the host, not by any
+    /// row: a row read for it is the declaration it is typed from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provided_by: Option<String>,
+    /// Why the name is an error, when it is one the model refuses: the resolver's message,
+    /// the one a check reports at a `require` of it. Set for a name the host provides that
+    /// a file of the model implements as well (the rows marked [`Status::Refused`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     /// The counts and the verdict, for a caller that wants the answer without walking the
     /// rows.
     pub summary: Summary,
@@ -187,17 +212,21 @@ pub fn resolve(
 ) -> Result<Resolution> {
     let dirs = h.search_path_dirs()?;
     let resolver = model.map(crate::model::Resolver::new);
-    let (rows, read, answered_by) = match resolver
+    let (rows, read, error, answered_by) = match resolver
         .as_ref()
         .zip(model)
         .and_then(|(r, m)| model_rows(r, name, root, m))
     {
-        Some((rows, read)) => (rows, read, AnsweredBy::Model),
+        Some(m) => (m.rows, m.read, m.error, AnsweredBy::Model),
         None => {
             let (rows, read) = path_rows(h, name, &dirs, root, model, resolver.as_ref())?;
-            (rows, read, AnsweredBy::Path)
+            (rows, read, None, AnsweredBy::Path)
         }
     };
+    let provided_by = resolver
+        .as_ref()
+        .zip(model.and_then(|m| m.provides(name)))
+        .map(|(r, p)| r.provided_by(p));
 
     let shadowed = rows.iter().filter(|c| c.status == Status::Shadowed).count();
     // One entry per directory as it is printed: the project root reached through
@@ -218,8 +247,10 @@ pub fn resolve(
         summary: Summary {
             candidates: rows.len(),
             shadowed,
-            ok: read.is_some(),
+            ok: error.is_none() && (read.is_some() || provided_by.is_some()),
         },
+        provided_by,
+        error,
         candidates: rows,
     })
 }
@@ -238,15 +269,29 @@ impl ModuleKind {
     }
 }
 
+/// What the model answers for a name it has: the rows, the file read, and the error when
+/// it refuses the name.
+struct ModelRows {
+    rows: Vec<Candidate>,
+    read: Option<PathBuf>,
+    error: Option<String>,
+}
+
 /// The rows for a name the model has: every file of the model under it, the one the
 /// resolver answers with marked `read`. `None` when the model does not have the name.
+///
+/// A name the host provides that a file implements as well reads its declaration, when
+/// it has one — the check types the `require` from it — and marks the implementations
+/// [`Status::Refused`], with the resolver's message as the error.
 fn model_rows(
     r: &crate::model::Resolver,
     name: &str,
     root: Option<&Path>,
     model: &crate::model::Project,
-) -> Option<(Vec<Candidate>, Option<PathBuf>)> {
+) -> Option<ModelRows> {
     use crate::model::Resolution as Answer;
+    let mut refused: Vec<PathBuf> = Vec::new();
+    let mut error = None;
     let (read, lua, ambiguous) = match r.resolve(None, name) {
         Answer::Found(f) => {
             let read = f
@@ -257,11 +302,16 @@ fn model_rows(
             (read, f.lua, Vec::new())
         }
         Answer::Ambiguous(claims) => (None, None, claims.into_iter().map(|(_, f)| f).collect()),
+        Answer::HostShadowed(s) => {
+            refused = s.files;
+            error = Some(s.message);
+            (s.declaration, None, Vec::new())
+        }
         _ => return None,
     };
     let mut files = r.claims(name);
     // A name only the resolver can spell (`@<dependency>/…`) has no plain claims.
-    for f in read.iter().chain(lua.iter()) {
+    for f in read.iter().chain(lua.iter()).chain(refused.iter()) {
         if !files.iter().any(|x| same_file(x, f)) {
             files.push(f.clone());
         }
@@ -288,6 +338,8 @@ fn model_rows(
                 Status::Read
             } else if ambiguous.iter().any(|a| same_file(a, f)) {
                 Status::Ambiguous
+            } else if refused.iter().any(|a| same_file(a, f)) {
+                Status::Refused
             } else if read_kind == Some(ModuleKind::Declaration)
                 && lua.as_ref().is_some_and(|l| same_file(f, l))
             {
@@ -306,7 +358,7 @@ fn model_rows(
             }
         })
         .collect();
-    Some((rows, read))
+    Some(ModelRows { rows, read, error })
 }
 
 /// The rows for a name outside the model: what `package.path` holds for it, a model file

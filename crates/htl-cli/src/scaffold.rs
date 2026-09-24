@@ -1444,7 +1444,7 @@ mod tests {
         };
         let lib = rust_lib_rs(&ctx);
         assert!(
-            lib.contains("include_bundle!(\"src/sample/init.tl\", host = [\"host\"])"),
+            lib.contains("include_bundle!(\"src/sample/init.tl\");"),
             "{lib}"
         );
         assert!(
@@ -1462,9 +1462,8 @@ mod tests {
         );
         let main = rust_main_rs(&ctx);
         assert!(
-            main.contains(
-                "include_bundle!(\"src/main.tl\", host = [\"host\", \"sample\"], debug = true)"
-            ) && main.contains("h.run_bundle(&Bundle::decode(MAIN)?, &args)?;"),
+            main.contains("include_bundle!(\"src/main.tl\", host = [\"sample\"], debug = true)")
+                && main.contains("h.run_bundle(&Bundle::decode(MAIN)?, &args)?;"),
             "{main}"
         );
         assert!(
@@ -1805,7 +1804,7 @@ mod tests {
             "{lib}"
         );
         assert!(
-            lib.contains("htl::include_bundle!(\"src/sample/init.tl\", host = [\"fx\", \"mq\"])"),
+            lib.contains("htl::include_bundle!(\"src/sample/init.tl\", host = [\"mq\"])"),
             "{lib}"
         );
         assert!(
@@ -1819,7 +1818,7 @@ mod tests {
         let main = window_main_rs(&ctx);
         assert!(
             main.contains(
-                "include_bundle!(\"src/main.tl\", host = [\"fx\", \"mq\", \"sample\"], debug = true)"
+                "include_bundle!(\"src/main.tl\", host = [\"mq\", \"sample\"], debug = true)"
             ),
             "{main}"
         );

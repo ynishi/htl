@@ -8,6 +8,18 @@
 //! Any other unresolved `require` is an error: the point of a bundle is that "module
 //! not found" happens here, not on the first `require` at the customer's machine.
 //!
+//! # The host's names
+//!
+//! Which names the host provides is the project model's to say
+//! (`model::Project::provided`: `#[host_module]`s in the crate around the project,
+//! `[build] host`, `std.*`), and the callers that have a model — `htl build`,
+//! `include_bundle!` — put all of them in [`LinkOptions::host`]. A name there is not
+//! walked. When a file of the model implements it as well, the model refuses the name
+//! (its resolver's `HostShadowed`): the check reports that at a checked file's
+//! `require`, and the linker reports it at a plain `.lua`'s, which nothing checks — the
+//! same split as for a name two files implement. The file is never bundled: every run
+//! with the host loads the host's module, which `package.preload` answers first.
+//!
 //! # The store
 //!
 //! Generating a module is the expensive part of linking — the Teal check behind it costs
@@ -48,6 +60,11 @@ pub struct LinkOptions {
     /// A name here is left out of the bundle and not walked, whether or not a file on
     /// the search path could answer it — a library that bundles its own module names it
     /// here in the binary's bundle so the two do not carry it twice.
+    ///
+    /// A caller with the project's model puts every name the model says the host provides
+    /// here (`model::Project::provided`), as `htl build` and `include_bundle!` do; what
+    /// else it lists is added to those. A file of the model under one of them is an error
+    /// of the model's, not something this list can override (see the module doc).
     pub host: Vec<String>,
     /// The module name the entry is served under in the bundle. `None` derives it from
     /// the file alone: its stem, or its directory's name for an `init.tl`.
@@ -229,7 +246,9 @@ pub fn link_with(
             Target::Missing => out.errors.push(format!(
                 "extra module '{name}' not found on the search path"
             )),
-            Target::Ambiguous(why) => out.errors.push(format!("extra module {why}")),
+            Target::Ambiguous(why) | Target::Shadowed(why) => {
+                out.errors.push(format!("extra module {why}"))
+            }
         }
     }
 
@@ -256,12 +275,21 @@ pub fn link_with(
             (Some(src), reqs)
         };
         for r in &requires {
-            if queued.contains(&r.module) || host.contains(&r.module) {
+            if queued.contains(&r.module) {
                 continue;
             }
             // A name the caller said the host provides is the host's before the search
             // path is asked: a file that could answer it is not bundled and not walked.
-            if host_declared.contains(&r.module) {
+            // If a file of the model implements it all the same, the model refuses the
+            // name; a checked file's `require` of it is already an error of the check, a
+            // plain `.lua`'s is said here, where it would otherwise pass unseen — at every
+            // such `require`, including after a checked file has filed the name under the
+            // host's.
+            if host_declared.contains(&r.module) || host.contains(&r.module) {
+                if !typed && let Some(why) = h.host_shadowing(&r.module)? {
+                    out.errors.push(at(&path, r, &why));
+                    continue;
+                }
                 host.insert(r.module.clone());
                 continue;
             }
@@ -276,11 +304,14 @@ pub fn link_with(
                 Target::Missing => out.errors.push(unresolved(&path, r)),
                 // A checked file's `require` of it is already an error of the check, at
                 // the same place; a plain `.lua` is checked by nobody, so it is said here.
-                Target::Ambiguous(why) if !typed => {
-                    out.errors
-                        .push(format!("{}:{}:{}: {why}", path.display(), r.line, r.col))
+                Target::Ambiguous(why) | Target::Shadowed(why) if !typed => {
+                    out.errors.push(at(&path, r, &why))
                 }
                 Target::Ambiguous(_) => {}
+                // The check said it; the name is still the host's, and nothing is bundled.
+                Target::Shadowed(_) => {
+                    host.insert(r.module.clone());
+                }
             }
         }
         let Some(code) = code else { continue };
@@ -409,6 +440,17 @@ enum Target {
     /// More than one file implements the name: the model's message saying which. Nothing
     /// is bundled for it, since no order picks one.
     Ambiguous(String),
+    /// The host provides the name and a file of the model implements it too: the model's
+    /// message saying so. Nothing is bundled for it — the host's module is what runs — and
+    /// it is an error wherever it is required, as `Ambiguous` is. Reached for a name the
+    /// caller did not list in [`LinkOptions::host`] (a caller without the model's list);
+    /// a listed one is checked before the walk would classify it.
+    Shadowed(String),
+}
+
+/// A linker error at a `require`: `file:line:col: why`, the shape a check's error has.
+fn at(file: &Path, r: &RequireSite, why: &str) -> String {
+    format!("{}:{}:{}: {why}", file.display(), r.line, r.col)
 }
 
 /// The module name an entry file answers to when the project model does not name it — an
@@ -435,6 +477,13 @@ fn classify(h: &Htl, name: &str, found: Option<&Path>) -> Result<Target> {
         Some(p) => (Some(p.to_path_buf()), None),
         None => h.resolve_module(name)?,
     };
+    // A refused name resolves to its declaration or to nothing, never to its file; either
+    // would read as the host's or as missing, so ask the model first.
+    if found.as_deref().is_none_or(is_decl)
+        && let Some(why) = h.host_shadowing(name)?
+    {
+        return Ok(Target::Shadowed(why));
+    }
     let Some(p) = found else {
         return Ok(match h.ambiguity(name)? {
             Some(why) => Target::Ambiguous(why),
