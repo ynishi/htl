@@ -1581,9 +1581,23 @@ htl resolve host: provided by the host (#[host_module] in Cargo.toml's crate), t
   answered by the project model
 ```
 
-A `.tl` or `.lua` of the project under such a name is the error `htl check` reports at its
-`require` (see "Embedding in Rust"): the header is that error, the file's row is
-`refused`, and the command exits 1.
+A name the project has only a declaration for — no `.tl`, no `.lua` — is provided by the
+environment at run time, and the header says so after the declaration it reads, naming the
+file that says so; it is the reason `htl build` leaves the name out of a bundle:
+
+```console
+$ htl resolve socket.http
+htl resolve socket.http: types/socket/http.d.tl, provided by the environment (declared by types/socket/http.d.tl)
+
+  order  file                    kind         status
+  1      types/socket/http.d.tl  declaration  read
+
+  answered by the project model
+```
+
+A `.tl` or `.lua` of the project under a name the host provides is the error `htl check`
+reports at its `require` (see "Embedding in Rust"): the header is that error, the file's
+row is `refused`, and the command exits 1.
 
 ```console
 $ htl resolve host
@@ -2095,9 +2109,10 @@ names are stable; fields may be added, not renamed.
   checker reads, `shadowed` names the `order` that is read instead (`shadowed_by`), and
   `runtime` is the `.lua` a declaration types — loaded by the run, hidden by nothing.
   `read` and `ok` are absent and false when the name resolves to nothing. `provided_by`
-  is present for a name the host provides, worded as the text header words it (`#[host_module]
-  in Cargo.toml's crate`, `[build] host in htl.toml`, `htl's std`), and `ok` is then true
-  without a file; `error` is present when a file of the project implements such a name as
+  is present for a name that runs from no file of the project, worded as the text header
+  words it: for the host `#[host_module] in Cargo.toml's crate`, `[build] host in htl.toml`
+  or `htl's std`, and `ok` is then true without a file; for a name the project has only a
+  declaration for, which the environment provides, `declared by <the .d.tl>`; `error` is present when a file of the project implements such a name as
   well — those rows are `refused` — and `ok` is false. Paths are relative to the project
   root when they are inside it.
 
@@ -2112,10 +2127,12 @@ htl check . --format json | jq -r '.diagnostics[] |
 
 `htl build src/main.tl -o app.hb` follows `require("<literal>")` from the entry and
 links everything it reaches into one file: `.tl` modules type-checked and generated,
-plain `.lua` modules (a dependency's own sources) as they are. A `require` that resolves only
-to a `.d.tl` is recorded as **host-provided** (a Rust `#[host_module]`, a `preload`);
-any other unresolved `require` is a build error, so "module not found" happens here
-and not on the first `require` at the user's machine. `htl run app.hb` runs it; a host
+plain `.lua` modules (a dependency's own sources) as they are. A name that runs from no
+file of the project is recorded as **host-provided**: one the host provides (below), and one
+the project has only a `.d.tl` for — no `.tl`, no `.lua` — which the environment provides at
+run time (a Lua library installed on the machine, a module registered where the project
+cannot see it). Any other unresolved `require` is a build error, so "module not found"
+happens here and not on the first `require` at the user's machine. `htl run app.hb` runs it; a host
 does `Htl::run_bundle(&Bundle::decode(bytes)?, &args)` after registering its modules,
 and is refused up front, naming them, if one is missing.
 
@@ -2148,9 +2165,13 @@ and is refused up front, naming them, if one is missing.
 - A dynamic `require(expr)` cannot be followed: list its targets under `[build] extra`
   in `htl.toml` (or `--extra`). The names the host provides are the project's: every
   `#[host_module]` in the crate around the project, `[build] host`, and `std.*` are left
-  out of the bundle without being listed again. A module the host registers some other
-  way (by hand, or from another crate) and that has no `.d.tl` goes under `[build] host`
-  (or `--host`). A `.tl` or `.lua` of the project under any of these names is an error (see
+  out of the bundle without being listed again. So is a name declared and nothing else:
+  a hand-written `types/socket/http.d.tl` for a LuaSocket installed on the machine, a
+  crate's `types/<crate>/`, a host's generated `.d.tl` beside the sources — a declaration
+  with no `.tl` or `.lua` under its name is how a project says the environment provides
+  the module, and needs no configuration beside it. `[build] host` (or `--host`) is for a
+  name the project cannot see at all: registered some other way (by hand, or from another
+  crate) and with no `.d.tl`. A `.tl` or `.lua` of the project under any of these names is an error (see
   "Embedding in Rust"): the check reports it at a checked file's `require`, and `htl
   build` at a plain `.lua`'s, which nothing checks — and writes no bundle.
 - Bundled modules are installed as `package.preload` entries, the same place a host

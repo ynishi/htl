@@ -95,6 +95,17 @@
 //! file of whichever module's root it is written under, and is named there like any other
 //! declaration.
 //!
+//! One more kind of name runs from no file of the project: a name the model has only a
+//! declaration for — a `.d.tl` and no `.tl` or `.lua` — and none of the three sources
+//! names ([`Provider::Declared`]). The environment provides it at run time: a Lua library
+//! installed on the machine (`types/socket/http.d.tl` for LuaSocket), a module some host
+//! registers that the model cannot read. A hand-written declaration is the ordinary way
+//! a project types such a library, so it needs no configuration beside it; `[build]
+//! host` is for a name the model cannot see at all, one with no declaration. This one is
+//! read from the files, not from the configuration, so the [`Resolver`] answers it
+//! ([`Resolver::provides`], [`Resolver::provided`]) — the model does not walk its roots
+//! when it is loaded, and [`Project::provides`] stays the three configured sources.
+//!
 //! A file of the model that implements a name the host provides — a `src/host.tl` or
 //! `src/host.lua` beside `#[host_module(name = "host")]` — is an error: the check would
 //! read the file and a run with the host would load the host's module. The
@@ -105,12 +116,17 @@
 //!
 //! # What this module does not do
 //!
-//! It does not load a host module's files. Everything that asks which names the host
-//! provides reads this table: the check and the run time through the resolver, and
-//! `htl build`, `include_bundle!`, `htl unused` and `htl resolve` through
-//! [`Project::provided`] / [`Project::provides`]. `--host` and `include_bundle!(host =
-//! [..])` add names a caller knows and the model cannot read (a module registered by
-//! hand, or by another crate); they do not replace it.
+//! It does not load a host module's files. Everything that asks which names run from no
+//! file of the project asks the model: the check and the run time through the resolver;
+//! `htl build`, `include_bundle!` and `htl unused` through [`Project::provided`], which
+//! they list the configured names from; and the linker and `htl resolve` through
+//! [`Resolver::provides`], which adds the declared ones. The linker used to decide the
+//! last kind itself — "a name that resolves to a `.d.tl` with no `.lua` behind it is the
+//! host's" — from its own lookup; it now asks the resolver, and keeps that lookup only for
+//! a file in no project, which has no model to ask (#321). `--host` and
+//! `include_bundle!(host = [..])` add names a caller knows and the model cannot read (a
+//! module registered by hand, or by another crate, with no declaration); they do not
+//! replace it.
 //!
 //! A host that serves modules itself describes the directories it serves as a model too
 //! ([`Project::for_host`], [`HostDir`]), and derives both sides from it: the checker with
@@ -181,13 +197,19 @@ pub struct Project {
     providers: Vec<(String, Provider)>,
 }
 
-/// Where a name the host provides comes from — the sources a project may declare a
-/// host-provided name in, and the only ones the model reads.
+/// Where a name that runs from no file of the project comes from — the sources a
+/// project may declare a host-provided name in, and the one the files themselves say.
 ///
 /// A host module has no files the model owns: its implementation is Rust, compiled into
 /// whatever runs the project, and what the project holds of it is at most a `.d.tl`. So
 /// the model does not describe it as a [`Module`] with roots and a home; it records the
-/// name and which of these said so ([`Project::provides`]).
+/// name and which of these said so.
+///
+/// The first three are read from the configuration and the crate around the project when
+/// the model is loaded, and [`Project::provides`] answers them. The fourth,
+/// [`Declared`](Provider::Declared), is read from the files: only the [`Resolver`], which
+/// walks the model's roots, knows that a name has a declaration and nothing else, so
+/// [`Resolver::provides`] is the one that answers all four.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
     /// Registered by a `#[host_module]` in the host crate's Rust sources
@@ -202,6 +224,22 @@ pub enum Provider {
     /// [`Htl::install_std`](crate::Htl::install_std) provide. Only in a build with the
     /// `std` feature; without it nothing provides these names.
     Std,
+    /// Declared and nothing else: the model has a `.d.tl` under the name and no `.tl` or
+    /// `.lua`, and none of the three sources above names it. The environment provides it
+    /// at run time — a Lua library installed on the machine, a module a host registers
+    /// that the model cannot read (by hand, or from another crate) — and the declaration
+    /// is how the project says so and how it is typed.
+    ///
+    /// Where the declaration sits does not matter. The declaration root (`[layout]
+    /// types`) is where hand-written ones go, a crate's under `types/<crate>/`; a host's
+    /// generated `src/host.d.tl` beside the sources says the same. A `.lua` behind the
+    /// declaration makes the name the project's own — the `.lua` is what runs, and is
+    /// bundled — and a `.tl` makes it an implementation, so neither is `Declared`.
+    ///
+    /// Only [`Resolver::provides`] answers it, from the files. It is never
+    /// [`Resolution::HostShadowed`]: a name with an implementation is not `Declared` by
+    /// definition.
+    Declared,
 }
 
 impl Provider {
@@ -212,12 +250,29 @@ impl Provider {
     /// provides the name, which may be that same registration written down a second time;
     /// `std.*` is what any htl binary carries, whoever the host is. So a name both
     /// registered and listed is reported as registered, and a host that registers a
-    /// `std.*` name of its own is the one that answers to it.
+    /// `std.*` name of its own is the one that answers to it. A declaration alone says
+    /// least — that something provides the name, not what — so
+    /// [`Declared`](Provider::Declared) is the lowest, and any of the others that names
+    /// the name is the answer instead.
     fn rank(self) -> u8 {
         match self {
-            Provider::HostModule => 2,
-            Provider::Build => 1,
-            Provider::Std => 0,
+            Provider::HostModule => 3,
+            Provider::Build => 2,
+            Provider::Std => 1,
+            Provider::Declared => 0,
+        }
+    }
+
+    /// The word the checker's Lua state carries a provider as, and
+    /// [`Provision::Provided`](crate::Provision::Provided) hands on: `host_module`,
+    /// `build`, `std`, `declared`. A word rather than this type because the linker, which
+    /// reads it, is compiled without the model.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Provider::HostModule => "host_module",
+            Provider::Build => "build",
+            Provider::Std => "std",
+            Provider::Declared => "declared",
         }
     }
 }
@@ -711,12 +766,17 @@ impl Project {
         }
     }
 
-    /// Whether the host provides `name`, and from which source. `None` for a name no
-    /// source declares — which is every name a module of the project answers to, and every
-    /// name nothing answers to.
+    /// Whether the host provides `name`, and from which of the three sources the model
+    /// reads when it is loaded — a `#[host_module]`, `[build] host`, `std.*`. `None` for a
+    /// name none of them declares — which is every name a module of the project answers
+    /// to, and every name nothing answers to.
     ///
     /// A name two sources declare is answered once, by the more specific
     /// ([`Provider::HostModule`] over [`Provider::Build`] over [`Provider::Std`]).
+    ///
+    /// Never [`Provider::Declared`]: that is a fact about the files under the name, and
+    /// the model does not walk its roots when it is loaded — its [`Resolver`] does. A
+    /// caller that has one asks [`Resolver::provides`], which answers this and that.
     pub fn provides(&self, name: &str) -> Option<Provider> {
         self.providers
             .binary_search_by(|(n, _)| n.as_str().cmp(name))
@@ -726,7 +786,9 @@ impl Project {
 
     /// Every name the host provides, with its source, in name order: the table
     /// [`provides`](Self::provides) reads, for a caller that needs all of it (a lint that
-    /// asks of every `require`, a linker leaving names out of a bundle).
+    /// asks of every `require`, a linker leaving names out of a bundle). The three
+    /// configured sources only, as for `provides`; [`Resolver::provided`] adds the
+    /// declared names.
     pub fn provided(&self) -> impl Iterator<Item = (&str, Provider)> {
         self.providers.iter().map(|(n, p)| (n.as_str(), *p))
     }
@@ -1047,7 +1109,7 @@ impl crate::Htl {
 
     /// Have the checker ask `resolver` for every module name.
     ///
-    /// Four functions go into the prelude, made in the checker's state: `resolve_name`
+    /// Five functions go into the prelude, made in the checker's state: `resolve_name`
     /// (requirer, name) → kind and files, which the prelude's `tl.search_module` asks
     /// first; `rewrite_name` (requirer, name) → the name a `require` is to be written as,
     /// which its `tl.parse` wrapper applies; and `owns_file` (path) → whether a file is the
@@ -1058,7 +1120,13 @@ impl crate::Htl {
     /// ([`Resolution`]). `shadowed` carries the error and the name's declaration, when it
     /// has one, which is what the checker types the `require` from.
     ///
-    /// A fifth, `refresh_model` (), builds the table again from the same project: the
+    /// And `provides_name` (name) → who provides a name that runs from no file of the project
+    /// ([`Resolver::provides`], as [`Provider`]'s tag), `"none"` for a name the model has
+    /// files for that are what runs, and nil for a name the model has nothing under: what
+    /// the linker asks before it leaves a declared name out of a bundle
+    /// ([`Htl::model_provides`](crate::Htl::model_provides)).
+    ///
+    /// A further one, `refresh_model` (), builds the table again from the same project: the
     /// table is read from the directories once, here, and a host's directory gains files
     /// while it runs. [`TealResolver::from_project`](crate::pkg::TealResolver::from_project)
     /// calls it before it checks a file the table does not have, so the check of a module
@@ -1132,6 +1200,23 @@ impl crate::Htl {
             let r = r.clone();
             lua.create_function(move |_, path: String| Ok(read(&r).owns(Path::new(&path))))?
         };
+        let provides = {
+            let r = r.clone();
+            lua.create_function(move |_, name: String| {
+                let r = read(&r);
+                Ok(match r.provides(&name) {
+                    Some(p) => Some(p.tag()),
+                    None if matches!(
+                        r.resolve(None, &name),
+                        Resolution::Outside | Resolution::Missing
+                    ) =>
+                    {
+                        None
+                    }
+                    None => Some("none"),
+                })
+            })?
+        };
         let refresh = lua.create_function(move |_, ()| {
             let fresh = read(&r).rebuilt();
             *r.write().unwrap_or_else(std::sync::PoisonError::into_inner) = fresh;
@@ -1141,6 +1226,7 @@ impl crate::Htl {
         self.h.set("resolve_name", resolve)?;
         self.h.set("rewrite_name", rewrite)?;
         self.h.set("owns_file", owns)?;
+        self.h.set("provides_name", provides)?;
         self.h.set("refresh_model", refresh)?;
         Ok(())
     }
