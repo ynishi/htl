@@ -1014,14 +1014,24 @@ pub fn check<O: Output>(
     // `deny` fails the run, and the sink counts those as it says them.
     sink.judge_by(lints.selection());
 
-    // The module names the host registers in `package.preload`, read from the crate's
-    // Rust sources once for the run: `host-module-shadowed` asks the same question of
-    // every require. No crate around the project means no host and no scan.
+    // The module names the host registers in `package.preload` with a `#[host_module]`:
+    // `host-module-shadowed` asks the same question of every require. A project's model
+    // read them from the crate around its root when it was loaded
+    // ([`Provider::HostModule`](crate::model::Provider::HostModule)); a file in no project
+    // has no model, and scans the crate around the first path. No crate means no host.
+    // That crate is also where `contract-unenforced` looks for enforcement, below.
     let cargo_root = crate::dts::find_cargo_package_root(start);
-    let host_modules = cargo_root
-        .as_deref()
-        .map(crate::dts::host_module_names)
-        .unwrap_or_default();
+    let host_modules: Vec<String> = match model {
+        Some(m) => m
+            .provided()
+            .filter(|(_, p)| *p == crate::model::Provider::HostModule)
+            .map(|(n, _)| n.to_string())
+            .collect(),
+        None => cargo_root
+            .as_deref()
+            .map(crate::dts::host_module_names)
+            .unwrap_or_default(),
+    };
 
     // Look every module up before checking any of them, so that a run where nothing moved
     // never builds a checker at all. The host module names go into the key for the same

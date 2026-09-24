@@ -76,11 +76,35 @@
 //! required ([`with_model`](crate::project::with_model)), and replays the entry only while
 //! those answers stand.
 //!
+//! # What the model knows about the host
+//!
+//! Some names are answered by no file at all: the host registers them in
+//! `package.preload` before any script runs. The model records which names those are and
+//! where each is declared ([`Project::provides`], [`Provider`]), from the three places a
+//! project may declare one:
+//!
+//! - a `#[host_module]` in the Rust crate around the project ([`Project::host_crate`]),
+//!   read from its sources when the model is loaded;
+//! - `[build] host` in `htl.toml`;
+//! - `std.*`, which htl's own binary provides when it is built with the `std` feature.
+//!
+//! This is the host's place in the model, and it is a table of names rather than an
+//! [`Owner`] with modules under it: a host module has no files the model owns — its
+//! implementation is compiled Rust — so there is nothing for a root, a home or
+//! [`locate`](Project::locate) to hold. The `.d.tl` a host generates for one is still a
+//! file of whichever module's root it is written under, and is named there like any other
+//! declaration.
+//!
 //! # What this module does not do
 //!
-//! Host modules — the `.d.tl` a Rust host generates from `#[host_module]` — are not loaded
-//! here: they are known to whoever compiled the host, and enter a project through the file
-//! they are written to. A host that serves modules itself does so with a
+//! It does not load a host module's files, and it does not decide what a name the host
+//! provides means when a file of the project answers to it as well. It knows the names and
+//! where each comes from; `htl check`'s `host-module-shadowed` lint reads them from here
+//! (#321), and the other places that ask which names the host provides — the linker,
+//! `htl unused`, the macros, the run time — still answer from their own sources until they
+//! are moved onto this table.
+//!
+//! A host that serves modules itself does so with a
 //! [`TealResolver`](crate::pkg::TealResolver), which names files by the same rule
 //! ([`naming`](crate::naming)) without a model.
 
@@ -131,6 +155,60 @@ pub struct Project {
     /// from the rest; nothing here stops a load. Today these come from `---@contract`
     /// markers that do not parse.
     pub problems: Vec<String>,
+    /// The Rust crate that hosts the project: the nearest directory at or above the root
+    /// whose `Cargo.toml` has a `[package]` ([`find_cargo_package_root`]). `None` for a
+    /// project with no Cargo package around it, which has no `#[host_module]` names.
+    ///
+    /// A walk for a Cargo manifest, not for a project: [`Project::find_root`] stays the one
+    /// walk for `htl.toml` / `mlua-pkg.toml`.
+    ///
+    /// [`find_cargo_package_root`]: crate::dts::find_cargo_package_root
+    pub host_crate: Option<PathBuf>,
+    /// Every name the host provides, with where the name comes from, one entry per name,
+    /// in name order. Read with [`provides`](Self::provides) and
+    /// [`provided`](Self::provided).
+    providers: Vec<(String, Provider)>,
+}
+
+/// Where a name the host provides comes from — the sources a project may declare a
+/// host-provided name in, and the only ones the model reads.
+///
+/// A host module has no files the model owns: its implementation is Rust, compiled into
+/// whatever runs the project, and what the project holds of it is at most a `.d.tl`. So
+/// the model does not describe it as a [`Module`] with roots and a home; it records the
+/// name and which of these said so ([`Project::provides`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provider {
+    /// Registered by a `#[host_module]` in the host crate's Rust sources
+    /// ([`Project::host_crate`]): the name is the attribute's `name = ".."`, or the impl
+    /// target lowercased — the key the generated code puts in `package.preload`.
+    HostModule,
+    /// Named in `htl.toml`'s `[build] host`: a module the project says the host provides,
+    /// for a host whose registration the model cannot read (one written by hand, or in
+    /// another crate).
+    Build,
+    /// A `std.*` module — and `std` itself — which htl's own binary and
+    /// [`Htl::install_std`](crate::Htl::install_std) provide. Only in a build with the
+    /// `std` feature; without it nothing provides these names.
+    Std,
+}
+
+impl Provider {
+    /// Rank when two sources name one module: the higher wins.
+    ///
+    /// The more specific source wins. A `#[host_module]` is the registration itself, read
+    /// from the code that performs it; `[build] host` is the project saying a host
+    /// provides the name, which may be that same registration written down a second time;
+    /// `std.*` is what any htl binary carries, whoever the host is. So a name both
+    /// registered and listed is reported as registered, and a host that registers a
+    /// `std.*` name of its own is the one that answers to it.
+    fn rank(self) -> u8 {
+        match self {
+            Provider::HostModule => 2,
+            Provider::Build => 1,
+            Provider::Std => 0,
+        }
+    }
 }
 
 /// A unit that owns a namespace and the directories it is read from.
@@ -454,13 +532,37 @@ impl Project {
             },
             home: Some(crate::lib_dir()),
         });
+        let host_crate = crate::dts::find_cargo_package_root(root);
+        let providers = providers(host_crate.as_deref(), &config);
         Ok(Self {
             root: root.to_path_buf(),
             config,
             modules,
             links: manifest.as_ref().map(|m| m.entries.clone()),
             problems,
+            host_crate,
+            providers,
         })
+    }
+
+    /// Whether the host provides `name`, and from which source. `None` for a name no
+    /// source declares — which is every name a module of the project answers to, and every
+    /// name nothing answers to.
+    ///
+    /// A name two sources declare is answered once, by the more specific
+    /// ([`Provider::HostModule`] over [`Provider::Build`] over [`Provider::Std`]).
+    pub fn provides(&self, name: &str) -> Option<Provider> {
+        self.providers
+            .binary_search_by(|(n, _)| n.as_str().cmp(name))
+            .ok()
+            .map(|i| self.providers[i].1)
+    }
+
+    /// Every name the host provides, with its source, in name order: the table
+    /// [`provides`](Self::provides) reads, for a caller that needs all of it (a lint that
+    /// asks of every `require`, a linker leaving names out of a bundle).
+    pub fn provided(&self) -> impl Iterator<Item = (&str, Provider)> {
+        self.providers.iter().map(|(n, p)| (n.as_str(), *p))
     }
 
     /// The project's own module.
@@ -976,6 +1078,38 @@ fn crate_modules(decl_root: &Path) -> Vec<Module> {
         .collect()
 }
 
+/// The names the host provides, from the three sources the model reads, one entry per
+/// name sorted by it; where two sources name one module the higher [`Provider::rank`]
+/// keeps it.
+///
+/// The host crate is scanned here, once per load, with the same scan `htl check` ran for
+/// its lint ([`host_module_names`](crate::dts::host_module_names)): a substring test per
+/// `.rs` file, and a parse only of those that mention `host_module`.
+fn providers(host_crate: Option<&Path>, config: &HtlConfig) -> Vec<(String, Provider)> {
+    use std::collections::BTreeMap;
+    let mut table: BTreeMap<String, Provider> = BTreeMap::new();
+    let mut add = |name: String, p: Provider| {
+        let slot = table.entry(name).or_insert(p);
+        if p.rank() > slot.rank() {
+            *slot = p;
+        }
+    };
+    #[cfg(feature = "std")]
+    for n in crate::batteries::module_names() {
+        add(n, Provider::Std);
+    }
+    for n in &config.build.host {
+        add(n.clone(), Provider::Build);
+    }
+    for n in host_crate
+        .map(crate::dts::host_module_names)
+        .unwrap_or_default()
+    {
+        add(n, Provider::HostModule);
+    }
+    table.into_iter().collect()
+}
+
 /// `dir` as a path relative to `root` when it is under it, for a module's name.
 fn display_under(dir: &Path, root: &Path) -> String {
     dir.strip_prefix(root)
@@ -1166,6 +1300,8 @@ mod tests {
             modules: vec![own],
             links: None,
             problems: Vec::new(),
+            host_crate: None,
+            providers: Vec::new(),
         };
         let d = p.locate(Path::new("/p/scripts/host.d.tl")).unwrap();
         assert_eq!((d.role, d.name.as_str()), (Role::Decl, "host"));
@@ -1224,6 +1360,83 @@ mod tests {
             .map(|c| &c.module.owner)
             .collect();
         assert_eq!(owners, [&Owner::Own, &Owner::Installed]);
+    }
+
+    /// A Cargo package at `root` whose `src/lib.rs` registers `host` with a
+    /// `#[host_module]`, the way `htl new --embed` scaffolds one.
+    fn host_crate(root: &Path) {
+        write(
+            &root.join("Cargo.toml"),
+            "[package]\nname = \"game\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        );
+        write(
+            &root.join("src/lib.rs"),
+            "use htl::host_module;\n\npub struct Host;\n\n\
+             #[host_module(name = \"host\", dts = \"src/host.d.tl\")]\n\
+             impl Host {\n    pub fn greet(&self, who: &str) -> String {\n        \
+             format!(\"hello, {who}\")\n    }\n}\n",
+        );
+    }
+
+    #[test]
+    fn a_host_module_in_the_crate_around_the_project_is_provided_by_it() {
+        let root = scratch("host-module");
+        write(&root.join(CONFIG_NAME), "");
+        host_crate(&root);
+        let p = Project::load(&root, HtlConfig::default()).unwrap();
+
+        assert_eq!(p.host_crate.as_deref().map(canon), Some(canon(&root)));
+        assert_eq!(p.provides("host"), Some(Provider::HostModule));
+        assert_eq!(p.provides("nothing.provides.this"), None);
+        assert!(
+            p.provided()
+                .any(|(n, pr)| n == "host" && pr == Provider::HostModule),
+            "{:?}",
+            p.provided().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn build_host_names_a_provided_module_and_a_host_module_outranks_it() {
+        let root = scratch("build-host");
+        let cfg = HtlConfig::parse("[build]\nhost = [\"game\", \"host\"]\n").unwrap();
+        let p = Project::load(&root, cfg.clone()).unwrap();
+        assert_eq!(p.provides("game"), Some(Provider::Build));
+        assert_eq!(p.provides("host"), Some(Provider::Build));
+
+        // The same name registered by a `#[host_module]` is answered once, by the
+        // registration.
+        host_crate(&root);
+        let p = Project::load(&root, cfg).unwrap();
+        assert_eq!(p.provides("host"), Some(Provider::HostModule));
+        assert_eq!(p.provides("game"), Some(Provider::Build));
+        assert_eq!(p.provided().filter(|(n, _)| *n == "host").count(), 1);
+    }
+
+    #[test]
+    fn a_project_with_no_cargo_package_has_no_host_modules() {
+        let root = scratch("no-crate");
+        write(&root.join(CONFIG_NAME), "");
+        // A `#[host_module]` in a file that belongs to no Cargo package registers nothing.
+        write(
+            &root.join("src/lib.rs"),
+            "#[host_module(name = \"host\")]\nimpl Host {}\n",
+        );
+        let p = Project::load(&root, HtlConfig::default()).unwrap();
+
+        assert_eq!(p.host_crate, None);
+        assert_eq!(p.provides("host"), None);
+        assert!(!p.provided().any(|(_, pr)| pr == Provider::HostModule));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn std_modules_are_provided_by_the_binary() {
+        let root = scratch("std");
+        let p = Project::load(&root, HtlConfig::default()).unwrap();
+        assert_eq!(p.provides("std.json"), Some(Provider::Std));
+        assert_eq!(p.provides("std"), Some(Provider::Std));
+        assert_eq!(p.provides("json"), None, "only under the std prefix");
     }
 
     #[test]

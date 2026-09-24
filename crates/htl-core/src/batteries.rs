@@ -58,6 +58,24 @@ pub(crate) fn declarations() -> Vec<(String, String)> {
     out
 }
 
+/// Every name [`Htl::install_std`] makes `require`-able: [`PREFIX`] itself, the namespace
+/// table, and `<PREFIX>.<module>` for every module the build carries, in the crate's order.
+///
+/// The names are formed here, once, from the same list the preload and the declarations
+/// are made from, so that what the project model says the binary provides
+/// (`model::Provider::Std`, with the `pkg` and `dts` features) is what `install_std` registers — a
+/// second list of `std.*` names would be the parallel list that drifts from the build's
+/// feature set.
+pub fn module_names() -> Vec<String> {
+    std::iter::once(PREFIX.to_string())
+        .chain(
+            mlua_batteries::dts::entries()
+                .into_iter()
+                .map(|e| format!("{PREFIX}.{}", e.name)),
+        )
+        .collect()
+}
+
 /// Write every declaration in [`declarations`] under [`lib_dir`]. Returns the directory
 /// the checker should search.
 fn write_declarations() -> Result<PathBuf> {
