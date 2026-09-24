@@ -191,6 +191,25 @@ pub enum Owner {
     Lib,
 }
 
+impl Owner {
+    /// Whose problem an error in this module's files is, as a diagnostic says it in its
+    /// `origin`: `dependency` for what an install or a crate brought in — an installed or
+    /// vendored copy, a crate's declarations — which the project changes by changing the
+    /// dependency; `external` for a `[check] paths` or contract directory, supplied from
+    /// outside; none for the project's own, a patch it took over included, and htl's
+    /// library.
+    ///
+    /// `htl resolve` names the same modules by how they arrived (`crate`, `vendored`, …);
+    /// both read the owner, so a file is never one thing to the one and another to the other.
+    pub fn origin(&self) -> Option<&'static str> {
+        match self {
+            Owner::Installed | Owner::Vendored | Owner::Crate { .. } => Some("dependency"),
+            Owner::External | Owner::Contract => Some("external"),
+            Owner::Own | Owner::Patched | Owner::Lib => None,
+        }
+    }
+}
+
 /// The directories a module keeps its files in, by role. Absolute.
 ///
 /// A role a module does not have is `None`. Two roles may name the same directory: a
@@ -450,6 +469,33 @@ impl Project {
             .iter()
             .find(|m| m.owner == Owner::Own)
             .expect("Project::load always makes the project's own module")
+    }
+
+    /// The module whose home holds `file` most specifically: whose directory the file is
+    /// in, which is not always a module it is named by. A patched dependency's own tests
+    /// sit in its copy (`patches/mathx/tests/`) and outside its entry, where no name reaches
+    /// them; they are the dependency's all the same. `None` for a file outside every home —
+    /// outside the project and everything it took on.
+    ///
+    /// A module's roots are its as well as its home: an installed dependency is read
+    /// through its link under `entries/`, which lies outside the copy the link points at.
+    ///
+    /// What a file's origin and a walk's count of a dependency's files are decided by;
+    /// [`locate`](Self::locate) is what names it.
+    pub fn home_of(&self, file: &Path) -> Option<&Module> {
+        let target = canon(file);
+        self.modules
+            .iter()
+            .flat_map(|m| {
+                m.home
+                    .iter()
+                    .map(PathBuf::as_path)
+                    .chain(m.roots.iter().map(|(_, r)| r))
+                    .map(move |d| (canon(d), m))
+            })
+            .filter(|(d, _)| target.starts_with(d))
+            .max_by_key(|(d, _)| d.components().count())
+            .map(|(_, m)| m)
     }
 
     /// Which module `file` belongs to, in which role, and the name it answers to.

@@ -1993,8 +1993,11 @@ names are stable; fields may be added, not renamed.
   at `deny` — a count of levels, so it overlaps those two rather than adding to them, and
   `ok` is false whenever it is not zero. An error in a module the check reached through `require` has `file` set
   to that module and `required_by` to the file that required it; `origin` is
-  `"dependency"` (installed under `.htl/modules`, or a vendored copy) or `"external"`
-  (a `[check] paths` or contract directory), and absent for a file of the project's own.
+  `"dependency"` (installed under `.htl/modules`, a vendored copy, or the declarations a
+  crate ships under `types/<crate>/`) or `"external"` (a `[check] paths` or contract
+  directory), and absent for a file of the project's own, a patched dependency included.
+  It is decided by the module whose directory holds the file — the same module `htl
+  resolve` names a file's origin from.
 - `test`: `{ files: [{ path, ok, diagnostics, error?, file_level, passed, failed,
   failures, tests: [{ name, ok, ms }], duration_ms, snapshots_written,
   snapshots_updated }], summary: { files, files_run, passed, failed, files_with_errors,

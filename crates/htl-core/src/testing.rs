@@ -186,8 +186,7 @@ pub fn discover_tests_for(paths: &[PathBuf], skip: &[PathBuf], lib: &str) -> Res
             out.push(p.clone());
             continue;
         }
-        let mut extra = crate::project_skip_dirs(p);
-        extra.extend(skip.iter().cloned());
+        let extra = skip.to_vec();
         let root = p.clone();
         let walker = walkdir::WalkDir::new(p)
             .sort_by_file_name()

@@ -311,7 +311,7 @@ pub fn unused(opts: &Options<'_>) -> Result<Report> {
     let dependencies = if no_entry {
         Vec::new()
     } else {
-        unused_deps(&root, &edges, &reached)
+        unused_deps(opts.model, &edges, &reached)
     };
 
     let summary = Summary {
@@ -464,15 +464,22 @@ fn first_literal(rest: &str) -> Option<&str> {
 /// `target_dir` copy in the tree, or a `patch_dir` the project took over. Both, because a
 /// dependency that is declared but not installed resolves to nothing and is still
 /// required by name.
+///
+/// The declared names are the manifest's at the model's root; where each dependency's
+/// files are is the model's — the homes of its modules — not worked out again here.
 fn unused_deps(
-    root: &Path,
+    model: Option<&crate::model::Project>,
     edges: &HashMap<PathBuf, Vec<cache::RequireJson>>,
     reached: &HashSet<PathBuf>,
 ) -> Vec<Dependency> {
-    let Some(project) = crate::pkg::MluaProject::find(root) else {
+    use crate::model::Owner;
+    let Some(model) = model else {
         return Vec::new();
     };
-    let declared = project.declared_deps();
+    if !model.root.join(crate::pkg::MANIFEST_NAME).is_file() {
+        return Vec::new();
+    }
+    let declared = crate::pkg::MluaProject::at(&model.root).declared_deps();
     let mut names: HashSet<String> = HashSet::new();
     let mut paths: Vec<PathBuf> = Vec::new();
     for f in reached {
@@ -493,16 +500,16 @@ fn unused_deps(
         {
             continue;
         }
-        // Where install put it — `vendored/<name>`, or its `target_dir` copy — and its
-        // patch when it has one.
-        let mut dirs = vec![canon(&project.placed_at(name))];
-        dirs.extend(
-            project
-                .patches
-                .iter()
-                .filter(|p| &p.name == name)
-                .map(|p| canon(&p.dir)),
-        );
+        // Where its modules are — the installed copy, a `target_dir` copy, a patch.
+        let dirs: Vec<PathBuf> = model
+            .modules
+            .iter()
+            .filter(|m| {
+                &m.name == name
+                    && matches!(m.owner, Owner::Installed | Owner::Vendored | Owner::Patched)
+            })
+            .filter_map(|m| m.home.as_deref().map(canon))
+            .collect();
         if paths.iter().any(|p| dirs.iter().any(|d| p.starts_with(d))) {
             continue;
         }

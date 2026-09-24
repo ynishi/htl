@@ -313,3 +313,47 @@ fn an_external_dependencys_path_is_folded_rather_than_kept_with_dot_dot() {
         "and not through the `..` it was resolved by: {stderr}"
     );
 }
+
+/// A file's origin is the owner of the module whose directory holds it, not a directory
+/// prefix. With `[layout] source = "lua"` and a `target_dir` copy at `lua/lshape`, the
+/// project's own `lua/app.tl` sits beside the copy under one parent; a prefix test over
+/// that parent called it a dependency's.
+#[test]
+fn a_file_beside_a_vendored_copy_is_the_projects_own() {
+    let root = scratch("origin-beside-copy");
+    write(&root.join("htl.toml"), "[layout]\nsource = \"lua\"\n");
+    write(
+        &root.join("mlua-pkg.toml"),
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[deps.lshape]\n\
+         git = \"https://example.invalid/lshape\"\ntag = \"v1\"\ntarget_dir = \"lua/lshape\"\n",
+    );
+    write(
+        &root.join("lua/lshape/init.tl"),
+        "local s: number = \"no\"\nreturn { s = s }\n",
+    );
+    write(
+        &root.join("lua/app.tl"),
+        "local s: number = \"no\"\nreturn { s = s }\n",
+    );
+    write(
+        &root.join("lua/main.tl"),
+        "local a = require(\"app\")\nlocal l = require(\"lshape\")\nprint(a.s, l.s)\n",
+    );
+    let v = check_json(&root, &["lua/main.tl", "--no-cache"]);
+    let origin_of = |suffix: &str| {
+        v["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["file"].as_str().unwrap().ends_with(suffix))
+            .unwrap_or_else(|| panic!("no diagnostic for {suffix}: {v}"))
+            .get("origin")
+            .cloned()
+    };
+    assert_eq!(origin_of("lua/app.tl"), None, "{v}");
+    assert_eq!(
+        origin_of("lshape/init.tl"),
+        Some("dependency".into()),
+        "{v}"
+    );
+}

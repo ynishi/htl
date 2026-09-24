@@ -2003,15 +2003,7 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
     // Dependencies are reported as `htl check` reports them and never rewritten: a fix
     // under `.htl/` goes at the next install, one under `[check] paths` is not this
     // project's. `fix_file` only ever writes the file it was given.
-    let fix_root = cfg
-        .as_ref()
-        .map(|(r, _, _)| r.clone())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let contracts = match &cfg {
-        Some((r, _, c)) => htl::contract::resolve(r, c).0,
-        None => Vec::new(),
-    };
-    let origins = project::Origins::new(&paths[0], &fix_root, &cfg, &contracts);
+    let origins = project::Origins::new(walk_model.as_ref());
     sink.walking(&files);
     let (mut applied, mut skipped, mut json_files) = (Vec::new(), Vec::new(), Vec::new());
     let (mut changed, mut deferred, mut reverted, mut errors_remaining) =
@@ -2250,7 +2242,7 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
         json,
         &rep,
         strict,
-        patched_files(&paths, &rep.files),
+        patched_files(walk_model.as_ref(), &rep.files),
     )?;
     Ok(if fail {
         ExitCode::FAILURE
@@ -2559,27 +2551,28 @@ fn human_age(secs: u64) -> String {
     }
 }
 
-/// How many of the files a walk visited came out of a patched dependency.
-///
-/// The prefix test a diagnostic's `origin` is decided by, asked of the file list instead,
-/// and canonicalised on both sides for the same reason it is there: the walk spells a file
-/// the way the command line spelled the root it started from (`htl check .` gives
-/// `./patches/mathx/src/mathx.tl`), while the `patch_dir` the manifest declares is
-/// absolute. Zero for a project with no patch, which is what keeps the summary line below
-/// unchanged for everyone who has never run `htl pkg patch`.
-fn patched_files(paths: &[PathBuf], files: &[PathBuf]) -> usize {
-    let dirs: Vec<PathBuf> = project::patched(paths)
-        .into_iter()
-        .map(|d| fs::canonicalize(&d).unwrap_or(d))
-        .collect();
-    if dirs.is_empty() {
+/// How many of the files a walk visited came out of a patched dependency: the files in the
+/// home of a module the project owns as a patch ([`htl::model::Project::home_of`]) — its
+/// tests included, which no name reaches. Zero outside a project and for a
+/// project with no patch, which is what keeps the summary line below unchanged for
+/// everyone who has never run `htl pkg patch`.
+fn patched_files(model: Option<&htl::model::Project>, files: &[PathBuf]) -> usize {
+    let Some(model) = model else {
+        return 0;
+    };
+    if !model
+        .modules
+        .iter()
+        .any(|m| m.owner == htl::model::Owner::Patched)
+    {
         return 0;
     }
     files
         .iter()
         .filter(|f| {
-            let f = fs::canonicalize(f).unwrap_or_else(|_| (*f).to_path_buf());
-            dirs.iter().any(|d| f.starts_with(d))
+            model
+                .home_of(f)
+                .is_some_and(|m| m.owner == htl::model::Owner::Patched)
         })
         .count()
 }
@@ -2766,7 +2759,14 @@ fn cmd_build(
         if cache_flags.explain {
             eprintln!("htl cache: the directory form of `htl build` is not cached");
         }
-        return cmd_build_dir(&h, entry, out, main, &opts);
+        // Not into an installed or vendored copy — a dependency's files, which the model
+        // knows — and into a patch, which is the project's code.
+        let skip = project::not_walked(
+            model.as_ref(),
+            &[entry.to_path_buf()],
+            htl::model::Purpose::Check,
+        );
+        return cmd_build_dir(&h, entry, out, main, &opts, &skip);
     }
     project::file_view(&h, model.as_ref(), entry)?;
     // The name the entry is served under: the one the project's model gives the file,
@@ -2863,9 +2863,10 @@ fn cmd_build_dir(
     out: &Path,
     entry: &str,
     opts: &htl::link::LinkOptions,
+    skip: &[PathBuf],
 ) -> Result<ExitCode> {
     h.add_path(dir)?;
-    let files = htl::collect_tl(&[dir.to_path_buf()])?;
+    let files = htl::collect_tl_skipping(&[dir.to_path_buf()], skip)?;
     let mut b = Bundle {
         entry: entry.to_string(),
         htl_version: env!("CARGO_PKG_VERSION").into(),

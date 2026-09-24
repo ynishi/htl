@@ -424,36 +424,20 @@ pub fn model_of(config: &Config, first: &Path) -> Result<Option<crate::model::Pr
     }
 }
 
-/// The directories a walk over `paths` for `purpose` does not enter: the project model's
-/// answer ([`crate::model::Project::not_walked`]) when there is a model, and outside a
-/// project the patched dependencies below `paths` for any purpose but checking.
+/// The directories a walk for `purpose` does not enter: the project model's answer
+/// ([`crate::model::Project::not_walked`]). Outside a project there is no dependency to
+/// leave out, and nothing is skipped beyond the walker's own rule
+/// ([`crate::is_skipped_dir`]).
+///
+/// `paths` is unused: which directories are a dependency's is the model's to say, not
+/// something a walk works out again from where it starts.
 pub fn not_walked(
     model: Option<&crate::model::Project>,
     paths: &[PathBuf],
     purpose: crate::model::Purpose,
 ) -> Vec<PathBuf> {
-    match model {
-        Some(m) => m.not_walked(purpose),
-        None if purpose == crate::model::Purpose::Check => Vec::new(),
-        None => patched(paths),
-    }
-}
-
-/// The patched dependencies below `paths` — `patch_dir` deps, as directories.
-///
-/// What a check walks and formatting or a test run does not: the copy is the project's
-/// code, so its type errors are the project's to fix, but rewriting it or running its
-/// tests is doing a dependency's work in the project's name.
-pub fn patched(paths: &[PathBuf]) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    for p in paths {
-        for d in crate::patched_dirs(p) {
-            if !out.contains(&d) {
-                out.push(d);
-            }
-        }
-    }
-    out
+    let _ = paths;
+    model.map(|m| m.not_walked(purpose)).unwrap_or_default()
 }
 
 /// `store`, probing with `model`'s answers when there is a model
@@ -551,15 +535,10 @@ pub fn cache_options(
     }
 }
 
-/// Directories a `require` could resolve in, listed whether or not they exist yet.
-///
-/// The ones that do not exist matter most: a `types/` created after an entry was written
-/// changes what a module name resolves to while every file the entry recorded still hashes
-/// the same. Recording only the directories that happened to exist is the hole ccache
-/// documents in its direct mode, and an empty directory hashes differently from one holding
-/// a module, so listing it now is what closes it.
-pub fn search_dirs(file: &Path, root: &Path, cfg: &Config) -> Vec<PathBuf> {
-    cache::search_dirs(file, root, cfg.as_ref().map(|(r, _, c)| (r.as_path(), c)))
+/// Directories a `require` from `file` could resolve in, for an entry's probes when the
+/// store has no project model ([`cache::search_dirs`]).
+pub fn search_dirs(file: &Path) -> Vec<PathBuf> {
+    cache::search_dirs(file)
 }
 
 // ------------------------------------------------------------------ the checker
@@ -589,62 +568,29 @@ pub fn checker(model: Option<&crate::model::Project>, sel: &crate::lint::Selecti
 
 /// Where a file a check pulled in lives, for the `origin` a dependency diagnostic carries.
 ///
-/// Decided by the directory and reported, never enforced: every file with errors is
-/// reported whatever this says. `dependency` is the installed-deps directory
-/// (`.htl/modules`) and the vendored copies the manifest declares; `external` is a
-/// `[check] paths` or contract directory, supplied from outside the project; anything else
-/// is the project's own and carries no origin. A consumer that counts a dependency's
-/// errors apart from the project's reads this field rather than parsing paths.
+/// Decided by the module of the project model whose home holds the file
+/// ([`home_of`](crate::model::Project::home_of)), by its owner
+/// ([`Owner::origin`](crate::model::Owner::origin)) — the same module `htl resolve` names
+/// the file's origin from — and reported, never enforced: every file with errors is
+/// reported whatever this says. A consumer that counts a dependency's errors apart from
+/// the project's reads this field rather than parsing paths. Outside a project every file
+/// is the caller's own.
 pub struct Origins {
-    dependency: Vec<PathBuf>,
-    external: Vec<PathBuf>,
+    model: Option<crate::model::Project>,
 }
 
 impl Origins {
-    /// Work out the two sets of directories once, from where the walk started, where the
-    /// project root is, the config, and the resolved contracts — so that classifying a
-    /// file afterwards is a prefix test rather than a fresh look at the filesystem.
-    pub fn new(
-        start: &Path,
-        root: &Path,
-        cfg: &Config,
-        contracts: &[crate::contract::Resolved],
-    ) -> Self {
-        let canon = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
-        let mut dependency = Vec::new();
-        if let Some(p) = crate::pkg::MluaProject::find(start) {
-            dependency.push(canon(p.pkgs_dir.clone()));
-            dependency.extend(p.target_dirs.iter().cloned().map(canon));
-        }
-        let mut external = Vec::new();
-        if let Some((r, _, c)) = cfg {
-            external.extend(
-                c.check
-                    .paths
-                    .iter()
-                    .map(|p| canon(crate::config::resolve_path(r, p))),
-            );
-            for c in contracts {
-                external.extend(c.dirs(root).into_iter().map(canon));
-            }
-        }
+    /// Origins as `model` has them.
+    pub fn new(model: Option<&crate::model::Project>) -> Self {
         Self {
-            dependency,
-            external,
+            model: model.cloned(),
         }
     }
 
     /// Which origin `file` has, or `None` for the project's own — the word a dependency
     /// diagnostic carries as its `origin`.
     pub fn of(&self, file: &Path) -> Option<&'static str> {
-        let file = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
-        if self.dependency.iter().any(|d| file.starts_with(d)) {
-            Some("dependency")
-        } else if self.external.iter().any(|d| file.starts_with(d)) {
-            Some("external")
-        } else {
-            None
-        }
+        self.model.as_ref()?.home_of(file)?.owner.origin()
     }
 }
 
@@ -780,10 +726,6 @@ pub struct Harvest<'a> {
     /// `htl.toml`'s own path, recorded as an input of every entry: a config change invalidates
     /// what was generated under it.
     pub cfg_inputs: &'a [PathBuf],
-    /// The project root, for the search directories an entry records.
-    pub root: &'a Path,
-    /// The config, read for those same search directories.
-    pub cfg: &'a Config,
     /// The project's [model](crate::model): the directories the test file was checked
     /// against, put back for the harvest.
     pub model: Option<&'a crate::model::Project>,
@@ -811,8 +753,6 @@ pub fn harvest_modules(h: &Harvest<'_>, check: &CheckInfo, test_file: &Path) {
         store,
         session,
         cfg_inputs,
-        root,
-        cfg,
         model,
         lint,
         opts,
@@ -870,7 +810,7 @@ pub fn harvest_modules(h: &Harvest<'_>, check: &CheckInfo, test_file: &Path) {
             &cache::module_gen_key(&path, lint),
             &path,
             cfg_inputs,
-            &search_dirs(&path, root, cfg),
+            &search_dirs(&path),
             &m,
         );
     }
@@ -1041,10 +981,10 @@ pub fn check<O: Output>(
         .first()
         .map(PathBuf::as_path)
         .unwrap_or(Path::new("."));
-    let origins = Origins::new(start, &root, cfg, &contracts);
     // Which module each file belongs to, and so what it may read: built once for the walk,
     // from the config already loaded.
     let model = model_of(cfg, start)?;
+    let origins = Origins::new(model.as_ref());
     let store = with_model(store(&root, cache_opts, None, "htl check"), model.as_ref());
     // A dependency error is said once per run, and not on behalf of a file the walk
     // checks itself. The rule applies to replayed entries as much as to fresh checks.
@@ -1130,7 +1070,7 @@ pub fn check<O: Output>(
                 if let Some(c) = &store
                     && c.mode() == cache::Mode::PerModule
                 {
-                    c.store_module(key, f, &cfg_inputs, &search_dirs(f, &root, cfg), &m);
+                    c.store_module(key, f, &cfg_inputs, &search_dirs(f), &m);
                 }
                 m
             }
@@ -1148,10 +1088,7 @@ pub fn check<O: Output>(
         && c.mode() == cache::Mode::WholeRun
         && to_check > 0
     {
-        let dirs: Vec<PathBuf> = files
-            .iter()
-            .flat_map(|f| search_dirs(f, &root, cfg))
-            .collect();
+        let dirs: Vec<PathBuf> = files.iter().flat_map(|f| search_dirs(f)).collect();
         c.store_run(&run_key, &files, &cfg_inputs, &dirs, &modules);
     }
     // Project-level: cycles in the require graph of the files just checked.
@@ -1616,8 +1553,6 @@ pub fn test<O: Output>(
         store: c,
         session: &session,
         cfg_inputs: &cfg_inputs,
-        root: &root,
-        cfg,
         model: model.as_ref(),
         lint,
         opts: cache_opts,
@@ -1649,7 +1584,7 @@ pub fn test<O: Output>(
                 // and storing that would replay an empty run as if it were a result.
                 if let (Some(c), Some(code)) = (&store, code) {
                     let m = cache::Module::generated(&rep.check, code);
-                    c.store_module(key, f, &cfg_inputs, &search_dirs(f, &root, cfg), &m);
+                    c.store_module(key, f, &cfg_inputs, &search_dirs(f), &m);
                     // And the modules it reached, so the next run can preload them. The
                     // checker's store is warm here, so this generates rather than re-checks.
                     if let Some(h) = &harvest {

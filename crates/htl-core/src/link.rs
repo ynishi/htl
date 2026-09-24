@@ -90,14 +90,10 @@ impl LinkStore<'_> {
             .unwrap_or_default()
     }
 
-    /// Directories a `require` from `file` could resolve in, for the entry's probes.
+    /// Directories a `require` from `file` could resolve in, for the entry's probes when
+    /// the store has no project model ([`cache::search_dirs`]).
     fn probe_dirs(&self, file: &Path) -> Vec<PathBuf> {
-        let cfg = self.config.map(|(file, c)| (crate::parent_dir(file), c));
-        cache::search_dirs(
-            file,
-            self.root,
-            cfg.as_ref().map(|(dir, c)| (dir.as_path(), *c)),
-        )
+        cache::search_dirs(file)
     }
 }
 
