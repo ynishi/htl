@@ -1716,10 +1716,31 @@ pub fn contract_resolvers(
     root: &Path,
     cfg: &crate::config::HtlConfig,
 ) -> Result<Vec<TealResolver>, InitError> {
+    // Reads the markers itself rather than through a project model: this is callable with
+    // `pkg` alone, which has no model, and its error type cannot carry a model's. A host
+    // that has the model asks it instead ([`project_contract_resolvers`]); the two agree
+    // because the model reads the markers with this same function.
     let (contracts, _) = crate::contract::resolve(root, cfg);
     let mut out = Vec::new();
     for c in &contracts {
         out.extend(TealResolver::for_contract(root, cfg, c)?);
+    }
+    Ok(out)
+}
+
+/// [`contract_resolvers`] for a project whose model is loaded: one resolver per directory
+/// of each contract the model holds ([`crate::model::Project::contracts`]).
+#[cfg(feature = "dts")]
+pub fn project_contract_resolvers(
+    project: &crate::model::Project,
+) -> Result<Vec<TealResolver>, InitError> {
+    let mut out = Vec::new();
+    for c in &project.contracts {
+        out.extend(TealResolver::for_contract(
+            &project.root,
+            &project.config,
+            &c.terms,
+        )?);
     }
     Ok(out)
 }
