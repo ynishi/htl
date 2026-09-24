@@ -227,6 +227,9 @@ pub struct FixReport {
     pub skipped: Vec<FixSkipped>,
     pub files: Vec<FixFile>,
     pub summary: FixSummary,
+    /// What the project says about itself as a whole — a name with two owners, a require
+    /// cycle, a contract problem — which belongs to no one file.
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 #[derive(Serialize, Debug)]
@@ -238,6 +241,13 @@ pub struct FixSummary {
     pub deferred: usize,
     pub reverted: usize,
     pub errors_remaining: usize,
+    /// Teal's warnings and htl's lints left in the tree, as `htl check` would count them.
+    pub warnings: usize,
+    pub lints: usize,
+    /// How many of those were said under a rule at `deny`.
+    pub denied: usize,
+    /// Whether every warning and lint counted as `deny` (`[lint] strict`).
+    pub strict: bool,
     pub ok: bool,
 }
 

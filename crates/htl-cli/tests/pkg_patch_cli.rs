@@ -153,24 +153,28 @@ fn fix_leaves_the_patched_copy_alone() {
     git(&root, &["add", "."]);
     git(&root, &["commit", "-qm", "patched"]);
 
-    let (_, _, err) = htl(&["check"], &root);
+    let (check_ok, _, err) = htl(&["check"], &root);
     assert!(
         err.contains("patches/mathx/src/fwd.tl") && err.contains("(fixable: htl fix)"),
         "the copy has something to fix: {err}"
     );
 
     let (ok, _, err) = htl(&["fix"], &root);
-    assert!(ok, "{err}");
     assert_eq!(
         std::fs::read_to_string(&fwd).unwrap(),
         text,
         "the copy is a diff against the revision it came from, and a fix nobody wrote is \
          not this project's to add to it: {err}"
     );
+    // Left alone, and still judged: the error in it is the project's, as `htl check` says,
+    // and the two commands exit the same on the tree.
+    assert!(!ok && !check_ok, "{err}");
     assert!(
-        err.contains("htl fix: 1 file(s), 0 changed"),
-        "only the project's own: {err}"
+        err.contains("htl fix: 1 file(s) + 3 checked in patched dependencies, 0 changed")
+            && err.contains("1 error(s) remaining"),
+        "the project's own are fixed, the copy's only checked: {err}"
     );
+    assert!(err.contains("patches/mathx/src/fwd.tl:3:"), "{err}");
 }
 
 /// The copy's `*_test.tl` is the dependency's suite. A project whose own `tests/` is empty
