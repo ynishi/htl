@@ -522,9 +522,9 @@ pub fn contract_lints(
 /// that file, so the two agree by construction.
 ///
 /// In a project this lint has nothing left to say, and says nothing. The model knows the
-/// names the host provides ([`model::Project::provides`]), and its resolver answers a name
+/// names the host provides (`model::Project::provides`), and its resolver answers a name
 /// a file of the project implements as well with
-/// [`Resolution::HostShadowed`](model::Resolution::HostShadowed): an error at the
+/// `model::Resolution::HostShadowed`: an error at the
 /// `require`, in the check and at run time, and a search that yields the name's
 /// declaration or nothing — never the file. So the require this lint looks for, one of a
 /// host module name that landed on a file, does not occur, and the error is what reports
@@ -1668,7 +1668,7 @@ end
 
     /// Why `name` resolves to nothing although files answer to it: the project model's
     /// message when more than one of them implements it. `None` when it does not, or when
-    /// no model is installed ([`apply_model`](Self::apply_model)).
+    /// no model is installed (`Htl::apply_model`).
     pub fn ambiguity(&self, name: &str) -> Result<Option<String>> {
         let f: Function = self.h.get("ambiguity")?;
         Ok(f.call(name)?)
@@ -1678,7 +1678,7 @@ end
     /// when a file of the model implements the name as well (the model's
     /// `Resolution::HostShadowed`). `None` when no file
     /// does, when the host does not provide the name, or when no model is installed
-    /// ([`apply_model`](Self::apply_model)).
+    /// (`Htl::apply_model`).
     ///
     /// [`resolve_module`](Self::resolve_module) answers such a name with its declaration,
     /// or with nothing, never with the file — which on its own reads as a host module, or
