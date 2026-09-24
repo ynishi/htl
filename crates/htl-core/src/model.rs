@@ -72,10 +72,9 @@
 //! `test`, `fix`, `gen`, `run`, `build`, `resolve` and the `include_tl!` /
 //! `include_bundle!` macros — and a file that belongs to no project reads its own
 //! directory instead ([`project::file_view`](crate::project::file_view)). The run cache
-//! still keys an entry on a list of directories of its own. It holds every directory
-//! listed here but one — the test root, of which it has only the directory of the test
-//! file — so a helper added directly under `tests/` is not seen by an entry for a test in
-//! a subdirectory of it. Host modules — the `.d.tl` a Rust host generates from
+//! records, for each entry, what the resolver answers for every name the module required
+//! ([`with_model`](crate::project::with_model)), and replays the entry only while those
+//! answers stand. Host modules — the `.d.tl` a Rust host generates from
 //! `#[host_module]` — are not loaded here: they are known to whoever compiled the host,
 //! and enter a project through the file they are written to.
 
@@ -265,7 +264,12 @@ impl Module {
     ///   everywhere else a file named after its directory is an ordinary submodule, and
     ///   giving it a second name is how one file came to answer to two.
     pub fn name_of(&self, root: &Path, file: &Path) -> Option<String> {
-        let rel = strip_under(file, root)?;
+        self.name_of_relative(&strip_under(file, root)?)
+    }
+
+    /// [`name_of`](Self::name_of) for a path already relative to the root, for a caller
+    /// that made both canonical once (the [`Resolver`] places thousands of files).
+    pub(crate) fn name_of_relative(&self, rel: &Path) -> Option<String> {
         let mut parts: Vec<String> = rel
             .components()
             .filter_map(|c| match c {

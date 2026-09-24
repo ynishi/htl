@@ -449,6 +449,25 @@ pub fn patched(paths: &[PathBuf]) -> Vec<PathBuf> {
     out
 }
 
+/// `store`, probing with `model`'s answers when there is a model
+/// ([`Cache::with_answers`](cache::Cache::with_answers)): an entry then says what each name
+/// its module required resolves to, which is the question its probes were for.
+pub fn with_model(
+    store: Option<cache::Cache>,
+    model: Option<&crate::model::Project>,
+) -> Option<cache::Cache> {
+    let store = store?;
+    let Some(model) = model else {
+        return Some(store);
+    };
+    let resolver = std::sync::Arc::new(crate::model::Resolver::new(model));
+    Some(
+        store.with_answers(std::sync::Arc::new(move |requirer, name| {
+            resolver.fingerprint(requirer, name)
+        })),
+    )
+}
+
 /// Why a run must not keep a store under `root`, when it must not.
 ///
 /// A person standing in a project and asking for a check never trips this: the store goes
@@ -1018,7 +1037,6 @@ pub fn check<O: Output>(
         .as_ref()
         .map(|(r, _, _)| r.clone())
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let store = store(&root, cache_opts, None, "htl check");
     // The project the walk belongs to is the first path's. Nothing named at all is the
     // working directory, which is what a command line with no argument already means.
     let start = paths
@@ -1029,6 +1047,7 @@ pub fn check<O: Output>(
     // Which module each file belongs to, and so what it may read: built once for the walk,
     // from the config already loaded.
     let model = model_of(cfg, start)?;
+    let store = with_model(store(&root, cache_opts, None, "htl check"), model.as_ref());
     // A dependency error is said once per run, and not on behalf of a file the walk
     // checks itself. The rule applies to replayed entries as much as to fresh checks.
     sink.walking(&files);
@@ -1590,7 +1609,7 @@ pub fn test<O: Output>(
         .as_ref()
         .map(|(r, _, _)| r.clone())
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let store = store(&root, cache_opts, None, "htl test");
+    let store = with_model(store(&root, cache_opts, None, "htl test"), model.as_ref());
     let keys: Vec<cache::Key> = files.iter().map(|f| cache::gen_key(f, lint)).collect();
     let cfg_inputs: Vec<PathBuf> = cfg.iter().map(|(_, p, _)| p.clone()).collect();
 

@@ -273,6 +273,9 @@ struct Checker {
     root: PathBuf,
     /// The lint selection in force: `[lint]` from `htl.toml`, then `HTL_LINTS`.
     spec: String,
+    /// The project model the expansion was checked against, when the file is in a
+    /// project: what the store probes with.
+    model: Option<htl_core::model::Project>,
 }
 
 impl Checker {
@@ -298,11 +301,14 @@ impl Checker {
     /// Nothing is swept from here — an expansion sees one closure, and only `htl check`,
     /// which sees the project, bounds the store.
     fn store(&self) -> Option<htl_core::cache::Cache> {
-        htl_core::project::store(
-            &self.root,
-            htl_core::cache::Options::from_env(),
-            htl_core::project::store_refusal(&self.root, self.cfg_path.is_some()).as_deref(),
-            "the macro expansion",
+        htl_core::project::with_model(
+            htl_core::project::store(
+                &self.root,
+                htl_core::cache::Options::from_env(),
+                htl_core::project::store_refusal(&self.root, self.cfg_path.is_some()).as_deref(),
+                "the macro expansion",
+            ),
+            self.model.as_ref(),
         )
     }
 
@@ -360,6 +366,7 @@ fn checker_for(tag: &str, manifest_dir: &Path, path: &Path) -> Result<Checker, S
         cfg_path,
         root,
         spec,
+        model,
     })
 }
 

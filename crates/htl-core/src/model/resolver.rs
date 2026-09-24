@@ -83,6 +83,10 @@ pub enum Resolution {
 #[derive(Debug, Clone)]
 pub struct Resolver {
     project: Project,
+    /// Every root of every module, canonical, once: `(module, role, root)`. Placing a file
+    /// is then one canonicalisation of the file and a comparison with each of these,
+    /// rather than a canonicalisation of every root for every file.
+    roots: Vec<(usize, Role, PathBuf)>,
     table: BTreeMap<String, Vec<Entry>>,
     imports: Vec<(String, ImportTarget)>,
     /// Every file in the table, canonical: what [`owns`](Self::owns) is asked about.
@@ -94,6 +98,16 @@ impl Resolver {
     /// modules, each under the name the model gives it. Contract directories are left out
     /// — each holds the same names as the next, and is checked on its own.
     pub fn new(project: &Project) -> Self {
+        let roots: Vec<(usize, Role, PathBuf)> = project
+            .modules
+            .iter()
+            .enumerate()
+            .flat_map(|(i, m)| {
+                m.roots
+                    .iter()
+                    .map(move |(role, r)| (i, role, super::canon(r)))
+            })
+            .collect();
         let mut table: BTreeMap<String, Vec<Entry>> = BTreeMap::new();
         let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
         for m in project
@@ -117,25 +131,19 @@ impl Resolver {
                     {
                         continue;
                     }
-                    if !seen.insert(super::canon(file)) {
+                    let canonical = super::canon(file);
+                    if !seen.insert(canonical.clone()) {
                         continue;
                     }
-                    let Some(place) = project.locate(file) else {
+                    let Some((module, root_role, name)) = place(project, &roots, &canonical) else {
                         continue;
                     };
-                    let Some(module) = project
-                        .modules
-                        .iter()
-                        .position(|x| std::ptr::eq(x, place.module))
-                    else {
-                        continue;
-                    };
-                    let role = if place.role == Role::Test {
+                    let role = if root_role == Role::Test {
                         Role::Test
                     } else {
                         Role::of(file)
                     };
-                    table.entry(place.name).or_default().push(Entry {
+                    table.entry(name).or_default().push(Entry {
                         module,
                         role,
                         file: file.to_path_buf(),
@@ -145,11 +153,24 @@ impl Resolver {
         }
         Self {
             project: project.clone(),
+            roots,
             table,
             imports: project.config.import_targets(),
             // Every file placed: what `owns` answers from.
             known: seen,
         }
+    }
+
+    /// [`Project::locate`] over the canonical roots taken once in [`new`](Self::new).
+    fn placed(&self, file: &Path) -> Option<super::Place<'_>> {
+        let (module, role, name) = place(&self.project, &self.roots, &super::canon(file))?;
+        let module = &self.project.modules[module];
+        let role = if role == Role::Test {
+            Role::Test
+        } else {
+            Role::of(file)
+        };
+        Some(super::Place { module, role, name })
     }
 
     /// Whether `file` is one of the model's: a search that found it under a name the
@@ -170,7 +191,7 @@ impl Resolver {
         if name.starts_with('@') {
             return None;
         }
-        let from = self.project.locate(requirer)?;
+        let from = self.placed(requirer)?;
         match from.module.owner {
             Owner::Own => self
                 .imported(name)
@@ -195,7 +216,7 @@ impl Resolver {
     /// — a run-time `require`, which carries only the name — every name the model has is
     /// answered.
     pub fn resolve(&self, requirer: Option<&Path>, name: &str) -> Resolution {
-        let from = requirer.and_then(|r| self.project.locate(r));
+        let from = requirer.and_then(|r| self.placed(r));
         let own = from.as_ref().is_some_and(|p| p.module.owner == Owner::Own);
         let test = from.as_ref().is_some_and(|p| p.role == Role::Test);
         let dependency = from.as_ref().is_some_and(|p| {
@@ -263,6 +284,36 @@ impl Resolver {
             );
         }
         Resolution::Outside
+    }
+
+    /// [`resolve`](Self::resolve)'s answer as a string that changes whenever the answer
+    /// does: the kind, and every file in it. What the run cache probes with
+    /// ([`crate::cache::Cache::with_answers`]).
+    pub fn fingerprint(&self, requirer: Option<&Path>, name: &str) -> String {
+        let s = |p: &Option<PathBuf>| {
+            p.as_ref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        match self.resolve(requirer, name) {
+            Resolution::Found(f) => format!(
+                "found\0{}\0{}\0{}\0{}",
+                f.module,
+                s(&f.implementation),
+                s(&f.declaration),
+                s(&f.lua)
+            ),
+            Resolution::Ambiguous(v) => {
+                let files: Vec<String> = v
+                    .iter()
+                    .map(|(_, f)| f.to_string_lossy().into_owned())
+                    .collect();
+                format!("ambiguous\0{}", files.join("\0"))
+            }
+            Resolution::Missing => "missing".into(),
+            Resolution::Outside => "outside".into(),
+            Resolution::NotVisible(f, _) => format!("hidden\0{}", f.display()),
+        }
     }
 
     /// Every file of the model that answers to `name`, whatever its role, in the order
@@ -355,6 +406,22 @@ impl Resolver {
             lua: first(".lua", None),
         })
     }
+}
+
+/// The module whose root holds `canonical` most specifically, that root's role, and the
+/// name the file answers to — [`Project::locate`]'s rule, over roots made canonical once.
+fn place(
+    project: &Project,
+    roots: &[(usize, Role, PathBuf)],
+    canonical: &Path,
+) -> Option<(usize, Role, String)> {
+    let (module, role, root) = roots
+        .iter()
+        .filter(|(_, _, r)| canonical.starts_with(r))
+        .max_by_key(|(_, _, r)| r.components().count())?;
+    let rel = canonical.strip_prefix(root).ok()?;
+    let name = project.modules[*module].name_of_relative(rel)?;
+    Some((*module, *role, name))
 }
 
 #[cfg(test)]

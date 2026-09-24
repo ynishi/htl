@@ -2772,7 +2772,10 @@ fn cmd_build(
         &cfg,
         cache_flags.explain,
     );
-    let store = project::store(&root, cache_opts, None, "htl build");
+    let store = project::with_model(
+        project::store(&root, cache_opts, None, "htl build"),
+        model.as_ref(),
+    );
     let link_store = store.as_ref().map(|c| htl::link::LinkStore {
         cache: c,
         lint,

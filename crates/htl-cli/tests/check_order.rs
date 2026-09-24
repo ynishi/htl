@@ -398,3 +398,34 @@ fn run_time_and_the_bundle_resolve_as_the_check_did() {
     let (out, err) = run(&["run", "app.hb"]);
     assert_eq!(out, "7\tfalse", "{err}");
 }
+
+/// A cached test is replayed only while every name it required still means the file it
+/// meant. A helper added directly under `tests/` gives `helper` a second implementation
+/// for a test in `tests/sub/`, and the next run says so instead of replaying the entry.
+#[test]
+fn a_cached_test_sees_a_helper_added_under_tests() {
+    let root = scratch("cache-helper");
+    write(&root.join("htl.toml"), "");
+    write(&root.join("src/helper.tl"), "return { v = 1 }\n");
+    write(
+        &root.join("tests/sub/a_test.tl"),
+        "local t = require(\"htl.test\")\nlocal h = require(\"helper\")\n\
+         t.it(\"x\", function() t.expect(h.v):to_equal(1) end)\n",
+    );
+    let test = || {
+        Command::new(common::htl_bin())
+            .args(["test", "."])
+            .current_dir(&root)
+            .output()
+            .unwrap()
+    };
+    assert!(
+        test().status.success(),
+        "the first run passes and is stored"
+    );
+    write(&root.join("tests/helper.tl"), "return { v = 2 }\n");
+    let out = test();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "not replayed from the store: {err}");
+    assert!(!err.contains("from cache"), "{err}");
+}
