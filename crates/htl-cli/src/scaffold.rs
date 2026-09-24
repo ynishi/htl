@@ -1004,8 +1004,8 @@ fn t_htl_toml(target: Option<BuildTarget>) -> String {
         "# htl project settings (htl check / htl test / htl fmt / include_tl! all read this).\n\
      # Command-line flags and HTL_LINTS / HTL_LINT override it.\n\n\
      [lint]\n\
-     # strict = true   # warnings and lints fail htl check, htl fix and include_tl!\n\
-     #                   (not htl test); a rule at deny fails them without it\n\n\
+     # strict = true   # warnings and lints fail htl check, fix, build and include_tl!\n\
+     #                   (not test / run / gen); a rule at deny fails them without it\n\n\
      # Per rule: htl check --list-lints names every rule with the level it has by\n\
      # default, and the README's \"Lints\" section says how to change one.\n\n\
      [fmt]\n\

@@ -57,6 +57,16 @@ pub struct Policy {
 }
 
 impl Policy {
+    /// The policy of a command whose verdict is its program: `htl run` and `htl gen`. They
+    /// fail on an error, which stops the program from being generated at all, and report
+    /// every warning and lint without judging it — `htl check` is where those are judged,
+    /// as `htl test`'s verdict is its tests. Named here so the difference is one value in
+    /// one place rather than a command that never asks.
+    pub const ERRORS_ONLY: Self = Self {
+        strict: false,
+        capped: true,
+    };
+
     /// The policy `htl.toml` and the command line give: `strict` when either says so, and
     /// advisory otherwise. The flag can only raise it — a `--strict` run of a project that
     /// wrote `strict = false` is strict — because the flag is the question asked now and

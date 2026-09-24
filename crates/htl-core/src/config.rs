@@ -5,8 +5,8 @@
 //! htl = "0.4"               # the htl command this project expects; a mismatch is refused
 //!
 //! [lint]
-//! strict = true             # every `warn` counts as `deny`: fails htl check, htl fix
-//!                           # and include_tl! (not htl test)
+//! strict = true             # every `warn` counts as `deny`: fails htl check, htl fix,
+//!                           # htl build and include_tl! (not htl test / run / gen)
 //!
 //! [lint.rules]              # a level per rule: allow (not reported) / warn (reported,
 //! nil-index = "deny"        # advisory) / deny (reported, fails htl check)
@@ -327,7 +327,8 @@ pub struct LintConfig {
     #[serde(default)]
     pub rules: std::collections::BTreeMap<String, lint::Level>,
     /// `true`: every finding this run reports at `warn` counts as `deny`, so Teal's
-    /// warnings and htl's lints fail `htl check`, `htl fix` and the macros. `false`, or
+    /// warnings and htl's lints fail `htl check`, `htl fix`, `htl build` and the macros.
+    /// `false`, or
     /// absent: advisory everywhere, except for a rule the project set to `deny`, which
     /// fails all of them with or without this key. One default for the command and the
     /// build ([`crate::verdict`]); `HTL_LINT` overrides it for a build.
@@ -336,8 +337,9 @@ pub struct LintConfig {
     /// level are the same question asked at two grains.
     ///
     /// `htl test` does not read it, by design: a test run's verdict is its tests, plus
-    /// the type errors that stop a file from running at all. Warnings and lints are
-    /// still reported there; `htl check` is where they are judged.
+    /// the type errors that stop a file from running at all. `htl run` and `htl gen` are
+    /// the same with their program ([`crate::verdict::Policy::ERRORS_ONLY`]). Warnings and
+    /// lints are still reported there; `htl check` is where they are judged.
     pub strict: Option<bool>,
 }
 

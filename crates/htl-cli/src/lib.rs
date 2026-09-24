@@ -816,6 +816,39 @@ fn text_sink() -> project::Sink<report::Out> {
     project::Sink::new(report::Out::new(false))
 }
 
+/// What else a verdict counted besides errors, for a summary line: a finding at `deny`,
+/// and under `strict` every warning and lint. Empty when neither. Without it a run that
+/// failed on a lint would end in `0 error(s)`.
+fn judged(found: &htl::verdict::Findings, policy: &htl::verdict::Policy) -> String {
+    let mut out = String::new();
+    if policy.capped {
+        return out;
+    }
+    if found.denied > 0 {
+        out.push_str(&format!(", {} at deny", found.denied));
+    }
+    if policy.strict && found.warnings + found.lints > 0 {
+        out.push_str(&format!(
+            ", {} warning(s) and {} lint(s) under strict",
+            found.warnings, found.lints
+        ));
+    }
+    out
+}
+
+/// The lint selection `htl.toml` puts in force, applied to `h`: the rules `htl check`
+/// reports under, at the levels it judges them by. A command that checks without it
+/// reports what the project turned off and judges nothing.
+fn config_lints(h: &Htl, cfg: &project::Config) -> Result<htl::lint::Lints> {
+    let spec = cfg
+        .as_ref()
+        .map(|(_, _, c)| c.lint_spec())
+        .unwrap_or_default();
+    let lints = htl::lint::Lints::parse(&spec)?;
+    h.select_lints(lints.selection())?;
+    Ok(lints)
+}
+
 /// (Re)generate the `.d.tl` files this project declares: the ones a Rust crate's
 /// `#[host_module]` / `#[derive(TealRecord)]` ask for, so the checker sees Rust-side
 /// modules before any `cargo build`, and the module each `---@contract` type is declared
@@ -2183,16 +2216,7 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
         // What else the verdict counted, said only when it did: a finding at `deny`, and
         // under `strict` every warning and lint. Without it a run that failed on a lint
         // would end in `0 error(s) remaining`.
-        let mut judged = String::new();
-        if found.denied > 0 {
-            judged.push_str(&format!(", {} at deny", found.denied));
-        }
-        if policy.strict && found.warnings + found.lints > 0 {
-            judged.push_str(&format!(
-                ", {} warning(s) and {} lint(s) under strict",
-                found.warnings, found.lints
-            ));
-        }
+        let judged = judged(&found, &policy);
         eprintln!(
             "htl fix: {} file(s){}, {} changed{}, {} error(s) remaining{}{}",
             files.len(),
@@ -2760,12 +2784,15 @@ fn cmd_gen(file: &Path, out: Option<&Path>) -> Result<ExitCode> {
     // resolved and a file the checker accepts is one this command can emit. Same calls, in
     // the same order, as `cmd_run` and `cmd_build`.
     let cfg = load_config(file)?;
+    config_lints(&h, &cfg)?;
     let model = apply_model(&h, &cfg, file)?;
     project::file_view(&h, model.as_ref(), file)?;
     h.install_std()?;
     let (code, c) = h.gen_lua(file)?;
     text_sink().checkinfo(&c);
-    let Some(code) = code else {
+    // Judged on its errors alone (`Policy::ERRORS_ONLY`): the warnings and lints above are
+    // reported, and `htl check` is where they are judged.
+    let (Some(code), false) = (code, runs_fail(&c)) else {
         return Ok(ExitCode::FAILURE);
     };
     // Written as it came back. This command used to append the final newline itself, which
@@ -2787,6 +2814,7 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
     // as `cmd_gen` and `cmd_build`; before the bundle branch because a bundle carries its
     // own modules and gains nothing from it either way.
     let cfg = load_config(file)?;
+    config_lints(&h, &cfg)?;
     let model = apply_model(&h, &cfg, file)?;
     h.install_test_lib()?;
     h.install_std()?;
@@ -2808,7 +2836,8 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
     h.set_arg(&file.to_string_lossy(), args)?;
     let (code, c) = h.gen_lua(file)?;
     text_sink().checkinfo(&c);
-    let Some(code) = code else {
+    // As `htl gen`: errors stop it, the rest is reported (`Policy::ERRORS_ONLY`).
+    let (Some(code), false) = (code, runs_fail(&c)) else {
         return Ok(ExitCode::FAILURE);
     };
     match h.exec(&code, &format!("@{}", file.display()), args) {
@@ -2821,6 +2850,21 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
             Ok(ExitCode::FAILURE)
         }
     }
+}
+
+/// Whether `htl run` / `htl gen` stop at the check `c`: [`htl::verdict::verdict`] under
+/// [`Policy::ERRORS_ONLY`](htl::verdict::Policy::ERRORS_ONLY), so an error does and
+/// nothing else.
+fn runs_fail(c: &htl::CheckInfo) -> bool {
+    htl::verdict::verdict(
+        &htl::verdict::Findings {
+            errors: c.errors.len(),
+            warnings: c.warnings.len(),
+            lints: c.lints.len(),
+            denied: 0,
+        },
+        &htl::verdict::Policy::ERRORS_ONLY,
+    )
 }
 
 /// The run cache as `htl build` was asked to use it: `--no-cache` and `--explain-cache`,
@@ -2846,6 +2890,10 @@ fn cmd_build(
     // it, as `htl run` does before `run_bundle`.
     h.install_std()?;
     let cfg = load_config(entry)?;
+    // The rules and levels `htl check` uses: a bundle is judged as a check of its closure
+    // would be, and a rule the project turned off is not reported here either.
+    let lints = config_lints(&h, &cfg)?;
+    let policy = htl::verdict::Policy::resolve(cfg.as_ref().map(|(_, _, c)| c), false);
     let model = apply_model(&h, &cfg, entry)?;
     // The names the host provides are the model's — `#[host_module]`s in the crate around
     // the project, `[build] host`, `std.*` — so the bundle leaves out what the host
@@ -2881,7 +2929,7 @@ fn cmd_build(
             &[entry.to_path_buf()],
             htl::model::Purpose::Check,
         );
-        return cmd_build_dir(&h, entry, out, main, &opts, &skip);
+        return cmd_build_dir(&h, entry, out, main, &opts, &skip, &cfg);
     }
     project::file_view(&h, model.as_ref(), entry)?;
     // The name the entry is served under: the one the project's model gives the file,
@@ -2919,10 +2967,17 @@ fn cmd_build(
     // One sink for the whole closure: a build is many modules, and what the layer says
     // once per run is said once for the build rather than once per module.
     let mut sink = text_sink();
+    sink.judge_by(lints.selection());
     for (_, c) in &linked.checks {
         sink.checkinfo(c);
     }
     let n_err = linked.errors.len();
+    let found = htl::verdict::Findings {
+        errors: n_err,
+        warnings: linked.checks.iter().map(|(_, c)| c.warnings.len()).sum(),
+        lints: linked.lints.len(),
+        denied: sink.denied(),
+    };
     // The checks' own errors went through the sink above; what is left is the linker's.
     let checked: std::collections::HashSet<&String> = linked
         .checks
@@ -2932,8 +2987,11 @@ fn cmd_build(
     for e in linked.errors.iter().filter(|e| !checked.contains(e)) {
         eprintln!("error: {e}");
     }
-    if n_err > 0 {
-        eprintln!("htl build: {n_err} error(s), bundle not written");
+    if htl::verdict::verdict(&found, &policy) {
+        eprintln!(
+            "htl build: {n_err} error(s){}, bundle not written",
+            judged(&found, &policy)
+        );
         return Ok(ExitCode::FAILURE);
     }
     let buf = linked.bundle()?.encode();
@@ -2978,7 +3036,11 @@ fn cmd_build_dir(
     entry: &str,
     opts: &htl::link::LinkOptions,
     skip: &[PathBuf],
+    cfg: &project::Config,
 ) -> Result<ExitCode> {
+    // Judged as the file form is: `htl.toml`'s rules and levels, its `strict`.
+    let lints = config_lints(h, cfg)?;
+    let policy = &htl::verdict::Policy::resolve(cfg.as_ref().map(|(_, _, c)| c), false);
     h.add_path(dir)?;
     let files = htl::collect_tl_skipping(&[dir.to_path_buf()], skip)?;
     let mut b = Bundle {
@@ -2986,8 +3048,9 @@ fn cmd_build_dir(
         htl_version: env!("CARGO_PKG_VERSION").into(),
         ..Default::default()
     };
-    let mut n_err = 0usize;
+    let mut found = htl::verdict::Findings::default();
     let mut sink = text_sink();
+    sink.judge_by(lints.selection());
     for f in &files {
         // Named against the directory the bundle is built from, by the naming rule.
         let rel = f.strip_prefix(dir).unwrap_or(f);
@@ -2995,7 +3058,9 @@ fn cmd_build_dir(
             .with_context(|| format!("cannot derive a module name for {}", f.display()))?;
         let (code, c) = h.gen_lua(f)?;
         sink.checkinfo(&c);
-        n_err += c.errors.len();
+        found.errors += c.errors.len();
+        found.warnings += c.warnings.len();
+        found.lints += c.lints.len();
         let Some(code) = code else { continue };
         let (kind, payload) = if opts.source {
             (htl::bundle::Kind::Source, code.into_bytes())
@@ -3011,8 +3076,13 @@ fn cmd_build_dir(
             payload,
         });
     }
-    if n_err > 0 {
-        eprintln!("htl build: {n_err} error(s), bundle not written");
+    found.denied = sink.denied();
+    if htl::verdict::verdict(&found, policy) {
+        eprintln!(
+            "htl build: {} error(s){}, bundle not written",
+            found.errors,
+            judged(&found, policy)
+        );
         return Ok(ExitCode::FAILURE);
     }
     if b.module(entry).is_none() {
