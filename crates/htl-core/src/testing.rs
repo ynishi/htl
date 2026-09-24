@@ -347,6 +347,7 @@ pub fn run_tests(paths: &[PathBuf], suite: &Suite) -> Result<SuiteReport> {
     let files = discover_tests_for(&paths, &skip, lib)?;
     let opts = project::TestOptions {
         config: &cfg,
+        model: model.as_ref(),
         lint: suite.lint.as_deref(),
         lib: suite.lib.as_deref().unwrap_or(DEFAULT_LIB),
         filter: suite.filter.as_deref(),

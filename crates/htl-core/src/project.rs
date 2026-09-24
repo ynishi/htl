@@ -892,6 +892,11 @@ pub struct Options<'a> {
     /// `htl.toml`, already loaded — the caller needs it for its own decisions (`strict`)
     /// and reading it twice would be reading it twice.
     pub config: &'a Config,
+    /// The project the files belong to ([`model_of`]), built by the caller from where the
+    /// run started: which module each file is, what it may read, where the store lives.
+    /// Handed in rather than found again from the files, so the run and its caller cannot
+    /// be about two projects. `None` outside any project.
+    pub model: Option<&'a crate::model::Project>,
     /// A lint selection from the caller, merged after the file's own so that it wins.
     pub lint: Option<&'a str>,
     /// The run cache's switches ([`cache_options`]).
@@ -964,10 +969,11 @@ pub fn check<O: Output>(
     let Options {
         paths,
         config: cfg,
+        model,
         lint,
         cache: cache_opts,
     } = opts;
-    let (cfg, cache_opts) = (*cfg, *cache_opts);
+    let (cfg, cache_opts, model) = (*cfg, *cache_opts, *model);
     let files = files.to_vec();
 
     // The `---@contract` markers, read once for the run rather than once per file: they
@@ -978,21 +984,18 @@ pub fn check<O: Output>(
         None => (Vec::new(), Vec::new()),
     };
 
-    // The project the walk belongs to is the first path's. Nothing named at all is the
-    // working directory, which is what a command line with no argument already means.
+    // The Rust crate around the walk, for the host modules it registers: found from the
+    // first path, and nothing named at all is the working directory.
     let start = paths
         .first()
         .map(PathBuf::as_path)
         .unwrap_or(Path::new("."));
-    // Which module each file belongs to, and so what it may read: built once for the walk,
-    // from the config already loaded.
-    let model = model_of(cfg, start)?;
-    let origins = Origins::new(model.as_ref());
+    let origins = Origins::new(model);
     // The store lives at the project root, so invocations from different directories in
     // one project share it; what separates them is the key, which carries the working
     // directory and each path as written.
-    let root = store_root(model.as_ref());
-    let store = with_model(store(&root, cache_opts, None, "htl check"), model.as_ref());
+    let root = store_root(model);
+    let store = with_model(store(&root, cache_opts, None, "htl check"), model);
     // A dependency error is said once per run, and not on behalf of a file the walk
     // checks itself. The rule applies to replayed entries as much as to fresh checks.
     sink.walking(&files);
@@ -1041,7 +1044,7 @@ pub fn check<O: Output>(
     let to_check = hits.iter().filter(|h| h.is_none()).count();
 
     let h = if to_check > 0 {
-        Some(checker(model.as_ref(), lints.selection())?)
+        Some(checker(model, lints.selection())?)
     } else {
         None
     };
@@ -1065,7 +1068,7 @@ pub fn check<O: Output>(
                     f,
                     &Walk {
                         cfg,
-                        model: model.as_ref(),
+                        model,
                         contracts: &contracts,
                         origins: &origins,
                         host_modules: &host_modules,
@@ -1408,10 +1411,12 @@ pub fn coverage_report(
 
 /// What a test run needs beyond the files themselves.
 pub struct TestOptions<'a> {
-    /// `htl.toml`, already loaded ([`config_of`]) — it names the project the run belongs
-    /// to (the root the store lives at), the caller reads it for its own decisions, and
-    /// reading it twice would be reading it twice.
+    /// `htl.toml`, already loaded ([`config_of`]) — the caller reads it for its own
+    /// decisions, and reading it twice would be reading it twice.
     pub config: &'a Config,
+    /// The project the run belongs to ([`model_of`]), built by the caller: what each file
+    /// may read, and the root the store lives at. `None` outside any project.
+    pub model: Option<&'a crate::model::Project>,
     /// A lint selection from the caller, merged after the file's own so that it wins.
     pub lint: Option<&'a str>,
     /// Module name of the assertion library to ask for the verdict
@@ -1488,13 +1493,14 @@ pub fn test<O: Output>(
 ) -> Result<TestReport> {
     let TestOptions {
         config: cfg,
+        model,
         lint,
         lib,
         filter,
         run,
         cache: cache_opts,
     } = opts;
-    let (cfg, cache_opts) = (*cfg, *cache_opts);
+    let (cfg, cache_opts, model) = (*cfg, *cache_opts, *model);
     let files = files.to_vec();
 
     // Given, or drawn once for the whole run and reported. Drawn from the clock rather
@@ -1530,25 +1536,18 @@ pub fn test<O: Output>(
     let (mut passed, mut failed, mut bad_files, mut ran_files) = (0usize, 0usize, 0usize, 0usize);
     let started = std::time::Instant::now();
     // One checker for the run; each file still gets a fresh program state. The project's
-    // model says what every file may read, built once from the config already loaded.
-    let model_root = cfg.as_ref().map(|(r, _, _)| r.clone()).unwrap_or_else(|| {
-        files
-            .first()
-            .map(|f| crate::parent_dir(f))
-            .unwrap_or_else(|| PathBuf::from("."))
-    });
-    let model = model_of(cfg, &model_root)?;
+    // model says what every file may read.
     let mut session = TestSession::new(lint, lib, *filter, run)?;
     if let Some(m) = &model {
-        session = session.for_project(m.clone());
+        session = session.for_project((*m).clone());
     }
 
     // Checking a test file and generating its Lua is most of what a run costs — the tests
     // themselves are a few percent of it — and none of that work depends on the outcome, so
     // it is reusable in exactly the way a check's is. Running is not: a test has to run to
     // say whether it passes, every time.
-    let root = store_root(model.as_ref());
-    let store = with_model(store(&root, cache_opts, None, "htl test"), model.as_ref());
+    let root = store_root(model);
+    let store = with_model(store(&root, cache_opts, None, "htl test"), model);
     let keys: Vec<cache::Key> = files.iter().map(|f| cache::gen_key(f, lint)).collect();
     let cfg_inputs: Vec<PathBuf> = cfg.iter().map(|(_, p, _)| p.clone()).collect();
 
@@ -1557,7 +1556,7 @@ pub fn test<O: Output>(
         store: c,
         session: &session,
         cfg_inputs: &cfg_inputs,
-        model: model.as_ref(),
+        model,
         lint,
         opts: cache_opts,
         done: RefCell::new(Default::default()),
@@ -1631,7 +1630,7 @@ pub fn test<O: Output>(
             &files,
             &cov_hits,
             &cov_deps,
-            model.as_ref(),
+            model,
         )?)
     } else {
         None

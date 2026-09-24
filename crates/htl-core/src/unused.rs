@@ -210,6 +210,7 @@ pub fn unused(opts: &Options<'_>) -> Result<Report> {
         &project::Options {
             paths: &walk,
             config: opts.config,
+            model: opts.model,
             lint: None,
             cache: opts.cache,
         },

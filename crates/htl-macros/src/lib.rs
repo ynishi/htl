@@ -1354,6 +1354,71 @@ mod tests {
         std::fs::write(path, text).unwrap();
     }
 
+    /// `include_tl!` and `htl check` resolve a name the same way: the file the macro's
+    /// check read for `helper` is the one `htl check`'s read.
+    ///
+    /// The case is the one where they used to differ. A file in `src/sub/` requires
+    /// `helper`, and there is a `helper.tl` beside it as well as in `src/`. `htl check`
+    /// consulted the file's own directory first and read `src/sub/helper.tl`; the macro
+    /// consulted it last and read `src/helper.tl`. Both set their checker up from the
+    /// project model now, where `src/sub/helper.tl` is `sub.helper` and `helper` is
+    /// `src/helper.tl`.
+    #[test]
+    fn include_tl_and_htl_check_read_the_same_file_for_a_name() {
+        let root = scratch("same-as-check");
+        write(&root.join("htl.toml"), "");
+        write(
+            &root.join("src/helper.tl"),
+            "local record helper\n   n: integer\nend\nreturn helper\n",
+        );
+        write(
+            &root.join("src/sub/helper.tl"),
+            "local record helper\n   s: string\nend\nreturn helper\n",
+        );
+        let main = root.join("src/sub/main.tl");
+        write(
+            &main,
+            "local helper = require(\"helper\")\nprint(helper.n)\n",
+        );
+
+        let inc = resolve_include(&root, "src/sub/main.tl", false).expect("the macro's check");
+        let by_macro: Vec<PathBuf> = inc
+            .deps
+            .iter()
+            .filter(|d| d.ends_with("helper.tl"))
+            .map(|d| std::fs::canonicalize(d).unwrap())
+            .collect();
+
+        let files = vec![main.clone()];
+        let cfg = htl_core::project::config_of(&main).unwrap();
+        let model = htl_core::project::model_of(&cfg, &main).unwrap();
+        let mut sink = htl_core::project::Sink::new(htl_core::project::Collect::default());
+        let checked = htl_core::project::check(
+            &mut sink,
+            &files,
+            &htl_core::project::Options {
+                paths: &files,
+                config: &cfg,
+                model: model.as_ref(),
+                lint: None,
+                cache: htl_core::project::cache_options(false, None, &cfg, false),
+            },
+        )
+        .unwrap();
+        let by_check: Vec<PathBuf> = checked
+            .requires
+            .iter()
+            .flat_map(|(_, reqs)| reqs.iter())
+            .filter(|r| r.module == "helper")
+            .filter_map(|r| r.path.as_ref())
+            .map(|p| std::fs::canonicalize(p).unwrap())
+            .collect();
+
+        let expected = std::fs::canonicalize(root.join("src/helper.tl")).unwrap();
+        assert_eq!(by_check, vec![expected.clone()], "htl check");
+        assert_eq!(by_macro, vec![expected], "include_tl!");
+    }
+
     /// The macro must see the same tree as the CLI: an installed dependency, reached at its
     /// entry (`.htl/modules/entries/<name>/init.tl`), resolves from a script under the
     /// project.

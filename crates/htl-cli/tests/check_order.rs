@@ -51,9 +51,11 @@ fn diagnostics(args: &[&str], cwd: &Path) -> Vec<String> {
 }
 
 /// Two directories where one provides a module the other requires but does not have. The
-/// only reason `b` could ever resolve `util` is `a` being on the path.
+/// only reason `b` could ever resolve `util` is `a` being on the path. A flat project, so
+/// that the tree can be walked: `a/util.tl` is `a.util`, and `util` is nobody's.
 fn two_dirs() -> PathBuf {
     let root = scratch("two");
+    write(&root.join("htl.toml"), "[layout]\nsource = \".\"\n");
     write(
         &root.join("a/util.tl"),
         "local record util\nend\nfunction util.f(): integer\n   return 1\nend\nreturn util\n",
@@ -544,4 +546,38 @@ fn the_store_is_at_the_project_root_wherever_the_command_ran() {
     );
     assert!(root.join(".htl/cache").is_dir(), "the store is at the root");
     assert!(!root.join("src/.htl").exists(), "and nowhere else");
+}
+
+/// A directory is checked as a project; with no `htl.toml` or `mlua-pkg.toml` in it or
+/// above it, `htl check` says so — what it looked for, from where, and what to do — rather
+/// than checking every file as a thing on its own under a name no project gave it. A file
+/// named on its own is still checked: that question has an answer without a project.
+#[test]
+fn a_directory_with_no_project_is_refused_and_a_file_is_still_checked() {
+    let root = scratch("no-project");
+    write(&root.join("a.tl"), "print(1)\n");
+    let run = |args: &[&str]| {
+        let out = Command::new(common::htl_bin())
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    for args in [&["check"][..], &["check", "."][..]] {
+        let (ok, err) = run(args);
+        assert!(!ok, "{args:?}: {err}");
+        assert!(
+            err.contains(&format!(
+                "no htl.toml or mlua-pkg.toml in {} or any directory above it",
+                std::fs::canonicalize(&root).unwrap().display()
+            )) && err.contains("htl init"),
+            "{args:?}: {err}"
+        );
+    }
+    let (ok, err) = run(&["check", "a.tl"]);
+    assert!(ok, "{err}");
 }

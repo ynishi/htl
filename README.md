@@ -127,7 +127,9 @@ check says so first. A file under the project's `tests/` may read the project's 
 and `tests/` itself, the same as under `htl test`, so `htl check tests` and `htl test`
 agree; the project's sources cannot `require` what is under
 `tests/`. A file with neither an `htl.toml` nor an `mlua-pkg.toml` above it belongs to
-no project, and resolves its `require`s in its own directory.
+no project, and resolves its `require`s in its own directory. `htl check <file>` checks
+it; `htl check <dir>` with neither above the directory is an error that says what it
+looked for — a directory is checked as a project, and `htl init` makes it one.
 
 A failure at run time names Teal, not the Lua htl generated — the file and the line that
 raised, and the same for every frame that reached it. `htl run boom.tl`, where `boom.tl`

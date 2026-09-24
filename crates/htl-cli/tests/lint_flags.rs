@@ -32,6 +32,8 @@ fn htl(args: &[&str], cwd: &Path) -> (String, String) {
 /// One file, one cast the checker cannot stand behind.
 fn project(name: &str) -> PathBuf {
     let dir = scratch(name);
+    // A flat project: the files sit beside the manifest.
+    write(&dir.join("htl.toml"), "[layout]\nsource = \".\"\n");
     write(
         &dir.join("defs.tl"),
         "local record defs\n   enum State\n      \"open\"\n      \"closed\"\n   end\n\

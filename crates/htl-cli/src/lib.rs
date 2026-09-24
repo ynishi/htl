@@ -1580,6 +1580,7 @@ fn cmd_test(
     }
     let opts = project::TestOptions {
         config: &cfg,
+        model: model.as_ref(),
         lint,
         lib,
         filter,
@@ -2218,6 +2219,26 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
     // stands in for is said here, so that an error under it is read as that dependency's
     // without the reader having to know the manifest.
     let walk_model = project::model_of(&cfg, &paths[0])?;
+    // A directory is checked as a project: which of its files is which module, and what
+    // they may read, is the project's to say. With none there is no answer to give, and
+    // checking each file as a thing on its own would answer a different question without
+    // saying so. A file named on its own is that question, asked outright, and is checked.
+    if walk_model.is_none()
+        && let Some(dir) = paths.iter().find(|p| p.is_dir())
+    {
+        bail!(
+            "no {} or {} in {} or any directory above it: a directory is checked as a \
+             project. Run `htl init` there to make it one, or name the .tl files to check \
+             each on its own",
+            htl::config::CONFIG_NAME,
+            htl::pkg::MANIFEST_NAME,
+            // Absolute: where the search started is the whole of the answer, and `.`
+            // relative to itself would say nothing.
+            fs::canonicalize(dir)
+                .unwrap_or_else(|_| dir.clone())
+                .display()
+        );
+    }
     let skip = project::not_walked(walk_model.as_ref(), &paths, htl::model::Purpose::Check);
     let files = htl::collect_tl_skipping(&paths, &skip)?;
     if !json {
@@ -2233,6 +2254,7 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
         &project::Options {
             paths: &paths,
             config: &cfg,
+            model: walk_model.as_ref(),
             lint,
             cache: project::cache_options(use_cache, cache_mode, &cfg, explain),
         },
