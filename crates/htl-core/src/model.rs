@@ -112,9 +112,12 @@
 //! [..])` add names a caller knows and the model cannot read (a module registered by
 //! hand, or by another crate); they do not replace it.
 //!
-//! A host that serves modules itself does so with a
-//! [`TealResolver`](crate::pkg::TealResolver), which names files by the same rule
-//! ([`naming`](crate::naming)) without a model.
+//! A host that serves modules itself describes the directories it serves as a model too
+//! ([`Project::for_host`], [`HostDir`]), and derives both sides from it: the checker with
+//! [`Htl::apply_model`](crate::Htl::apply_model), the run with
+//! [`TealResolver::from_project`](crate::pkg::TealResolver::from_project), which names
+//! files by the same rule ([`naming`](crate::naming)) on every `require` rather than from
+//! a table built once, because a host's directory changes while it runs.
 
 pub mod resolver;
 pub use resolver::{Found, HostShadowed, Resolution, Resolver};
@@ -217,6 +220,30 @@ impl Provider {
             Provider::Std => 0,
         }
     }
+}
+
+/// One directory a host serves modules from, and how its files are named: what
+/// [`Project::for_host`] builds a host's model from.
+///
+/// The three are the three ways a directory can hold modules, each with the naming rule
+/// ([`crate::naming`]) applied from a different mount.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostDir {
+    /// A directory of modules mounted at the top: `<dir>/a/b.tl` is `a.b`, `<dir>/a/init.tl`
+    /// is `a`, and `<dir>/util/util.tl` is `util.util` and nothing else. A host's script
+    /// directory. What [`TealResolver::new`](crate::pkg::TealResolver::new) serves.
+    Modules(PathBuf),
+    /// A directory of packages, each a child directory mounted at its name:
+    /// `<dir>/mathx/init.tl` and a flat package's `<dir>/mathx/mathx.tl` are `mathx`,
+    /// `<dir>/mathx/sub.tl` is `mathx.sub`, and `<dir>/a/b/a/b.tl` is `a.b.a.b`. A mod
+    /// directory with one folder per mod. What
+    /// [`holding_packages`](crate::pkg::TealResolver::holding_packages) serves.
+    Packages(PathBuf),
+    /// A declaration root: `.d.tl` mounted at the top, and every `<dir>/<crate>/` that
+    /// `htl dts` materialised a crate's declarations into a root of its own, so that
+    /// `types/htl-mq/mq.d.tl` is `mq` — the name the crate wrote it under — and not
+    /// `htl-mq.mq`. The layout `[layout] types` has in a project.
+    Declarations(PathBuf),
 }
 
 /// A unit that owns a namespace and the directories it is read from.
@@ -551,6 +578,137 @@ impl Project {
             host_crate,
             providers,
         })
+    }
+
+    /// The model of what a host serves, for a host that has no `htl.toml` to
+    /// [`load`](Self::load): `root` and the directories in `dirs`, each read the way its
+    /// [`HostDir`] says (#320).
+    ///
+    /// # Why a host describes its directories
+    ///
+    /// A host that serves `.tl` modules at run time — a game's mod directory, a plugin
+    /// folder — used to say where they are twice: once to the checker
+    /// ([`Htl::add_path`](crate::Htl::add_path),
+    /// [`add_package_path`](crate::Htl::add_package_path),
+    /// [`apply_config`](crate::Htl::apply_config)) and once to the run
+    /// ([`TealResolver::new`](crate::pkg::TealResolver::new),
+    /// [`holding_packages`](crate::pkg::TealResolver::holding_packages)). The two did not
+    /// name files the same way: the checker read the directories through `package.path`
+    /// templates, which answer `require("a.b")` with `a/b/a/b.tl` and read a crate's
+    /// `types/htl-mq/mq.d.tl` as both `mq` and `htl-mq.mq`, while the run read them by the
+    /// naming rule ([`crate::naming`]). A script could check and then fail to load.
+    ///
+    /// Described once, as a model, both sides are derived from the one description: the
+    /// checker with [`Htl::apply_model`](crate::Htl::apply_model) — the call every `htl`
+    /// command makes for a project — and the run with
+    /// [`TealResolver::from_project`](crate::pkg::TealResolver::from_project). Every name
+    /// is then answered by the same module, from the same file, on both sides.
+    ///
+    /// # What the model holds
+    ///
+    /// - The host's own module ([`Owner::Own`]), named after `root`'s last component, with
+    ///   `root` as its home and no roots: a host's code is Rust, and what it serves are
+    ///   other people's modules. A model has exactly one `Own` module, so this is it.
+    /// - Per [`HostDir::Modules`], one module mounted at the top, owned
+    ///   [`Owner::External`]: modules the host did not write and reaches anyway, which is
+    ///   what a `[check] paths` entry is to a project.
+    /// - Per [`HostDir::Packages`], one module per child directory, mounted at the child's
+    ///   name and owned [`Owner::Installed`]: each child is a package put there by
+    ///   something other than the host's author, the way an install puts a dependency
+    ///   under `.htl/modules`, and like a dependency it sees its own modules and the rest
+    ///   of the host's, not a project's own. The children are read when this is called;
+    ///   a package directory added later is a new model (a file added later to a package
+    ///   that was there is not — see [`from_project`](crate::pkg::TealResolver::from_project)).
+    /// - Per [`HostDir::Declarations`], one [`Owner::External`] module whose declaration
+    ///   root is the directory, and one [`Owner::Crate`] module per `<dir>/<crate>/`
+    ///   materialised by `htl dts`, as [`load`](Self::load) builds them: `types/htl-mq/mq.d.tl`
+    ///   is `mq`, and nothing else.
+    /// - htl's own library ([`Owner::Lib`]), as for every project.
+    ///
+    /// A relative directory is relative to `root`. A directory that does not exist
+    /// contributes a module with nothing in it, as a missing root does in a loaded project.
+    ///
+    /// The model names no host-provided names ([`provides`](Self::provides) answers `None`):
+    /// a host registers its modules in `package.preload` itself, and the run-time resolver
+    /// steps aside for a declaration whose name is preloaded.
+    pub fn for_host(root: &Path, dirs: &[HostDir]) -> Self {
+        let root = root.to_path_buf();
+        let config = HtlConfig::default();
+        let mut modules = vec![Module {
+            name: canon(&root)
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            owner: Owner::Own,
+            mount: String::new(),
+            roots: Roots::default(),
+            home: Some(root.clone()),
+        }];
+        for d in dirs {
+            match d {
+                HostDir::Modules(dir) => {
+                    let dir = root.join(dir);
+                    modules.push(Module {
+                        name: display_under(&dir, &root),
+                        owner: Owner::External,
+                        mount: String::new(),
+                        roots: Roots {
+                            source: Some(dir.clone()),
+                            ..Roots::default()
+                        },
+                        home: Some(dir),
+                    });
+                }
+                HostDir::Packages(dir) => {
+                    let dir = root.join(dir);
+                    let mut children: Vec<(String, PathBuf)> = std::fs::read_dir(&dir)
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .filter(|e| e.path().is_dir())
+                        .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path()))
+                        .filter(|(n, _)| !n.starts_with('.'))
+                        .collect();
+                    children.sort();
+                    for (name, path) in children {
+                        modules.push(dependency(&name, Owner::Installed, path.clone(), path));
+                    }
+                }
+                HostDir::Declarations(dir) => {
+                    let dir = root.join(dir);
+                    modules.push(Module {
+                        name: display_under(&dir, &root),
+                        owner: Owner::External,
+                        mount: String::new(),
+                        roots: Roots {
+                            decl: Some(dir.clone()),
+                            ..Roots::default()
+                        },
+                        home: Some(dir.clone()),
+                    });
+                    modules.extend(crate_modules(&dir));
+                }
+            }
+        }
+        modules.push(Module {
+            name: "htl".into(),
+            owner: Owner::Lib,
+            mount: String::new(),
+            roots: Roots {
+                decl: Some(crate::lib_dir()),
+                ..Roots::default()
+            },
+            home: Some(crate::lib_dir()),
+        });
+        Self {
+            root,
+            config,
+            modules,
+            links: None,
+            problems: Vec::new(),
+            host_crate: None,
+            providers: Vec::new(),
+        }
     }
 
     /// Whether the host provides `name`, and from which source. `None` for a name no
@@ -899,14 +1057,27 @@ impl crate::Htl {
     /// The kinds are `found`, `ambiguous`, `missing`, `outside`, `hidden` and `shadowed`
     /// ([`Resolution`]). `shadowed` carries the error and the name's declaration, when it
     /// has one, which is what the checker types the `require` from.
+    ///
+    /// A fifth, `refresh_model` (), builds the table again from the same project: the
+    /// table is read from the directories once, here, and a host's directory gains files
+    /// while it runs. [`TealResolver::from_project`](crate::pkg::TealResolver::from_project)
+    /// calls it before it checks a file the table does not have, so the check of a module
+    /// dropped in after the host started reads the host's directories as they are now, as
+    /// the run does. No `htl` command calls it: a command's tree does not change under it.
     pub fn install_resolver(&self, resolver: Resolver) -> Result<()> {
         let lua = self.checker_lua()?;
-        let r = std::sync::Arc::new(resolver);
+        let r = std::sync::Arc::new(std::sync::RwLock::new(resolver));
+        // A poisoned lock is a panic in a closure below, which already failed its call; the
+        // table itself is whole, since it is only ever replaced.
+        fn read(r: &std::sync::RwLock<Resolver>) -> std::sync::RwLockReadGuard<'_, Resolver> {
+            r.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
         let s = |p: Option<PathBuf>| p.map(|p| p.to_string_lossy().into_owned());
         let resolve = {
             let r = r.clone();
             lua.create_function(move |_, (requirer, name): (Option<String>, String)| {
                 type Answer = (String, Option<String>, Option<String>, Option<String>);
+                let r = read(&r);
                 let answer: Answer = match r.resolve(requirer.as_deref().map(Path::new), &name) {
                     Resolution::Found(f) => (
                         "found".into(),
@@ -944,23 +1115,33 @@ impl crate::Htl {
         let rewrite = {
             let r = r.clone();
             lua.create_function(move |_, (requirer, name): (String, String)| {
-                Ok(r.rewrite(Path::new(&requirer), &name))
+                Ok(read(&r).rewrite(Path::new(&requirer), &name))
             })?
         };
         let claims = {
             let r = r.clone();
             lua.create_function(move |_, name: String| {
-                Ok(r.claims(&name)
+                Ok(read(&r)
+                    .claims(&name)
                     .into_iter()
                     .map(|p| p.to_string_lossy().into_owned())
                     .collect::<Vec<_>>())
             })?
         };
-        let owns = lua.create_function(move |_, path: String| Ok(r.owns(Path::new(&path))))?;
+        let owns = {
+            let r = r.clone();
+            lua.create_function(move |_, path: String| Ok(read(&r).owns(Path::new(&path))))?
+        };
+        let refresh = lua.create_function(move |_, ()| {
+            let fresh = read(&r).rebuilt();
+            *r.write().unwrap_or_else(std::sync::PoisonError::into_inner) = fresh;
+            Ok(())
+        })?;
         self.h.set("claims_name", claims)?;
         self.h.set("resolve_name", resolve)?;
         self.h.set("rewrite_name", rewrite)?;
         self.h.set("owns_file", owns)?;
+        self.h.set("refresh_model", refresh)?;
         Ok(())
     }
 }

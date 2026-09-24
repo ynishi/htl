@@ -345,6 +345,18 @@ pub struct ContractResult {
 impl Htl {
     /// Make an `htl.toml` project's dirs visible to the checker: `root`, `root/src` and
     /// `[check] paths`. `root` is the directory holding `htl.toml`.
+    ///
+    /// These go on `package.path` ([`search_paths`](config::HtlConfig::search_paths)),
+    /// which is read through Lua's templates rather than the naming rule every `htl`
+    /// command names files by. `types/` and each `types/<crate>/` are two roots there, so
+    /// a crate's `types/htl-mq/mq.d.tl` checks as `mq` and as `htl-mq.mq` — where `htl
+    /// check` and a model-derived resolver know it only as `mq` (#320).
+    ///
+    /// Kept for a host that does not describe a project. One that does sets its checker up
+    /// with `Htl::apply_model` (feature `dts`) on the project `htl` itself reads
+    /// (`model::Project::discover`, or `Project::for_host` for a host with no `htl.toml`)
+    /// and serves the run from the same project (`pkg::TealResolver::from_project`), so the
+    /// check and the run are one description rather than two kept in step by hand.
     pub fn apply_config(&self, root: &Path, cfg: &config::HtlConfig) -> Result<()> {
         self.add_search_paths(&cfg.search_paths(root))
     }
@@ -1421,6 +1433,18 @@ impl Htl {
     /// dependency links under `.htl/modules/entries`, the parent of a vendored copy or a
     /// patch: `dir/<name>/init.tl` is `<name>`, and so is `dir/<name>/<name>.tl`, a flat
     /// package's entry ([`naming`]).
+    ///
+    /// The flat entry is the `?/?.lua` template, and a template substitutes the whole name
+    /// for each `?`: `require("a.b")` also reaches `dir/a/b/a/b.tl`, a file the naming
+    /// rule calls `a.b.a.b`. A run-time resolver over the same directory
+    /// (`pkg::TealResolver::holding_packages`) does not serve it for `a.b`, so the check
+    /// passes and the run fails (#320).
+    ///
+    /// Kept for a host that does not describe a project, and for
+    /// [`apply_project`](Self::apply_project). A host's directory of packages is
+    /// `model::HostDir::Packages` in a model built with `model::Project::for_host`; the
+    /// checker is then `Htl::apply_model` and the run `pkg::TealResolver::from_project`
+    /// (feature `dts`), both reading that one description.
     pub fn add_package_path(&self, dir: &Path) -> Result<()> {
         self.add_path_as(dir, true)
     }

@@ -47,11 +47,41 @@ pub use mlua_pkg;
 /// The rule is applied on every `require` rather than to a table built once, because the
 /// directory is the host's: a mod dropped into it after the host started is one the next
 /// `require` finds.
+///
+/// # One description for the check and the run
+///
+/// A host that serves its directories describes them as a model
+/// (`model::Project::for_host`) and derives both sides from it: the run with
+/// `TealResolver::from_project`, the checker with `Htl::apply_model` (all three with the
+/// `dts` feature as well as `pkg`). That is the way to set a host up (#320).
+///
+/// A resolver over one directory ([`new`](Self::new), [`holding_packages`](Self::holding_packages))
+/// names its own files by the rule, but the checker it is paired with is set up
+/// separately — [`Htl::add_path`](crate::Htl::add_path),
+/// [`add_package_path`](crate::Htl::add_package_path),
+/// [`apply_config`](crate::Htl::apply_config), or the root this resolver puts on the
+/// checker's `package.path` itself — and `package.path` is read through Lua's templates,
+/// not the rule. The two then disagree in places: under a directory of packages the
+/// checker's `?/?` template reads `pkgs/a/b/a/b.tl` as `a.b` while this resolver serves it
+/// only as `a.b.a.b`, and a directory of declarations with a crate's `types/<crate>/`
+/// inside is two roots to the checker and one to this resolver. Such a script checks and
+/// then fails to load. The one-directory constructors stay for a host that does not
+/// describe a project, and for a contract directory ([`for_contract`](Self::for_contract)).
 pub struct TealResolver {
-    sandbox: Box<dyn SandboxedFs>,
+    /// The directories served, each through its own sandbox and read from its own mount.
+    /// One for a resolver over one root ([`new`](Self::new)); one per root of the model's
+    /// modules for [`from_project`](Self::from_project).
+    served: Vec<Served>,
+    /// The one root of a resolver over one directory, put on the checker's search path.
+    /// `None` for [`from_project`](Self::from_project), whose checker answers from the
+    /// model and has no directory of its on the path.
     root: Option<PathBuf>,
     /// The root holds packages by name ([`holding_packages`](Self::holding_packages)).
     packages: bool,
+    /// Built from a project model ([`from_project`](Self::from_project)): the checker is
+    /// the model's, and is asked to read the directories again before a file it does not
+    /// know is checked.
+    from_model: bool,
     path_added: AtomicBool,
     module_separator: char,
     /// `"defs.Mod"`: every module served by this resolver must be assignable to that type.
@@ -67,13 +97,21 @@ pub struct TealResolver {
 }
 
 impl TealResolver {
-    /// Strict sandbox (no symlinks out of `root`).
+    /// Strict sandbox (no symlinks out of `root`), serving `root` as a directory of modules
+    /// mounted at the top.
+    ///
+    /// Its checker is set up separately, and reads the directory through `package.path`
+    /// templates rather than the naming rule — see the [type documentation](Self) for where
+    /// the two part ways. A host that can describe its directories builds a model and uses
+    /// `TealResolver::from_project` with `Htl::apply_model` (feature `dts`), so the check
+    /// and the run are one description.
     pub fn new(root: impl Into<PathBuf>) -> Result<Self, InitError> {
         let root = root.into();
         Ok(Self {
-            sandbox: Box::new(FsSandbox::new(&root)?),
+            served: vec![Served::one(Box::new(FsSandbox::new(&root)?))],
             root: Some(root),
             packages: false,
+            from_model: false,
             path_added: AtomicBool::new(false),
             module_separator: '.',
             expect_type: None,
@@ -88,9 +126,10 @@ impl TealResolver {
     pub fn new_symlink_aware(root: impl Into<PathBuf>) -> Result<Self, InitError> {
         let root = root.into();
         Ok(Self {
-            sandbox: Box::new(SymlinkAwareSandbox::new(&root)?),
+            served: vec![Served::one(Box::new(SymlinkAwareSandbox::new(&root)?))],
             root: Some(root),
             packages: false,
+            from_model: false,
             path_added: AtomicBool::new(false),
             module_separator: '.',
             expect_type: None,
@@ -105,9 +144,10 @@ impl TealResolver {
     /// resolving `require`s inside `.tl` files (it searches `package.path`).
     pub fn with_sandbox(sandbox: impl SandboxedFs + 'static, root: Option<PathBuf>) -> Self {
         Self {
-            sandbox: Box::new(sandbox),
+            served: vec![Served::one(Box::new(sandbox))],
             root,
             packages: false,
+            from_model: false,
             path_added: AtomicBool::new(false),
             module_separator: '.',
             expect_type: None,
@@ -125,11 +165,20 @@ impl TealResolver {
     /// [`MluaProject::registry`] does for the parent of a `target_dir` copy.
     ///
     /// Without it the root is a directory of modules mounted at the top, the way a host's
-    /// script directory is, and `<root>/<name>/<name>.tl` is `<name>.<name>`. The checker's
-    /// search path spells the root the same way
-    /// ([`Htl::add_package_path`](crate::Htl::add_package_path)).
+    /// script directory is, and `<root>/<name>/<name>.tl` is `<name>.<name>`.
+    ///
+    /// The checker's counterpart, [`Htl::add_package_path`](crate::Htl::add_package_path),
+    /// is a `package.path` template, and a template substitutes the whole name for each
+    /// `?`: it reads `<root>/a/b/a/b.tl` as `a.b`, which this resolver does not serve, so a
+    /// `require("a.b")` of it checks and fails at run time (#320). A host's directory of
+    /// packages is `model::HostDir::Packages` in a model, served by
+    /// `TealResolver::from_project` and checked by `Htl::apply_model` (feature `dts`),
+    /// where both sides read it the one way.
     pub fn holding_packages(mut self) -> Self {
         self.packages = true;
+        for s in &mut self.served {
+            s.mount = Mount::Packages;
+        }
         self
     }
 
@@ -397,19 +446,6 @@ impl TealResolver {
         }
         let _ = lua;
         Ok(())
-    }
-
-    /// The paths under the root that may be `name` (dot-separated), in the naming rule's
-    /// order: implementations, declarations, plain Lua.
-    fn candidates(&self, name: &str) -> Vec<PathBuf> {
-        if !self.packages {
-            return crate::naming::candidates("", name);
-        }
-        let package = name.split('.').next().unwrap_or(name);
-        crate::naming::candidates(package, name)
-            .into_iter()
-            .map(|c| Path::new(package).join(c))
-            .collect()
     }
 
     fn load_teal(
@@ -1875,13 +1911,203 @@ fn preloaded(lua: &Lua, name: &str) -> mlua::Result<bool> {
     Ok(!matches!(preload.get::<Value>(name)?, Value::Nil))
 }
 
+/// One directory a [`TealResolver`] serves: the sandbox it is read through, the mount its
+/// names are read under, and what inside it belongs to somebody else.
+struct Served {
+    sandbox: Box<dyn SandboxedFs>,
+    mount: Mount,
+    /// The model module the directory is a root of; `0` for a resolver over one root. Two
+    /// implementations of a name in two modules are an ambiguity, as they are to the
+    /// model's resolver; two in one module are one only when both are `.tl`.
+    module: usize,
+    /// Roots of other modules nested inside this one, canonical: a file under one of them
+    /// is that module's, under the name its root gives it, and not this one's under a
+    /// longer name ([`model::Project::locate`](crate::model::Project::locate)'s rule).
+    /// `types/htl-mq/` inside `types/` is why.
+    inner: Vec<PathBuf>,
+}
+
+/// The mount a served directory's names are read under ([`crate::naming`]).
+enum Mount {
+    /// A directory of modules: `a/b.tl` is `a.b`. `""` is the top; a model module mounted
+    /// at a dependency's name has that name.
+    At(String),
+    /// A directory of packages ([`TealResolver::holding_packages`]): the mount is the name's
+    /// first segment, read in the child directory of that name.
+    Packages,
+}
+
+impl Served {
+    /// The one directory of a resolver over one root, mounted at the top.
+    fn one(sandbox: Box<dyn SandboxedFs>) -> Self {
+        Self {
+            sandbox,
+            mount: Mount::At(String::new()),
+            module: 0,
+            inner: Vec::new(),
+        }
+    }
+
+    /// The paths under this directory that may be `name` (dot-separated), in the naming
+    /// rule's order: implementations, declarations, plain Lua.
+    fn candidates(&self, name: &str) -> Vec<PathBuf> {
+        match &self.mount {
+            Mount::At(mount) => crate::naming::candidates(mount, name),
+            Mount::Packages => {
+                let package = name.split('.').next().unwrap_or(name);
+                crate::naming::candidates(package, name)
+                    .into_iter()
+                    .map(|c| Path::new(package).join(c))
+                    .collect()
+            }
+        }
+    }
+
+    /// Whether a file read from here is this directory's to serve, and not a nested root's.
+    fn holds(&self, resolved: &Path) -> bool {
+        if self.inner.is_empty() {
+            return true;
+        }
+        let file = std::fs::canonicalize(resolved).unwrap_or_else(|_| resolved.to_path_buf());
+        !self.inner.iter().any(|i| file.starts_with(i))
+    }
+
+    /// `candidate`, read through the sandbox, when it exists and is this directory's.
+    fn read(&self, candidate: &Path) -> Result<Option<mlua_pkg::sandbox::FileContent>, ReadError> {
+        Ok(self
+            .sandbox
+            .read(candidate)?
+            .filter(|f| self.holds(&f.resolved_path)))
+    }
+}
+
+#[cfg(feature = "dts")]
+impl TealResolver {
+    /// A resolver that serves every name `project`'s modules give, from the file the model
+    /// names — the run-time half of a host described as a model (#320). The checker half is
+    /// [`Htl::apply_model`](crate::Htl::apply_model) on the same project:
+    ///
+    /// ```no_run
+    /// # fn main() -> anyhow::Result<()> {
+    /// use htl_core::model::{HostDir, Project, View};
+    /// use htl_core::pkg::TealResolver;
+    /// let root = std::path::Path::new("game");
+    /// let project = Project::for_host(root, &[
+    ///     HostDir::Modules("scripts".into()),
+    ///     HostDir::Packages("mods".into()),
+    ///     HostDir::Declarations("types".into()),
+    /// ]);
+    /// let h = htl_core::Htl::new()?;
+    /// h.apply_model(&project, View::Source)?;
+    /// let mut reg = mlua_pkg::Registry::new();
+    /// reg.add(TealResolver::from_project(&project)?);
+    /// reg.install(h.lua())?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// # Why from the model
+    ///
+    /// A checker set up with directories and a resolver set up with the same directories
+    /// are two descriptions kept in step by hand, and they were not in step: the checker's
+    /// `package.path` templates answered names the resolver did not serve, and the reverse.
+    /// Here both read one description, and a name is the same file to both — or an error
+    /// to both.
+    ///
+    /// # What it serves
+    ///
+    /// Every root of every module but contract directories (which each hold the same names
+    /// as the next and are served per directory, [`for_contract`](Self::for_contract)), each
+    /// at its module's mount, by the naming rule ([`crate::naming`]); a file under a root
+    /// nested inside another belongs to the inner one only. For each name:
+    ///
+    /// - one `.tl` implementation is checked, generated and loaded;
+    /// - two `.tl` of the name, or implementations (`.tl` or `.lua`) in two modules, are
+    ///   [`TealResolveError::Ambiguous`], as the model's resolver reports them to the
+    ///   checker;
+    /// - a declaration alone steps aside for a `.lua` of the name and for a name in
+    ///   `package.preload` (a host module), and is otherwise a type-only table — what
+    ///   [`new`](Self::new) does.
+    ///
+    /// The rule is applied on every `require`, not to a table built once: a file dropped
+    /// into a served directory after the host started is found by the next `require`. The
+    /// checker's table is built once ([`Htl::apply_model`](crate::Htl::apply_model)), so
+    /// before a file it does not have is checked, the checker is asked to read the
+    /// directories again — the module is then checked against the directories as they are,
+    /// including another module dropped in with it. A directory the project did not have
+    /// when it was built — a package added to a [`HostDir::Packages`] directory, a root
+    /// that did not exist — is not served; that is a new project.
+    ///
+    /// [`HostDir::Packages`]: crate::model::HostDir::Packages
+    ///
+    /// # What it does not do
+    ///
+    /// It puts nothing on the checker's `package.path`: the model answers every name it has.
+    /// The contract settings — [`expect_type`](Self::expect_type),
+    /// [`require_fields`](Self::require_fields) and the rest — apply as on any resolver,
+    /// but belong on a resolver per contract directory ([`for_contract`](Self::for_contract))
+    /// rather than on one serving everything. [`holding_packages`](Self::holding_packages)
+    /// is for a resolver over one directory; here a directory of packages is
+    /// [`HostDir::Packages`] in the model.
+    ///
+    /// Fails when a root that exists cannot be opened as a sandbox.
+    pub fn from_project(project: &crate::model::Project) -> Result<Self, InitError> {
+        use crate::model::Owner;
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        // Every root, contract directories included: a file under one is not the outer
+        // module's, served or not.
+        let all: Vec<PathBuf> = project
+            .modules
+            .iter()
+            .flat_map(|m| m.roots.iter().map(|(_, r)| canon(r)))
+            .collect();
+        let mut served = Vec::new();
+        for (i, m) in project.modules.iter().enumerate() {
+            if m.owner == Owner::Contract {
+                continue;
+            }
+            let mut seen: Vec<PathBuf> = Vec::new();
+            for (_, root) in m.roots.iter() {
+                // Two roles of one module on one directory are one directory.
+                let r = canon(root);
+                if !root.is_dir() || seen.contains(&r) {
+                    continue;
+                }
+                seen.push(r.clone());
+                let inner = all
+                    .iter()
+                    .filter(|o| **o != r && o.starts_with(&r))
+                    .cloned()
+                    .collect();
+                served.push(Served {
+                    sandbox: Box::new(SymlinkAwareSandbox::new(root)?),
+                    mount: Mount::At(m.mount.clone()),
+                    module: i,
+                    inner,
+                });
+            }
+        }
+        Ok(Self {
+            served,
+            root: None,
+            packages: false,
+            from_model: true,
+            path_added: AtomicBool::new(false),
+            module_separator: '.',
+            expect_type: None,
+            require_fields: Default::default(),
+            checker_paths: Vec::new(),
+            exclude: Vec::new(),
+            only_module: None,
+        })
+    }
+}
+
 impl Resolver for TealResolver {
     fn resolve(&self, lua: &Lua, name: &str) -> Option<mlua::Result<Value>> {
         let dotted: String = name
             .split(self.module_separator)
             .collect::<Vec<_>>()
             .join(".");
-        let candidates = self.candidates(&dotted);
         let h = match Self::prelude(lua) {
             Ok(h) => h,
             Err(e) => return Some(Err(e)),
@@ -1889,8 +2115,8 @@ impl Resolver for TealResolver {
         if let Err(e) = self.ensure_checker_path(lua, &h) {
             return Some(Err(e));
         }
-        let read = |candidate: &Path| {
-            self.sandbox.read(candidate).map_err(|source| {
+        let read = |s: &Served, candidate: &Path| {
+            s.read(candidate).map_err(|source| {
                 mlua::Error::external(TealResolveError::Read {
                     module: name.to_string(),
                     source,
@@ -1898,27 +2124,70 @@ impl Resolver for TealResolver {
             })
         };
         let is = |c: &Path, ext: &str| c.to_string_lossy().ends_with(ext);
-        let mut implementations = Vec::new();
-        for c in candidates
+        let candidates: Vec<(&Served, Vec<PathBuf>)> = self
+            .served
             .iter()
-            .filter(|c| is(c, ".tl") && !is(c, ".d.tl"))
-        {
-            match read(c) {
-                Ok(Some(file)) => implementations.push(file),
-                Ok(None) => {}
-                Err(e) => return Some(Err(e)),
+            .map(|s| (s, s.candidates(&dotted)))
+            .collect();
+        let mut implementations = Vec::new();
+        for (s, cs) in &candidates {
+            for c in cs.iter().filter(|c| is(c, ".tl") && !is(c, ".d.tl")) {
+                match read(s, c) {
+                    Ok(Some(file)) => implementations.push((s.module, file)),
+                    Ok(None) => {}
+                    Err(e) => return Some(Err(e)),
+                }
             }
         }
-        if implementations.len() > 1 {
+        // Plain Lua of the name, by module. Read only to be known about: a `.lua` is served
+        // by a later resolver, and one that cannot be read is one that is not there.
+        let luas = || -> Vec<(usize, PathBuf)> {
+            candidates
+                .iter()
+                .flat_map(|(s, cs)| {
+                    cs.iter()
+                        .filter(|c| is(c, ".lua"))
+                        .filter_map(|c| match s.read(c) {
+                            Ok(Some(f)) => Some((s.module, f.resolved_path)),
+                            _ => None,
+                        })
+                })
+                .collect()
+        };
+        // Implementations in two modules are two owners of one name, which no order picks
+        // between; within one directory only two `.tl` are. One directory is one module.
+        let others = if self.served.len() > 1 {
+            luas()
+        } else {
+            Vec::new()
+        };
+        let modules: std::collections::BTreeSet<usize> = implementations
+            .iter()
+            .map(|(m, _)| *m)
+            .chain(others.iter().map(|(m, _)| *m))
+            .collect();
+        if implementations.len() > 1 || modules.len() > 1 {
+            let mut files: Vec<PathBuf> = implementations
+                .into_iter()
+                .map(|(_, f)| f.resolved_path)
+                .collect();
+            if files.len() < 2 {
+                files.extend(others.into_iter().map(|(_, f)| f));
+            }
             return Some(Err(mlua::Error::external(TealResolveError::Ambiguous {
                 module: name.to_string(),
-                files: implementations
-                    .into_iter()
-                    .map(|f| f.resolved_path)
-                    .collect(),
+                files,
             })));
         }
-        if let Some(file) = implementations.pop() {
+        if let Some((_, file)) = implementations.pop() {
+            // The checker's table was read when the host set it up; a module dropped in
+            // since is not in it, nor is anything dropped in with it. Read it again first,
+            // so the check sees the directories the run sees.
+            if self.from_model
+                && let Err(e) = refresh_if_unknown(&h, &file.resolved_path)
+            {
+                return Some(Err(e));
+            }
             let loaded = match self.load_teal(lua, &h, &file.content, &file.resolved_path, name) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1939,24 +2208,27 @@ impl Resolver for TealResolver {
             };
         }
         let mut declaration = None;
-        for c in candidates.iter().filter(|c| is(c, ".d.tl")) {
-            match read(c) {
-                Ok(Some(file)) => {
-                    declaration = Some(file);
-                    break;
+        'found: for (s, cs) in &candidates {
+            for c in cs.iter().filter(|c| is(c, ".d.tl")) {
+                match read(s, c) {
+                    Ok(Some(file)) => {
+                        declaration = Some(file);
+                        break 'found;
+                    }
+                    Ok(None) => {}
+                    Err(e) => return Some(Err(e)),
                 }
-                Ok(None) => {}
-                Err(e) => return Some(Err(e)),
             }
         }
         let file = declaration?;
         // A `.d.tl` may describe a plain `.lua` served by a later resolver (FsResolver /
         // VendoredResolver): step aside if one is present. Native modules must be
         // registered *before* this resolver.
-        let lua_beside = candidates
-            .iter()
-            .filter(|c| is(c, ".lua"))
-            .any(|c| matches!(self.sandbox.read(c), Ok(Some(_))));
+        let lua_beside = if self.served.len() > 1 {
+            !others.is_empty()
+        } else {
+            !luas().is_empty()
+        };
         if lua_beside {
             return None;
         }
@@ -1976,4 +2248,20 @@ impl Resolver for TealResolver {
             }),
         )
     }
+}
+
+/// Have the model's checker read its directories again when it does not have `file`
+/// ([`Htl::install_resolver`](crate::Htl::install_resolver)'s `refresh_model`). A checker
+/// with no model installed has neither function, and nothing to refresh.
+fn refresh_if_unknown(h: &Table, file: &Path) -> mlua::Result<()> {
+    let (Ok(owns), Ok(refresh)) = (
+        h.get::<Function>("owns_file"),
+        h.get::<Function>("refresh_model"),
+    ) else {
+        return Ok(());
+    };
+    if !owns.call::<bool>(file.to_string_lossy().as_ref())? {
+        refresh.call::<()>(())?;
+    }
+    Ok(())
 }
