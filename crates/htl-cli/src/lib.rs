@@ -3028,14 +3028,10 @@ fn cmd_build(
         lints: linked.lints.len(),
         denied: sink.denied(),
     };
-    // The checks' own errors went through the sink above; what is left is the linker's.
-    let checked: std::collections::HashSet<&String> = linked
-        .checks
-        .iter()
-        .flat_map(|(_, c)| c.errors.iter())
-        .collect();
-    for e in linked.errors.iter().filter(|e| !checked.contains(e)) {
-        eprintln!("error: {e}");
+    // The checks' own errors went through the sink above; the linker's are its own list,
+    // said through the same sink so they read as the checks' do.
+    for d in &linked.link_errors {
+        sink.diagnostic(d);
     }
     if htl::verdict::verdict(&found, &policy) {
         eprintln!(
