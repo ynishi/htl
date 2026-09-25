@@ -89,68 +89,42 @@ a name that resolves to nothing. A command that could not get as far as a verdic
 directory in no project, an `htl.toml` that does not parse, a file it cannot read, a flag
 it does not take — says why and exits 2, whichever command it was.
 
-The project root is found once, by walking up from the file to the nearest `htl.toml` or
-`mlua-pkg.toml` — either is enough, and the two naming different directories is refused by
-every command, since a project has one root. Installed deps become
-visible to the checker and to `run` / `test` / `build` automatically. They go under
-`.htl/modules/`, beside the check cache — htl decides that one location, and the installer
-is [mlua-pkg](https://github.com/ynishi/mlua-pkg)'s library rather than its binary, so
+Installed deps just work after `htl pkg install`. They go under `.htl/modules/`, beside
+the check cache — htl decides that one location, and the installer is
+[mlua-pkg](https://github.com/ynishi/mlua-pkg)'s library rather than its binary, so
 there is no second process to agree with and nothing on `PATH` to install. `MLUA_PKG_DIR`
 and a `target/` in the working directory, which the `mlua-pkg` binary reads, are not
-consulted. Inside, `vendored/<name>` is mlua-pkg's link to each dependency's package root,
-and `entries/<name>` is htl's link to the directory below that root the dependency's
-`entry` names (`src/<name>` for a library `htl new --lib` wrote), which is where
-`require("<name>")` looks — a diagnostic in a dependency carries that path, and a
-dependency's `types/` is read from the root beside it. The links are written from
-`mlua-pkg.lock` by `htl pkg install` and repaired by any command that reads the path.
-*Vendored* is kept for the other
-thing: a copy of a dependency committed to the repo, which a `target_dir` entry in the
-manifest declares and nothing does by default. When a
-directory is given, `check` / `fmt` / `build` / `test` walk the project's own files only:
-`target/`, `node_modules/`, `.mlua-pkgs/` and any
-dot-directory are not entered, so dependencies' sources and tests stay theirs. A
-directory passed explicitly is always walked. A `target_dir` copy is not entered either,
-and there the manifest is what says so: the copy sits in the repo under a name the project
-chose, so nothing about the path tells it apart from the project's own code beside it.
-Nor does a walk by `check`, `fix` or `unused` take a `.tl` that belongs to no module of the
-project — one directly under the project root, which is no module's root unless
-`[layout] source = "."`, or in a directory the layout does not name: nothing can require
-it by a name the project gives it, so it is not the project's to check or to count as
-unused. The run names such files once, with where they go (`1 file(s) belong to no module
-of the project and were not checked: stray.tl; move them under src/, or set [layout]
-source = "." if the project root is where its modules are`); a file named on the command
-line is checked all the same. A project that has no source directory at all and keeps its
-`.tl` at the root is not skipped but refused: `check`, `fix`, `unused` and `test` stop
-with `htl: 3 file(s) at the project root belong to no module (lib.tl, lib_test.tl,
-main.tl): add [layout] source = "." to htl.toml, or move them under src/` and exit 2,
-because those files are where the project keeps its code and a run that skipped them
-would pass having checked nothing. The layout is the project's to state, not htl's to
-guess.
-`mlua-pkg install` rewrites it every time it runs — checking it would report a dependency's
-errors as the project's, `htl fmt` would write a diff against upstream that the next
-install undoes, and its `*_test.tl` are a dependency's suite (Go's `./...` has excluded
-`vendor/` since 1.9 for the same reason). A `patch_dir` dependency is the one thing in
-between: `check` reads it, `fmt`, `fix` and `test` do not (see Patched dependencies). What is
-not walked is still checked: a dependency is checked through the `require` that reaches
-it, and a type error in it is reported as an error with the dependency's own path and
-the file that required it —
+consulted. Inside, `entries/<name>` is where `require("<name>")` looks (`src/<name>` for a
+library `htl new --lib` wrote). *Vendored* is kept for the other thing: a copy of a
+dependency committed to the repo, which a `target_dir` entry in the manifest declares.
+When a directory is given, `check` / `fmt` / `build` / `test` do not enter `target/`,
+`node_modules/`, `.mlua-pkgs/` or any dot-directory. A `target_dir` copy is not entered
+either, and there the manifest is what says so: the copy sits in the repo under a name
+the project chose, so nothing about the path tells it apart from the project's own code
+beside it. `mlua-pkg install` rewrites it every time it runs — checking it would report a
+dependency's errors as the project's, `htl fmt` would write a diff against upstream that
+the next install undoes, and its `*_test.tl` are a dependency's suite (Go's `./...` has
+excluded `vendor/` since 1.9 for the same reason). A `.tl` that belongs to no module of
+the project is named once, with where it goes: `1 file(s) belong to no module of the
+project and were not checked: stray.tl; move them under src/, or set [layout] source =
+"." if the project root is where its modules are`. A project that keeps its `.tl` at the
+root with no source directory is refused: `htl: 3 file(s) at the project root belong to
+no module (lib.tl, lib_test.tl, main.tl): add [layout] source = "." to htl.toml, or move
+them under src/`, exit 2. A type error in a dependency is reported with the dependency's
+own path and the file that required it —
 
 ```text
 error: .htl/modules/entries/mathx/init.tl:12:8: in local declaration: got string, expected number
   (required by src/geometry.tl)
 ```
 
-— once per run however many files require it, and replayed from the cache like the
-requirer's own diagnostics. Paths read against the directory the command ran in, whether
-the walk or a `require` found the file, and one that lies outside it is written in full
-rather than as a stack of `..`. `htl run` would refuse the module at that `require`; the
-check says so first. A file under the project's `tests/` may read the project's sources
-and `tests/` itself, the same as under `htl test`, so `htl check tests` and `htl test`
-agree; the project's sources cannot `require` what is under
-`tests/`. A file with neither an `htl.toml` nor an `mlua-pkg.toml` above it belongs to
-no project, and resolves its `require`s in its own directory. `htl check <file>` checks
-it; `htl check <dir>` with neither above the directory is an error that says what it
-looked for — a directory is checked as a project, and `htl init` makes it one.
+`htl run` would refuse the module at that `require`; the check says so first. A file
+under the project's `tests/` may read the project's sources and `tests/` itself, the same
+as under `htl test`, so `htl check tests` and `htl test` agree; the project's sources
+cannot `require` what is under `tests/`. `htl check <file>` works on a file in no
+project; `htl check <dir>` with neither an `htl.toml` nor an `mlua-pkg.toml` above the
+directory is an error that says what it looked for — a directory is checked as a project,
+and `htl init` makes it one.
 
 A failure at run time names Teal, not the Lua htl generated — the file and the line that
 raised, and the same for every frame that reached it. `htl run boom.tl`, where `boom.tl`
@@ -167,15 +141,13 @@ stack traceback:
 
 Nothing had to be mapped back. Teal keeps the input's line breaks when it generates Lua,
 and htl loads every chunk under its source's own name, so a Lua frame is already a Teal
-frame. The innermost line says a value was nil; the frames say which caller passed it,
-which is the part a reader who did not write the program cannot guess. `htl test` reports
-the same for a failing test and for a file that raises while loading, and `--format json`
-carries the text unchanged in each file's `error` and `failures`.
+frame. `htl test` reports the same for a failing test and for a file that raises while
+loading, and `--format json` carries the text unchanged in each file's `error` and
+`failures`.
 
 The exception is stripped bytecode, which is what a bundle holds by default and what
-`include_tl_bytes!` embeds. Stripping drops the line numbers and the chunk's own name
-together, so those frames say what raised and not where. A scaffolded Rust host
-(`htl new --target bin`), failing inside its embedded module:
+`include_tl_bytes!` embeds. A scaffolded Rust host (`htl new --target bin`), failing
+inside its embedded module:
 
 ```text
 runtime error: ?:-1: attempt to index a nil value
@@ -186,12 +158,8 @@ stack traceback:
 	src/main.tl:4: in main chunk
 ```
 
-The last frame is the entry script, embedded with `include_tl!` as source, and it still
-names its file and line; the two `?` frames are the stripped module, left with the
-function names Lua recovered from the calls and nothing to open. A bundle is stripped
-throughout unless it was built with `htl build --debug` (see Bundles). Whichever a host
-ships, the `.tl` is still there, and running it is what gives the frames back —
-`htl run src/main.tl`, the same failure:
+A bundle keeps the frames when built with `htl build --debug` (see Bundles). Running the
+`.tl` gives them back too — `htl run src/main.tl`, the same failure:
 
 ```text
 runtime error: src/sample/init.tl:9: attempt to index a nil value (local 'g')
@@ -202,47 +170,29 @@ stack traceback:
 	src/main.tl:4: in main chunk
 ```
 
-Frames are for whoever wrote the Teal. A host embedding htl in a program whose users did
-not write it shows them `htl::user_message(&err)` instead — the innermost cause alone (see
-Embedding in Rust).
+A host embedding htl in a program whose users did not write it shows them
+`htl::user_message(&err)` instead (see Embedding in Rust).
 
 ## Caching
 
-`htl check` stores what it worked out under `.htl/cache/` at the project root and replays
-whatever has not moved. The summary says how much: `[cached]` when everything came from the
-store and no checker was built at all, `[36/48 cached]` when some of it did, and nothing
-when none did. `--format json` carries the same as `summary.cached` and `summary.replayed`.
+`htl check` stores what it worked out under `.htl/cache/` at the project root. The summary
+says how much: `[cached]`, `[36/48 cached]`, or nothing when none was replayed.
+`--format json` carries the same as `summary.cached` and `summary.replayed`.
 `htl init` puts `.htl/` in `.gitignore` — one line for the cache and the installed deps
 beside it; add it by hand in an existing project.
 
 `htl build` and the macros (`include_bundle!`, `include_tl!`, `include_tl_bytes!`) read
-the same store. A typed module in the closure whose entry still holds is taken from it —
-the Lua it generated, and what checking it reported — instead of being generated again,
-and `htl build` says so with the same `[cached]` / `[31/32 cached]` suffix (the directory
-form of `build`, the older snapshot, is not cached). The entries are the ones `htl test`
-writes for the modules its test files reach (`module`, holding the generated Lua beside
-what checking said), keyed by the file and the lint selection and stamped without the
-binary, so a test run feeds the next build, a build feeds the next test run, and a
-`cargo build` replays what `htl build` generated. Bytecode is never stored: compiling the
-stored Lua is milliseconds, and the bundle a replayed build writes is byte-for-byte the
-one a cold build writes. `build` takes `--no-cache` and `--explain-cache` and is always
-per-module; the macros keep a store only in a project — an `htl.toml` or an `mlua-pkg.toml`
-above the crate, at whose root the store is — and never under
-`target/` (the copy `cargo publish` verifies) or a registry checkout — `HTL_NO_CACHE=1`
-turns it off, `HTL_CACHE_DEBUG=1` has them say how much they replayed or why they did
-not. In those two places it is no store **and no link**: reading a project there writes
-nothing at all, the `.htl/modules/entries` repair included, so the tree `cargo package`
-built is the tree it verifies. `target/` is read off the path, which is convention and
-not a signal cargo gives — a `CARGO_TARGET_DIR` outside the tree is not recognised.
-Only `htl check` bounds the store: a build or an expansion sees one closure and
-would evict the rest of the project. On a 30-module, 16,000-line project (release CLI): a
-cold build 1.3 s; nothing edited 0.03 s; one leaf edited 0.7 s, `[30/32 cached]` — the
-leaf and the entry that requires it are generated, the rest replay; the module every
-other one requires edited, 1.3 s again, since every entry read it.
+the same store, and `htl build` says so with the same `[cached]` / `[31/32 cached]`
+suffix (the directory form of `build`, the older snapshot, is not cached). `build` takes
+`--no-cache` and `--explain-cache`; for the macros, `HTL_NO_CACHE=1` turns the store off
+and `HTL_CACHE_DEBUG=1` has them say how much they replayed or why they did not. On a
+30-module, 16,000-line project (release CLI): a cold build 1.3 s; nothing edited 0.03 s;
+one leaf edited 0.7 s, `[30/32 cached]` — the leaf and the entry that requires it are
+generated, the rest replay; the module every other one requires edited, 1.3 s again,
+since every entry read it.
 
-There are two separate controls. **Whether to cache** is `--no-cache`, which neither reads
-nor writes. **How the cache is grained** is `--cache-mode`, or `[cache] mode` in `htl.toml`
-with the flag overriding it:
+**Whether to cache** is `--no-cache`. **How the cache is grained** is `--cache-mode`, or
+`[cache] mode` in `htl.toml` with the flag overriding it:
 
 | mode | entry | an edit costs |
 |---|---|---|
@@ -266,46 +216,17 @@ cold check. `whole-run` keeps one entry per invocation rather than one per modul
 the reason to reach for it if the number of files in `.htl/` becomes a problem before
 eviction lands.
 
-An entry is used only when the module and everything it required still hash the same, every
-name it requires still resolves where it did, and the binary that wrote the entry is the one
-reading it. Content hashes throughout, no timestamps, so touching a file without editing it
-invalidates nothing and a fresh checkout does not either. Anything unexpected — a corrupt
-entry, an unreadable store, an htl upgrade — is a miss, which costs the check it would have
-skipped and never the wrong answer.
+A level is in the key because it is written in the same spec as which rules run — moving
+one rule between `warn` and `deny` changes no diagnostic, and re-checks anyway.
 
-Only the names a module actually requires are watched. Adding a module nothing requires
-leaves every existing entry valid; adding one that could answer to a name something does
-require invalidates the modules asking for that name, whether or not the checker would still
-have picked the old file. Writing a new module is a normal thing to do while working, and it
-costs a check of that module rather than of the project.
-
-The store is bounded, at four entries per module or 256, whichever is larger. A run that
-finds it over the bound drops what it did not itself use: entries whose files are gone go
-first, then the oldest until it fits. A dropped entry is a miss on the next run and nothing
-worse. Eviction is where mtimes are allowed, because being wrong there costs a check rather
-than a wrong answer; invalidation still refuses them.
-
-Flags are part of the key when they change what a module reports and not when they only
-change the verdict: `--lint` gets its own entries, `--strict` reuses them and differs in the
-exit code alone. A level is in the key because it is written in the same spec as which
-rules run — moving one rule between `warn` and `deny` changes no diagnostic, and re-checks
-anyway.
-
-`htl test` shares the store, for the half of its work that does not depend on the outcome:
-checking a test file and generating its Lua. **The run is never cached** — a test has to run
-to say whether it passes, and it does, every time. The summary says how many files had their
-checking reused (`27 checked from cache`), and `--no-cache` opts out as it does for `htl
-check`.
-
-The modules a test requires are stored too, and put in front of the module searcher before
-the file runs, so requiring one does not check and generate it mid-execution. Measured on a
-27-file suite: 4.65 s without any of this, 5.03 s on the first run (which stores what it
-generated) and 3.03 s on every run after.
+`htl test` shares the store for checking a test file and generating its Lua. The summary
+says how many files had their checking reused (`27 checked from cache`), and `--no-cache`
+opts out as it does for `htl check`. The modules a test requires are stored too. Measured
+on a 27-file suite: 4.65 s without any of this, 5.03 s on the first run (which stores what
+it generated) and 3.03 s on every run after.
 
 `htl cache status` says what the store holds — entries by kind, total size, how recently they
-were used, and with `--entries` the files each one covers. `htl cache clear` empties it. Both
-find the store at the project root, which is not necessarily where you are standing:
-`htl check src` run from anywhere in a repo writes to the project root.
+were used, and with `--entries` the files each one covers. `htl cache clear` empties it.
 
 `--explain-cache` (or `HTL_CACHE_DEBUG=1`) prints why each lookup missed and one line at the
 end with what the run did: hits, misses, entries written, entries evicted.
@@ -357,33 +278,19 @@ an `any` as much as on a `string`, and `tonumber(...)` is a `number` that no `in
 accepts. What the checker did not see is Lua's — the far side of a cast, `(v as integer)
 + 1` where `v` is the `"10"` that `std.json.decode` or `arg` handed over; a function
 `load` built from a string; Lua source the host gave `exec` — and Lua 5.4 reads
-`"10" + 1` there as `11`. `h.strict_strings()?` in `preload` makes that an error naming
-the string (it removes the arithmetic metamethods from the string metatable, which is
-where Lua keeps that conversion). It does not touch `10 .. ""`, which the VM does, nor
-`"10" < "9"`, which is a string comparison, nor `tonumber` and `math.tointeger`, which
-convert because they were asked to — so a value that arrives as `any` is converted once,
-where it arrives, by the program: `s:match("^%-?%d+$")` and `math.tointeger` when hex, an
-exponent and surrounding whitespace are not wanted, `tonumber` when they are, and never
-a cast. The third layer, a host's own argument, is `#[host_module]`'s: mlua converts a
-Lua string to an `i64` parameter and a number to a `String` one, so a parameter that may
-see a value from that edge is a `Strict<T>` — `n: Strict<i64>` is declared `integer`
-exactly as `i64` is, takes a Lua integer (or a float with no fraction) and refuses
-`"10"` with `error converting Lua string to integer`. `Strict<String>`, `Strict<bool>`
-and `Strict<f64>` are the same for their kinds; it derefs to `T`.
+`"10" + 1` there as `11`. `h.strict_strings()?` in `preload` makes that an error. A
+value that arrives as `any` is converted once, where it arrives, by the program:
+`s:match("^%-?%d+$")` and `math.tointeger` when hex, an exponent and surrounding
+whitespace are not wanted, `tonumber` when they are, and never a cast. The third layer, a
+host's own argument, is `#[host_module]`'s: a parameter that may see a value from that
+edge is a `Strict<T>` — `n: Strict<i64>` is declared `integer`; `Strict<String>`,
+`Strict<bool>` and `Strict<f64>` are the same for their kinds; it derefs to `T`.
 
 The second argument to `exec` is the chunk name: the name every frame of a run-time
 failure inside that chunk is reported under. `@<path>` is a source location and prints as
 the path, so `@scripts/main.tl` gives a reader something to open; `=<label>` is a bare
 label, the honest answer for a module no file backs, which is how htl registers its own
-test library as `=htl.test`. `preload` takes no chunk name and uses the `.tl` a `require`
-of that module name would have found (`foo.bar` → `@foo/bar.tl`); `preload_at` takes one
-when the source is somewhere else, or when there is no source.
-
-`preload_bytes` is the exception, and it is worth knowing before reading a failure from
-an embedded module. A compiled chunk carries the name it was compiled under, and stripping
-drops that name along with the line numbers — so a frame from `include_tl_bytes!` reads
-`?: in function 'util.greet'`, whatever name the load was given. The Teal is still there
-to run: `htl run scripts/util.tl` and `htl test` name the file and the line.
+test library as `=htl.test`.
 
 The macros run the checker — htl-core and the vendored Lua that hosts `tl` — inside the
 proc macro, and the `dev` profile compiles a proc macro and its dependencies under
@@ -402,10 +309,8 @@ rebuild of the macro's dependencies, then every build after). The `.tl` edit loo
 to `htl check` / `htl test` in any case — an edit to a leaf module costs a few
 milliseconds from the cache — and `cargo build` to the Rust host and the binary.
 
-`#[derive(TealRecord)]` is checked in one direction at build time and one at runtime:
-the `.d.tl` it writes is what the Teal side is compiled against, while a table coming
-back the other way is compared field by field as it converts. A table that does not fit
-says which record, which field, what the record declared and what arrived:
+A table `#[derive(TealRecord)]` converts that does not fit says which record, which
+field, what the record declared and what arrived:
 
 ```text
 Outcome.cause: expected string, got nil
@@ -434,28 +339,16 @@ declarations rather than as `any`:
 | `mlua::Value` / `serde_json::Value` | `any` | unchanged: the deliberate escape hatch |
 
 A data-carrying enum is declared nested in the host module (`records = [Shape]`), where
-its variant records are reachable as `host.Shape_Circle` for `is`; a `.d.tl` module of
-its own could export only the union, so `#[teal(dts = ..)]` on one is refused. Unit
-enums and newtypes may stand alone, and `uses = [Name]` imports every kind with
-`local type Name = require("Name")`.
+its variant records are reachable as `host.Shape_Circle` for `is`; `#[teal(dts = ..)]` on
+one is refused. `uses = [Name]` imports every kind with `local type Name =
+require("Name")`.
 
-A variant reaches Teal under its Rust name unless the enum says otherwise:
-`#[teal(rename_all = "..")]` on the enum takes serde's set — `lowercase`, `UPPERCASE`,
+`#[teal(rename_all = "..")]` on an enum takes serde's set — `lowercase`, `UPPERCASE`,
 `PascalCase`, `camelCase`, `snake_case`, `SCREAMING_SNAKE_CASE`, `kebab-case`,
-`SCREAMING-KEBAB-CASE`, spelled as serde spells them, so a type that is also `Serialize`
-can say the same thing twice and the two agree — and `#[teal(name = "..")]` on one
-variant overrides it. The word is what the declaration lists, what a value must say to
-cross, what the message lists when it does not, and, for a data-carrying enum, what
-`where self.kind == "in_review"` tests; the variant *records* keep their Rust names
-(`Shape_InReview`), since a Teal identifier cannot be `kebab-case`. Two variants that end
-up with the same word are refused at expansion, naming both. Record fields have no
-equivalent — they are declared under their Rust names, and `#[teal(..)]` on a field is
-refused rather than ignored.
+`SCREAMING-KEBAB-CASE` — and `#[teal(name = "..")]` on one variant overrides it.
 
 `Result<T, E>` returns raise a Lua error on `Err` by default. With
-`#[host_module(name = "store", errors = "return")]` they come back Lua-style instead:
-`Ok(v)` -> `v, nil`, `Ok(())` -> `true, nil`, `Err(e)` -> `nil, tostring(e)`, and the
-`.d.tl` says `function(...): T, string` (`boolean, string` for unit), so
+`#[host_module(name = "store", errors = "return")]` they come back Lua-style instead, so
 `local ok, err = store:write(name, text)` needs no `pcall`.
 
 `#[host_module]` turns the plain `impl` into a `mlua::UserData` impl and writes
@@ -468,16 +361,11 @@ sees `None`; Teal parses the mark only on a trailing run of parameters, so an `O
 with a required parameter after it is declared as the plain `T` and has to be passed.
 Another host type comes
 in as `UserDataRef<T>` (`UserDataRefMut<T>` to mutate it, `UserDataOwned<T>` to keep it)
-and is declared as `T`, the same name a method returning it declared; nested types come
-from `#[derive(TealRecord)]` structs and enums in the same source file, types from
-other modules via `uses = [Name]` + their own `.d.tl`.
+and is declared as `T`, the same name a method returning it declared; types from other
+modules come in via `uses = [Name]`.
 
-The name a host module registers is a name the Teal sources no longer own. The host puts
-it in `package.preload`, which Lua consults before any path searcher, so a `src/host.tl`
-sitting beside `#[host_module(name = "host")]` would be the file the check reads and never
-the module the program runs — green check, `attempt to call a nil value` at the first
-function the two do not share. In a project (a directory with `htl.toml` or
-`mlua-pkg.toml`) that is an error, reported at every `require` of the name:
+A `src/host.tl` beside `#[host_module(name = "host")]` is, in a project, an error
+reported at every `require` of the name:
 
 ```text
 src/main.tl:1:14: 'host' is provided by the host (#[host_module] in Cargo.toml's crate)
@@ -485,14 +373,12 @@ and also implemented by src/host.tl: the host's module is what runs, so this fil
 checked and never run — rename it, or stop providing the name
 ```
 
-The same holds for a `src/host.lua`, with or without a `.d.tl` beside it, and for a name
-the host provides by the other two routes: `[build] host` in `htl.toml` (the message says
-`[build] host in htl.toml`) and `std.*` (`htl's std`). `htl run` and `htl test` refuse the
-file at its `require` with the same message rather than run it. The host's `.d.tl` is not
-an implementation: it is how the module is typed, and the check reads it. Which of the two
-gives up the name is the project's decision — rename the file, or stop providing the name.
-A file in no project has no model to ask, and is reported by the `host-module-shadowed`
-lint instead (see "Lints").
+The same holds for a `src/host.lua`, and for the other two routes: `[build] host` in
+`htl.toml` (the message says `[build] host in htl.toml`) and `std.*` (`htl's std`). The
+host's `.d.tl` is not an implementation: it is how the module is typed, and the check
+reads it. Which of the two gives up the name is the project's decision — rename the
+file, or stop providing the name. A file in no project is reported by the
+`host-module-shadowed` lint instead (see "Lints").
 
 ### Your own `Lua`
 
@@ -520,9 +406,7 @@ let h = Htl::with_checker_lua(&checker, lua)?; // the program runs here; `os` an
 `Htl::from_lua(lua)` is the same for the shared form, where the checker runs on the
 host's state too; that state then needs what the checker needs as well.
 
-What htl itself needs from a program state: `package` (the searcher and `preload`) and
-the base library's `load`; `debug`, only for `htl test --coverage`. The checker state
-`Htl::new` makes uses `string`, `table`, `math` and `package`, and `os.getenv` and
+The checker state `Htl::new` makes uses `string`, `table`, `math` and `package`, and `os.getenv` and
 `io.stderr` on its debug paths — and it is not the state a mod runs in.
 
 The limits are mlua's, and so are their edges, which are worth knowing before relying
@@ -535,9 +419,8 @@ limit is checked after Lua's emergency collection, and `MemoryError` is what com
 
 ### Shipping the declaration to your users (`[package.metadata.htl] dts`)
 
-A crate that registers a module in someone else's Lua state has to hand them the
-declaration of it too — their `htl check` searches their project, not your package. Name
-the files your macros write, in your manifest:
+A crate that registers a module in someone else's Lua state names the declaration files
+its macros write, in its manifest:
 
 ```toml
 # your-crate/Cargo.toml
@@ -546,15 +429,10 @@ dts = ["dts/mq.d.tl"]      # written by this crate's own #[host_module(dts = "dt
 ```
 
 A crate with one declaration per module in one directory names the directory and a `*`
-instead of the list: `dts = ["types/mine/*.d.tl"]`. The `*` stands for any run of
-characters in the file name and nothing else — no `?`, no `**` — and the directory is
-spelled out. A pattern that matches nothing is reported like a listed file that is not
-there, under the pattern's own name.
+instead of the list: `dts = ["types/mine/*.d.tl"]`.
 
-The file's own name is the module name, because `types/<crate>/` goes on the search path:
-`dts/mq.d.tl` is `require("mq")` however deep in the package it sat. A crate whose modules
-have a namespace — one that registers `mine.thing` — says where its paths start, and what
-is below that root is kept:
+A crate whose modules have a namespace — one that registers `mine.thing` — says where
+its paths start:
 
 ```toml
 [package.metadata.htl]
@@ -562,9 +440,7 @@ dts_root = "types"
 dts = ["types/mine/thing.d.tl", "types/other/log.d.tl"]
 ```
 
-which lands at `types/<crate>/mine/thing.d.tl`, so `require("mine.thing")` is the module
-the crate registered, and two modules called `log` in two namespaces are two files. An
-entry that does not start at the root is reported like a file the crate does not ship.
+which lands at `types/<crate>/mine/thing.d.tl`.
 
 Every project that depends on the crate then gets them under `types/<crate>/` from `htl
 dts` (and from `check` / `run` / `test` / `build` and the other commands that generate
@@ -586,21 +462,8 @@ in place: …` — and never an `unchanged` line:
 | `not written: <why>` | asked for and not written: a crate names a file in `[package.metadata.htl] dts` that is not a `.d.tl`, or is not in the package, or does not start at the `dts_root` that manifest declares, or names two that would be one file under `types/<crate>/`, or the file could not be written |
 | `left in place: <file>` | under `types/<crate>/` from an earlier run, and not what is read now — the crate is gone from the graph, or still there and no longer naming the file, or one this binary carries itself ([`std.*`](#the-native-modules-std), whose copy an htl built without that feature may have written: the crate is still a dependency, and the line says so) |
 
-**The exit code is about what was asked for and not written.** It is non-zero when a
-declaration this command was asked to write could not be written — a crate's, under `not
-written`, or the module a `---@contract` type is declared in, which `htl check` reports
-again as a `contract` lint — so a CI step that regenerates declarations does not pass
-having written nothing. `left in place` fails
-nothing: the file is still there and still checked, and whether to delete it is the
-project's call, since a script may still `require` the module and the dependency may be
-back on the next branch. `htl dts` deletes nothing under `types/` on its own. With nothing
-to write at all — no `Cargo.toml` with a `[package]` above, and no `---@contract` type —
-it is an error rather than a quiet success, and exits 2.
-
-Neither line is a lint. They are this command reporting on its own job, so they carry no
-`[htl <rule>]` name, they are not in `--list-lints` or `[lint]`, `-- htl: allow(...)`
-does not apply, and `htl check --format json` never carries one — a lint is a finding
-about your code, and these two are about files this command was asked to write.
+With nothing to write at all — no `Cargo.toml` with a `[package]` above, and no
+`---@contract` type — it is an error rather than a quiet success, and exits 2.
 
 ### Opening a window (`htl-mq`)
 
@@ -638,9 +501,7 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
-The entry script returns the game: `update(dt)` says whether to go on, `draw()` draws,
-and `load()`, if there is one, runs once first. `run` calls them in that order around
-macroquad's `next_frame()` until `update` returns false or the window is closed.
+The entry script returns the game table:
 
 ```lua
 local mq = require("mq")
@@ -659,22 +520,15 @@ return {
 }
 ```
 
-`mq.Key` and `mq.MouseButton` are enums, so the name of a key is checked where it is
-written: `mq:is_key_pressed("spce")` is `string "spce" is not a member of Key` from
-`htl check`, and a string that reaches the host at run time is refused with the list of
-what it accepts. `mq.Color` and `mq.Vec2` are records, and a table literal with the
-right fields is one.
-
 `htl test` runs without a display: `require("mq")` resolves to the declaration, which
 declares and does nothing, so an engine module that takes what it needs as arguments is
 testable headless, and `main.tl` — the one file that calls `mq` — is not what a test
 requires. Every `mq` method calls macroquad and panics without a window, which is the
 other reason to keep the loop out of the engine.
 
-Two environment variables make a run answerable from a script: `HTL_MQ_FRAMES=60` stops
-after sixty frames, and `HTL_MQ_SHOT=out.png` writes the last frame drawn as a PNG when
-the loop ends, for either reason. `run` reads them; `run_with` takes a `Hooks` instead,
-and `Hooks::NONE` turns them off for a host that has its own idea. A machine with no
+`HTL_MQ_FRAMES=60` stops after sixty frames, and `HTL_MQ_SHOT=out.png` writes the last
+frame drawn as a PNG. `run` reads them; `run_with` takes a `Hooks` instead, and
+`Hooks::NONE` turns them off. A machine with no
 display fails before the first frame (`XOpenDisplay() failed!` on Linux); `xvfb-run`
 is enough to get the PNG out of one.
 
@@ -693,26 +547,12 @@ htl pkg patch htlx    # patches/htlx/ in the tree, patch_dir in mlua-pkg.toml
 git add patches/htlx mlua-pkg.toml mlua-pkg.lock
 ```
 
-That is the whole recipe. `patches/<dep>/` is committed, so it is in the tarball; the
-manifest names it, so `require("<dep>.x")` resolves from it directly — no install, no
-link and no network, in a fresh clone and in the copy `cargo package` builds to verify
-alike. The copy plus the manifest naming it is the source of truth, the way `cargo
-vendor` and Go's `vendor/` have it, and its presence is what takes the network out of the
-build. Nothing else is written by hand: no `[check] paths` pointing at the copy, no
-`exclude` in `Cargo.toml`.
-
-`.htl/` is not part of any of this. `htl init` gitignores it, so no clone and no tarball
-has one, and nothing in a tarball needs one — reading a project under `target/` or a
-registry checkout [writes nothing at all](#caching), which is also what keeps cargo from
-refusing a tarball it has just built.
+That is the whole recipe. Nothing else is written by hand: no `[check] paths` pointing
+at the copy, no `exclude` in `Cargo.toml`.
 
 ### `async fn` (feature `async`)
 
-A method may be `async`, in the same `impl` as the sync ones and with no annotation
-saying which the block contains. It is registered through mlua's async variant, and its
-Teal declaration is the one the same signature produces without `async` — a function that
-yields internally and hands back the same values is an ordinary call from Lua, and Teal
-has no way to say otherwise.
+A method may be `async`, in the same `impl` as the sync ones:
 
 ```rust
 #[host_module(name = "api")]
@@ -737,8 +577,7 @@ The feature is off by default: it turns on mlua's `async`, and a host with no as
 method should be built as it was without it.
 
 Runtime resolution through mlua-pkg. A host describes the directories it serves once, as
-a project model, and sets up both the checker and the run from that one description
-(features `pkg` and `dts`):
+a project model (features `pkg` and `dts`):
 
 ```rust
 use htl::model::{HostDir, Project, View};
@@ -759,28 +598,12 @@ reg.install(h.lua())?;
 // htl::pkg::MluaProject::find(dir).expect("mlua-pkg.toml").registry()?
 ```
 
-A `.tl` that fails its type check is `Some(Err)` in mlua-pkg's terms: it never falls
-through to a later resolver. Native modules must be registered *before* the Teal
-resolver and described by a `.d.tl` for the checker.
-
-Every name is then the same file to the check and to the run, named the way `htl check`
-names files: `a/b.tl` is `a.b`, `a/init.tl` is `a`, `util/util.tl` under `scripts/` is
-`util.util` — never `util` — and under `mods/` a package's `<name>/<name>.tl` is its
-entry while `mods/a/b/a/b.tl` is `a.b.a.b`, not `a.b`. Two implementations of one name
-(`util.tl` beside `util/init.tl`, or a script and a mod of one name) are an error to
-both. The run applies the rule on every `require`, so a mod dropped into a served
-directory while the host runs is found, and the check reads the directories as they are
-by then — the new mod's own check, and the check of a module the host already had that
-requires it. A package directory or root added later is a new `Project`.
+Native modules must be registered *before* the Teal resolver and described by a `.d.tl`
+for the checker.
 
 `Htl::apply_config`, `Htl::add_path`, `Htl::add_package_path` and a `TealResolver` over one
 directory (`TealResolver::new(dir)`, `.holding_packages()`) are still there, for a host
-that does not describe a project. They are two descriptions kept in step by hand, and the
-checker's half reads `package.path` through Lua's templates rather than the naming rule,
-so they part ways: `add_package_path`'s `?/?` template checks `require("a.b")` against
-`pkgs/a/b/a/b.tl`, which the resolver does not serve, and `apply_config` puts `types/`
-and `types/<crate>/` on the path as two roots, so `types/htl-mq/mq.d.tl` checks as `mq`
-and as `htl-mq.mq` while `TealResolver::new("types")` serves only the second (#320).
+that does not describe a project; they part ways with the resolver (#320).
 
 Teal resolves every `require("literal")` at check time, and htl keeps it that way. When a
 module exists only at run time (the user's `Tasks.tl` that a long-built host loads), the
@@ -799,33 +622,22 @@ A dynamic `require(name_in_a_variable)` typed as `any` is the escape hatch, like
 GDScript's `load()` or a shorthand `declare module "x"`; use it only when the module name
 itself is unknown until run time.
 
-Errors that come out of running Lua (a host function's `Err`, a Lua `error(...)`) carry
-mlua's `stack traceback:`, and there are two things to do with it. A host chooses by
-audience: `htl::developer_message(&err)` returns the cause with the frames below it, which
-is what `htl run` and `htl test` print because whoever runs them wrote the Teal;
-`htl::user_message(&err)` returns the innermost cause alone, which is what a program puts
-in front of people who did not and cannot act on a stack. The C ABI takes the second
-(see below).
+A host chooses by audience: `htl::developer_message(&err)` returns the cause with the
+frames below it; `htl::user_message(&err)` returns the innermost cause alone. The C ABI
+takes the second (see below).
 
 For mod / plugin directories, `TealResolver::new("mods")?.expect_type("defs.Mod")` holds
-every served module to a record type: a mod that returns the wrong shape is rejected at
-`require` time even if it never annotates its own return value. It rejects fields of the
-wrong *type*; on its own it does not reject *missing* fields (every Teal record field is
-nilable). Chain `.require_fields(["name", "monsters"])` to name the fields that must be
-present: the module is rejected at `require` naming the nil ones, and a field added to
-the record later stays optional until it is added to the list, so the type can grow
-without breaking the modules already written against it. `.require_all_fields()` takes
-every declared field, for types that are settled.
-
-These settings belong to a resolver over the one directory they hold to the contract,
-registered before `TealResolver::from_project`, which serves the rest of the model; a
-`[[contract]]` in `htl.toml` builds them for you (`htl::pkg::contract_resolvers`).
+every served module to a record type; `.require_fields(["name", "monsters"])` names the
+fields that must be present, and `.require_all_fields()` takes every declared field.
+These settings go on a resolver per contract directory, registered before
+`TealResolver::from_project`; a `[[contract]]` in `htl.toml` builds them for you
+(`htl::pkg::contract_resolvers`).
 
 ### A C ABI for a host that is not Rust (feature `ffi`)
 
 `#[host_module]` hands the Rust host to Lua. `#[c_export]` hands the same `impl` block to
 a caller that is not written in Rust — a Unity script, a Swift app, a Python REPL — as a
-C ABI, with the header written from the same breakdown so a rename moves both.
+C ABI.
 
 ```rust
 use htl::{Htl, c_export, ffi};
@@ -851,11 +663,7 @@ Add `htl = { version = "…", features = ["ffi"] }` and `crate-type = ["rlib", "
 (plus `"staticlib"` for Unity on iOS). `cargo build` writes `include/game.h` and the
 library exports `game_*` and nothing else.
 
-**What the ABI promises.** Everything a caller holds is an opaque handle pointer, a
-`char *` this library allocated, or an `int`. There are no structs by value, no `bool`,
-no bare enums and no variadics — the list every host language breaks on, one way or
-another (C# marshals a returned `string` and then frees it with `CoTaskMemFree`; Python's
-`restype = c_char_p` copies and leaks the original).
+**What the ABI promises.**
 
 | C | Rust | |
 |---|---|---|
@@ -870,32 +678,13 @@ a struct by value, a float, an integer of another width, a generic or an `async 
 not build, rather than building and going wrong on the far side.
 
 **The status enum**, as `int`: `OK` 0, `ERR` 1, `BAD_HANDLE` 2, `NOT_FOUND` 3, `LUA` 4,
-`PANIC` 5, `WRONG_THREAD` 6, `INTERRUPTED` 7. A `char *` function answers `NULL` when it
-fails and `game_last_status()` says which of these it was. `game_last_error()` is the
-message — a pointer owned by the library, valid until the next call *on that thread* —
-and `game_last_error_into(buf, len)` copies it into a buffer of the caller's own.
-
-**Panics do not cross.** Since Rust 1.81 a panic reaching an `extern "C"` frame aborts
-the process, which for a plugin host means taking the editor down with it. Every wrapper
-catches it, records it as `PANIC` with the panic's message, and **poisons the handle**:
-every later call on it answers `PANIC` without running anything.
-
-**One handle, one thread.** The handle records the thread that opened it and every entry
-checks it, so using it elsewhere is `WRONG_THREAD` rather than a data race
-(`game_threadsafe()` answers `0`, the `sqlite3_threadsafe()` convention). The exception is
-`game_interrupt(h)`, callable from any thread: it sets an atomic that a Lua debug hook —
-the state's global one, so a loop inside a coroutine is reached too — turns into an
-error at the next tick, which is how a runaway mod is stopped from a host that cannot
-preempt it. One interrupt stops one run; the handle stays usable.
+`PANIC` 5, `WRONG_THREAD` 6, `INTERRUPTED` 7. `game_last_status()`, `game_last_error()`
+and `game_last_error_into(buf, len)` carry the failure of the last call.
 
 **Conventions the generated code fixes**, so a project does not decide them again:
 `game_open` takes one JSON object — pass absolute paths, a seed and names in it rather
 than expecting the library to read the environment or the working directory; records
-cross as JSON text and an object payload carries `"v"`, a schema version separate from
-`GAME_ABI_VERSION` (which is the shape of the functions, and what a host that never
-unloads a library compares before calling anything else).
-
-`htl dts` writes the header too, so it can be regenerated and diffed without a build.
+cross as JSON text; `GAME_ABI_VERSION` is the shape of the functions.
 
 **Both ways of holding Teal are in this repository, built and run on every commit**:
 [`examples/`](examples/README.md) has `embed`, where `include_tl!`, `include_bundle!`,
@@ -910,11 +699,8 @@ what they are handed.
 
 ## Lints (`htl check`, `include_tl!`)
 
-Every rule has a **level**, and the level is what a project sets: `allow` is not reported,
-`warn` is reported and does not fail the run, `deny` is reported and fails `htl check`. The
-three words are selene's and Cargo's `[lints]`. The `default` column below is each rule's
-level for a project that says nothing, and nothing defaults to `deny` — which is why
-adopting a rule gradually is a thing you can write:
+Every rule has a **level**: `allow`, `warn` or `deny`. The `default` column below is each
+rule's level for a project that says nothing:
 
 ```toml
 [lint.rules]
@@ -949,39 +735,22 @@ no-any = "warn"           # allow by default; see it while you migrate, without 
 Teal's own warnings are named too, in a namespace of their own: see
 [Teal's own warnings](#teals-own-warnings-tl) below.
 
-Every name in either table is a name you can write back, and every one takes a level:
-`--lint contract=deny`, `[lint.rules] require-cycle = "allow"`, `HTL_LINTS=tl:unused=allow`,
-and `htl check --list-lints` lists them all with their defaults. Where a finding comes
-from — one file's syntax tree, the project layer once the files are checked, or the
-vendored compiler — changes nothing about how it is named, configured or judged; one
-registry holds the rules.
+Every name in either table takes a level: `--lint contract=deny`, `[lint.rules]
+require-cycle = "allow"`, `HTL_LINTS=tl:unused=allow`, and `htl check --list-lints` lists
+them all with their defaults. `htl fix` also takes two names of its own, `forward-ref` and
+`tl:error`, for `--rule` and `[fix]` only. See [Fixing](#fixing-htl-fix).
 
-The listing is every rule a **check** reports under, which is not quite every name htl
-takes: `htl fix` also files an error's fix under a class (`forward-ref`, `tl:error`), and
-those two are names for `--rule` and `[fix]` only — no level, not in `[lint.rules]`, not in
-`--lint`. See [Fixing](#fixing-htl-fix).
-
-On the command line and in `HTL_LINTS`, `+rule` and `-rule` are the older spelling and say
-the same thing a level does: `+` is `=warn` (report it) and `-` is `=allow` (do not). The
-level form is what can also say `deny`. Later entries win, so a flag raises or lowers what
-`htl.toml` set:
+`+rule` and `-rule` are the older spelling of `=warn` and `=allow`. Later entries win:
 
 ```
 htl check src --lint nil-index=deny,no-any=warn,-tl:hint
 ```
 
-`[lint] strict` and `--strict` are the same statement made run-wide: **for this run, every
-`warn` counts as `deny`.** Nothing is advisory under it, because everything a run reports is
-at `warn` or `deny` — `allow` is not reported at all, so a rule you silenced does not come
-back under `strict`, and is not counted either. A run's summary says both: `0 error(s),
-2 warning(s), 1 lint(s), 1 at deny` is three findings said and one of them fatal. `htl check`
-is where levels are judged; `htl test`'s verdict is its tests (findings are reported there
-and not weighed).
+`[lint] strict` and `--strict`: for this run, every `warn` counts as `deny`. A run's
+summary says both: `0 error(s), 2 warning(s), 1 lint(s), 1 at deny`.
 
 Silence one occurrence with a trailing `-- htl: allow(nil-index)`, at the line the
-finding points at. That works for the project-level rules too — the require a cycle
-passes through, the require that resolved to a shadowed declaration, the module that
-misses its contract — and for Teal's kinds: `-- htl: allow(tl:hint)`. There is one
+finding points at; Teal's kinds too: `-- htl: allow(tl:hint)`. There is one
 exception: `contract-unenforced` points at the `---@contract` marker, and a marker owns
 the rest of its line, so a comment there is read as an argument to it. Turn that one off
 by name, or answer it with `enforced_by`.
@@ -993,20 +762,14 @@ one line: a local over a required module is both a redeclaration and the thing
 line — one that a name is shadowed, the other which module it was — which is the whole of
 why both are still reported there and nowhere else.
 
-`include_tl!` and `include_bundle!` judge their warnings and lints as `htl check` does:
-a rule at `deny`, or any finding under `[lint] strict`, fails the build; the rest are
-printed and the build goes on. `HTL_LINTS=no-any=warn,-shadow-local` configures which
-rules run and at what level, as `--lint` does for the command. `HTL_LINT=deny` makes every
-finding fail the build, the environment's `strict`; `HTL_LINT=warn` lets the build through
-whatever the levels say, a cap for a build that has to go out; any other value is refused.
-The default is the checker's, so a new release that reports one more lint at `warn` says
-so in the build output and does not break a build that passed before.
+For `include_tl!` and `include_bundle!`, `HTL_LINTS=no-any=warn,-shadow-local`
+configures which rules run and at what level, as `--lint` does for the command.
+`HTL_LINT=deny` makes every finding fail the build; `HTL_LINT=warn` lets the build
+through whatever the levels say.
 
 `htl build` judges the bundle's closure the same way, by the same `[lint.rules]` — a rule
 the project turned off is not reported there either — and writes no bundle when the
-closure fails. `htl run` and `htl gen` report every warning and lint and stop on errors
-alone: their verdict is the program, as `htl test`'s is its tests, and `htl check` is
-where the rest is judged.
+closure fails.
 
 Everything `htl` prints with an `[htl <rule>]` name is a finding about your code — a lint
 of htl's own, or a warning the vendored compiler raised. `htl dts`'s `not written` and
@@ -1016,8 +779,7 @@ reports](#what-htl-dts-reports-and-what-it-exits-on).
 
 ### Teal's own warnings (`tl:*`)
 
-htl vendors the Teal compiler, and Teal reports warnings of its own. Each carries a *kind*,
-and htl reports it under that kind's name in the `tl:` namespace — as
+Teal's own warnings are reported under their kind's name in the `tl:` namespace — as
 `warning: src/a.tl:5:10: unused variable n: integer [htl tl:unused]`, and as
 `"rule": "tl:unused"` in `--format json`:
 
@@ -1031,19 +793,10 @@ and htl reports it under that kind's name in the `tl:` namespace — as
 | `tl:hint` | warn | the compiler's suggestions: `.` where `:` was meant, `pairs` over an array, a `string.format` pattern that does not match its arguments, and more |
 | `tl:debug` | warn | the checker reporting an ambiguity in what it inferred |
 
-The prefix is not decoration. `unused` already means something else here — `htl unused`
-reports modules nothing requires, not locals nothing reads — and these seven words are
-Teal's to rename, not htl's, so they keep a namespace that says where they came from.
-
-They are warnings rather than lints, and their level is `warn`, so they fail `htl check`
-under `[lint] strict` or when the project sets one to `"deny"`. Setting one to `"allow"`
-changes whether it is reported at all, and a kind you silenced is not counted either.
-
 ### Records built whole (`---@struct`)
 
-Every Teal record field is nilable and Teal has `?` for function parameters but not for
-record fields, so a record the program builds itself still reads as if any field might be
-absent. `---@struct` says it does not:
+`---@struct` on a record says every field it declares is set where it is built, except
+the ones marked `---@optional`:
 
 ```tl
 local record MonsterDef   ---@struct
@@ -1080,23 +833,17 @@ writes (`color = htl_fixme("string")`, a call the checker refuses wherever it la
 is a checklist and a line to paste from, not the migration done for you; a field has no
 honest default, which is why nothing fills it in.
 
-A misspelled field is the case where two rules each hold half the answer: the checker says
-`unknown field colour` about the key that exists, and this says `color` is missing. When
-the key the literal sets is a near miss for the one it wants, the message names it instead
-of repeating the standing advice, because "mark it `---@optional`" is the wrong fix for a
-typo:
+When the key the literal sets is a near miss for the one it wants, the message names it:
 
 ```text
 MonsterDef is built without color (the literal sets `colour`)
 ```
 
 One edit counts as a near miss in any name, two once the name is at least eight characters
-long. An extra key that is nothing like the missing one is not offered.
+long.
 
-The markers go where the record is **declared**, and the report lands where it is
-**built**, so an SDK can declare the shape its mods must fill in. Both marker forms work:
-trailing on the field's own line, or on a line of its own above it — a marker trailing
-one field is that field's and not the next one's. Every construction site counts
+Both marker forms work: trailing on the field's own line, or on a line of its own above
+it. Every construction site counts
 — a bare literal, an element of an array or map of that record, a literal passed as a
 typed argument, and a function's `return`.
 
@@ -1108,11 +855,8 @@ mod's return value, a save file, a host — is a different question, and a recor
 
 ### Records built where they are declared (`---@sealed`)
 
-Some records mean "this went through the check": a `Judged` that only `gate.judge()` is
-supposed to produce, a state a transition may mint and nobody else. In Rust that is a
-private field and a constructor; in Teal a record is built by writing `{ ... }` with the
-right keys anywhere, and `{ ok = true } as Judged` gets past even a mismatch, so the
-invariant the record stands for is a comment. `---@sealed` is that comment made a rule:
+`---@sealed` says a record is built only in its declaring file, or only in the functions
+the marker names:
 
 ```tl
 local record gate
@@ -1134,13 +878,8 @@ A table built as a `Judged`, or an `as` cast to one, outside `gate.tl` is report
 `gate.Judged` is sealed: built only in gate.tl
 ```
 
-Inside the declaring file everything is allowed — the marker is about the boundary, not
-the owner. Naming functions narrows it to those, inside that file: a `Draft` built in
-`gate.open` passes and one built in `gate.other` is reported (`built only in gate.tl by
-gate.open or gate.reopen`). The function is matched on the name as written or on its last
-segment, and a function assigned rather than declared (`gate.judge = function() ... end`)
-counts as the function it is written inside. `-- htl: allow(sealed-record)` keeps one site
-the project stands behind.
+Naming functions narrows it (`built only in gate.tl by gate.open or gate.reopen`).
+`-- htl: allow(sealed-record)` keeps one site the project stands behind.
 
 A test that compares a whole sealed value builds one, and is reported like anywhere else:
 `t.expect(gate.judge("yes")):to_equal({ verdict = "yes", at = 1 })` writes a literal typed
@@ -1151,7 +890,6 @@ leaves the test, or the test asserts the fields it is about
 (`t.expect(j.verdict):to_equal("yes")`), which builds nothing and says which field
 differed when it fails.
 
-A record nested inside a sealed one is not sealed by that; mark it too if it should be.
 Like `---@struct`, this is a lint and not a type: the file stays valid Teal, other tooling
 ignores the comment, and what it adds is the one thing a run-time check cannot — that no
 other code minted the value. It pairs with `---@struct` on the same record, which says
@@ -1174,13 +912,7 @@ about the key the declaration has never heard of:
    end
 ```
 
-A table built as a `Mod` may now set keys the record does not declare, and htl drops the
-checker's `unknown field` for exactly those keys. What it is for is the direction
-`---@required` does not cover: a mod written against a newer SDK, a save file from a later
-version, a table a host will grow next release. Each carries one key more than the
-declaration knows about, and without this each is refused the same way a mod that is
-*short* is refused — which leaves a lockstep edit of every declaration as the only way for
-a producer to ship a new field.
+A table built as a `Mod` may now set keys the record does not declare.
 
 The marker goes where the record is **declared**, in both forms — trailing, or on a line
 of its own above it — like `---@struct` and `---@sealed`. A record nested inside an
@@ -1198,10 +930,6 @@ Three things it deliberately does not do:
   the right answer when the keys are to be used and the wrong one at a data boundary,
   since every producer then has to nest its extra keys under an agreed name, which is a
   change to the wire shape rather than to the type.
-- **It does not relax which declared fields must be set.** `---@struct` and `---@required`
-  are untouched: a record can be open at one end (keys nobody declared) and closed at the
-  other (the fields it does declare), and `struct-fields` still names the near-miss key
-  when a required field is short.
 - **It changes nothing for an unmarked record**, which stays closed, as every record is
   today.
 
@@ -1215,11 +943,7 @@ silence.
 
 ### Functions that may return nothing (`---@nilable`)
 
-A function that returns nil on some inputs — a parent directory that does not exist, an
-environment variable that is unset, a pattern that does not match — has no way to say so in
-a Teal signature. Every Teal type accepts nil, so `function(string): string` is already the
-declaration of a function that may return nil, and the checker treats the result as a
-`string` at every call site. `---@nilable` says the first return value may be nothing:
+`---@nilable` says the first return value may be nothing:
 
 ```tl
    -- nil when there is no parent.
@@ -1228,30 +952,17 @@ declaration of a function that may return nil, and the checker treats the result
    find: function(s: string, pat: string): string
 ```
 
-The type does not change. `local d = path.parent(p)` still gives a `string`, so `if d then
-… end`, `d or "."` and passing `d` on all read as they always have, and what the marker
-buys is the `nil-return` lint over the one use that cannot be right whatever the run-time
-value is — indexing the call itself:
+What the marker buys is the `nil-return` lint over indexing the call itself:
 
 ```
 lint: src/main.tl:4:19: call result may be nil at runtime: path.parent is marked ---@nilable; bind it to a local and nil-check first [htl nil-return]
 ```
 
-`f(x).y`, `f(x):m()`, `f(x)()` and `f(x)[k]` are the four shapes, the same four `nil-index`
-reports over an index, and binding the call to a local is what it asks for. Silence one
+`f(x).y`, `f(x):m()`, `f(x)()` and `f(x)[k]` are the four shapes. Silence one
 occurrence with a trailing `-- htl: allow(nil-return)`.
 
-**Why not `string | nil`.** That form is real Teal and the checker does act on it — it
-refuses the index. The trouble is everything else: Teal narrows a union with `is` and with
-`as`, and with nothing else, so `if v then`, `v ~= nil` and `v or "."` all leave the union
-in place and every caller ends up writing `as string`. Declaring a nilable return that way
-would turn ordinary Lua into an error across every project on the declaration. The marker
-carries the same fact at the cost of being a lint rather than a type.
-
 The marker goes where the function is **declared**, in both forms — trailing, or on a line
-of its own above it — like `---@struct` and `---@sealed`, and it is read from whichever
-file holds the declaration: the project's own source, a `.d.tl` in `types/`, or one a crate
-ships. mlua-batteries (0.7.3, the version htl's `std` feature takes) writes it on
+of its own above it. mlua-batteries (0.7.3, the version htl's `std` feature takes) writes it on
 `path.parent` / `filename` / `stem` / `ext` and `env.get` / `home`, so a project using
 `std.*` gets the rule without writing anything; `regex.find` / `captures` carry it too, in a
 host that turns that module on (it is not in the default set htl carries, see `std.*`).
@@ -1260,44 +971,26 @@ An unmarked function says nothing: no marker means *unknown*, not *nilable*, whi
 adding the rule is silent on a project until someone writes a marker or depends on a
 declaration that has one.
 
-**Following the local (`nil-return-unchecked`, off by default).** Binding the call is half
-the advice, and the other half is the check that follows it: `local d = path.parent(p)`
-and then `d:upper()` with nothing in between is the same run-time error the one-liner was.
-A second rule reports that — the first use of the local as the base of a chain, once per
-local, with everything that mentions the name in a condition, `assert`s it, or re-binds it
-counting as the check:
+**Following the local (`nil-return-unchecked`, off by default).** A second rule reports
+the first use of the local as the base of a chain before anything checks it:
 
 ```
 lint: src/main.tl:5:8: 'd' may be nil at runtime: it comes from path.parent, which is marked ---@nilable, and nothing checks it before this [htl nil-return-unchecked]
 ```
 
-It is `allow` by default, unlike every other rule that has a marker behind it, and the
-level is the whole difference between the two halves. Indexing a call's result directly is
-wrong whatever an analysis says; asking whether a guard stands between two statements is a
-question a static rule gets wrong in three shapes that lua-language-server has had open on
-its own version for years — a check inside a helper predicate, a check on a second local,
-and `local d = f(p) or error(...)`. htl reads a guard loosely to stay wrong in the
-forgiving direction (a condition that merely *mentions* the name ends the tracking), and
-the `or` at the declaration is read, so the third of those is silent here — but the first
-two are not: `if has_parent(p) then d:upper() end` and `local ok = d ~= nil` followed by
-`if ok then` are both reported, because the name the condition mentions is not `d`. A rule
-that is still sometimes wrong while it is doing its job does not belong in every project by
-default. A project that wants it writes it down:
+A project that wants it writes it down:
 
 ```toml
 [lint.rules]
 nil-return-unchecked = "warn"   # or "deny" to fail the run on it
 ```
 
-`[lint] strict = true` does not turn it on — strict promotes what a run *reports* to a
-failure, and an `allow` rule reports nothing — so the level is where it is asked for.
 One occurrence is silenced with a trailing `-- htl: allow(nil-return-unchecked)`.
 
 ### A loop a dependency already has (`htlx-available`, off by default)
 
-[htl-x](https://github.com/ynishi/htl-x) is the collections library `htl new` writes into a
-project's `[deps]`, and a project that has it still writes the loops it has. This rule
-reports three of them, each the body of a `for i = 1, #t do` with nothing else in it:
+This rule reports three loops [htl-x](https://github.com/ynishi/htl-x) already has, each
+the body of a `for i = 1, #t do` with nothing else in it:
 
 | loop | call |
 |---|---|
@@ -1309,41 +1002,18 @@ reports three of them, each the body of a `for i = 1, #t do` with nothing else i
 lint: src/find.tl:16:4: this loop is list.map(rows, row_summary): htlx is a dependency of this project, and `require("htlx.list")` has it [htl htlx-available]
 ```
 
-`sum`, `contains`, `tablex.keys` and `sorted_pairs` are the same idea over other shapes and
-are not written yet.
-
-**It is silent in a project that does not depend on htl-x** — the names come from the
-lockfile the project installed from, so telling a project to use a library is never telling
-it to take one on. Three more conditions keep a loop from being read as a call it is not:
-the index is used only to subscript (`t[i]`, and `out[i]` on the left), the loop starts at
-1 with no `step`, and the accumulator is declared empty on the line directly above. The
-last is what makes the call *equal* to the loop rather than similar — `list.map` returns a
-new array, and a loop over an `out` that already held something does not.
-
-Off by default all the same, and for a different reason from the two rules above: what it
-reports is right. A loop whose `f` has a side effect the author wants in that order is code
-the project would argue about, and a rule that argues about working code does not belong on
-in every project.
-
 ```toml
 [lint.rules]
 htlx-available = "warn"
 ```
 
-The finding carries the rewrite as a `htl fix` suggestion — the loop replaced by
-`out = list.map(rows, row_summary)` — which `htl fix --diff` shows and `htl fix` never
-applies: merging that into the declaration above it is the edit a person makes.
+The finding carries the rewrite as a `htl fix` suggestion, which `htl fix --diff` shows
+and `htl fix` never applies.
 
 ### The string boundary of an enum (`enum-cast`, `enum-table`)
 
-A Teal enum is a string at run time and `as` is erased along with the types, so
-`h.state as defs.State` promises nothing: with `"opne"` in the store the value is false
-against every variant, drops out of every branch, and nothing raises. `enum-exhaustive`
-guards the `if` chain; it cannot see that the value never entered the set. `enum-cast`
-reports the cast when the checker types the value as `string` — a value it already types
-as the enum is a cast that restates what is known, and `"open" as defs.State` is checked
-by the literal itself, so neither is reported. `-- htl: allow(enum-cast)` keeps a cast the
-project stands behind.
+`enum-cast` reports `h.state as defs.State` when the checker types the value as `string`.
+`-- htl: allow(enum-cast)` keeps a cast the project stands behind.
 
 The hand-written answer is a table, and `enum-table` is what keeps it level with the enum:
 
@@ -1362,20 +1032,6 @@ local function stored_state(s: string): defs.State
 end
 ```
 
-The words a constructor lists are its keys, in both shapes that map the enum —
-`{string: E}` above and `{E: T}`, a table of one thing per value — and the message names
-both the values of the enum that are missing and the words that are not values of it. Add
-a value to the enum and every such table reports, which is the `enum-exhaustive` story for
-constructors.
-
-An array of the enum (`{E}`) is left alone: a list of the styles one branch uses or the
-behaviours one test walks is a selection, and asking it for every value is noise. So are
-an empty constructor (which is how a table that is filled later is written) and one whose
-keys are not all literals, since a computed key leaves the word set unknown; a table built
-by a call has no constructor to look at, the exemption `enum-exhaustive` makes as well. A
-`{string: E}` map none of whose keys is a value of the enum is some other map and not this
-lookup.
-
 `htl fix enum-table` fills a `{string: E}` table in — `name = "name"` per missing value,
 laid out where the entries already there are. For `{E: T}` it reports and changes nothing:
 what an entry maps to is not something a fix can invent.
@@ -1383,10 +1039,8 @@ what an entry maps to is not something a fix can invent.
 ## Project config (`htl.toml`)
 
 `htl check` / `htl test` / `htl fmt` / `htl fix` / `htl resolve` / `htl gen` / `htl run` /
-`htl build` / `include_tl!` all read the `htl.toml` at the project root — the root is
-found once, from the nearest `htl.toml` or `mlua-pkg.toml` above the file, and the two
-naming different directories is refused by every command — so the CLI and the build agree.
-Flags and `HTL_LINTS` / `HTL_LINT` override it (`htl new` writes a commented one).
+`htl build` / `include_tl!` all read the `htl.toml` at the project root. Flags and
+`HTL_LINTS` / `HTL_LINT` override it (`htl new` writes a commented one).
 
 ```toml
 [toolchain]
@@ -1426,70 +1080,44 @@ dir = "mods"              # relative to htl.toml; "sites/*" = every subdirectory
 # exclude = ["defs"]      # optional: modules in dir not held to it (a helper, an SDK)
 ```
 
-`[toolchain] htl` is a cargo requirement (`"0.8"` = 0.8.x) on the *command*, which
-`Cargo.toml` does not pin — it pins the crate a Rust host builds against. The command
+`[toolchain] htl` is a cargo requirement (`"0.8"` = 0.8.x) on the *command*. The command
 is what decides whether the project checks: three lints were added on one day and all
 three are reported by default, so a project quiet under the release before them says
 three new things under the release after — on unchanged sources, and fatally if it runs
-`--strict`. Written down, that arrives as a version the
-project moved to rather than as a difference between two machines. A command outside
-the requirement is refused before anything is read, naming both versions and this file;
-htl installs nothing, so the answer is `cargo install htl-cli` — or, when another project
-on the same machine needs another `htl`, a version manager (see Install). Leave the key
-out and any command runs the project, as before. `htl new` leaves it out: the scaffold
-pins the CLI's own htl, which reads every key the file writes, and a fresh project has no
-reason to refuse a newer one. Add it by hand when a project should.
+`--strict`. A command outside the requirement is refused; htl installs nothing, so the
+answer is `cargo install htl-cli` — or, when another project on the same machine needs
+another `htl`, a version manager (see Install). `htl new` leaves the key out; add it by
+hand when a project should.
 
-The two halves are still released together, so `htl check` prints one line when the
-`htl = "0.8"` in the project's `Cargo.toml` does not admit the command running — `htl
-0.8.0; Cargo.toml asks for htl 0.7.1 — the crate and the CLI are meant to move together
-(cargo install htl-cli --version 0.7.1, or bump the dependency)`. A warning and nothing
-more: the check that printed it worked, and which half is the stale one is the project's
-to say. A `path` or `git` dependency states no version here and is passed over.
+`htl check` prints one line when the `htl = "0.8"` in the project's `Cargo.toml` does
+not admit the command running — `htl 0.8.0; Cargo.toml asks for htl 0.7.1 — the crate
+and the CLI are meant to move together (cargo install htl-cli --version 0.7.1, or bump
+the dependency)`. A warning and nothing more.
 
 `[layout]` is where this project's own files live: `source` holds its `.tl`, `types`
 holds the hand-written `.d.tl` for modules something else provides, and `tests` holds its
 tests and the helpers only tests may `require` (see Tests). Each defaults to the
-directory it names (`src`, `types`, `tests`), which is what `htl new` writes and what every
-command searched before the section existed — a project that keeps its code somewhere
-else now says so instead of being told. Each is **one directory, not a list**: a module
-name resolves to exactly one file, so a directory that answers a name has to be the only
-one that could. `"."` is a flat project, with the sources beside `htl.toml` — and the one
-line a project laid out that way needs: without it, a project with `.tl` at its root and
-no `src/` is refused by every walk (see above) rather than read as flat.
+directory it names (`src`, `types`, `tests`). `"."` is a flat project, with the sources
+beside `htl.toml`.
 
 `[layout] source` naming the directory that `[layout] types` or a `[check] paths` entry
-names is refused when the file is parsed, before any source is read: the first says a
-module there is this project's own, the others that it is somebody else's (its
-declarations of other people's modules / modules it did not write), and nothing later
-could tell which. Spelling does not get around it: `lib`, `./lib` and `./lib/.` are one
+names is refused. Spelling does not get around it: `lib`, `./lib` and `./lib/.` are one
 directory. `types` listed under `[check] paths` is accepted — the two make the same claim,
 so the entry is redundant rather than wrong — and `[layout] tests` is compared with
 nothing.
 
-A file answers to one name: its path below the root that holds it, with `init.tl` naming
-its directory. `src/util/util.tl` is `util.util`, not `util`, and a crate's
-`types/htl-mq/mq.d.tl` is `mq`, not `htl-mq.mq` — Lua's search path would find either
-under the other name, and htl does not. The `<name>/<name>.tl` spelling is a
-dependency's, for the entry of a flat package (see "Layout of a project").
+A file answers to one name: `src/util/util.tl` is `util.util`, not `util`, and a crate's
+`types/htl-mq/mq.d.tl` is `mq`, not `htl-mq.mq`.
 
-A module name belongs to one module. When two implement it — the project's own
-`src/mathx.tl` and a dependency `mathx`, or a module under `[check] paths` of the same
-name — `htl check` reports an error at each file, naming both, rather than letting the
-order of the search path pick one. Rename one of them. A `require` of such a name is an
+When two modules implement one name — the project's own `src/mathx.tl` and a dependency
+`mathx`, or a module under `[check] paths` of the same name — `htl check` reports an
+error at each file, naming both. Rename one of them. A `require` of such a name is an
 error as well, naming both files — in the check, at run time and in a bundle, a `require`
 in a plain `.lua` included — and so is one of a name a module implements twice
-(`src/demo.tl` beside `src/demo/init.tl`). A dependency's own submodules are
-under its name (`mathx.vec`) and are not the project's `vec`; a `.d.tl` beside an
-implementation declares it and is not a second claim.
+(`src/demo.tl` beside `src/demo/init.tl`). A dependency's own submodules are under its
+name (`mathx.vec`).
 
-A dependency sees its own modules and what it depends on, not the project that uses it.
-A `require` in a dependency that would land on one of the project's own files — the
-project happens to have a `util.tl` and the dependency asks for `util` — is an error at
-that `require`, rather than the dependency quietly reading the project's file.
-
-`[imports]` settles a shared name without a rename. It is the project's say over its own
-`require`s, and each entry covers a name and every name under it:
+`[imports]` settles a shared name without a rename:
 
 ```toml
 [imports]
@@ -1499,20 +1127,17 @@ mathx_local = "own:mathx"    # the project's own mathx, under a name of its choo
 
 A `dep:` entry makes the dependency's modules answer to `@<dependency>/<name>` —
 `require("mathx")` in the project is generated as `require("@mathx/mathx")`, and the
-dependency's own `require("mathx.vec")` as `require("@mathx/mathx.vec")` — so that at run
-time and in a bundle each name still has one module behind it. An `own:` entry makes the
-project's own module answer to `@/<name>` — `require("mathx_local")` above is generated as
-`require("@/mathx")` — and only the project's own module can answer that, so the
-dependency of the same name is set aside for it. A `dep:` entry naming a
+dependency's own `require("mathx.vec")` as `require("@mathx/mathx.vec")`. An `own:`
+entry makes the project's own module answer to `@/<name>` — `require("mathx_local")`
+above is generated as `require("@/mathx")` — and only the project's own module can answer
+that, so the dependency of the same name is set aside for it. A `dep:` entry naming a
 dependency the project does not have is an error at `htl.toml`.
 
 `[check] paths` is for modules the host supplies at run time from somewhere the
-checker would not look (an SDK cache, a mods dir): the CLI, `include_tl!` and
-`contract_resolvers` all add them, beside the two `[layout]` directories. `htl check`
+checker would not look (an SDK cache, a mods dir). `htl check`
 does not search the `htl.toml` directory itself: a `.tl` there is the project's only when
-`source = "."` says the sources are there. `types/` is the conventional home for `.d.tl` (the DefinitelyTyped shape:
-declarations the module's author did not ship), searched without any configuration;
-`htl new` creates it.
+`source = "."` says the sources are there. `types/` is searched without any
+configuration; `htl new` creates it.
 
 Four kinds arrive there, and `types/` below means the declaration root wherever
 `[layout] types` puts it: every one of them is written there. The ones written by hand; the ones a Rust dependency ships; the
@@ -1523,41 +1148,24 @@ belongs in the crate or package it came from.
 A Rust crate that registers a module in its user's Lua state names the declarations it
 ships in its manifest (`[package.metadata.htl] dts = ["dts/mq.d.tl"]`, see "Embedding in
 Rust"). `htl dts` — and `check` / `run` / `test` / `build` and the other commands that
-generate before they work —
-resolves the crate graph with `cargo metadata` and writes each of those files to
-`types/<crate>/<file>`, reported like the project's own (`wrote types/htl-mq/mq.d.tl`) and
-committed like them. That directory is a root of its own, so the module keeps the name it
-was declared under whatever the crate is called: `htl-mq`'s `mq.d.tl` is
-`require("mq")`. A crate whose modules have a namespace keeps that too, by naming the
-directory its paths start at (`dts_root`, see "Shipping the declaration to your users"). A
-note beside them (`.htl-dts`) records which crate and version they came from, and is what
-tells the directory apart from one laid out by hand, where the path below `types/` is the
-module name.
+generate before they work — writes each of those files to `types/<crate>/<file>` (`wrote
+types/htl-mq/mq.d.tl`). A crate whose modules have a namespace names the directory its
+paths start at (`dts_root`, see "Shipping the declaration to your users"). A note beside
+them (`.htl-dts`) records which crate and version they came from.
 
 Nothing is built to do it, and a project whose dependencies are already resolved and
 fetched needs no network. A manifest edited since the last resolve is resolved again, which
 writes `Cargo.lock` and may fetch — what the next `cargo build` would do anyway, and what
 having the dependency's files on disk to copy from requires. Where the graph cannot be
 resolved at all, that is reported and the committed copies go on being what the project
-checks against. `include_tl!` never runs cargo at all — it reads `types/`, as it always
-has. A hand-written `types/mq.d.tl` beside a shipped one is a
+checks against. A hand-written `types/mq.d.tl` beside a shipped one is a
 `duplicate-declaration` (the hand-written one is read), which is the message wanted when a
-project upgrades a crate that has started shipping its own. Dropping the dependency leaves
-the file where it is and says so: what a committed declaration is still for is the
-project's to decide, not this command's.
+project upgrades a crate that has started shipping its own.
 
-A package keeps its own declarations at `types/` in its root, which is outside the entry
-directory `require` resolves through, so `htl pkg` copies them in. `htl types add
-<library>` is the other half: teal-types is where the Teal ecosystem collects declarations
-for libraries that ship none, as `types/<library>/<module>.d.tl`, and `add` takes one
-library's worth. The library's own directory is dropped and the path below it kept, since
-that path is the module name — `socket/http.d.tl` stays `require("socket.http")`.
-
-Both write a `.src` note beside each file: what published it, at which commit, and the
-path it had there. Nothing else records that. `luasocket-tl-type` is versioned `0.0.2-1`
-against a luasocket at 3.x, its rockspec declares no dependency on luasocket, and its
-source names no revision — so without the note, a declaration carries no evidence of what
-it was written against.
+`htl types add <library>` takes one library's declarations from teal-types, as
+`types/<library>/<module>.d.tl`; `socket/http.d.tl` stays `require("socket.http")`.
+`htl pkg` and `htl types add` both write a `.src` note beside each file: what published
+it, at which commit, and the path it had there.
 
 Copying rather than searching the installed deps is what makes them survive a fresh clone:
 `.htl/` is gitignored and empty until someone installs, `types/` is committed. A name
@@ -1565,24 +1173,13 @@ Copying rather than searching the installed deps is what makes them survive a fr
 publishing a module of the same name is a real situation, and there is no registry to
 arbitrate it with.
 
-Source beats declaration: when both `defs.tl` and a `defs.d.tl` are reachable, the
-checker reads the `.tl`, wherever the two sit (Teal's own order is `.d.tl` first). So a `.d.tl` a host writes out for external script authors never shadows the
-source it was made from inside the repo, and a check that runs before the host has
-rewritten it still sees the current types.
-
-Between two *declarations* of one module there is no such rule, only an order: the
-project's own comes first, then its dependencies', then the declarations crates ship, then
-`[check] paths`, and the first is the one read. `duplicate-declaration` reports it — a project that keeps a hand-written
-`xlib.d.tl` under `types/` and also has one arriving from a `[check] paths` directory is
-told which is in effect and which is not, rather than being left to work out why a type
-is not what the file in front of it says.
+Between two *declarations* of one module there is only an order: the project's own comes
+first, then its dependencies', then the declarations crates ship, then `[check] paths`,
+and the first is the one read. `duplicate-declaration` reports it.
 
 ### Which file a name resolves to (`htl resolve`)
 
-That lint fires only when there is more than one declaration, and only at a `require` the
-check happened to reach. The ordinary question — which of these files is in effect, and
-what does it hide — is asked far more often, and `htl resolve <module>` answers it without
-anything having to go wrong first:
+`htl resolve <module>` answers which of these files is in effect, and what it hides:
 
 ```console
 $ htl resolve mq
@@ -1596,31 +1193,14 @@ htl resolve mq: src/mq.d.tl
   answered by the project model
 ```
 
-Three answers in one view: what is read, what it hides, and why — the order is the reason,
-and printing it is what makes the answer self-explaining. One declaration overriding
-another is the mechanism working as intended, so nothing here is a defect and nothing
-fails.
-
-The rows are every file of the project — its own, a dependency's, a vendored or patched
-copy, a declaration materialised under `types/<crate>/`, which names the crate and version
-its `.htl-dts` note records — that answers to the name, and the answer is the one every
-command resolves with. A file the search path would reach under some other name is not a
-row: `src/util/util.tl` is `util.util`, and `htl resolve util` does not list it. The rows
-are in the order a name is answered, by kind first: a source beats a declaration wherever
-the two sit, so row 1 is not necessarily the earliest directory. A `.lua` under a
-declaration reads `runtime, typed by <n>` rather than `shadowed`: the check reads the
-declaration and the run loads that file, and neither hides the other. Two implementations
-of one name — two modules, or `src/demo.tl` beside `src/demo/init.tl` — are both
-`ambiguous`, and the command fails: no order picks one. A name the project does not have
-is looked up on the search path as Lua would, for a library installed for the machine, and
-the report ends with the directories it searched instead (`searched, in order: …`). None
-of them is the project's: the project's directories are the model's to answer for, and
-are not on Lua's search path at all.
+The rows are in the order a name is answered, by kind first: a source beats a declaration
+wherever the two sit, so row 1 is not necessarily the earliest directory. A `.lua` under
+a declaration reads `runtime, typed by <n>` rather than `shadowed`. A name the project
+does not have is looked up on Lua's search path, and the report ends with `searched, in
+order: …`.
 
 A name the host provides — a `#[host_module]` in the crate around the project, `[build]
-host`, `std.*` — is answered at run time by the host and by no file, and the header says
-which of the three the project model read it from; a row read for it is the declaration it
-is typed from:
+host`, `std.*`:
 
 ```console
 $ htl resolve host
@@ -1632,9 +1212,7 @@ htl resolve host: provided by the host (#[host_module] in Cargo.toml's crate), t
   answered by the project model
 ```
 
-A name the project has only a declaration for — no `.tl`, no `.lua` — is provided by the
-environment at run time, and the header says so after the declaration it reads, naming the
-file that says so; it is the reason `htl build` leaves the name out of a bundle:
+A name the project has only a declaration for — no `.tl`, no `.lua`:
 
 ```console
 $ htl resolve socket.http
@@ -1646,9 +1224,8 @@ htl resolve socket.http: types/socket/http.d.tl, provided by the environment (de
   answered by the project model
 ```
 
-A `.tl` or `.lua` of the project under a name the host provides is the error `htl check`
-reports at its `require` (see "Embedding in Rust"): the header is that error, the file's
-row is `refused`, and the command exits 1.
+A `.tl` or `.lua` of the project under a name the host provides (see "Embedding in
+Rust"): the header is that error, the file's row is `refused`, and the command exits 1.
 
 ```console
 $ htl resolve host
@@ -1687,13 +1264,7 @@ return defs
 ```
 
 Every module under `mods/` must return a value assignable to `defs.Mod` and set the three
-marked fields — `mods/foo.tl`, and as much `mods/foo/init.tl` (named `foo`) or
-`mods/sub/x.tl` (named `sub.x`), the names a `require` writes and the host's resolver
-serves them under. `factions` and `npcs` are for the mods that want them, and that
-asymmetry is the point: a record cannot say which of its own fields are mandatory (every
-Teal record field is nilable and there is no `?` for them), and holding modules to *all*
-of them would break every one written before a field was added. Marking the mandatory
-ones lets the type grow.
+marked fields.
 
 The default is the opposite of `---@struct`'s, and each marker says which regime its
 record is under: `---@struct` is about a record the program builds itself, where a new
@@ -1712,15 +1283,6 @@ modules in the directory that are not held to it — a helper, an SDK the host w
 a `.d.tl` is never held to a contract and needs no listing — and any of these can be given
 at once. `[[contract]] module` and `exclude` in `htl.toml` say the same two things there.
 
-The record is declared in a module of the project, and the contract is part of the
-project's model with it: its directories, the modules they hold and under what names, and
-where its type is published are read once, and `htl check`, `htl unused`, `htl dts` and a
-host's resolvers all ask the model. Markers are read in the roots of the project's
-modules — `[layout] source` (`src/`), `[layout] types` (`types/`) and `[check] paths` —
-at the top of each and in a `<sub>/init.tl`. The project root is not one of them unless
-it is the source root (`source = "."`): a marker left in a file there is not read, and
-the `contract` lint says so and where to move the file.
-
 The module the contract type is declared in is what an outside author writes their
 modules against, so htl publishes it: `types/defs.d.tl` here, alongside the `.d.tl` a
 Rust host's `#[host_module]` writes, regenerated by `htl dts` and by every command that
@@ -1729,31 +1291,13 @@ reads the project (check / run / test / build / fix / unused / resolve / gen).
 the same as the Rust-generated ones: it is what makes a fresh clone check before anything
 has been built.
 
-What it writes is the declaring module with its bodies removed: each function the module
-exported becomes a field of the record it was on, keeping its parameter names and its doc
-comment, which is what a hand-written `.d.tl` says.
+What it writes is the declaring module with its bodies removed:
 
 ```tl
 function defs.describe(m: Mod): string    -->    describe: function(m: Mod): string
    return m.name
 end
 ```
-
-A `local function` is not part of what the module declares and leaves nothing behind, a
-field the record already declares is left as the author wrote it, and a method keeps the
-`self` its definition left implicit. The published marker names its directory outright,
-since whoever reads the declaration does not have the `htl.toml` a bare `---@contract`
-inherits from. A function on a table the module declares no record for is reported rather
-than dropped — a declaration missing a function is worse than one that was not written.
-A module declaring two contract types is one file and is published once, both markers
-named outright.
-
-`types/` is searched, so the published declaration puts the claim on the path a second
-time. That is one record found twice, not a second claimant of the directory, and only two
-*different* records claiming one directory is reported. Nor do two contract directories
-collide over a name: a contract directory is resolved as a directory and is not on the
-project's search path, so `mods_a/one.tl` and `mods_b/one.tl` are two modules, each held
-to the record its own directory is under.
 
 Two lints follow:
 
@@ -1766,11 +1310,10 @@ Two lints follow:
   markers claiming one directory, a marker on the record a module returns rather than on
   one inside it, a marker in a file at the project root, which is no module's — is
   reported here too.
-- `contract-unenforced` — a contract is only a guarantee if the host enforces it. When a
-  Cargo package is found, `htl check` scans its Rust sources for `contract_resolvers(`
-  and otherwise tells you to add it, or to say where it is enforced with `enforced_by`.
+- `contract-unenforced` — the host never builds resolvers for the contract; say where the
+  enforcement lives with `enforced_by` when the scan cannot see it.
 
-Hosts build their resolvers from the same markers, so the two cannot drift:
+Hosts build their resolvers from the same markers:
 
 ```rust
 let (path, cfg) = htl::config::HtlConfig::find(Path::new("."))?.expect("htl.toml");
@@ -1780,10 +1323,6 @@ for r in htl::pkg::contract_resolvers(&htl::parent_dir(&path), &cfg)? {
                 // ---@contract for that directory and its ---@required fields
 }
 ```
-
-That one call is what `contract-unenforced` looks for. A resolver assembled by hand from
-`TealResolver::new(…).expect_type(…).require_fields([…])` still works, but it restates
-what the record already says, which is the drift the marker exists to remove.
 
 Enforcement the scan cannot see — a Lua-side validator that checks the table before the
 host uses it, a resolver in a sibling crate, generated code, or one built by hand on
@@ -1795,16 +1334,9 @@ dir = "mods"
 enforced_by = "mods/_validate.lua"   # relative to htl.toml; ~ and absolute paths work
 ```
 
-That contract is then not held to the scan, and the others in the project still are. It
-takes a path rather than a `true` because the file has to exist: a name that points at
-nothing is reported under the same rule, whether or not the call was found elsewhere, so
-the key stays a claim `htl check` can hold to something rather than a per-contract off
-switch.
-
 ## Patched dependencies (`htl pkg patch`)
 
-A dependency needs one line changed. `htl pkg patch mathx` copies its package root — the
-whole package, so its `types/` comes with it, and none of the repository around it — out
+A dependency needs one line changed. `htl pkg patch mathx` copies its package root out
 of the pinned revision and into `patches/mathx/`, writes `patch_dir = "patches/mathx"`
 onto that dependency in `mlua-pkg.toml`, and records the commit it was taken from as
 `patch_base` in the lockfile.
@@ -1814,36 +1346,18 @@ onto that dependency in `mlua-pkg.toml`, and records the commit it was taken fro
   dropped .git, .github, .gitignore (the repository's, not the package's)
 ```
 
-What is left out is the dot-entries at the root of the copy — the repository the package
-was checked out of, rather than the package. A `.git` there would make the directory an
-embedded repository git records as a gitlink; a workflow under `.github` is inert where it
-lands but still trips the gates that watch `.github/workflows/*`; and a second
-`.gitignore` inside the tree, written for another repository, silently drops files from
-this project's commits, which is the failure Cargo's vendored copies are known for. The
-package's own files all come through, both manifests among them, and a dotfile below the
-root is the package's business rather than htl's. There is no flag to keep the rest:
-somebody who wants the repository clones the repository.
-
 From there the directory is the project's code: edited, diffed, reviewed and committed
-with git like anything else in the tree. There is no patch file and nothing is applied —
-`htl pkg install` leaves the directory alone and resolves the dependency from it — and so
-does everything else, without it: the copy's entry directory is on the search path
+with git like anything else in the tree. The copy's entry directory is on the search path
 because the manifest names it, so the dependency resolves in a clone that has never
 installed anything and in the copy `cargo package` verifies
 ([Publishing a crate that embeds Teal](#publishing-a-crate-that-embeds-teal)). This is
 the shape of Cargo's `[patch]` with a `path` source, and of Go's `replace` pointing at a
 directory in the module tree. Removing `patch_dir` and the directory returns the
-dependency to its fetched form at the next install. What is copied is the package root
-whole, so a dependency that is a project itself brings its own `mlua-pkg.toml` and
-`htl.toml` along — and neither makes `patches/<dep>` a project: the root is the one whose
-manifest declared the `patch_dir`, and it keeps the only `.htl/`.
+dependency to its fetched form at the next install.
 
-**What is checked, and what is not.** The copy is committed, project-owned code whose
-errors are the project's to fix, so `htl check` walks it and names the dependency each
-directory stands in for. `htl fmt`, `htl fix` and `htl test` do not touch it: formatting
-it would turn every file into a diff against its base and hide the change inside it, a
-fix would be a line of that diff nobody wrote (what `htl check` reports there — and `htl
-fix` reports it too, without fixing it — is fixed by hand), and its `*_test.tl` are the dependency's suite rather than the project's. `.htl/modules` is not
+**What is checked, and what is not.** `htl check` walks the copy; `htl fmt`, `htl fix`
+and `htl test` do not touch it (what `htl check` reports there — and `htl fix` reports
+it too, without fixing it — is fixed by hand). `.htl/modules` is not
 descended into at all, patched or otherwise; its modules are checked through the
 `require` that reaches them and their errors reported against the requirer, never offered
 to `htl fix` (a fix there would go at the next install — patching is how a dependency is
@@ -1856,9 +1370,8 @@ dependencies, 0 error(s), ...`, the two adding up to every file the walk visited
 project with no patch prints the one number, as before. Under `--format json` the whole
 is `files` and the second half is `patched` ("Machine-readable output").
 
-**Upgrading.** A patch is bound to the revision it was taken from. When the pin moves —
-the dependency was upgraded — install fetches the new revision and resolves from it, the
-copy is left alone, and every install says so until the patch is refreshed or removed:
+**Upgrading.** When the pin moves, every install says so until the patch is refreshed or
+removed:
 
 ```text
   patch   patches/mathx is not in use (taken from 3f2a9c1, mathx is now at 8b07e44)
@@ -1866,13 +1379,9 @@ copy is left alone, and every install says so until the patch is refreshed or re
           drop it: remove patch_dir from mlua-pkg.toml and delete patches/mathx
 ```
 
-Install does not fail over it; the project builds against the new upstream. `htl pkg
-patch` on an already patched dependency refreshes the copy from the revision the pin now
-resolves to and records that as the new base. The copy is overwritten rather than merged,
-so carrying the project's own change forward onto it is a merge git performs — which is
-why a directory with uncommitted changes is refused, naming them, and why `--force` (which
-discards them) is a flag rather than the default. Outside a repository the question cannot
-be asked at all, and that is said rather than guessed at.
+`htl pkg patch` on an already patched dependency refreshes the copy; a directory with
+uncommitted changes is refused, and `--force` discards them. Outside a repository the
+question cannot be asked at all, and that is said rather than guessed at.
 
 ## The native modules (`std.*`)
 
@@ -1886,23 +1395,13 @@ print(pretty.dump({ name = str.trim(name), rows = #rows }))
 ```
 
 `std.*` is [mlua-batteries](https://github.com/ynishi/mlua-batteries) — Rust modules
-reached from Teal — under the namespace that crate leaves to its host to assemble. htl is
-that host: the `htl` binary carries the crate's default set, `json`, `env`, `path`, `time`,
-`string`, `validate`, `pretty` and `argparse`, preloads each as `std.<name>` (and the
-namespace table as `require("std")`) before any command runs a script, and puts the
-declarations in front of the checker, so `htl check`, `htl test` and `include_tl!` type
-them without the project holding a copy. Each declaration is the crate's own; what a
-function does and what it raises is documented there. Every one raises on failure rather
-than returning `nil, err`, so a result-style call is `pcall`, or a host module under
-`errors = "return"`. What `pcall` receives is a string, one line — `json.decode: EOF while
-parsing an object at line 1 column 1` — the same kind of value a Lua `error("...")` gives
-it: a Rust function's failure would otherwise arrive as a userdata whose `tostring` carries
-a `stack traceback:` block, and htl re-raises it as the text in front of that block.
-
-The set is the crate's *default* and not `full`: a module that reaches the file system,
-the network or an async runtime (`fs`, `http`, `llm`, `task`) is a decision about what a
-script may do, and a toolchain does not make it for every project it runs. A Rust host
-that wants those depends on the crate itself, under its own prefix, beside `std`.
+reached from Teal — under the namespace `std`: the `htl` binary carries the crate's
+default set, `json`, `env`, `path`, `time`, `string`, `validate`, `pretty` and `argparse`,
+preloads each as `std.<name>` (and the namespace table as `require("std")`), and `htl
+check`, `htl test` and `include_tl!` type them without the project holding a copy. Every
+one raises on failure rather than returning `nil, err`, so a result-style call is
+`pcall`, or a host module under `errors = "return"`. What `pcall` receives is a string,
+one line — `json.decode: EOF while parsing an object at line 1 column 1`.
 
 What version of the modules a script sees follows where the script runs. Under `htl run`
 / `htl test` it is the binary's, pinned like everything else the binary does by
@@ -1915,9 +1414,7 @@ typed against `std.*` and failing at the first `require`, which is the same stan
 
 In a bundle, `std.*` is a host module: `htl build` files it with the modules the running
 binary provides rather than trying to bundle Rust, and `htl run x.hb` preloads it before
-the bundle starts. A dependency that ships its own declarations for the crate
-(`[package.metadata.htl] dts`) is not materialised under `types/`: the modules are already
-on the path under the prefix that answers `require`.
+the bundle starts.
 
 ## Tests
 
@@ -1933,39 +1430,24 @@ end)
 `expect(x)` is generic, so `t.expect(1 + 1):to_equal("2")` is a *type* error and the
 file is refused before it runs.
 
-The split follows Go / Rust rather than Jest: htl invests in the **runner** and keeps
-the assertion surface small enough to read in one screen. Matchers: `to_equal`,
+Matchers: `to_equal`,
 `to_not_equal`, `to_be_truthy` / `to_be_falsy`, `to_be_nil` / `to_not_be_nil`,
 `to_be_close`, `to_be_greater_than` / `to_be_less_than` / `to_be_at_least` /
 `to_be_at_most`, `to_contain` / `to_not_contain` (substring or array element),
 `to_match` / `to_not_match` (Lua pattern), `to_have_length`, `to_error`. A function returning two values is asserted with
-`t.expect_all(f()):to_equal(false, "no door")` (`t.expect(f())` is a 2-argument call and
-a type error; the message says so).
+`t.expect_all(f()):to_equal(false, "no door")`.
 
 **A test file is a `.tl` that loads the test library** — `require("htl.test")`, or the
-module `--lib` names — wherever it is and whatever it is called. `htl test` runs each one
-in a state of its own. Anything else is not run on its own: a module under `tests/` that
-does not load the library is a helper, which the tests `require` like any module. Which
-names a file requires is read from its syntax, before anything is checked; a file that
-does not parse is a test when its text names the library, so that it fails where it can
-be seen.
+module `--lib` names — wherever it is and whatever it is called.
 
 `tests/` (`[layout] tests`) is the project's place for tests and for helpers only tests
-may reach: a test sees the project's sources and `tests/`, the sources do not see
-`tests/`, and a helper is named by its path below it (`tests/common/fx.tl` is
-`common.fx`). A unit test kept beside the module it tests is easier to tell from the
-module when it is called `<module>_test.tl`; the suffix is a convention, not a rule. What
-a test may `require` is decided by where it is, not by its name: a `<module>_test.tl`
-under `src/` is run like any test file, and sees what the sources see — a helper under
-`tests/` is not reachable from there.
+may reach; a helper is named by its path below it (`tests/common/fx.tl` is `common.fx`).
 Keep tests in a file of their own rather than in the module: a module that loads the
 test library loads it wherever the module is required, including in the program that
 ships it.
 
 A matcher that is not one of these is a type error too — `invalid key 'to_be' in type
-Expect<integer>` — and the checker appends the list above to it, read from the same
-declaration it refused the call against, so the names are in front of you at the moment
-you need them rather than here.
+Expect<integer>` — with the list above appended.
 
 A test builds values far more often than it asserts them, and what it builds is usually
 one valid value with a single thing varied, so a record with a handful of fields and a
@@ -2007,17 +1489,12 @@ directory — `tests/__snapshots__/session_test/first_floor.snap` for
 run of characters in the name outside letters, digits, `-`, `.` and `_` is one `_`. The
 first run writes the
 file (and says so); later runs fail with a `-expected +actual` line diff when the value
-changed; `htl test --update` rewrites the differing ones. A string is stored as is, an
-array of strings as its lines (a rendered screen), anything else in a sorted,
-one-entry-per-line form, so the files read well in a review. A name used twice in one
+changed; `htl test --update` rewrites the differing ones. A name used twice in one
 file is an error.
 
-Coverage: `htl test --coverage` prints, per `.tl` module of the project's own that the
-tests' checks depended on, how many of its statements ran (`executed/all  %`), and a
-total; a module no test reached shows `0/n`. A dependency the tests reach — installed,
-vendored or patched — is not in it, nor is a helper under `tests/`: coverage is of the
-code the project answers for. Under a module it names the functions nothing entered, since the
-percentage says how much was missed and not what:
+Coverage: `htl test --coverage` prints, per `.tl` module of the project's own, how many
+of its statements ran (`executed/all  %`), and a total. Under a module it names the
+functions nothing entered:
 
 ```text
 coverage: src/combat.tl      124/181   68.4%
@@ -2026,37 +1503,19 @@ coverage: src/combat.tl      124/181   68.4%
 
 `--coverage-lines` adds the unexecuted line ranges under those. Statements are counted
 from the `.tl` syntax tree and matched against Lua's line hook (Teal keeps line numbers
-when it generates Lua), so the numbers are `.tl` lines. A function counts as entered
-when a line strictly between its `function` and its `end` ran: defining a function runs
-both of those lines, so neither says anything about calls. A function with nothing in
-between — written on one line, or with an empty body — is not reported. The hook slows
-the run, and code that runs inside a coroutine the program creates is not seen.
+when it generates Lua), so the numbers are `.tl` lines. The hook slows the run, and code
+that runs inside a coroutine the program creates is not seen.
 
 `--lcov coverage.info` writes the same run as an lcov tracefile, which is what Codecov,
 Coveralls, GitLab, `genhtml` and editor gutters read; it implies `--coverage`, and the
-table and `--format json` are unchanged. One record per module the table lists: `FN` /
-`FNDA` from the functions above (`1` when the body was entered, `0` when not), `DA` per
-line a statement starts on, with a count of `1` or `0` — the hook records whether a line
-ran, not how often, and consumers treat any non-zero as covered. Two statements starting
-on one line share the entry, so `LF` / `LH` differ from the table's `total` / `executed`
-by exactly those lines. There is no branch data and no `BRDA`. `SF` is relative to the
-project root rather than to where the command ran, so the
-file resolves against the repository wherever CI stood; a module outside the root is
-written absolute.
+table and `--format json` are unchanged. One record per module: `FN` / `FNDA`, `DA` per
+line with a count of `1` or `0`, `LF` / `LH`, no `BRDA`; `SF` is relative to the project
+root.
 
-`--junit report.xml` writes the run as a JUnit XML report, which is what a CI reads to
-show which tests failed rather than a log to scroll: Jenkins' JUnit plugin, GitLab's
-report ingestion, and the GitHub Actions reporters all take this file. One `<testsuite>`
-per test file, one `<testcase>` per test with `classname` (the file), `name` (the suite
-and test name as the text output composes them) and `time` in seconds; a failing case
-carries a `<failure>` with the message printed under the file, traceback included. The
-totals are the summary line's: the same cases, the same failures. A file that failed to
-type-check, or raised outside any test, is a suite whose cases could not run, so it
-carries an `<error>` and no cases — the distinction a report makes between a test that
-said no and a file that never got to ask. Nothing is ever `<skipped>`: `--filter`
-selects before the run, so an excluded test is absent rather than skipped, while a file
-with no tests did run and is there as a suite with no cases. The flag composes with
-`--filter`, `--seed` and `--format json`, and changes neither the text nor the document.
+`--junit report.xml` writes the run as a JUnit XML report: Jenkins' JUnit plugin,
+GitLab's report ingestion, and the GitHub Actions reporters all take this file. The flag
+composes with `--filter`, `--seed` and `--format json`, and changes neither the text nor
+the document.
 
 Randomness: the runner seeds each file before it runs, prints the seed of every run, and
 takes it back with `--seed`, so a test that draws is one whose failure can be looked at
@@ -2067,27 +1526,14 @@ htl test: seed 8014255196 (repeat with --seed 8014255196)
 ```
 
 `t.rng()` is that stream, shaped like `math.random` (`rng()`, `rng(m)`, `rng(m, n)`);
-`math.random` is the same stream, so a test already using it repeats too. It *is*
-`math.random`, so the argumentless form returns a float in [0, 1) and the other two an
-integer; the declaration types all three `integer`, since this Teal resolves an overload
-by declaration order rather than by arity and cannot type the forms apart. Each file's
-seed is derived from the run's seed and the file's own path rather than drawn from one
-shared stream, so what a file draws does not depend on which other files ran or in what
-order — running it alone, or with `--filter`, reproduces what it did in the full run. A
-test that calls `math.randomseed` itself takes over from there; the runner does not seed
-again.
+`math.random` is the same stream, so a test already using it repeats too.
 
 Runner: `htl test [paths] [--filter substr] [--lib MOD] [--lint rule=level] [--fail-fast]
 [-v | -q] [--slow MS] [--update] [--seed N] [--coverage [--coverage-lines]] [--lcov FILE]
 [--junit FILE] [--format json] [--no-cache] [--explain-cache]`. Each file runs in a fresh
 state; `-v` prints every test with its time,
 `-q` only failures (with their details), errors and the summary line, `--slow 50` the
-tests over 50 ms, `--fail-fast` stops at the first failure. The run has one checker
-(`htl::testing::TestSession`) and one fresh program state per file: globals,
-`package.loaded` and module state never cross files, while a module is type-checked
-and generated once and served to every file whose search path resolves that name to
-the same file (`Htl::with_checker` is the same split for hosts that run many
-programs). `HTL_PROFILE=1` prints per-phase and per-file timings to stderr. Any library exposing
+tests over 50 ms, `--fail-fast` stops at the first failure. `HTL_PROFILE=1` prints per-phase and per-file timings to stderr. Any library exposing
 `run(filter, opts) -> {passed, failed, failures, tests?, snapshots_written?, snapshots_updated?}`
 (and optionally `configure({snapshot_dir, update, mkdir})`) plugs in via `--lib`
 (bring its `.d.tl`); files that use no such library pass if they run to completion.
@@ -2104,112 +1550,61 @@ and `--format json` carries the edits. `htl fix [paths]` applies them:
   a `{string: E}` lookup is missing (safe — the entry it adds is the identity mapping the
   table already states for every other value); `struct-fields` gets the fields the site
   leaves out, one entry each, in the order the record declares them, laid out where the
-  entries already there are (**suggest** — there is no honest value to put in one. A
-  record field has a type and no zero, `hp: integer` is not `0`, and `hp = nil`
-  type-checks, so a fix that filled the gap would satisfy the lint, pass the checker and
-  ship the wrong value silently. What it writes is `hp = htl_fixme("integer")`: the
-  declared type to read, in a call to a name the project does not have, so the checker
-  refuses it until a person replaces it); `no-global` becomes `local` (unsafe). `htl.toml` `[fix] unsafe = ["no-global"]` promotes a rule, `disable = [..]`
-  turns its fix off; `--rule a,b` limits a run.
+  entries already there are (**suggest** — what it writes is `hp = htl_fixme("integer")`);
+  `no-global` becomes `local` (unsafe). `htl.toml` `[fix] unsafe = ["no-global"]`
+  promotes a rule, `disable = [..]` turns its fix off; `--rule a,b` limits a run.
 - **The names those three take** are every rule `htl check --list-lints` names, plus two
-  that it does not: `forward-ref` and `tl:error`. A Teal error carries no rule of its own,
-  so those two are the classes an error's fix is filed under — `forward-ref` when the
-  message is a record key used before the function that defines it, `tl:error` for any
-  other error. They are names for fixes and nothing else: no check reports under either,
-  so neither has a level, neither is in `[lint.rules]` or `--lint`, and
-  `-- htl: allow(forward-ref)` silences nothing. A name from neither set is refused rather
-  than quietly matching nothing (`--rule forwardref` is an error, not a run that fixed
-  nothing). `tl:error` was called `error` before it joined the same namespace as Teal's
-  warnings; writing the old name says so.
-- **A rule with no fix is a name these take and nothing more.** `--rule require-cycle`
-  is a run that fixes nothing, not an error: which rules carry fixes is a fact about the
-  implementations, and `[fix] disable = ["contract"]` stays valid if one gains a fix later.
+  that it does not: `forward-ref` and `tl:error`. A name from neither set is refused
+  (`--rule forwardref` is an error, not a run that fixed nothing). `tl:error` was called
+  `error` before; writing the old name says so.
 - The working tree is the undo. A file git reports as modified or staged is refused
   (`--allow-dirty`), and so is a file outside a repository (`--allow-no-vcs`).
   `--dry-run` reports without writing; `--diff` prints a unified diff per file instead.
   A `suggest` fix is listed as skipped and its insertion printed under `--diff`, as a
   second diff headed `<file> (suggested)`, since nothing ever writes it.
-- A file with a syntax error is never touched. Type errors elsewhere do not block (a
-  fix is often what removes one); after each pass the file is re-checked and put back
-  if it has more errors than before. Edits that overlap an applied one wait for the
-  next pass; passes are capped at 4; two passes producing the same edits are reported
-  as fixes undoing each other.
 - Everything applied is listed (`fixed: file:line: rule (safe)`), as is everything
   skipped and why. What is left is reported and judged as `htl check` reports and judges
-  it — each file's diagnostics and htl's own lints on it, a patched dependency's copy
-  (checked, never fixed), and what the project says about itself as a whole (a name with
-  two owners, a require cycle, a contract problem) — so the two exit the same on the same
-  tree: an error, a finding at `deny`, or under `[lint] strict` any warning or lint → 1.
-  The summary line says which it was (`1 at deny`, `... under strict`). Like `htl check`,
+  it; the summary line says which it was (`1 at deny`, `... under strict`). Like `htl check`,
   it first regenerates the `.d.tl` declarations the project publishes, `--dry-run` or not.
   `--exit-non-zero-on-fix` also fails when a file changed, for CI.
 
 ## Machine-readable output
 
 `htl check --format json`, `htl test --format json` and `htl unused --format json` print
-one JSON document on
-stdout and nothing on stderr (the text form is stderr-only, so the two never mix).
-`htl resolve` is a report rather than a run, so both of its forms go to stdout, as
-`cache status` and `bundle info` do. The exit code is the same as in text mode. Field
-names are stable; fields may be added, not renamed.
+one JSON document on stdout and nothing on stderr. `htl resolve` is a report rather than
+a run, so both of its forms go to stdout, as `cache status` and `bundle info` do. The
+exit code is the same as in text mode.
 
 - `check`: `{ files, patched, diagnostics: [{ severity: "error"|"warning"|"lint", file,
   line, col, rule?, message, fix?, required_by?, origin? }], summary: { errors, warnings,
   lints, denied, strict, ok, cached, replayed } }`. `fix` is the rewrite `htl fix` would
   apply, when the diagnostic carries one: `{ applicability: "safe"|"unsafe"|"suggest",
-  edits: [{ line, col, end_line, end_col, text }] }`, positions counted from 1 and the end
-  exclusive (see Fixing). `cached` is true when every file came from the store and no
-  checker was built; `replayed` is how many of `files` were, so a mostly cached run reads
-  as such (see Caching). `rule` is the lint rule (`nil-index`, `contract`, ...) or a
-  Teal warning's kind (`tl:unused`, ...), kept apart from the message; on an error the
-  checker raised it is the class `htl fix` files that error's fix under (`forward-ref`,
-  `tl:error`), the same name `htl fix --format json` gives it. `files` is every file the walk visited and `patched` how many of
-  them came out of a `patch_dir` dependency (see Patched dependencies), so the project's
-  own is the difference — which is the pair the text summary prints. `denied` is how many
-  of `warnings` + `lints` were said under a rule
-  at `deny` — a count of levels, so it overlaps those two rather than adding to them, and
-  `ok` is false whenever it is not zero. An error in a module the check reached through `require` has `file` set
-  to that module and `required_by` to the file that required it; `origin` is
+  edits: [{ line, col, end_line, end_col, text }] }` (see Fixing). `rule` is the lint
+  rule (`nil-index`, `contract`, ...) or a Teal warning's kind (`tl:unused`, ...), kept
+  apart from the message; on an error the checker raised it is the class `htl fix` files
+  that error's fix under (`forward-ref`, `tl:error`), the same name `htl fix --format
+  json` gives it. An error in a module the check reached through `require` has `file`
+  set to that module and `required_by` to the file that required it; `origin` is
   `"dependency"` (installed under `.htl/modules`, a vendored copy, or the declarations a
   crate ships under `types/<crate>/`) or `"external"` (a `[check] paths` or contract
   directory), and absent for a file of the project's own, a patched dependency included.
-  It is decided by the module whose directory holds the file — the same module `htl
-  resolve` names a file's origin from.
 - `test`: `{ files: [{ path, ok, diagnostics, error?, file_level, passed, failed,
   failures, tests: [{ name, ok, ms }], duration_ms, snapshots_written,
   snapshots_updated }], summary: { files, files_run, passed, failed, files_with_errors,
   replayed, duration_ms, ok, seed }, coverage?: { modules: [{ path, executed, total,
   unexecuted: [[first, last]], never_ran?: [{ name, line }] }], executed, total } }`
   (`coverage` with `--coverage`; `never_ran` is absent when every function of the module
-  ran; `replayed` is how many files had their check and codegen come from the store — they
-  still ran).
+  ran).
 - `unused`: `{ modules: [{ path, module? }], dependencies: [{ name }], entries: [{ path,
   module?, kind: "main"|"test"|"contract"|"build"|"host" }], summary: { considered,
-  reached, entries, modules, dependencies, no_entry, check_errors, ok } }`. The two kinds
-  carry the names the text form prints them under (`module:` / `dependency:`); `module`
-  is the name a `require` would have to spell, absent when the search path gives the file
-  none. `check_errors` is what the check behind the graph reported: a file that does not
-  check contributes no edges, so a report from a run with any is a guess.
+  reached, entries, modules, dependencies, no_entry, check_errors, ok } }`.
 - `resolve`: `{ module, read?, candidates: [{ order, path, dir, kind:
   "source"|"declaration"|"lua", status: "read"|"shadowed"|"runtime"|"ambiguous"|"refused",
   shadowed_by?, origin?: { kind: "crate"|"dependency"|"vendored"|"patched", name, version? } }],
   answered_by: "model"|"path", searched: [dir], provided_by?, error?, summary: { candidates,
-  shadowed, ok } }`.
-  `answered_by` says whether the rows are the project model's files under the name or what
-  Lua's search path found for a name the project does not have; `searched` is that path's
-  directories either way. `order` is the position in
-  the search order, and `status` what became of that candidate: `read` is the file the
-  checker reads, `shadowed` names the `order` that is read instead (`shadowed_by`),
-  `runtime` is the `.lua` a declaration types — loaded by the run, hidden by nothing —
-  and `ambiguous` is one of two implementations of the name, which no order picks between:
-  `read` is then absent, `ok` false, and the command exits 1, as the text form does.
-  `read` and `ok` are absent and false when the name resolves to nothing. `provided_by`
-  is present for a name that runs from no file of the project, worded as the text header
-  words it: for the host `#[host_module] in Cargo.toml's crate`, `[build] host in htl.toml`
-  or `htl's std`, and `ok` is then true without a file; for a name the project has only a
-  declaration for, which the environment provides, `declared by <the .d.tl>`; `error` is present when a file of the project implements such a name as
-  well — those rows are `refused` — and `ok` is false. Paths are relative to the project
-  root when they are inside it.
+  shadowed, ok } }`. `provided_by` is worded as the text header words it: `#[host_module]
+  in Cargo.toml's crate`, `[build] host in htl.toml`, `htl's std`, or `declared by <the
+  .d.tl>`.
 
 GitHub Actions annotations from a check, for instance:
 
@@ -2221,21 +1616,11 @@ htl check . --format json | jq -r '.diagnostics[] |
 ## Bundles (`htl build`)
 
 `htl build src/main.tl -o app.hb` follows `require("<literal>")` from the entry and
-links everything it reaches into one file: `.tl` modules type-checked and generated,
-plain `.lua` modules (a dependency's own sources) as they are. A name that runs from no
-file of the project is recorded as **host-provided**: one the host provides (below), and one
-the project has only a `.d.tl` for — no `.tl`, no `.lua` — which the environment provides at
-run time (a Lua library installed on the machine, a module registered where the project
-cannot see it). Any other unresolved `require` is a build error, so "module not found"
-happens here and not on the first `require` at the user's machine. The build says it once
-per `require`: in a checked file the checker's `module not found` and the linker's error
-are one finding, and the build prints the linker's, which also says where to declare the
-module: in an `x.d.tl`, under `[build] host`, or under `[build] extra` for a dynamic
-`require`. A `require` of a name two files implement is a build error as well, naming
-both files (see "Project config"): no order picks one, in a bundle or anywhere else.
-`htl run app.hb` runs it; a host
-does `Htl::run_bundle(&Bundle::decode(bytes)?, &args)` after registering its modules,
-and is refused up front, naming them, if one is missing.
+links everything it reaches into one file. A missing `require` is said once, and the
+line says where to declare the module: in an `x.d.tl`, under `[build] host`, or under
+`[build] extra` for a dynamic `require`. `htl run app.hb` runs it; a host does
+`Htl::run_bundle(&Bundle::decode(bytes)?, &args)` after registering its modules, and is
+refused up front, naming them, if one is missing.
 
 - Payload is stripped Lua 5.4 bytecode by default, and stripping takes the traceback
   with it: every frame of a run-time failure reads `?`, with no line. `--debug` keeps
@@ -2243,20 +1628,10 @@ and is refused up front, naming them, if one is missing.
   bundle knows, since a bundle holds modules rather than files. `--source` stores
   generated Lua instead: larger and readable, bound to no Lua build, and named the same
   way as `--debug`.
-- **Portability.** A bytecode bundle runs on any host whose Lua chunk header matches
-  the one it was compiled by: version, bytecode format, the sizes of instruction /
-  integer / number, and endianness. Nothing about the CPU or the OS is in a Lua chunk,
-  and the Lua htl vendors has a 4-byte instruction, 8-byte integer and 8-byte double on
-  every 64-bit little-endian platform, so a bundle built on an arm64 Mac loads on
-  x86_64 Linux and cross-building between mainstream desktop and server targets needs
-  nothing. `--source` is for the cases the header refuses: a big-endian target, a host
-  whose Lua was built with a non-default `LUA_INT_TYPE` / `LUA_FLOAT_TYPE`, and a bundle
-  that has to outlive a Lua upgrade (mlua pins the Lua htl vendors, and a new one may
-  change the format). `install_bundle` checks the header before the first `require`
-  and refuses on mismatch, naming both sides: `compiled for Lua 5.4, format 0, 4/8/8,
-  little-endian by htl 0.1.19, but this host runs ... on htl 0.2.0`. The htl version
-  is advisory (a bundle from an older htl whose header agrees still loads); it is in
-  the message because the header alone cannot say why two 5.4 builds disagree.
+- **Portability.** `install_bundle` checks the Lua chunk header before the first
+  `require` and refuses on mismatch, naming both sides: `compiled for Lua 5.4, format 0,
+  4/8/8, little-endian by htl 0.1.19, but this host runs ... on htl 0.2.0`. `--source`
+  is for a host the header refuses.
 - `htl bundle info app.hb` prints what the file records — format version, the htl that
   built it, payload kind, the Lua the bytecode is for in the same words as the mismatch
   message, entry, modules, host-provided names — without creating a Lua state. That is
@@ -2264,39 +1639,21 @@ and is refused up front, naming them, if one is missing.
   `--source` bundle says its Lua is `any`; a format 1 bundle (`HTLB\x01`, before the
   fingerprint) says it was not recorded.
 - A dynamic `require(expr)` cannot be followed: list its targets under `[build] extra`
-  in `htl.toml` (or `--extra`). The names the host provides are the project's: every
-  `#[host_module]` in the crate around the project, `[build] host`, and `std.*` are left
-  out of the bundle without being listed again. So is a name declared and nothing else:
-  a hand-written `types/socket/http.d.tl` for a LuaSocket installed on the machine, a
-  crate's `types/<crate>/`, a host's generated `.d.tl` beside the sources — a declaration
-  with no `.tl` or `.lua` under its name is how a project says the environment provides
-  the module, and needs no configuration beside it. `[build] host` (or `--host`) is for a
-  name the project cannot see at all: registered some other way (by hand, or from another
-  crate) and with no `.d.tl`. A `.tl` or `.lua` of the project under any of these names is an error (see
-  "Embedding in Rust"): the check reports it at a checked file's `require`, and `htl
-  build` at a plain `.lua`'s, which nothing checks — and writes no bundle.
+  in `htl.toml` (or `--extra`). The names the host provides, and a name declared and
+  nothing else, are left out of the bundle without being listed. `[build] host` (or
+  `--host`) is for a name the project cannot see at all.
 - Bundled modules are installed as `package.preload` entries, the same place a host
   puts its own (a name the host preloaded first is left alone: the host wins). So
   everything that defers to preload, a `.d.tl` stepping aside for the implementation
   or an mlua-pkg resolver over a mods dir, sees bundled modules too, and files on disk
   do not override the bundle.
-- A second `install_bundle` writes nothing, because every name is taken. Putting a newer
-  bundle into a state that is already running is `Htl::replace_bundle(&b, keep)`: the
-  names the old bundle installed go from `package.preload` and `package.loaded`, so the
-  next `require` of one evaluates the new module, while the host's own modules are
-  untouched — a bundle only takes back what it wrote. `keep` is the exception, for a
-  module that *is* the state: `replace_bundle(&b, &["world"])` leaves `world`'s evaluated
-  table exactly as it is, mutations included, and the new bundle's `world` is never
-  evaluated. Nothing is run at replace time and the entry is not re-run; what to do with
-  it is the host's. A reference already taken is not reached by any of this: a `local m =
-  require "rules"` captured by a closure that is still running keeps the old table until
-  that closure is gone. The returned `Replaced` lists `dropped`, `kept` and `added` — a
-  module both bundles carry is in the first and the last, which is what happened to it.
+- A second `install_bundle` writes nothing. `Htl::replace_bundle(&b, keep)` puts a
+  newer bundle into a state that is already running; `replace_bundle(&b, &["world"])`
+  keeps `world`'s evaluated table. The returned `Replaced` lists `dropped`, `kept` and
+  `added`.
 - `htl build <dir>` (the older form) still bundles every `.tl` under a directory.
 
-From Rust, `include_bundle!` does the same at `cargo build` and keeps the guarantee
-`include_tl!` gives a single file: every linked `.tl` / `.lua` / `.d.tl` is tracked,
-so an edit rebuilds, and a Teal type error anywhere in the closure fails the build.
+From Rust, `include_bundle!` does the same at `cargo build`:
 
 ```rust
 const BUNDLE: &[u8] = htl::include_bundle!("src/main.tl", extra = ["modkit"]);
@@ -2319,21 +1676,13 @@ directory's.
 
 ## Unused (`htl unused`)
 
-`htl check` answers whether every file it was given is correct. It never answers whether
-every file it was given is *reached*. `htl unused` asks the second question of the same
-graph a bundle is linked from — a module nobody requires, and a dependency declared and
-never used, both keep checking clean forever:
+`htl unused` reports a module nobody requires, and a dependency declared and never used:
 
 ```text
 module: src/legacy/parser.tl (legacy.parser)
 dependency: strx
 htl unused: 1 module, 1 dependency [68 considered, 67 reached, 39 entries]
 ```
-
-Nothing new is parsed. `htl check` already resolves every `require` — that is what the
-`require-cycle` lint reads and what a cached entry carries — so this walks those edges
-from the entries and reports the complement, replaying the check from `.htl/` when
-nothing moved.
 
 **Where it starts is not a guess.** The equivalent tools for JavaScript need a plugin
 per framework to work out where a project starts; here the project has already said, in
@@ -2354,27 +1703,9 @@ the files `htl test`, `htl build`, `[[contract]]` and a Rust host are pointed at
   / `include_tl_bytes!` in the crate around the project. A project whose `main` is in Rust
   has no `src/main.tl`, and its entry is named there and nowhere else.
 
-A project with none of these gets a message saying so rather than a list of everything.
-
-`paths` narrows what is **reported**, never what is walked: reachability is a property of
-the project, so `htl unused src` still reads `tests/`, and a module only a test requires
-stays quiet. The dependency question is asked of `mlua-pkg.toml` `[deps]`: a name counts
-as required when a reached module says `require("mathx")` or `require("mathx.vec")`, or
-when what a reached module required resolved to a file inside that dependency — both,
-because a dependency that is declared but not installed resolves to nothing and is still
-required by name.
-
-The exit code is 0 whatever it finds, unless `--exit-non-zero-on-unused` says otherwise:
-"unused" is a question about intent, and CI should opt in to failing on it rather than
-out. Deleting is nobody's business here either — `htl fix` applies mechanical rewrites,
-and "this module is unreachable" is not one of those; the fix is a decision.
-
-**Exports are not a kind.** A third question — which field of a module record no reached
-module reads — was considered and left out. htl's premise is a Rust host embedding Teal,
-so a module's caller is routinely outside the Teal sources entirely: a `#[host_module]`
-calling into a preloaded module, a `---@contract` type published for mod authors, an SDK
-a consumer requires. Every one of those reads a field no walk of this project's `.tl` can
-see, and a rule that fires on them is a rule nobody can act on.
+The exit code is 0 whatever it finds, unless `--exit-non-zero-on-unused` says otherwise.
+Deleting is nobody's business here either — `htl fix` applies mechanical rewrites, and
+"this module is unreachable" is not one of those; the fix is a decision.
 
 ## Layout of a project (`htl new`)
 
@@ -2397,33 +1728,19 @@ see, and a rule that fires on them is a rule nobody can act on.
 └── tests/<mod>_test.tl     a test (it loads htl.test); helpers beside it are not run
 ```
 
-mlua-pkg's `entry` is a directory, so a consumer's `require("<name>")` looks for
-`<name>/init.tl`. A flat package can instead ship `<name>/<name>.tl` (e.g. `entry = "src"`
-with `src/<name>.tl`); htl resolves that form in the checker and in `TealResolver`. It
-is the entry of a package and nothing else: in the project's own `src/`, `util/util.tl`
-is `util.util`.
-
 `mlua-pkg.toml` names one dependency from the start: `htlx`, the collections Lua does not
 have ([htl-x](https://github.com/ynishi/htl-x) — `htlx.list` / `tablex` / `seq` /
 `ordered`, pure Teal), pinned at an exact tag, so the README's first step is `htl pkg
 install`. `htl new --no-x` leaves the line out.
-The tag the scaffold pins is a constant in the scaffold, and `just e2e` scaffolds a
-project, installs it and runs a test against it, which is what the constant is allowed to
-move on.
 
-The name is the directory, the package, the module `require("<name>")` resolves, the
-record that module declares — and, when the project has a target, the crate in
-`Cargo.toml` and the path the host preloads through — so a name that cannot be all of
-those is refused before anything is written: the rules `cargo new` applies (a Rust
-keyword, a leading digit, a character outside `[A-Za-z0-9_-]`) for a project with a
-target, and, for every project, a Lua keyword or one of Teal's `record` / `enum` /
-`interface`. So `htl new pub --embed` and `htl new end` are refused by name, and `pubs`,
-`my-lib` and a plain (target-less) `htl new match` are not.
+A name that cannot be the directory, the package, the module, the record and the crate
+at once is refused before anything is written: `htl new pub --embed` and `htl new end`
+are refused by name, and `pubs`, `my-lib` and a plain (target-less) `htl new match` are
+not.
 
 ### Build targets (`--target <name>`)
 
-**A build target is what runs this project's output.** That is the axis `--target` names,
-and it is the only thing the entries differ about:
+**A build target is what runs this project's output.**
 
 | target | what runs the output | output | Rust in the project |
 |---|---|---|---|
@@ -2432,20 +1749,10 @@ and it is the only thing the entries differ about:
 | `cdylib` | a C / Python / Unity caller | `cdylib` + `staticlib` + a header | the user's crate |
 | `window` | the OS, as a window | a binary that opens a window (library + `main.rs` calling `htl_mq::run`) | the user's crate, plus `htl-mq` |
 
-*Host* is the other axis: the Rust side that embeds the Lua state, what `[build] host` and
-`htl build --host` name the modules of. Both words are defined where the target is, in
-`BuildTarget`'s doc comment in
-[`crates/htl-core/src/build_target.rs`](crates/htl-core/src/build_target.rs).
+`htl init --target bin` adds the Rust side to a project that predates it.
 
-`--target` names an entry in that registry rather than adding a flag per kind: `bin`,
-`cdylib` and `window` are the three the scaffold writes today, and the flag reports the
-rest as they arrive. A name that is not registered is refused with the ones that are, before the
-directory is created, so a typo leaves nothing behind. `htl init --target bin` adds the
-Rust side to a project that predates it and lists the files it kept rather than skipping
-them in silence.
-
-`[build] target` in `htl.toml` is the key that records what runs the output, read by every
-command that loads the file (absent means `hb`). `htl new --target <name>` writes it.
+`[build] target` in `htl.toml` records what runs the output (absent means `hb`).
+`htl new --target <name>` writes it.
 
 `htl build` is the first command that acts on what the key records. A bundle is the `hb`
 target, so in a project whose target is any other — `bin`, `cdylib`, `window` — the build
@@ -2457,28 +1764,13 @@ record is a decision the project made rather than a note about itself; dropping
 #### Which htl the project depends on (`--htl <main | path:<checkout>>`)
 
 A target that writes Rust writes a `Cargo.toml`, and the `htl` that manifest pins is the
-one the `htl` binary was built with — the scaffold writes what that htl reads (`htl.toml`
-keys, the host's `include_bundle!`), so the two cannot disagree. Where that htl *is* is
-what changes with the binary: one installed from crates.io (`cargo install htl-cli`) pins
-its own version there, `htl = "0.8.0"`; one built from a checkout of this repository
-(`cargo run`, `cargo install --path`) pins that checkout, `htl = { path = ".../crates/htl" }`,
-so a project written by it builds against the tree that wrote it with nothing patched
-afterwards — and is tied to that tree, as a project written by a development build should
-be. One built by `cargo install --git` pins the repository's `main` branch. Two more
-cases decide the same way: a binary built in GitHub Actions at a `refs/tags/` ref — the
-cargo-dist build a release ships — pins its release, and `HTL_PIN_DEFAULT=release|main|path`
-in the environment at build time overrides the guess.
+one the `htl` binary was built with.
 
-The same release, as the *command*, goes into `mise.toml` — `"cargo:htl-cli" = "0.8.0"` —
-so a version manager can hold the project to the `htl` that wrote it (see Install). A
-checkout or `main` pin names a tree rather than a release, and writes no such file.
+The same release, as the *command*, goes into `mise.toml` — `"cargo:htl-cli" = "0.8.0"`
+(see Install). A checkout or `main` pin writes no such file.
 
 `--htl main` pins `main` by hand, and `--htl path:<checkout>` another clone (the
-checkout's *root* — the dependency written is the `crates/htl` inside it); the C ABI
-target's `features = ["ffi"]` travels onto whichever form the pin takes. A release by
-number is refused: a project for an older htl is written by that release's own CLI,
-`cargo install htl-cli --version <release>`, the way every generator that ships beside its
-library does it.
+checkout's *root*).
 
 #### The bin target (`--target bin`)
 
@@ -2519,23 +1811,14 @@ caller that is not written in Rust:
 └── examples/python/       run.py: restype = c_void_p and ctypes.cast, never c_char_p
 ```
 
-The two callers are the point. Each language has one way of reading a `char *` that looks
-natural and is wrong — C never makes you think about the pointer at all, and Python's
-`restype = c_char_p` copies the string and drops the pointer, leaking it every call — so
-the scaffold ships a caller in each that does it correctly, and the CI job runs both
-against the library it just built.
-
-`--target cdylib` requires `--lib` and is refused without it: a `cdylib` has no entry
-point of its own, so there is no `src/main.tl` for a binary to run. What the callers do
-have is a Lua `error()` and a Rust `Err` to handle — the generated `greet` refuses an empty
-name in Teal and `reset` refuses a no-op in Rust — so both error paths are in front of the
-reader rather than described.
+What the callers have is a Lua `error()` and a Rust `Err` to handle — the generated
+`greet` refuses an empty name in Teal and `reset` refuses a no-op in Rust — so both error
+paths are in front of the reader rather than described.
 
 #### The window target (`--target window`)
 
-`htl new --target window <name>` is the `bin` shape with the window on it: the same
-library and thin binary, plus [`htl-mq`](#opening-a-window-htl-mq) for macroquad's
-drawing and input.
+`htl new --target window <name>` is the `bin` shape with the window on it, plus
+[`htl-mq`](#opening-a-window-htl-mq):
 
 ```text
 ├── Cargo.toml             htl + htl-mq (under the same pin) + anyhow
@@ -2552,16 +1835,8 @@ Both generated declarations are committed, and the first command in a fresh clon
 `htl check .`: it writes `src/fx.d.tl` and copies `types/htl-mq/mq.d.tl` out of the
 dependency, and `cargo build` reads the second of them when `include_bundle!` links `mq`.
 
-`--target window` refuses `--lib`: the frame loop is handed a game table and that table is
-what `src/main.tl` returns, so a window project with no entry script is a loop with
-nothing to drive. It is the first target to say so, and the refusal — like `cdylib`'s
-opposite one — happens before the directory is created.
-
-`htl test` runs the engine with no display, because the engine is Teal that takes its
-world as arguments and `require("mq")` resolves to the declaration. For the window itself,
-`HTL_MQ_FRAMES=60 HTL_MQ_SHOT=out.png cargo run` stops after sixty frames and writes the
-last one as a PNG, which is how a run nobody is watching — CI, or `xvfb-run` on a machine
-with no display — answers for itself.
+`htl test` runs the engine with no display. For the window itself, `HTL_MQ_FRAMES=60
+HTL_MQ_SHOT=out.png cargo run` stops after sixty frames and writes the last one as a PNG.
 
 ## Unions of records (`where`)
 
@@ -2632,11 +1907,8 @@ than from the tests, and stays quiet for a chain with an `else`, for a single `i
 is a guard, not a dispatch), and where every branch returns and code follows, which is the
 `else` written differently. Those are the same exemptions `enum-exhaustive` makes.
 
-Because the clause is read *before* the body's fields, a record cannot open with a field
-called `where`: on the first line, `where: any` is parsed as the predicate and dies on
-the `:`. The name is taken in that one position only — a `where` field one line further
-down is an ordinary field — and the quoted spelling Lua tables already allow works
-anywhere, first line included:
+A record cannot open with a field called `where`; the quoted spelling works anywhere,
+first line included:
 
 ```tl
 local record FindArgs
@@ -2645,20 +1917,14 @@ local record FindArgs
 end
 ```
 
-Teal reports the first-line form as a bare `syntax error` plus a second error on the next
-field's line. htl replaces it with `'where' opens a union predicate when it is the first
-line of a record or interface body; write ["where"]: <type>, or put another field first`,
-and drops the follow-on.
-
 This is a Teal feature, not an htl one; it is documented here because the error above is
 what a reader meets first, and it reads like a dead end rather than a pointer to `where`.
 
 ## Pitfalls the checker now names
 
 - **Case-insensitive filesystems (macOS, Windows)**: `require("site")` from a file
-  called `Site.tl` resolves to that very file. Teal reports it as "no type information
-  for required module"; htl appends that the module resolved to the requiring file
-  itself and that one of the names has to change.
+  called `Site.tl` resolves to that very file; htl says so, and that one of the names
+  has to change.
 - **Numeric inference**: `local n = 0` is `integer`, `0.0` is `number`; opt into the
   `explicit-number` lint to be told where an annotation is missing.
 - **Forward references**: `function world.tick` calling `world.observe` that is
@@ -2675,9 +1941,8 @@ what a reader meets first, and it reads like a dead end rather than a pointer to
   follow-on error on the next field's line become one message naming the keyword and the
   two ways out — `["where"]: <type>`, or any other field first (see above).
 - **Multi-value call in last position**: `t.expect(can_cast(x))` with `can_cast`
-  returning `boolean, string` is a 2-argument call, and Teal reports "wrong number of
-  arguments" at `expect`. htl names the expanding call and the two fixes (bind first,
-  or parenthesize to keep the first value).
+  returning `boolean, string` is a 2-argument call; htl names the expanding call and the
+  two fixes (bind first, or parenthesize to keep the first value).
 
 ## Running against an unpublished htl
 
