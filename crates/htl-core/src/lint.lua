@@ -160,7 +160,8 @@ end
 -- `f(x)[k]`, `f(x)()` where `f` is declared `---@nilable`. Teal types the result `T`
 -- because every Teal type accepts nil, so nothing in the check stops the chain; the marker
 -- beside the declaration is what says the call may hand back nothing, and this is the one
--- use of the result that cannot be right whatever the run-time value is.
+-- use of the result that cannot be right whatever the run-time value is. The rule is
+-- silent until a declaration carries the marker: an unmarked function says nothing.
 --
 -- Which function a call reaches is type information, so `extra.nilable_at(y, x)` answers it
 -- from the checker's position report (see prelude.lua) — the marker travels with the
@@ -597,7 +598,8 @@ local function literal_tests(exp)
 end
 
 -- `extra.enums`: name -> enumset the checker resolved (nested in records, required
--- modules). `extra.subject_enum(y, x, key)`: the checker's type of a subject —
+-- modules), so an enum declared inside a record or in a required module counts like one
+-- declared in the file. `extra.subject_enum(y, x, key)`: the checker's type of a subject —
 -- (enumset, name) for an enum, `false` for a known non-enum, nil when unknown.
 -- `if` statements that have statements after them in their block: when every branch
 -- ends in `return`, what follows is the implicit `else`, not a missing branch.
@@ -790,7 +792,10 @@ end
 -- and how far it is indented are all things only the lines know.
 --
 -- `opts.entry(name)` writes one entry and defaults to the identity mapping `enum-table`
--- fills a lookup in with; `opts.applicability` classes the fix; `opts.split` gives every
+-- fills a lookup in with — safe, because the entry it adds is the mapping the table
+-- already states for every other value, so what the program does does not change. For a
+-- `{E: T}` table the rule reports and changes nothing: what an entry maps to is not
+-- something a fix can invent. `opts.applicability` classes the fix; `opts.split` gives every
 -- name an edit of its own, so an editor can offer one code action per name rather than
 -- one for the lot.
 local function table_entry_fix(lines, n, names, opts)
@@ -983,7 +988,10 @@ end
 -- wherever the last branch happened to lead.
 --
 -- The union's members come from the checker (`extra.union_at`), not from the tests: a
--- chain that names two variants tells you nothing about how many there are.
+-- chain that names two variants tells you nothing about how many there are. The
+-- exemptions are `enum-exhaustive`'s: a chain with an `else`, a single `is` (a guard, not
+-- a dispatch), and a chain where every branch returns and code follows, which is the
+-- `else` written differently.
 local function lint_union_exhaustive(ast, report, extra)
    extra = extra or {}
    local union_at = extra.union_at
@@ -1037,6 +1045,12 @@ local function lint_shadow(ast, report)
    -- say is that the name it saw came from a `require`, and in a growing codebase the
    -- typical hit is exactly that — a new parameter or local taking the name of a module
    -- required at the top of the file, which the rest of the scope then cannot reach.
+   -- `tl:redeclaration` also sees two declarations in the *same* scope, which this never
+   -- could. On a local over a required module both fire at one position, and they say
+   -- different things about it — one that a name is shadowed, the other which module it
+   -- was — so a line that wants both quiet allows both names:
+   -- `-- htl: allow(tl:redeclaration, shadow-local)`. An allow comment silences the names
+   -- it lists and no others.
    local function declare(name, y, x, module)
       if type(name) ~= "string" or name == "self" or name == "..." or name:sub(1, 1) == "_" then
          return
@@ -1290,6 +1304,23 @@ end
 -- every construction site, except the ones marked `---@optional`. Teal has no `?` for
 -- record fields, so without this a record the program builds itself reads as if any field
 -- might be absent, and every use site pays for that with a nil check.
+--
+-- Adding an unmarked field makes the construction sites that predate it report, which is
+-- the point: the default for a new field is mandatory, and `---@optional` is the
+-- exception written on purpose. Growing a record that already has sites is that report
+-- arriving at all of them at once, so the way through is two steps: add the field with
+-- `---@optional` on it (a marker that says "not yet"), fill the sites at whatever pace
+-- the work allows, then delete the marker line — every site still short is reported, and
+-- a clean check says the last one is done. `htl fix --diff` spells the missing field into
+-- each site as a suggestion it never writes (see `field_placeholder`): a checklist and a
+-- line to paste from, not the migration done for you.
+--
+-- This is a lint, not a type: the markers are comments, so the file stays valid Teal and
+-- other tooling ignores them, and use sites still see a nilable field. What it removes is
+-- the reason to guard, and the doubt about whether a field was ever set. Data arriving
+-- from outside the program — a mod's return value, a save file, a host — is a different
+-- question, and a record marked `---@contract` with `---@required` on its mandatory
+-- fields is what checks that (contract.rs).
 --
 -- Which record a bare `{ ... }` is being built as is type information, and this rule is
 -- run over a syntax-only parse (see L.run). `extra.struct_at(y, x)` answers it from the

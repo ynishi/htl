@@ -160,7 +160,8 @@ pub struct Summary {
     /// happening.
     pub shadowed: usize,
     /// The name resolves to a file, or the host provides it, and the model does not
-    /// refuse it. What the exit code says.
+    /// refuse it. What the exit code says: a name that resolves to nothing says so and
+    /// exits non-zero, so a script can ask, and `--format json` carries the same rows.
     pub ok: bool,
 }
 
@@ -294,6 +295,9 @@ struct ModelRows {
 
 /// The rows for a name the model has: every file of the model under it, the one the
 /// resolver answers with marked `read`. `None` when the model does not have the name.
+/// The rows are in the order a name is answered, by kind first — a source, then a
+/// declaration, then plain Lua — so row 1 is not necessarily the earliest directory: a
+/// source beats a declaration wherever the two sit.
 ///
 /// A name the host provides that a file implements as well reads its declaration, when
 /// it has one — the check types the `require` from it — and marks the implementations

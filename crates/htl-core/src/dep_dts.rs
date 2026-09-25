@@ -48,9 +48,11 @@
 //!
 //! Copying rather than searching the dependency where cargo unpacked it is what makes a
 //! fresh clone check: the registry cache is machine-local and empty until someone builds,
-//! `types/` is in the repository. It is also what keeps `include_tl!` out of cargo — the
-//! macro reads `types/` as it always has, and a proc macro shelling out to `cargo
-//! metadata` on every build is the cost this avoids.
+//! `types/` is in the repository. The shipping crate keeps its files current the same way
+//! — the macro rewrites them, CI diffs them — and commits them: they are what a
+//! consumer's checkout copies from, before anything of the crate is built. It is also
+//! what keeps `include_tl!` out of cargo — the macro reads `types/` as it always has, and
+//! a proc macro shelling out to `cargo metadata` on every build is the cost this avoids.
 //!
 //! # Why a subprocess, and why the graph
 //!
@@ -58,7 +60,8 @@
 //! versions, not the ones that were resolved, and a registry dependency's files are under
 //! `$CARGO_HOME/registry/src/<registry>/<name>-<version>/`, a layout no project should be
 //! reimplementing. `cargo metadata` reports both — the resolved graph, and each package's
-//! `manifest_path` wherever cargo put it — and it does not build.
+//! `manifest_path` wherever cargo put it — and it does not build. A project whose
+//! dependencies are already resolved and fetched needs no network for it.
 //!
 //! It is run with `--locked` when the project has a `Cargo.lock`, which is what keeps a
 //! read a read. Resolving a graph is what writes a lockfile, and a project that pins a git

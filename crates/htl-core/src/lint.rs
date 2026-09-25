@@ -1,7 +1,11 @@
 //! The rules a finding can be reported under, and which of them a run has on.
 //!
 //! Every rule name htl prints — the ` [htl <rule>]` suffix a finding's message ends with,
-//! and the `rule` field of `--format json` — is one entry of [`RULES`]. Fifteen of them are
+//! and the `rule` field of `--format json` — is one entry of [`RULES`], and everything
+//! printed with that suffix is a finding about the project's code. `htl dts`'s `not
+//! written` and `left in place` lines are not: they are the command reporting on the
+//! declarations it was asked to write, carry no rule name, and are in no listing here.
+//! Fifteen of them are
 //! implemented in `lint.lua`, five in the project layer and seven by the vendored Teal
 //! compiler, and that difference used to decide what a project could say about them: the
 //! registry was `L.DEFAULT` in `lint.lua`, so `--lint` and `[lint]` knew the thirteen and

@@ -6,12 +6,19 @@
 //! ```text
 //! <name>/
 //! ├── mlua-pkg.toml          [package] entry = "src/<mod>"  -> consumers require("<name>")
+//! ├── htl.toml               [fmt], and commented [lint] / [check] / [[contract]] to fill
+//! │                          in; [build] target with --target. Read by the CLI and the macros
+//! ├── mise.toml              the htl command that wrote it, for mise (release builds only)
+//! ├── .gitignore             .htl/ (the cache and the installed deps) and *.hb; a target
+//! │                          adds its own lines
+//! ├── README.md              the commands to run, and what the manifest's entry is for
 //! ├── src/<mod>/init.tl      the module (require("<mod>") from src/ and from tests/)
 //! ├── src/main.tl            entry script            (omitted with --lib)
-//! ├── tests/<mod>_test.tl    htl.test sample
-//! ├── .gitignore
-//! ├── README.md
-//! ├── mise.toml              the htl command that wrote it, for mise (release builds only)
+//! ├── types/README.md        .d.tl the project consumes (hand-written, and <crate>/ copied
+//! │                          from a dependency) and publishes (a ---@contract type)
+//! ├── patches/<dep>/         a dependency taken into the tree (htl pkg patch), committed;
+//! │                          checked, not formatted, its tests not run
+//! ├── tests/<mod>_test.tl    htl.test sample; helpers beside it are not run
 //! └── Cargo.toml + src/lib.rs    Rust host (only with a target): #[host_module] exposing
 //!     + src/main.rs               `host` to Teal (declaration -> src/host.d.tl), the
 //!                                 module and its require closure embedded with
@@ -46,10 +53,16 @@
 //! Each target that writes Rust writes `src/lib.rs`: the `#[host_module]`, its records,
 //! the embedded Teal module, `preload` registering both, and a Rust test that goes through
 //! `preload`. When the project has an entry script it also writes `src/main.rs`, a few
-//! lines that call `preload` and `exec` the script. So what a project grows — a second
-//! host module, a C ABI layer, a window loop — grows in the library, and the binary never
-//! holds logic. The `cdylib` target is that taken to its end: a `#[c_export]` block in the
-//! same library and no binary at all, which is why it is the target that answers
+//! lines that call `preload` and then run the bundle of `src/main.tl` embedded at `cargo
+//! build` — `include_bundle!("src/main.tl", ..)`, the entry script and its `require`
+//! closure, handed to `run_bundle` with the process arguments; nothing is read from a file
+//! at run time. So what a project grows — a second host module, a C ABI layer, a window
+//! loop — grows in the library, every entry point reaches it through `preload`, and
+//! another crate that embeds this one calls the same function. `--lib` means the project
+//! has no entry script, so there is nothing for a binary to run and none is written; what
+//! is left is the library, the part someone else embeds. The `cdylib` target is that
+//! taken to its end: a `#[c_export]` block in the same library and no binary at all,
+//! which is why it is the target that answers
 //! [`Script::Forbids`](htl::build_target::Script::Forbids).
 //!
 //! [`scaffold`] therefore does the same three things whatever it is asked for: pick the
@@ -451,6 +464,11 @@ const CDYLIB: TargetProfile = TargetProfile {
 /// no display, while `src/main.tl` — the one script that calls `mq` — is the game table and
 /// nothing else. Hence [`Script::Requires`](htl::build_target::Script::Requires): a loop
 /// with no table to drive is not a project this scaffold can write.
+///
+/// Both generated declarations are committed — `src/fx.d.tl` from the project's own
+/// `#[host_module]`, `types/htl-mq/mq.d.tl` copied out of the dependency — and the first
+/// command in a fresh clone is `htl check .`, which writes both; `cargo build` reads the
+/// second when `include_bundle!` links `mq`.
 const WINDOW: TargetProfile = TargetProfile {
     target: BuildTarget::Window,
     deps: &[

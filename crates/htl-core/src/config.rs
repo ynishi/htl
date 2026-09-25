@@ -113,7 +113,9 @@ pub struct HtlConfig {
 /// meaning what they mean to the dependency.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImportTarget {
-    /// `own:<name>`: the project's own module of that name.
+    /// `own:<name>`: the project's own module of that name. The key then answers to
+    /// `@/<name>` in generated Lua, and only the project's own module may answer it — the
+    /// dependency of the same name is what the entry was written to set aside.
     Own(String),
     /// `dep:<name>`: a module of a dependency — `<name>` starts with the dependency's name
     /// (`dep:mathx`, `dep:mathx.vec`).
@@ -156,9 +158,12 @@ impl HtlConfig {
 ///
 /// `Cargo.toml` already pins the `htl` *crate* a Rust host builds against, and nothing
 /// pinned the command. The command is what decides whether the project checks: a default
-/// lint added in a release turns a green project red on unchanged sources, and without
-/// this key the first place that shows up is a teammate's terminal rather than the line
-/// in this file that says which release the project moved to.
+/// lint added in a release turns a green project red on unchanged sources — three lints
+/// were added on one day and all three are reported by default, so a project quiet under
+/// the release before them says three new things under the release after, fatally if it
+/// runs `--strict` — and without this key the first place that shows up is a teammate's
+/// terminal rather than the line in this file that says which release the project moved
+/// to.
 ///
 /// htl does not install anything — it is one binary, not a toolchain manager — so a
 /// mismatch is reported and the message names `cargo install htl-cli`.
@@ -276,7 +281,9 @@ impl RequireFields {
 
 /// `[[contract]]` — where this project accepts modules from outside it. One line, in the
 /// file a reader opens first; the shape those modules must have is declared on the record
-/// itself with `---@contract` (see [`crate::contract`]).
+/// itself with `---@contract` (see [`crate::contract`]). Marking the record is what makes
+/// the contract discoverable: a directory carries no evidence of which of a project's
+/// records is the one its modules must satisfy.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Contract {
@@ -502,7 +509,8 @@ impl HtlConfig {
     ///
     /// `types` appearing in `[check] paths` is *not* refused. Those two make the same
     /// claim, so saying it twice says nothing new; a project that lists the directory it
-    /// would have got anyway is redundant, not wrong.
+    /// would have got anyway is redundant, not wrong. `[layout] tests` is compared with
+    /// nothing: only `source` makes the claim the others contradict.
     ///
     /// Nothing here touches the filesystem. The contradiction is in the file, so it is
     /// reported when the file is parsed, before a single source is read.
@@ -589,10 +597,21 @@ impl HtlConfig {
 
     /// Directories the checker should search, in the order it consults them: `root`, the
     /// source directory, the types directory (hand-written `.d.tl` for modules the host
-    /// provides, the DefinitelyTyped shape), then `[check] paths` (resolved against
-    /// `root`, `~` expanded). Only existing dirs. The project's own code comes before
-    /// declarations it keeps for other people's, and both come before anything supplied
-    /// from outside.
+    /// provides, the DefinitelyTyped shape), the `types/<crate>/` directories materialised
+    /// under it, then `[check] paths` (resolved against `root`, `~` expanded). Only
+    /// existing dirs. The project's own code comes before declarations it keeps for other
+    /// people's, and both come before anything supplied from outside. Between two
+    /// declarations of one module that order is the whole rule — the project's own, then
+    /// the ones crates ship, then `[check] paths` — and the first is read: a hand-written
+    /// `types/mq.d.tl` beside a shipped `types/htl-mq/mq.d.tl` is the one in effect, and
+    /// the shipped one is what `duplicate-declaration` reports as shadowed. (The model,
+    /// which every command resolves through, puts a dependency's declarations between
+    /// the project's own and the crates'; see `model::Project::load`.)
+    ///
+    /// `root` is here for the legacy path-based callers (`Htl::apply_config`) and for
+    /// `pkg::contract_resolvers`. The model does not search it: a `.tl` beside `htl.toml`
+    /// is the project's only when `[layout] source = "."` says the sources are there
+    /// ([`marker_roots`](Self::marker_roots) applies the same rule).
     ///
     /// The two middle entries are [`LayoutConfig`]'s, `src` and `types` unless the
     /// project says otherwise. They were constants here until that section existed.

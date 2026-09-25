@@ -86,8 +86,9 @@ use crate::{CheckInfo, DependencyError, Fix, RequireSite};
 /// meaning — which the hash cannot see.
 const FORMAT: u32 = 9;
 
-/// Where the store lives under the project root. Generated, and `htl init` puts it in
-/// `.gitignore`.
+/// Where the store lives under the project root. Generated, and `htl init` puts `.htl/` in
+/// `.gitignore` — one line for the cache and the installed deps beside it, both
+/// machine-local and regenerated; an existing project adds the line by hand.
 const DIR: &str = ".htl/cache";
 
 /// How many entries a project's store may hold before a run starts dropping the ones it did
@@ -665,8 +666,13 @@ struct RunEntry {
 /// How much of a run one entry covers.
 ///
 /// The two are a real trade rather than one being a refinement of the other, and which
-/// wins depends on where in the dependency graph the edit lands — see the Caching section
-/// of the README. `PerModule` is the default because editing is the common case.
+/// wins depends on where in the dependency graph the edit lands. What `PerModule` saves
+/// depends entirely on that: editing a leaf replays everything else, and editing the
+/// module at the bottom of the graph saves nothing, because everything above it has to be
+/// checked again anyway. Neither mode is slower than a cold check. `WholeRun` keeps one
+/// entry per invocation rather than one per module, which is the reason to reach for it
+/// if the number of files in `.htl/` is the problem. `PerModule` is the default because
+/// editing is the common case.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
 pub enum Mode {
     /// One entry per module. An edit costs the module, its dependents, and what those pull

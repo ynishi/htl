@@ -64,9 +64,13 @@ use std::path::{Path, PathBuf};
 /// half of a link's inputs is [`LinkStore`].
 #[derive(Debug, Clone, Default)]
 pub struct LinkOptions {
-    /// Keep debug info (line numbers, local names) in bytecode. Off = stripped.
+    /// Keep debug info (line numbers, local names) in bytecode. Off = stripped, and
+    /// stripping takes the traceback with it: every frame of a run-time failure reads `?`,
+    /// with no line. On, a frame reads `depth:8` — the module the bundle knows, since a
+    /// bundle holds modules rather than files.
     pub debug: bool,
-    /// Store generated Lua source instead of bytecode (portable across Lua builds).
+    /// Store generated Lua source instead of bytecode (portable across Lua builds):
+    /// larger and readable, bound to no Lua build, and named the same way as `debug`.
     pub source: bool,
     /// Modules to include even if no literal `require` reaches them.
     pub extra: Vec<String>,
@@ -147,7 +151,9 @@ pub struct LinkedModule {
 /// was arrived at.
 ///
 /// The bundle is private because an incomplete one must not escape — see
-/// [`errors`](Self::errors) and [`bundle`](Self::bundle).
+/// [`errors`](Self::errors) and [`bundle`](Self::bundle). [`link`] itself returns `Ok`
+/// with the errors inside, so a caller (a `build.rs`, the macros) can show the whole list
+/// rather than the first one; the bundle is handed out only when the list is empty.
 #[derive(Debug, Default)]
 pub struct Linked {
     bundle: Bundle,
@@ -252,7 +258,10 @@ impl Linked {
     }
 
     /// Every file the bundle was built from (entry, modules, and what the checker read
-    /// for them, e.g. `.d.tl`s): what a build script or macro should watch for changes.
+    /// for them, e.g. `.d.tl`s): what a build script or macro should watch for changes,
+    /// one `cargo:rerun-if-changed=<file>` each. Files, not the directory: cargo compares
+    /// the mtime of the path it is given, and editing a file inside a directory does not
+    /// change the directory's.
     pub fn inputs(&self) -> Vec<PathBuf> {
         let mut out: Vec<PathBuf> = self.modules.iter().map(|m| m.path.clone()).collect();
         for (_, ci) in &self.checks {

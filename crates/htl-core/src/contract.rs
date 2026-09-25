@@ -17,18 +17,27 @@
 //! part is why the fields are marked rather than counted: a record cannot say which of
 //! its own fields are mandatory (every Teal record field is nilable and there is no `?`
 //! for them), and taking all of them would break every module written before the field
-//! was added.
+//! was added. The same nilability is why a record literal may leave fields out and
+//! `htl check` is right to pass it: a `#[derive(TealRecord)]` on the Rust side reports a
+//! missing field only when the value crosses at run time, and a record marked
+//! `---@contract` with `---@required` on the fields that must be there is the check-time
+//! counterpart, for a module's table that is meant to be complete.
 //!
-//! `htl.toml` holds the directory and nothing else:
+//! `htl.toml` holds the directory, and two narrowings the marker can also spell:
 //!
 //! ```toml
 //! [[contract]]
 //! dir = "mods"
+//! # module = "Site"      # only this module name, in each matched dir, is held to it
+//! # exclude = ["defs"]   # modules in dir not held to it: a helper, an SDK the host writes
 //! ```
 //!
-//! A bare `---@contract` inherits it — one line in the file a reader opens first, saying
-//! where this project accepts modules — and `---@contract("<dir>")` overrides it, which
-//! is what a project with more than one contract writes.
+//! A bare `---@contract` inherits the directory — one line in the file a reader opens
+//! first, saying where this project accepts modules — and `---@contract("<dir>")`
+//! overrides it, which is what a project with more than one contract writes.
+//! `---@contract(module = "S")` and `---@contract(exclude = "defs modkit")` say the two
+//! narrowings on the record ([`Contract::module`], [`Contract::exclude`]); a `.d.tl` is
+//! never held to a contract and needs no listing, and any of these can be given at once.
 //!
 //! The markers are comments, so the file stays valid Teal and other tooling ignores them.
 //! Reading them is a scan of the search paths, not a type-check: a record is found by the
@@ -302,8 +311,13 @@ fn same_record(root: &Path, earlier: &Resolved, later: &Resolved) -> bool {
 
 /// Publish each contract's declaration: the module that declares the contract type is
 /// what an outside author writes against, so `htl` writes it out rather than leaving the
-/// host to copy the file at run time. Returns the targets it wrote (`true`) or found
-/// already current (`false`), and what it could not publish.
+/// host to copy the file at run time — to `types/<module>.d.tl` beside the `.d.tl` a Rust
+/// host's `#[host_module]` writes, or where `---@contract(dts = "…")` says. `htl dts`
+/// and every command that reads the project (check / run / test / build / fix / unused /
+/// resolve / gen) regenerate it; the result is committed, the same as the Rust-generated
+/// ones, which is what makes a fresh clone check before anything has been built. Returns
+/// the targets it wrote (`true`) or found already current (`false`), and what it could
+/// not publish.
 ///
 /// The declaring module is written out as a declaration: bodies removed, and each
 /// function that was part of the module's interface folded into its record as a field

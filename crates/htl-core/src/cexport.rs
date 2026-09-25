@@ -23,7 +23,13 @@
 //! Anything else is refused at compile time, naming the type and this set: `bool` (C#,
 //! Swift and Rust do not agree on its width), a bare enum (its underlying type is
 //! implementation-defined), a float (the ABI differs by platform in ways a JSON number
-//! does not), an integer of another width, a struct by value, and variadics.
+//! does not), an integer of another width, a struct by value, and variadics. A generic
+//! method and an `async fn` are refused as well (`check_signature`): the first has no
+//! one C signature, the second no executor on the C side to poll it with.
+//!
+//! The opener takes one JSON object, `options_json`: absolute paths, a seed, names —
+//! whatever the host has to say — go in it, rather than the library reading the
+//! environment or the working directory, which a plugin host does not control.
 //!
 //! # The four wrapper shapes
 //!
@@ -351,7 +357,8 @@ pub fn plan(hd: &HostDecl, imp: &ItemImpl, attrs: CAttrs) -> Result<CPlan, Strin
     })
 }
 
-/// The opener: one options parameter, plus optionally the interrupt flag.
+/// The opener: one options parameter — the JSON object the module doc describes — plus
+/// optionally the interrupt flag.
 fn open_fn(type_name: &str, prefix: &str, m: &HostMethod) -> Result<CFn, String> {
     let mut params = Vec::new();
     let mut options = 0;

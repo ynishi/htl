@@ -514,8 +514,9 @@ impl TealResolver {
 ///
 /// Installed deps go under [`pkgs_dir`] — `<root>/.htl/modules`, beside the check cache
 /// and regenerated the same way: from the manifest and the lockfile rather than from the
-/// project's own sources. Deps that are *committed* are the other thing, and they are
-/// declared: `target_dirs`.
+/// project's own sources. The installer is mlua-pkg's library rather than its binary, so
+/// there is no second process to agree with and nothing on `PATH` to install. Deps that
+/// are *committed* are the other thing, and they are declared: `target_dirs`.
 #[derive(Debug, Clone)]
 pub struct MluaProject {
     /// The directory holding `mlua-pkg.toml`, and what every other path here is derived
@@ -769,9 +770,10 @@ pub const PATCHES_DIR: &str = "patches";
 /// Where a project's installed deps go: `<root>/.htl/modules`, always.
 ///
 /// One directory, named in one place. htl does not read the location out of the
-/// environment and does not infer it from whether `target/` happens to exist — it decides
-/// it here and hands it to mlua-pkg when it runs one (`htl pkg`), so the installer and the
-/// checker cannot name different directories.
+/// environment (`MLUA_PKG_DIR`, which the `mlua-pkg` binary reads, is not consulted) and
+/// does not infer it from whether `target/` happens to exist in the working directory —
+/// it decides it here and hands it to mlua-pkg when it runs one (`htl pkg`), so the
+/// installer and the checker cannot name different directories.
 ///
 /// What goes on *inside* is mlua-pkg's: [`mlua_pkg::PkgDir`] derives `cache/` and
 /// `vendored/` from the base, and this returns one so htl does not spell that layout out a
@@ -1124,7 +1126,12 @@ impl MluaProject {
     }
 
     /// Registry with the project's deps: Teal first, then plain Lua. Add your
-    /// `NativeResolver`s *before* calling `install` if Teal code declares them in `.d.tl`.
+    /// `NativeResolver`s *before* calling `install` if Teal code declares them in `.d.tl`:
+    /// the Teal resolver answers a `.d.tl` with a type-only table unless a resolver ahead
+    /// of it, or `package.preload`, already holds the module (it steps aside for a plain
+    /// `.lua` a later resolver serves, and for a name the host preloaded, but not for a
+    /// resolver after it). The same holds for a [`TealResolver::from_project`] added by
+    /// hand: native modules go in first, and a `.d.tl` types them for the checker.
     pub fn registry(&self) -> anyhow::Result<mlua_pkg::Registry> {
         let mut reg = mlua_pkg::Registry::new();
         reg.add(self.teal_resolver()?);
@@ -1148,9 +1155,10 @@ impl MluaProject {
     /// result survive a fresh clone: [`pkgs_dir`] is machine-local and empty until someone
     /// installs, while `types/` is committed.
     ///
-    /// A name `types/` already has is left alone and reported. Two libraries publishing a
-    /// module of the same name is a real situation, and there is no registry to arbitrate
-    /// it with, so the project decides rather than the last install winning.
+    /// A name `types/` already has is left alone and reported; `htl types add --force`
+    /// ([`add_types`](Self::add_types) with `force`) replaces it. Two libraries publishing
+    /// a module of the same name is a real situation, and there is no registry to
+    /// arbitrate it with, so the project decides rather than the last install winning.
     pub fn sync_types(&self, types: &Path) -> anyhow::Result<TypesSync> {
         let mut out = TypesSync::default();
         if !self.installed() {
@@ -1543,7 +1551,9 @@ fn drop_dot_entries(dir: &Path) -> anyhow::Result<Vec<String>> {
 /// The refresh replaces the directory with the pinned upstream, and the project's own
 /// change survives that only through git: it is carried forward by merging the new copy
 /// with the history of the old one. A change git cannot see is a change that cannot be
-/// carried forward, so it is named here and the refresh does not happen.
+/// carried forward, so it is named here and the refresh does not happen. Outside a
+/// repository the question cannot be asked at all, and that is said rather than guessed
+/// at: the `Err` names what could not be asked, not what came back dirty.
 fn refuse_if_uncommitted(root: &Path, rel: &Path) -> anyhow::Result<()> {
     match uncommitted(root, rel) {
         Ok(changes) if changes.is_empty() => Ok(()),
@@ -1784,7 +1794,10 @@ impl crate::Htl {
     /// `entry`; the links are written first if the lockfile calls for any that are missing.
     ///
     /// **A `patch_dir` dependency is on the path in its own right**, at
-    /// [`MluaProject::patch_search_dirs`]. The copy is committed and the manifest names it,
+    /// [`MluaProject::patch_search_dirs`]. A crate whose Teal has no dependency needs none
+    /// of this: the `.tl` is in the package because `src/` is, and the macro reads it
+    /// where cargo puts it. A crate whose `mlua-pkg.toml` names a dependency ships the
+    /// dependency itself, as that copy. The copy is committed and the manifest names it,
     /// so the two together are the whole of what a `require` of that dependency needs:
     /// no install, no link, no network, and nothing that has to exist outside what a
     /// clone or a tarball carries. That is the arrangement `cargo vendor` and Go's

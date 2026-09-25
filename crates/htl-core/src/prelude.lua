@@ -182,6 +182,10 @@ local function source_lines(cache, file)
    return lines
 end
 
+-- The markers go where the record is declared, and the report lands where it is built,
+-- so an SDK can declare the shape its mods must fill in. They are comments: the file
+-- stays valid Teal and other tooling ignores them.
+--
 -- On the line itself (trailing), or on the line above it when that line is nothing but
 -- markers (own line). The line above is not read when it is a declaration of its own: a
 -- trailing `---@optional` belongs to the field it trails, and reading it from the next
@@ -444,15 +448,31 @@ local function nilable_resolver(result, filename)
 end
 
 -- `---@extensible`: records a table may carry keys beyond the ones they declare. Every
--- Teal record is closed, and a value arriving from outside the program is where that
--- costs: a mod written against a newer SDK, a save file from a later version, a table a
--- host will grow next release, each carrying one key more than the declaration knows
--- about. The marker says the declaration is not the whole set, and the only thing it
--- buys is that tl's `unknown field <k>` is dropped for the keys it does not declare.
+-- Teal record is closed — a table typed as a record may not carry a key the record does
+-- not declare, and that is a checker error rather than a lint, so no allow comment and no
+-- `[lint]` setting reaches it. `---@optional` and `---@required` decide which *declared*
+-- fields a literal may leave out; this marker is about the key the declaration has never
+-- heard of. A value arriving from outside the program is where that costs: a mod written
+-- against a newer SDK, a save file from a later version, a table a host will grow next
+-- release, each carrying one key more than the declaration knows about, and without this
+-- each is refused the way a mod that is *short* is refused — which leaves a lockstep edit
+-- of every declaration as the only way for a producer to ship a new field. The marker
+-- says the declaration is not the whole set, and the only thing it buys is that tl's
+-- `unknown field <k>` is dropped for the keys it does not declare.
 --
--- Read from the declaring file, in both forms, like the markers above and for the same
--- reason: the checker discards comments, and the file being checked is rarely the one
--- that declares the record.
+-- Read from the declaring file, in both forms — trailing, or on a line of its own above
+-- the record — like the markers above and for the same reason: the checker discards
+-- comments, and the file being checked is rarely the one that declares the record. A
+-- record nested inside an extensible one is not extensible by that (`marker_on` reads
+-- the record's own line); mark it too if it should be. An unmarked record stays closed,
+-- as every record is: this returns nil for it.
+--
+-- The keys stay unreadable: `m.extra` through the record type is still an error. The
+-- marker buys tolerance where a value is built and nothing else. A program that wants to
+-- *read* what it did not declare wants a map field — `extra: {string: any}` — which is
+-- the right answer when the keys are to be used and the wrong one at a data boundary,
+-- since every producer then has to nest its extra keys under an agreed name, a change to
+-- the wire shape rather than to the type.
 --
 -- Nothing here relaxes which *declared* fields a literal must set. `---@struct` and
 -- `---@required` are answered elsewhere and are untouched by this, so a record can be
@@ -844,7 +864,10 @@ end
 
 -- Where and how to insert `<key>: function<sig>` into the record: just before its
 -- closing `end`, indented like the last field (or one indent deeper than the header
--- for an empty record). nil when the record's end line is unknown.
+-- for an empty record). nil when the record's end line is unknown. The insertion is a
+-- safe fix: a declaration line adds a field the record already has a definition for, so
+-- what the program does at run time is unchanged, and the record becomes the module's
+-- declared API. Moving the definition up is the other fix.
 local function forward_ref_fix(src, decl, line)
    local lines, i = {}, 0
    for l in (src .. "\n"):gmatch("([^\n]*)\n") do
@@ -1633,7 +1656,9 @@ end
 -- Static contract check for one module file (the `contract` lint):
 --   1. `local m: <type_path> = require("<modname>")` through the checker (type errors),
 --   2. with require_fields (`true` for every declared field, or a list of names): keys
---      of the module's returned table literal (also `X.define({ ... })`) vs those.
+--      of the module's returned table literal vs those. The literal is found through
+--      `return { … }`, `return define({ … })`, `return { … } as T`, and
+--      `local m: T = { … } … m.f = … return m` (see the `as` / local cases below).
 -- Returns { errors = {string}, missing = {string} | nil (nil = not decidable),
 --           bad_require_fields = {string} (names the type does not declare) }.
 -- Type-check a stub in a fresh env: the shared env caches module types by name, so a

@@ -101,7 +101,9 @@ pub enum Resolution {
     /// The model has the name, and one module implements it.
     Found(Found),
     /// More than one module implements the name, or one module has two implementations
-    /// of it (`src/util.tl` beside `src/util/init.tl`). Each file, with its module.
+    /// of it (`src/util.tl` beside `src/util/init.tl`). Each file, with its module. An
+    /// error wherever the name is asked for, naming both files: in the check, at run
+    /// time, in a bundle, and at a `require` in a plain `.lua` — no order picks one.
     Ambiguous(Vec<(String, PathBuf)>),
     /// A name the model is the only authority for — `@<dependency>/…` — and it has no
     /// such module.

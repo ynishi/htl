@@ -12,9 +12,10 @@ mod report;
 mod scaffold;
 
 /// Output format of every command that has `--format`. One enum, so its help must be
-/// true of all of them: `check` / `test` / `fix` put their text form on stderr (README,
-/// "Machine-readable output" says why), `cache status` / `bundle info` / `resolve` are
-/// reports and put it on stdout. Which stream is the README's to say, not this help's.
+/// true of all of them: `check` / `test` / `fix` / `unused` print their JSON document on
+/// stdout and nothing on stderr, and their text form on stderr only, so the two never
+/// mix; `cache status` / `bundle info` / `resolve` are reports rather than runs, so both
+/// of their forms go to stdout. The exit code is the same in either form.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
 enum Format {
     /// Human-readable lines
@@ -296,6 +297,15 @@ Examples:
     },
     /// Apply the fixes diagnostics carry (safe ones by default)
     ///
+    /// The working tree is the undo: a file git reports as modified or staged is refused
+    /// (`--allow-dirty`), and so is a file outside a repository (`--allow-no-vcs`), since a
+    /// rewrite git could not give back is one nobody can review. `--dry-run` reports
+    /// without writing; `--diff` prints a unified diff per file instead, and a `suggest`
+    /// fix — never applied — is listed as skipped and printed there as a second diff
+    /// headed `<file> (suggested)`. The `.d.tl` declarations the project publishes are
+    /// regenerated first, as `htl check` regenerates them; a dry run works them out and
+    /// writes none.
+    ///
     /// README, "Fixing": https://github.com/ynishi/htl#fixing-htl-fix
     #[command(after_long_help = "\
 Examples:
@@ -336,11 +346,16 @@ Examples:
     /// `#[teal(dts = ..)]` ask for in a Rust crate, without building it, and the module
     /// each `---@contract` type is declared in (check / run / test / build do both)
     ///
-    /// Each declaration is reported as `wrote`, `unchanged`, or `not written`. The exit
-    /// code is about that last one and nothing else: non-zero when a declaration this
-    /// command was asked to write could not be written. A file already under `types/`
-    /// that no dependency ships any more is reported as `left in place` — nothing was
-    /// asked for, nothing is deleted, and the exit code does not move.
+    /// Each declaration is reported as `wrote`, `unchanged`, or `not written`, one line
+    /// each. The commands that generate before they work (`check` / `run` / `test` /
+    /// `build` / `fix` / `unused` / `resolve` / `gen`) do the same job first and print only
+    /// what moved, prefixed `dts:` — `dts: wrote …`, `dts: not written: …`, `dts: left in
+    /// place: …` — and never an `unchanged` line; a dependency's declarations land under
+    /// `types/<crate>/` from every one of them. The exit code is about `not written` and
+    /// nothing else: non-zero when a declaration this command was asked to write could
+    /// not be written. A file already under `types/` that no dependency ships any more is
+    /// reported as `left in place` — nothing was asked for, nothing is deleted, and the
+    /// exit code does not move.
     Dts {
         /// Crate root or any path inside it (default: current directory)
         dir: Option<PathBuf>,
@@ -464,6 +479,12 @@ Examples:
 
 Caching: https://github.com/ynishi/htl#caching
 ")]
+    /// The closure is judged by the project's `[lint.rules]` as `htl check` judges it — a
+    /// rule the project turned off is not reported here either — and no bundle is written
+    /// when it fails. A project whose `[build] target` is not `hb` is refused, naming the
+    /// command that does build it: the key records a decision the project made rather
+    /// than a note about itself, and dropping it from `htl.toml` is how a project with
+    /// Rust in it asks for a bundle anyway.
     Build {
         /// Entry `.tl` file: it and everything it requires are bundled, replaying from
         /// the run cache what still holds (a directory bundles every `.tl` under it, the
@@ -568,6 +589,13 @@ pub fn command() -> clap::Command {
     <Cli as clap::CommandFactory>::command()
 }
 
+/// Parse the command line and run the command; the exit code.
+///
+/// An exit of 1 is a verdict — an error in a file, a finding at `deny`, a failing test, a
+/// name that resolves to nothing ([`htl::verdict`]). A command that could not get as far
+/// as a verdict — a directory in no project, an `htl.toml` that does not parse, a file it
+/// cannot read, a flag it does not take — says why and exits 2, whichever command it was
+/// (clap exits 2 on a bad flag, and an `Err` from any command lands on the same arm).
 pub fn run() -> ExitCode {
     // Invoked as `cargo htl ...` -> argv = ["cargo-htl", "htl", ...]; drop the "htl".
     let mut argv: Vec<String> = std::env::args().collect();
@@ -3164,9 +3192,11 @@ fn cmd_build_dir(
 }
 
 /// What `htl bundle info` reports: everything the file records and nothing it does not
-/// (no Lua state is created, nothing is loaded). `lua` is the header the bytecode was
-/// compiled for, in the fields the mismatch message names; `None` when the bundle
-/// carries no fingerprint, which `payload` explains (`source`) or `format` does (`1`).
+/// (no Lua state is created, nothing is loaded), which is what a build step checks in and
+/// a bug report pastes; `--format json` is the same fields. `lua` is the header the
+/// bytecode was compiled for, in the fields the mismatch message names; `None` when the
+/// bundle carries no fingerprint, which `payload` explains (`source`: the text says `any`)
+/// or `format` does (`1`, before the fingerprint: `not recorded`).
 #[derive(serde::Serialize)]
 struct BundleInfo {
     file: String,

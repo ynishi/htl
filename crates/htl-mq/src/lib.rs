@@ -1,5 +1,11 @@
 //! A macroquad window for an htl program.
 //!
+//! `htl new --target bin` writes a host whose script runs to completion. A game wants the
+//! other shape — a window, a frame loop, input, drawing — and the part of that which is
+//! the same for every project is this crate; `htl new --target window` writes a project
+//! on it. The project keeps its engine and its rules in Teal, and its own
+//! `#[host_module]` beside `mq` for whatever wants the GPU.
+//!
 //! [`Mq`] is a [`#[host_module]`](htl::host_module) that re-exports macroquad's drawing
 //! and input to Teal as `require("mq")`. [`run`] drives a Teal game table (with
 //! `load`, `update(dt): boolean`, and `draw` methods) through the frame loop.
@@ -237,7 +243,10 @@ impl From<MouseButton> for macroquad::input::MouseButton {
 
 /// Stateless, because macroquad keeps its state process-global; every method calls
 /// macroquad and panics when no window is open, which is why a Teal test never calls
-/// them — `htl test` sees only the declaration.
+/// them — `htl test` sees only the declaration, which declares and does nothing. So an
+/// engine module that takes what it needs as arguments is testable headless, and
+/// `main.tl` — the one file that calls `mq` — is not what a test requires; that panic is
+/// the other reason to keep the loop out of the engine.
 pub struct Mq;
 
 #[host_module(name = "mq", dts = "dts/mq.d.tl", records = [Color, Vec2, Key, MouseButton])]

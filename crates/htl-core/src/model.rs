@@ -44,7 +44,9 @@
 //! root that holds it, extension dropped, separators turned into dots, under the module's
 //! mount. Two spellings of a module directory are recognised, both as the name of the
 //! directory itself: `<dir>/init.tl`, everywhere; and `<mount>/<mount>.tl`, only at the
-//! top of a mounted module, which is where a flat package keeps its entry.
+//! top of a mounted module, which is where a flat package keeps its entry. The test root
+//! is a root like the others, so a helper under it is named by its path below it:
+//! `tests/common/fx.tl` is `common.fx`.
 //!
 //! # Which module a file belongs to
 //!
@@ -112,7 +114,9 @@
 //! [`Resolver`] answers such a name with [`Resolution::HostShadowed`], which `htl check`
 //! reports at every `require` of the name and `htl run` / `htl test` raise at run time, the
 //! way a name two files implement is an error in both. A `.d.tl` of the name is not an
-//! implementation; it is how the host module is typed, and the checker reads it.
+//! implementation; it is how the host module is typed, and the checker reads it. Which
+//! of the two gives up the name is the project's decision — rename the file, or stop
+//! providing the name — and the message says both.
 //!
 //! # What this module does not do
 //!
@@ -256,7 +260,9 @@ pub enum Provider {
     Build,
     /// A `std.*` module — and `std` itself — which htl's own binary and
     /// [`Htl::install_std`](crate::Htl::install_std) provide. Only in a build with the
-    /// `std` feature; without it nothing provides these names.
+    /// `std` feature; without it nothing provides these names. In a bundle it is a host
+    /// module: `htl build` files it with the modules the running binary provides rather
+    /// than bundling Rust, and `htl run x.hb` preloads it before the bundle starts.
     Std,
     /// Declared and nothing else: the model has a `.d.tl` under the name and no `.tl` or
     /// `.lua`, and none of the three sources above names it. The environment provides it
@@ -941,7 +947,8 @@ impl Project {
 /// What a checker is being set up to check, which decides the roots it may read from.
 ///
 /// A test may `require` a helper beside it under the test root; the project's sources
-/// may not reach into its tests. Everything else is visible from both.
+/// may not reach into its tests. Everything else is visible from both. `htl check tests`
+/// checks under the test view, so it and `htl test` agree on what a test may require.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     /// The project's own sources, and anything they reach.
@@ -960,7 +967,7 @@ pub enum Purpose {
     /// patched dependency is left alone — its change is a diff against the revision it came
     /// from, and a rewrite no person asked for would bury it; what reaches it lives
     /// upstream. A command that rewrites files walks as this one, whatever it checks on
-    /// the way.
+    /// the way: `htl fix` still reports what it finds in the copy, and fixes none of it.
     Own,
     /// Running the project's tests: `htl test`. A patched dependency's tests are its own
     /// suite, and running them would report a library's failures as the project's.
@@ -972,11 +979,23 @@ impl Project {
     /// whose files are not the walk's to visit.
     ///
     /// An installed or vendored dependency is never entered: `mlua-pkg install` writes
-    /// it, and every file in it is someone else's. A patched one is entered only to
-    /// check it. The project's own module, contract directories and `[check] paths`
-    /// inside the tree are walked as they always were; declarations a crate shipped are
-    /// `.d.tl`, which no walk collects. Directories a walk never enters whatever it is for
-    /// — build output, dot-directories — are the walker's own rule
+    /// it, and every file in it is someone else's — checking it would report a
+    /// dependency's errors as the project's, `htl fmt` would write a diff against
+    /// upstream that the next install undoes, and its `*_test.tl` are a dependency's
+    /// suite (Go's `./...` has excluded `vendor/` since 1.9 for the same reason). A
+    /// `target_dir` copy sits in the repository under a name the project chose, so
+    /// nothing about the path tells it apart from the project's own code beside it; the
+    /// manifest is what says so. A patched one is entered only to check it. The
+    /// criterion is who writes the directory: one an install regenerates is skipped, one
+    /// the project edits is checked.
+    ///
+    /// What is not walked is still checked, through the `require` that reaches it, and
+    /// its errors are reported against the requirer ([`crate::project::Sink`]) — never
+    /// offered to `htl fix`, since a fix there would go at the next install; patching is
+    /// how a dependency is edited. The project's own module, contract directories and
+    /// `[check] paths` inside the tree are walked as they always were; declarations a
+    /// crate shipped are `.d.tl`, which no walk collects. Directories a walk never enters
+    /// whatever it is for — build output, dot-directories — are the walker's own rule
     /// ([`crate::is_skipped_dir`]).
     pub fn not_walked(&self, purpose: Purpose) -> Vec<PathBuf> {
         self.modules
@@ -1120,7 +1139,7 @@ impl Project {
 
 impl Project {
     /// What `[imports]` gets wrong about this project: a `dep:` target naming no
-    /// dependency.
+    /// dependency. Reported at `htl.toml`, where the entry is written.
     pub fn import_problems(&self) -> Vec<String> {
         self.config
             .import_targets()

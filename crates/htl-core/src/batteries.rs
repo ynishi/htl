@@ -9,6 +9,16 @@
 //! searches, so a `.tl` that requires one is typed in `htl check`, `htl test` and
 //! `include_tl!` without the project holding a copy.
 //!
+//! Under `htl run` / `htl test` the version of the modules a script sees is the
+//! binary's, pinned like everything else the binary does by `[toolchain] htl`. Under a
+//! Rust host it is the `htl` crate's, pinned by the host's `Cargo.toml`: the `std`
+//! feature (on by default, off with `default-features = false`) brings the crate in, and
+//! `h.install_std()?` in the host's `preload` — which `htl new --target` writes —
+//! installs it. The checker inside the proc macros sees `std.*` whether or not the host
+//! installs it, as it sees `htl.test`, so a host that leaves the call out has its scripts
+//! typed against `std.*` and failing at the first `require`; a host that leaves the
+//! feature off does so knowingly.
+//!
 //! What is in it is the crate's default feature set and not `full`: json, env, path, time,
 //! string, validate, pretty, argparse. Those add serde_json to the build and nothing else.
 //! A module that reaches the file system, the network or a runtime (fs / http / llm /

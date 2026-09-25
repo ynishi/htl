@@ -13,7 +13,9 @@
 //! Rust: the C ABI runtime — the handle, the error slot, the panic guard — and an
 //! attribute that writes one `extern "C"` wrapper per method and the C header, from the
 //! same `impl` block `#[host_module]` reads. Off by default, so a host with no C caller
-//! compiles as it did before. The two are named and linked in the paragraph this page
+//! compiles as it did before. A host that turns it on adds `crate-type = ["rlib",
+//! "cdylib"]` (plus `"staticlib"` for Unity on iOS); `cargo build` then writes the
+//! header, and the library exports the `<prefix>_*` functions and nothing else. The two are named and linked in the paragraph this page
 //! shows when the feature is on; without it there is nothing on this page to link to, and
 //! a link to an item that is not compiled is a broken one.
 #![cfg_attr(

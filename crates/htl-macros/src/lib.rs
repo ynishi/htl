@@ -9,7 +9,9 @@
 //! Paths are relative to `CARGO_MANIFEST_DIR`. Teal type errors become `compile_error!`s,
 //! and so do the warnings and lints `htl check` would fail on — a rule at `deny`, or any
 //! under `[lint] strict` (`htl_core::verdict`); the rest are printed and the build goes on.
-//! `HTL_LINT=deny` makes every one fail, `HTL_LINT=warn` none. Every `.tl` consulted is registered with
+//! `HTL_LINT=deny` makes every one fail, `HTL_LINT=warn` none. `HTL_LINTS` configures
+//! which rules run and at what level, as `--lint` does for the command; it is read after
+//! `htl.toml`'s `[lint]`, so the environment wins. Every `.tl` consulted is registered with
 //! `include_str!` so edits trigger a rebuild. Generated code refers to `::htl::...`, so
 //! use these through the `htl` umbrella crate.
 //!
@@ -888,6 +890,12 @@ fn union_from(en: &ItemEnum, name: &str, variants: &[dts::UnionVariant]) -> Toke
 
 // ------------------------------------------------------------------ #[host_module]
 
+/// Turn a plain `impl` block into a `mlua::UserData` impl, and write its Teal
+/// declaration (`dts = "scripts/host.d.tl"`) when the macro expands, so a script sees
+/// `host:scale(p: Point, k: number): Point` and `host.Point`. Change a Rust signature and
+/// the next `cargo build` fails inside the `.tl` that relied on it: the declaration is
+/// rewritten first, and `include_tl!` / `include_bundle!` check against it. The
+/// breakdown is `htl_core::dts::host_decl`, which `htl dts` runs without building.
 #[proc_macro_attribute]
 pub fn host_module(attr: TokenStream, item: TokenStream) -> TokenStream {
     let metas = match Punctuated::<Meta, Token![,]>::parse_terminated.parse(attr) {

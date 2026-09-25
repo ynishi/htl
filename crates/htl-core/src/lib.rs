@@ -130,7 +130,8 @@ pub fn checker_identity() -> &'static str {
     })
 }
 
-/// Teal version vendored into this crate.
+/// Teal version vendored into this crate: `vendor/tl.lua`, verbatim. There is no fork;
+/// the compiler is swapped as a file when it moves.
 pub const TEAL_VERSION: &str = "0.24.8";
 
 /// Result of type-checking one `.tl` file.
@@ -1104,7 +1105,12 @@ return R
 "#;
 
 impl Htl {
-    /// New state. Uses `Lua::unsafe_new` so stripped bytecode bundles can be loaded.
+    /// New state. Uses `Lua::unsafe_new` so stripped bytecode bundles can be loaded, and
+    /// opens every standard library — `debug`, `io` and `os` included. That is the right
+    /// state for `htl run`, for the checker, and for a host running Teal it wrote. A host
+    /// running Teal it did not write (a mods directory, a script a user dropped in)
+    /// decides what that Teal may reach, and decides it on the `Lua` it builds itself:
+    /// [`with_checker_lua`](Self::with_checker_lua) takes that state.
     pub fn new() -> Result<Self> {
         // SAFETY: we accept binary chunks only from bundles we produced ourselves.
         let lua = unsafe { Lua::unsafe_new() };
@@ -1136,6 +1142,13 @@ impl Htl {
     /// base library's `load`; `debug`, only for [`coverage_start`](Self::coverage_start).
     /// A state that will load bundles has to come from `unsafe_new_with`: mlua's safe
     /// `new_with` refuses binary chunks, which is what a bundle is.
+    ///
+    /// The limits are mlua's, and so are their edges. An instruction hook fires only while
+    /// Lua is executing Lua, so a host function that blocks is one instruction;
+    /// `set_global_hook` reaches the coroutines a script starts, `set_hook` one thread. A
+    /// thread has one hook, and a script with `debug` can replace it — a state that runs
+    /// Teal the host does not trust leaves `debug` out. A memory limit is checked after
+    /// Lua's emergency collection, and `MemoryError` is what comes back.
     pub fn with_checker_lua(checker: &Htl, lua: Lua) -> Result<Self> {
         let r: Table = lua
             .load(RUNTIME_PRELUDE)
@@ -1187,8 +1200,8 @@ impl Htl {
     }
 
     /// Start recording which lines of which chunk run in the program state (a state
-    /// made by [`with_checker`](Self::with_checker)). Lua's line hook is per thread:
-    /// code inside coroutines the program creates is not seen.
+    /// made by [`with_checker`](Self::with_checker)). The hook slows the run. Lua's line
+    /// hook is per thread: code inside coroutines the program creates is not seen.
     pub fn coverage_start(&self) -> Result<()> {
         let f: Function = self.runtime()?.get("coverage_start")?;
         f.call::<()>(())?;
@@ -1216,8 +1229,11 @@ impl Htl {
     }
 
     /// Statements of a `.tl` file as `(first line, last line)` ranges: what a coverage
-    /// report counts as executable. A statement counts as executed when any line of its
-    /// range ran (Lua attributes a multi-line statement's instructions to several lines).
+    /// report counts as executable. The ranges come from the `.tl` syntax tree and are
+    /// matched against Lua's line hook as they are: Teal keeps the input's line breaks
+    /// when it generates Lua, so a `.tl` line is a Lua line and nothing is mapped back. A
+    /// statement counts as executed when any line of its range ran (Lua attributes a
+    /// multi-line statement's instructions to several lines).
     pub fn executable_ranges(&self, file: &Path) -> Result<Vec<(usize, usize)>> {
         Ok(self.coverage_spans(file)?.0)
     }
@@ -1263,7 +1279,11 @@ impl Htl {
         Ok(())
     }
 
-    /// Attach the Teal compiler to an existing Lua state (the host's own `Lua`).
+    /// Attach the Teal compiler to an existing Lua state (the host's own `Lua`): the
+    /// shared form, where the checker runs on the program's state too, so that state has
+    /// to hold what the checker needs as well as what the program does.
+    /// [`with_checker_lua`](Self::with_checker_lua) is the split form, where the host's
+    /// state holds only what the program needs.
     pub fn from_lua(lua: Lua) -> Result<Self> {
         let tl_loader: Function = lua
             .load(TL_SRC)
@@ -1605,7 +1625,11 @@ impl Htl {
         Ok(package.get("preload")?)
     }
 
-    /// Set the global `arg` table like the `lua` CLI does.
+    /// Set the global `arg` table like the `lua` CLI does — and like `htl run` does.
+    /// [`exec`](Self::exec) passes its arguments to the script as `...` and nothing else,
+    /// so a script that reads `arg[1]` needs this before `exec`; with it the same
+    /// `main.tl` runs unchanged under `htl run` and embedded (`htl new --embed` writes
+    /// both calls).
     pub fn set_arg(&self, script: &str, args: &[String]) -> Result<()> {
         let t = self.lua.create_table()?;
         t.set(0, script)?;
@@ -1621,7 +1645,8 @@ impl Htl {
     /// Lua 5.4 reads `"10" + 1` as `11`: the string library's metatable carries `__add`
     /// and the other seven arithmetic metamethods, and each one converts its string
     /// operands and retries. Checked Teal never gets there: the checker refuses the
-    /// expression on a `string`, and on an `any` too. It happens in what the checker did
+    /// expression on a `string`, and on an `any` too, and `tonumber(...)` is a `number`
+    /// that no `integer` accepts. It happens in what the checker did
     /// not see — the far side of a cast (`(v as integer) + 1` where `v` came from
     /// `std.json.decode` or `arg` as `"10"`), a function `load` built from a string, Lua
     /// source a host handed to [`exec`](Self::exec) — and there the conversion is
@@ -1657,7 +1682,15 @@ end
         Ok(())
     }
 
-    /// Execute Lua source with `...` = args.
+    /// Execute Lua source with `...` = args. The global `arg` is not set here; that is
+    /// [`set_arg`](Self::set_arg).
+    ///
+    /// `chunk_name` is the name every frame of a run-time failure inside the chunk is
+    /// reported under. `@<path>` is a source location and prints as the path, so
+    /// `@scripts/main.tl` gives a reader something to open; `=<label>` is a bare label,
+    /// the honest answer for a chunk no file backs, which is how htl registers its own
+    /// test library as `=htl.test`. [`preload`](Self::preload) derives the name from the
+    /// module name; [`preload_at`](Self::preload_at) takes one, as this does.
     pub fn exec(&self, lua_src: &str, chunk_name: &str, args: &[String]) -> Result<()> {
         let f = self
             .lua
@@ -1898,6 +1931,12 @@ end
 
     /// Install a searcher serving modules from a bundle.
     ///
+    /// Bundled modules become `package.preload` entries, the same place a host puts its
+    /// own modules, so everything that already defers to preload — a `.d.tl` stepping
+    /// aside for the implementation, an mlua-pkg resolver over a mods directory — sees
+    /// them too, and files on disk do not override the bundle. A name the host preloaded
+    /// first is left alone: the host wins.
+    ///
     /// Idempotent, and deliberately so: a second call installs nothing, because every
     /// name is taken by the first. Putting a *newer* bundle into a state that is already
     /// running is [`replace_bundle`](Self::replace_bundle).
@@ -2021,7 +2060,10 @@ end
         })
     }
 
-    /// Install the bundle and run its entry module with `...` = args.
+    /// Install the bundle and run its entry module with `...` = args. A host calls it
+    /// after registering its own modules: a module the bundle records as host-provided
+    /// that is not in `package.preload` is refused up front, naming it, rather than found
+    /// missing at the first `require` inside the run.
     pub fn run_bundle(&self, b: &bundle::Bundle, args: &[String]) -> Result<()> {
         let entry = b
             .module(&b.entry)
@@ -2098,7 +2140,11 @@ pub fn user_message_lua(e: &mlua::Error) -> String {
 ///
 /// The innermost line says a value was nil; the frames say which caller passed it, and
 /// they name Teal files and Teal lines because a generated chunk is loaded under its
-/// source's own name. This is what `htl run` and `htl test` print. The frames are absent
+/// source's own name. Nothing is mapped back: Teal keeps the input's line breaks when it
+/// generates Lua, so a Lua frame is already a Teal frame. This is what `htl run` and
+/// `htl test` print, for a failing test and for a file that raises while loading, and
+/// what `--format json` carries unchanged in each file's `error` and `failures`. The
+/// frames are absent
 /// only where the debug information is: stripped bytecode, which is what a bundle without
 /// `--debug` and `include_tl_bytes!` both hold.
 pub fn developer_message(err: &anyhow::Error) -> String {

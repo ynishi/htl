@@ -2,9 +2,12 @@
 //!
 //! The runner owns nothing about assertions. A test file `require`s a library; the
 //! bundled default is `htl.test` (`describe` / `it` / `expect`, typed via `test.d.tl`).
-//! Any library exposing `run(filter) -> { passed, failed, failures }` under the
-//! module name the runner is told about plugs in the same way. A file that uses no
-//! such library is judged at file level: it passes if it runs to completion.
+//! Any library exposing `run(filter, opts) -> { passed, failed, failures, tests?,
+//! snapshots_written?, snapshots_updated? }` (and optionally `configure({ snapshot_dir,
+//! update, mkdir })`, called before the file runs) under the module name `--lib` names
+//! plugs in the same way, bringing its own `.d.tl`; `test.lua`'s header is the contract in
+//! full. A file that uses no such library is judged at file level: it passes if it runs
+//! to completion.
 
 use crate::{CheckInfo, Htl, parent_dir, write_if_changed};
 use anyhow::{Context, Result};
@@ -106,7 +109,9 @@ pub struct RunOptions {
     /// Seed for the run (`htl test --seed`). Each file draws from a stream derived from
     /// this and its own path, so one file's values do not depend on which other files ran
     /// or in what order: `--filter` reproduces what the full run did, and a failure can be
-    /// looked at again on its own. `None` leaves the state's own seeding alone.
+    /// looked at again on its own. The runner prints the seed of every run, not only a
+    /// failing one: the seed of a run that passed is what reproduces it when a failure two
+    /// commits later is compared against it. `None` leaves the state's own seeding alone.
     pub seed: Option<u64>,
 }
 
@@ -127,7 +132,11 @@ pub fn file_seed(run_seed: u64, path: &Path) -> u64 {
     z ^ (z >> 31)
 }
 
-/// Where a test file's snapshots live: `<dir>/__snapshots__/<file stem>/`.
+/// Where a test file's snapshots live: `<dir>/__snapshots__/<file stem>/`, in the test
+/// file's own directory — `tests/__snapshots__/session_test/first_floor.snap` for
+/// `tests/session_test.tl`, and beside the module for a test kept under `src/`. The file
+/// is `<name>.snap` with every run of characters outside letters, digits, `-`, `.` and
+/// `_` in the name turned into one `_` (`test.lua`, `to_match_snapshot`).
 pub fn snapshot_dir(test_file: &Path) -> PathBuf {
     let stem = test_file
         .file_stem()
