@@ -110,7 +110,7 @@ project — one directly under the project root, which is no module's root unles
 `[layout] source = "."`, or in a directory the layout does not name: nothing can require
 it by a name the project gives it, so it is not the project's to check or to count as
 unused. The run names such files once, with where they go (`1 file(s) belong to no module
-of the project and were not checked: ./stray.tl; move them under src/`); a file named on
+of the project and were not checked: stray.tl; move them under src/`); a file named on
 the command line is checked all the same.
 `mlua-pkg install` rewrites it every time it runs — checking it would report a dependency's
 errors as the project's, `htl fmt` would write a diff against upstream that the next

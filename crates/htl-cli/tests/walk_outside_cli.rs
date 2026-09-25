@@ -55,7 +55,7 @@ fn a_file_at_the_root_is_not_the_projects_and_the_run_says_so() {
     assert!(
         err.contains(
             "htl check: 1 file(s) belong to no module of the project and were not checked: \
-             ./stray.tl; move them under src/"
+             stray.tl; move them under src/"
         ),
         "{err}"
     );
@@ -69,7 +69,7 @@ fn a_file_at_the_root_is_not_the_projects_and_the_run_says_so() {
 
     let (ok, err) = htl(&["fix", "--allow-no-vcs", "."], &root);
     assert!(ok, "{err}");
-    assert!(err.contains("were not fixed: ./stray.tl"), "{err}");
+    assert!(err.contains("were not fixed: stray.tl"), "{err}");
 }
 
 /// Named on its own, the file is the question asked outright, and is checked.

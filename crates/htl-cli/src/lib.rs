@@ -2110,7 +2110,7 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
             for a in &out.applied {
                 eprintln!(
                     "fixed: {}:{}: {} ({}{})",
-                    f.display(),
+                    project::display_path(f),
                     a.line,
                     a.rule,
                     a.applicability.as_str(),
@@ -2120,29 +2120,32 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
             for s in &out.skipped {
                 eprintln!(
                     "skipped: {}:{}: {} — {}",
-                    f.display(),
+                    project::display_path(f),
                     s.line,
                     s.rule,
                     s.reason
                 );
             }
             if let Some(r) = &out.reverted {
-                eprintln!("reverted: {}: {r}", f.display());
+                eprintln!("reverted: {}: {r}", project::display_path(f));
             }
             if let Some(o) = &out.oscillation {
-                eprintln!("stopped: {}: fixes of {o} undo each other", f.display());
+                eprintln!(
+                    "stopped: {}: fixes of {o} undo each other",
+                    project::display_path(f)
+                );
             }
             if out.deferred > 0 {
                 eprintln!(
                     "deferred: {}: {} edit(s) overlapped applied ones; run htl fix again",
-                    f.display(),
+                    project::display_path(f),
                     out.deferred
                 );
             }
             if flags.diff
                 && let (Some(b), Some(a)) = (&before, &out.contents)
             {
-                print!("{}", unified_diff(&f.display().to_string(), b, a));
+                print!("{}", unified_diff(&project::display_path(f), b, a));
             }
             // A suggestion is never written, so the diff is the only place it is shown.
             // Against what was applied, when something was: the two are one edit session.
@@ -2154,7 +2157,7 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
             {
                 print!(
                     "{}",
-                    unified_diff(&format!("{} (suggested)", f.display()), b, s)
+                    unified_diff(&format!("{} (suggested)", project::display_path(f)), b, s)
                 );
             }
         }
@@ -2167,20 +2170,20 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
         infos.push((f.clone(), out.check.clone()));
         if flags.json {
             applied.extend(out.applied.iter().map(|a| report::FixApplied {
-                file: f.display().to_string(),
+                file: project::display_path(f),
                 line: a.line,
                 rule: a.rule.clone(),
                 applicability: a.applicability.as_str(),
                 pass: a.pass,
             }));
             skipped.extend(out.skipped.iter().map(|s| report::FixSkipped {
-                file: f.display().to_string(),
+                file: project::display_path(f),
                 line: s.line,
                 rule: s.rule.clone(),
                 reason: s.reason.clone(),
             }));
             json_files.push(report::FixFile {
-                path: f.display().to_string(),
+                path: project::display_path(f),
                 changed: out.contents.is_some(),
                 deferred: out.deferred,
                 reverted: out.reverted.clone(),
@@ -2198,7 +2201,7 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
         infos.push((f.clone(), m.requires_only()));
         if flags.json {
             json_files.push(report::FixFile {
-                path: f.display().to_string(),
+                path: project::display_path(f),
                 changed: false,
                 deferred: 0,
                 reverted: None,

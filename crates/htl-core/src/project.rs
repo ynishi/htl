@@ -215,15 +215,18 @@ impl<O: Output> Sink<O> {
                 return;
             }
             self.dependency_errors += 1;
-            // A dependency's path is the one that does not read like the rest of the
-            // report: it came from the resolver rather than from the command line. The
-            // cache keeps what the checker said and this writes it for the reader, so an
-            // entry replayed from another directory still reads against that one.
-            if !d.file.is_empty() {
-                d.file = display_path(Path::new(&d.file));
-            }
-            d.required_by = Some(dep.required_by.clone());
+            d.required_by = Some(display_path(Path::new(&dep.required_by)));
             d.origin = dep.origin.clone();
+        }
+        // Every path a report carries is spelled one way, whoever made the finding: the
+        // checker names a file as the walk handed it over (`./src/a.tl`), the resolver by
+        // the search path that found it (absolute), a contract by where its marker was
+        // read. Written here, the one place a diagnostic becomes output, relative to the
+        // working directory and absolute outside it ([`display_path`]), so the text and
+        // `--format json` agree and an entry replayed from another directory still reads
+        // against this one.
+        if !d.file.is_empty() {
+            d.file = display_path(Path::new(&d.file));
         }
         // A type error fails the run whatever any level says — it is htl being unable to
         // stand behind the code, not an opinion about it. Everything else carries the name
@@ -280,13 +283,16 @@ fn canonical(p: &Path) -> PathBuf {
 /// does: [`crate::unused`] reports files the walk found rather than diagnostics, and the
 /// two must spell one file the same way.
 pub fn display_path(p: &Path) -> String {
-    let norm = lexical(p);
-    match std::env::current_dir()
-        .ok()
-        .and_then(|cwd| norm.strip_prefix(cwd).ok().map(Path::to_path_buf))
-    {
-        Some(rel) => rel.display().to_string(),
-        None => norm.display().to_string(),
+    let Ok(cwd) = std::env::current_dir() else {
+        return lexical(p).display().to_string();
+    };
+    // Against the working directory first: a relative path's leading `..` says where it
+    // is from here, and folding it without that — `../src/a.tl` to `src/a.tl` — names a
+    // different file.
+    let norm = lexical(&cwd.join(p));
+    match norm.strip_prefix(&cwd) {
+        Ok(rel) => rel.display().to_string(),
+        Err(_) => norm.display().to_string(),
     }
 }
 
@@ -414,7 +420,7 @@ pub fn outside_modules_note(
         outside.len(),
         outside
             .iter()
-            .map(|f| f.display().to_string())
+            .map(|f| display_path(f))
             .collect::<Vec<_>>()
             .join(", ")
     ))
