@@ -153,7 +153,7 @@ fn the_scaffolds_htlx_dependency_installs_checks_and_tests_against_this_htl() {
     htl(&["check", "."], &project);
     let report = htl(&["test"], &project);
     assert!(
-        report.contains("ok   ./tests/x_test.tl  (2 passed, 0 failed"),
+        report.contains("ok   tests/x_test.tl  (2 passed, 0 failed"),
         "htl test did not run the consumer file green:\n{report}"
     );
 

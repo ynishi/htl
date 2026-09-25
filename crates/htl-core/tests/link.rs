@@ -187,6 +187,36 @@ fn a_type_error_names_its_file_one_way() {
     assert!(!err.contains("/sub/.."), "{err}");
 }
 
+/// A file that checks but does not generate carries that as one error about the file, at
+/// 1:1 like htl's other findings about a file, with the path in `file` rather than in the
+/// words — so a reader spells it as it spells every other path, and the text and the item
+/// say the same thing.
+#[test]
+fn a_file_that_does_not_generate_names_itself_one_way() {
+    let root = scratch("genfail");
+    write(&root.join("src/main.tl"), "return 1\n");
+    std::fs::create_dir_all(root.join("src/sub")).unwrap();
+    let h = checker(&root);
+    h.lua()
+        .load(r#"package.loaded.tl.generate = function() return nil, "boom" end"#)
+        .exec()
+        .unwrap();
+    let (code, ci) = h.gen_lua(&root.join("src/sub/../main.tl")).unwrap();
+    assert!(code.is_none());
+    assert_eq!(ci.error_items.len(), 1, "{:?}", ci.errors);
+    let d = &ci.error_items[0];
+    assert_eq!(
+        (d.line, d.col, d.message.as_str()),
+        (1, 1, "generate failed: boom")
+    );
+    assert_eq!(ci.errors, vec![d.to_string()]);
+    let file = htl_core::project::display_path(&root.join("src/main.tl"));
+    assert_eq!(
+        d.clone().spelled().to_string(),
+        format!("{file}:1:1: generate failed: boom")
+    );
+}
+
 #[test]
 fn inputs_list_every_file_the_bundle_depends_on() {
     let root = project("inputs");
