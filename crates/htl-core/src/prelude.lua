@@ -16,6 +16,43 @@ function H.current_requirer()
    return H.asking or H.requirers[#H.requirers]
 end
 
+-- The environment the innermost check is running in, kept beside `H.requirers` by the
+-- same wrapper. The `tl.search_module` wrapper below needs it: a `require` is answered
+-- into an env, and what the store has to hand that env (a global-declaring module's
+-- globals, see `deliver_globals`) goes into that env and no other. Empty outside a check,
+-- which is how a search made for its own sake (`seed_env`'s) is told apart from one Teal
+-- makes on behalf of a `require`.
+H.envs = {}
+
+-- filename -> store entry, for the entries that declare globals. Filled by `store_from`
+-- (further down, with the store itself) and read by the search wrapper here: a search
+-- answers with a path, and the path is what says whether the file being required is one
+-- whose globals the store holds for this env.
+local global_files = {}
+
+-- Hand an env the globals of a module it is requiring and will not walk. The store seeds
+-- such a module's checked result into `env.loaded` (`seed_env`), so `tl.check_file` will
+-- return that result without reading the file — and a result replayed is not a walk, so
+-- nothing would register the module's `global`s into this env. The walk that did register
+-- them, once, left their var tables on the entry; putting the same tables into this env's
+-- `env.globals` is what makes the name known here, and known as the same type instance the
+-- one walk produced. A name this env already has is left alone: the checker's own rule for
+-- a second declaration (`add_global` in vendor/tl.lua: same type is kept, a different one
+-- is an error) applies when the env walks a declaration of its own.
+--
+-- Only an env that was seeded with the entry's result is handed the globals: in one that
+-- was not (the entry's name resolves to another file here, or seeding was off) the
+-- `require` walks the file, and the walk registers what it declares.
+local function deliver_globals(found)
+   local env = H.envs[#H.envs]
+   local e = env and global_files[found]
+   if not (e and env.loaded[found] == e.result) then return false end
+   for name, var in pairs(e.globals) do
+      if env.globals[name] == nil then env.globals[name] = var end
+   end
+   return true
+end
+
 -- Source beats declaration. tl's own search order is `.d.tl` across the whole path
 -- first, then `.tl`, so a stale `mods/defs.d.tl` written by a host would shadow the
 -- `src/defs.tl` it was made from wherever the two sit on the path. htl's run-time
@@ -24,7 +61,7 @@ end
 -- (`require_module` looks `tl.search_module` up on each call, so wrapping it works.)
 do
    local tl_search = tl.search_module
-   tl.search_module = function(module_name, search_all)
+   local function search(module_name, search_all)
       -- A name the project model has is answered by the model and nothing else: its
       -- implementation, else (for a search that takes them) its declaration, then its
       -- `.lua`. A name it does not have falls through to `package.path`, for a library
@@ -67,6 +104,17 @@ do
          tried = tried or {}
          tried[#tried + 1] = "'" .. found .. "' is not the module '" .. module_name .. "'"
          return nil, nil, tried
+      end
+      return found, fd, tried
+   end
+   tl.search_module = function(module_name, search_all)
+      local found, fd, tried = search(module_name, search_all)
+      -- A module the env will take from the store rather than walk gets its globals now,
+      -- at the `require` — and no file handle: `tl.check_file` returns the seeded result
+      -- before it would read one, and a handle it never takes is one nobody closes.
+      if found and deliver_globals(found) and fd then
+         fd:close()
+         fd = nil
       end
       return found, fd, tried
    end
@@ -1016,9 +1064,12 @@ do
    end
    local tl_check_string = tl.check_string
    tl.check_string = function(input, env, filename, parse_lang)
-      -- The file whose `require`s Teal resolves while this runs.
+      -- The file whose `require`s Teal resolves while this runs, and the env it resolves
+      -- them into.
       table.insert(H.requirers, filename)
+      table.insert(H.envs, env)
       local ok, result = pcall(tl_check_string, input, env, filename, parse_lang)
+      table.remove(H.envs)
       table.remove(H.requirers)
       if not ok then error(result, 0) end
       local pending = filename and view_errors[filename]
@@ -1350,31 +1401,50 @@ local function prof(label, filename, t0)
    end
 end
 
--- Whether a checked file's top level declares a `global`: the three node kinds that reach
--- `TypeChecker:add_global` (vendor/tl.lua). The scan is the one `checked_enums` does a few
--- lines above, over the same top-level list and for the same reason -- a declaration at the
--- top level of the file is the whole of what a module contributes to the env's globals.
-local function declares_globals(result)
+-- The names a checked file's top level declares `global`, or nil when it declares none:
+-- the three node kinds that reach `TypeChecker:add_global` (vendor/tl.lua), and the name
+-- each carries (`global_declaration` is `global a, b = ...`, one name per var). The scan is
+-- the one `checked_enums` does a few lines above, over the same top-level list and for the
+-- same reason -- a declaration at the top level of the file is the whole of what a module
+-- contributes to the env's globals.
+local function declared_globals(result)
+   local names
    for _, node in ipairs(result.ast or {}) do
       local k = node.kind
-      if k == "global_type" or k == "global_declaration" or k == "global_function" then
-         return true
+      if k == "global_type" then
+         names = names or {}
+         names[#names + 1] = node.var.tk
+      elseif k == "global_function" then
+         names = names or {}
+         names[#names + 1] = node.name.tk
+      elseif k == "global_declaration" then
+         names = names or {}
+         for _, var in ipairs(node.vars) do names[#names + 1] = var.tk end
       end
    end
-   return false
+   return names
 end
 
 -- Checked-module store, shared by every fresh env in this state. A fresh env per file
 -- exists so that module *names* resolve under that file's own search path and never
 -- leak from another directory; the store keeps that guarantee by seeding an env only
 -- with entries whose name still resolves to the very same file here. What is shared is
--- the result of checking a file, which does not depend on who required it -- with one
--- exception, and it is what `declares_globals` is on the entry for. Checking a file also
--- registers the `global`s its top level declares into the env it was walked in, and
--- replaying a result is not a walk: `tl.check_file` returns `env.loaded[filename]`
--- without reading the file, so in an env that was seeded the global never exists. That
--- made a global reach only the first file of a run that required its module.
-local store = {} -- module name -> { filename, type, result, declares_globals }
+-- the result of checking a file, which does not depend on who required it. A file is
+-- walked once per run, whoever required it first, and every record its walk declared is
+-- one instance from then on -- which is what lets a value typed by one requirer be passed
+-- to a function typed by another (Teal compares records by instance, not by shape).
+--
+-- A module that declares a `global` has one effect beyond its type: the walk registers
+-- the name into the env it happened in, and replaying a result is not a walk -- so an env
+-- seeded with such a module's result would never have its global. Walking the file again
+-- in every requiring env (what #302 did) gives every env the global and every env its own
+-- record instances, which is the split above. So the walk stays one, and the entry keeps
+-- what the walk registered (`globals`, the very var tables from that env), for
+-- `deliver_globals` (top of this file) to put into each env that requires the module.
+-- That happens at the `require` and not at the seed, because a global is visible where
+-- the module was required and nowhere else: seeding it into every env would let a file
+-- read a name whose declaration it never required, and pass.
+local store = {} -- module name -> { filename, type, result, globals }
 
 local function store_from(env)
    for name, ty in pairs(env.modules) do
@@ -1382,35 +1452,40 @@ local function store_from(env)
       local result = fname and env.loaded[fname]
       -- skip the placeholder tl leaves while a module is being checked (circular requires)
       if result and result.type == ty then
-         store[name] = {
-            filename = fname,
-            type = ty,
-            result = result,
-            declares_globals = declares_globals(result),
-         }
+         local e = { filename = fname, type = ty, result = result }
+         local names = declared_globals(result)
+         if names then
+            e.globals = {}
+            for _, n in ipairs(names) do e.globals[n] = env.globals[n] end
+            global_files[fname] = e
+         end
+         store[name] = e
       end
    end
 end
 
--- A module that declares a global is left out of the seed *entirely* -- not its type, not
--- its filename, not its result. `require_module` (vendor/tl.lua) answers from
--- `env.modules[name]` when it is there and never reaches `tl.check_file`, so seeding any
--- of the three keeps the walk from happening, and the walk is the point. Left out, the
--- require falls through to `tl.search_module` -> `tl.check_file` -> the walk, in every env
--- that asks. Its own dependencies are still seeded from the store, so what is re-checked
--- is the one file rather than its closure.
+-- A module that declares a global is seeded by its result only -- `env.loaded`, not
+-- `env.modules` nor `env.module_filenames`. `require_module` (vendor/tl.lua) answers from
+-- `env.modules[name]` when it is there and never reaches `tl.search_module`, and the
+-- search is where `deliver_globals` hands the env the module's globals. Left out of
+-- `env.modules`, the require falls through to the search, the wrapper delivers, and
+-- `tl.check_file` returns the seeded result without reading the file: no walk, one
+-- record instance, the global present. A module that declares none is seeded whole, as
+-- before, and its require never leaves `require_module`.
 --
 -- (The `.htl/` cache on the Rust side needs nothing for this: its module entries are
 -- stamped with `checker_identity()`, a hash over this file, so a warm cache misses of its
 -- own accord the moment this changes.)
 local function seed_env(env)
    for name, e in pairs(store) do
-      if env.modules[name] == nil and not e.declares_globals then
+      if env.modules[name] == nil then
          local found, fd = tl.search_module(name, true)
          if fd then fd:close() end
          if found == e.filename then
-            env.modules[name] = e.type
-            env.module_filenames[name] = e.filename
+            if not e.globals then
+               env.modules[name] = e.type
+               env.module_filenames[name] = e.filename
+            end
             env.loaded[e.filename] = e.result
          end
       end
@@ -1419,6 +1494,7 @@ end
 
 function H.reset_store()
    store = {}
+   for k in pairs(global_files) do global_files[k] = nil end
 end
 
 -- The type errors of every module a check pulled in through `require`, transitively.

@@ -165,6 +165,63 @@ fn a_global_from_a_required_module_reaches_every_file_whatever_the_order() {
     assert_eq!(forward, whole, "a walk is the files it visits");
 }
 
+/// A module that declares a `global` and a record, required by a middle module and by two
+/// consumers that pass the record through the middle module. The declaring file is walked
+/// once per run and its result served to every requirer, so the record is one type in all
+/// of them; walked once per requirer, it was one type per requirer and the second consumer
+/// could not call the middle module.
+fn global_record_project() -> PathBuf {
+    let root = scratch("global-record");
+    write(
+        &root.join("htl.toml"),
+        "[layout]\nsource = \".\"\n[lint.rules]\nno-global = \"allow\"\n",
+    );
+    write(
+        &root.join("modx.tl"),
+        "global knl: {string:any}\nlocal record SessionX\n   id: function(SessionX): string\nend\n\
+         local record M\n   type Session = SessionX\n   open: function(): SessionX\n   use: function(SessionX): string\nend\n\
+         function M.open(): SessionX return nil end\nfunction M.use(s: SessionX): string return s:id() end\nreturn M\n",
+    );
+    write(
+        &root.join("midx.tl"),
+        "local k = require(\"modx\")\nlocal record S\n   whole: function(k.Session, string): string\nend\n\
+         function S.whole(s: k.Session, _who: string): string return s:id() end\nreturn S\n",
+    );
+    for (m, who) in [("topx", "x"), ("topy", "y")] {
+        write(
+            &root.join(format!("{m}.tl")),
+            &format!(
+                "local k = require(\"modx\")\nlocal S = require(\"midx\")\n\
+                 local function go(s: k.Session): string return S.whole(s, \"{who}\") end\nprint(go(k.open()))\n"
+            ),
+        );
+    }
+    root
+}
+
+#[test]
+fn a_record_declared_beside_a_global_is_one_type_whatever_the_order() {
+    let root = global_record_project();
+    let whole = diagnostics(&["--strict", "."], &root);
+    let backward = diagnostics(
+        &["--strict", "topy.tl", "topx.tl", "midx.tl", "modx.tl"],
+        &root,
+    );
+    let alone = diagnostics(&["--strict", "topx.tl"], &root);
+    assert!(
+        whole.is_empty(),
+        "one walk of modx.tl, one SessionX in every requirer: {whole:?}"
+    );
+    assert_eq!(
+        whole, backward,
+        "the order the files are given in decides nothing"
+    );
+    assert_eq!(
+        whole, alone,
+        "a consumer alone reports what it reports in the tree"
+    );
+}
+
 /// What a name means does not depend on where the command ran. A module that happens to
 /// sit in the working directory is not one of the project's, and a project that requires
 /// it without having it is told so from anywhere.
