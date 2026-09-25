@@ -638,3 +638,55 @@ fn a_directory_with_no_project_is_refused_and_a_file_is_still_checked() {
     let (ok, err) = run(&["check", "a.tl"]);
     assert!(ok, "{err}");
 }
+
+/// A global declared by a module only the first link of a chain requires, and a file
+/// that requires nothing and reads it anyway. Through the CLI: the chain is clean and the
+/// loose file is told `unknown variable`, whatever the order and alone.
+fn global_chain_project() -> PathBuf {
+    let root = scratch("global-chain");
+    write(
+        &root.join("htl.toml"),
+        "[layout]\nsource = \".\"\n[lint.rules]\nno-global = \"allow\"\n",
+    );
+    write(&root.join("hostg.d.tl"), "global VERSION: string\n");
+    write(
+        &root.join("modx.tl"),
+        "require(\"hostg\")\nlocal record M\n   v: function(): string\nend\n\
+         function M.v(): string return VERSION end\nreturn M\n",
+    );
+    write(
+        &root.join("midx.tl"),
+        "local k = require(\"modx\")\nlocal record S\n   both: function(): string\nend\n\
+         function S.both(): string return k.v() .. VERSION end\nreturn S\n",
+    );
+    write(
+        &root.join("topx.tl"),
+        "local s = require(\"midx\")\nprint(s.both() .. VERSION)\n",
+    );
+    write(&root.join("loose.tl"), "print(VERSION)\n");
+    root
+}
+
+#[test]
+fn a_global_reaches_the_end_of_a_require_chain_and_nowhere_else() {
+    let root = global_chain_project();
+    let loose = "loose.tl:1: unknown variable: VERSION";
+    let whole = diagnostics(&["--strict", "."], &root);
+    let backward = diagnostics(
+        &["--strict", "loose.tl", "topx.tl", "midx.tl", "modx.tl"],
+        &root,
+    );
+    assert_eq!(
+        whole,
+        vec![loose.to_string()],
+        "the tree: only the loose file"
+    );
+    assert_eq!(
+        whole, backward,
+        "the order the files are given in decides nothing"
+    );
+    let mid_alone = diagnostics(&["--strict", "midx.tl"], &root);
+    assert!(mid_alone.is_empty(), "midx alone: {mid_alone:?}");
+    let loose_alone = diagnostics(&["--strict", "loose.tl"], &root);
+    assert_eq!(loose_alone, vec![loose.to_string()], "loose alone");
+}

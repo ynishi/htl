@@ -273,3 +273,106 @@ fn a_module_that_declares_no_global_is_still_served_from_the_store() {
         c2.errors
     );
 }
+
+/// Check the named files under `lib/` in the order given and return the errors of the
+/// last one only, as `<module>: message` — for a file whose error is the point.
+fn errors_of_last(root: &Path, decl_dir: &str, order: &[&str]) -> Vec<String> {
+    let h = checker(root, decl_dir);
+    let mut out = Vec::new();
+    for (i, m) in order.iter().enumerate() {
+        let f = root.join(format!("lib/{m}/init.tl"));
+        let c = h.check(&f).unwrap();
+        if i + 1 == order.len() {
+            out.extend(c.errors.into_iter().map(|e| format!("{m}: {e}")));
+        }
+    }
+    out
+}
+
+/// A global reached through a chain: `host_v` declares it, `modx` requires `host_v`,
+/// `midx` requires only `modx`, `topx` requires only `midx`. In an environment where `modx`
+/// is taken from the store its own `require("host_v")` never runs, so the global has to
+/// travel with `modx` — everything a module's requires declare, transitively, is what a
+/// `require` of it delivers. Without that, `midx` and `topx` were told `unknown variable`
+/// exactly when `modx` had been checked before them.
+fn chain_tree(name: &str) -> PathBuf {
+    let root = scratch(name);
+    write(&root.join("types/host_v.d.tl"), "global VERSION: string\n");
+    write(
+        &root.join("lib/modx/init.tl"),
+        "require(\"host_v\")\nlocal record M\n   v: function(): string\nend\n\
+         function M.v(): string return VERSION end\nreturn M\n",
+    );
+    write(
+        &root.join("lib/midx/init.tl"),
+        "local k = require(\"modx\")\nlocal record S\n   both: function(): string\nend\n\
+         function S.both(): string return k.v() .. VERSION end\nreturn S\n",
+    );
+    write(
+        &root.join("lib/topx/init.tl"),
+        "local s = require(\"midx\")\nprint(s.both() .. VERSION)\n",
+    );
+    root
+}
+
+#[test]
+fn a_global_travels_the_require_chain_to_a_file_that_never_requires_its_declaration_directly() {
+    let root = chain_tree("chain-value");
+    assert_files_order_free(&root, "types", &["modx", "midx", "topx"]);
+}
+
+/// The same chain for a record type: `Ev` is declared global by `host_ev`, which only
+/// `modx` requires; `midx` and the consumers reach `Ev` through `modx`, and a value made
+/// by `modx` crosses `midx`'s signature — which is only well-typed if every environment
+/// on the chain holds the one instance the single walk produced.
+#[test]
+fn a_global_record_travels_the_require_chain_as_one_instance() {
+    let root = scratch("chain-record");
+    write(
+        &root.join("types/host_ev.d.tl"),
+        "global record Ev\n   kind: string\nend\n",
+    );
+    write(
+        &root.join("lib/modx/init.tl"),
+        "require(\"host_ev\")\nlocal record M\n   mk: function(): Ev\n   use: function(Ev): string\nend\n\
+         function M.mk(): Ev return nil end\nfunction M.use(e: Ev): string return e.kind end\nreturn M\n",
+    );
+    write(
+        &root.join("lib/midx/init.tl"),
+        "local k = require(\"modx\")\nlocal record S\n   whole: function(Ev, string): string\nend\n\
+         function S.whole(e: Ev, _who: string): string return k.use(e) end\nreturn S\n",
+    );
+    for (m, who) in [("topx", "x"), ("topy", "y")] {
+        write(
+            &root.join(format!("lib/{m}/init.tl")),
+            &format!(
+                "local k = require(\"modx\")\nlocal S = require(\"midx\")\n\
+                 local function go(e: Ev): string return S.whole(e, \"{who}\") end\nprint(go(k.mk()))\n"
+            ),
+        );
+    }
+    assert_files_order_free(&root, "types", &["modx", "midx", "topx", "topy"]);
+}
+
+/// The other half of delivering at the `require`: a file that reads the global and
+/// requires nothing gets `unknown variable`, whether or not the declaring module was
+/// checked into the store before it. The global is visible where its module was required
+/// and nowhere else.
+#[test]
+fn a_file_that_requires_nothing_does_not_see_a_global_the_store_holds() {
+    let root = chain_tree("chain-loose");
+    write(&root.join("lib/loose/init.tl"), "print(VERSION)\n");
+    for order in [
+        &["loose"][..],
+        &["modx", "midx", "loose"][..],
+        &["midx", "modx", "loose"][..],
+        &["topx", "loose"][..],
+    ] {
+        let errs = errors_of_last(&root, "types", order);
+        assert_eq!(errs.len(), 1, "{order:?}: {errs:?}");
+        assert!(
+            errs[0].contains("unknown variable: VERSION"),
+            "{order:?}: {errs:?}"
+        );
+    }
+}

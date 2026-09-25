@@ -24,30 +24,68 @@ end
 -- makes on behalf of a `require`.
 H.envs = {}
 
--- filename -> store entry, for the entries that declare globals. Filled by `store_from`
--- (further down, with the store itself) and read by the search wrapper here: a search
--- answers with a path, and the path is what says whether the file being required is one
--- whose globals the store holds for this env.
-local global_files = {}
+-- filename -> store entry, every entry. Filled by `store_from` (further down, with the
+-- store itself) and read here: a search answers with a path, and the path is what says
+-- whether the file being required is one the store holds for this env; and an entry's
+-- `result.dependencies` is name -> file, which this index turns back into entries.
+local by_file = {}
+
+-- Every global a `require` of the entry's module brings into scope: the names its own top
+-- level declares (`globals`), and those of every module it requires, transitively. The
+-- second half is what a walk would have done — walking `modx` runs its `require("host")`,
+-- which registers `host`'s globals — and a result served from the store is not a walk, so
+-- the requirer of a served module is handed what the walk would have registered below it.
+-- Name -> var table, the first declaration found winning, the way the checker keeps the
+-- first of two same-typed declarations.
+--
+-- Computed on first use and kept on the entry. That is never stale: `store_from` stores
+-- an env whole, so every module walked in the env that walked this one was stored in the
+-- same call, and a module served to that env from the store was stored earlier. The
+-- entry is rebuilt by the next `store_from` that sees the module, which drops the memo —
+-- the result object is the same, so what is recomputed is the same too. A cycle in the
+-- requires (`require-cycle` is a lint, not an error) is cut at the entry already on the
+-- path.
+local function globals_below(e, visited)
+   if e.closure then return e.closure end
+   visited = visited or {}
+   visited[e.filename] = true
+   local out = {}
+   for name, var in pairs(e.globals or {}) do out[name] = var end
+   local deps = e.result.dependencies or {}
+   local names = {}
+   for name in pairs(deps) do names[#names + 1] = name end
+   table.sort(names) -- the map has no order; the first declaration to win must be the same each run
+   for _, name in ipairs(names) do
+      local d = by_file[deps[name]]
+      if d and not visited[d.filename] then
+         for gname, var in pairs(globals_below(d, visited)) do
+            if out[gname] == nil then out[gname] = var end
+         end
+      end
+   end
+   e.closure = out
+   return out
+end
 
 -- Hand an env the globals of a module it is requiring and will not walk. The store seeds
 -- such a module's checked result into `env.loaded` (`seed_env`), so `tl.check_file` will
 -- return that result without reading the file — and a result replayed is not a walk, so
--- nothing would register the module's `global`s into this env. The walk that did register
--- them, once, left their var tables on the entry; putting the same tables into this env's
--- `env.globals` is what makes the name known here, and known as the same type instance the
--- one walk produced. A name this env already has is left alone: the checker's own rule for
--- a second declaration (`add_global` in vendor/tl.lua: same type is kept, a different one
--- is an error) applies when the env walks a declaration of its own.
+-- nothing would register into this env the `global`s the module declares, nor those the
+-- modules it requires declare. The walks that did register them, once each, left their
+-- var tables on the entries (`globals_below` collects them); putting the same tables into
+-- this env's `env.globals` is what makes the names known here, and known as the same type
+-- instances those walks produced. A name this env already has is left alone: the
+-- checker's own rule for a second declaration (`add_global` in vendor/tl.lua: same type is
+-- kept, a different one is an error) applies when the env walks a declaration of its own.
 --
 -- Only an env that was seeded with the entry's result is handed the globals: in one that
 -- was not (the entry's name resolves to another file here, or seeding was off) the
--- `require` walks the file, and the walk registers what it declares.
+-- `require` walks the file, and the walk registers what it and its requires declare.
 local function deliver_globals(found)
    local env = H.envs[#H.envs]
-   local e = env and global_files[found]
+   local e = env and by_file[found]
    if not (e and env.loaded[found] == e.result) then return false end
-   for name, var in pairs(e.globals) do
+   for name, var in pairs(globals_below(e)) do
       if env.globals[name] == nil then env.globals[name] = var end
    end
    return true
@@ -1444,7 +1482,15 @@ end
 -- That happens at the `require` and not at the seed, because a global is visible where
 -- the module was required and nowhere else: seeding it into every env would let a file
 -- read a name whose declaration it never required, and pass.
-local store = {} -- module name -> { filename, type, result, globals }
+--
+-- The same holds one level down. A walk of `modx` runs its `require("host")`, so a file
+-- that requires `modx` and never names `host` still sees `host`'s globals -- that is what
+-- a `require` chain means in Lua, and what the checker of a whole project in one env
+-- would see. A `modx` served from the store runs no requires, so its requirer is handed
+-- the globals of everything below it too (`globals_below`), and every module with a
+-- global anywhere below it is seeded the way a declaring module is (`seed_env`), so that
+-- its require reaches the point of delivery.
+local store = {} -- module name -> { filename, type, result, globals, closure }
 
 local function store_from(env)
    for name, ty in pairs(env.modules) do
@@ -1455,23 +1501,33 @@ local function store_from(env)
          local e = { filename = fname, type = ty, result = result }
          local names = declared_globals(result)
          if names then
-            e.globals = {}
-            for _, n in ipairs(names) do e.globals[n] = env.globals[n] end
-            global_files[fname] = e
+            -- The var tables of the walk that produced this result. A later env that was
+            -- served the result holds the same tables (delivered), or -- when it walked a
+            -- declaration of its own for one of the names first -- another declaration's;
+            -- the entry keeps the ones the walk made, not whatever this env has now.
+            local old = by_file[fname]
+            if old and old.result == result and old.globals then
+               e.globals = old.globals
+            else
+               e.globals = {}
+               for _, n in ipairs(names) do e.globals[n] = env.globals[n] end
+            end
          end
+         by_file[fname] = e
          store[name] = e
       end
    end
 end
 
--- A module that declares a global is seeded by its result only -- `env.loaded`, not
--- `env.modules` nor `env.module_filenames`. `require_module` (vendor/tl.lua) answers from
--- `env.modules[name]` when it is there and never reaches `tl.search_module`, and the
--- search is where `deliver_globals` hands the env the module's globals. Left out of
--- `env.modules`, the require falls through to the search, the wrapper delivers, and
--- `tl.check_file` returns the seeded result without reading the file: no walk, one
--- record instance, the global present. A module that declares none is seeded whole, as
--- before, and its require never leaves `require_module`.
+-- A module with a global anywhere below it -- one its own top level declares, or one a
+-- module it requires (transitively) declares -- is seeded by its result only:
+-- `env.loaded`, not `env.modules` nor `env.module_filenames`. `require_module`
+-- (vendor/tl.lua) answers from `env.modules[name]` when it is there and never reaches
+-- `tl.search_module`, and the search is where `deliver_globals` hands the env those
+-- globals. Left out of `env.modules`, the require falls through to the search, the
+-- wrapper delivers, and `tl.check_file` returns the seeded result without reading the
+-- file: no walk, one record instance, the globals present. A module with no global below
+-- it is seeded whole, as before, and its require never leaves `require_module`.
 --
 -- (The `.htl/` cache on the Rust side needs nothing for this: its module entries are
 -- stamped with `checker_identity()`, a hash over this file, so a warm cache misses of its
@@ -1482,7 +1538,7 @@ local function seed_env(env)
          local found, fd = tl.search_module(name, true)
          if fd then fd:close() end
          if found == e.filename then
-            if not e.globals then
+            if next(globals_below(e)) == nil then
                env.modules[name] = e.type
                env.module_filenames[name] = e.filename
             end
@@ -1494,7 +1550,7 @@ end
 
 function H.reset_store()
    store = {}
-   for k in pairs(global_files) do global_files[k] = nil end
+   for k in pairs(by_file) do by_file[k] = nil end
 end
 
 -- The type errors of every module a check pulled in through `require`, transitively.
