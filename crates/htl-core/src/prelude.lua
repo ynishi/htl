@@ -1418,9 +1418,9 @@ local function dependency_errors(filename, result, env)
                if e and e.filename == fname then dep = e.result end
             end
             if dep then
-               local errs = collect_errors(fname, dep)
-               for _, text in ipairs(errs) do
-                  out[#out + 1] = { file = fname, required_by = requirer, text = text }
+               local errs, _, items = collect_errors(fname, dep)
+               for i, text in ipairs(errs) do
+                  out[#out + 1] = { file = fname, required_by = requirer, text = text, item = items[i] }
                end
                walk(dep, fname)
             end
@@ -1865,7 +1865,10 @@ function H.contract_check(filename, modname, type_path, require_fields)
    end
    local stub = string.format('local %s = require("%s")\nlocal m: %s = require("%s")\nreturn m\n',
       module, module, type_path, modname)
-   out.errors = H.check_stub(stub, "<contract " .. type_path .. " for " .. modname .. ">")
+   -- The sentences alone: the stub's own position says nothing about the module, and the
+   -- caller points at the module instead.
+   local _, _, items = H.check_stub(stub, "<contract " .. type_path .. " for " .. modname .. ">")
+   for i, it in ipairs(items or {}) do out.errors[i] = it.message end
    if #out.errors > 0 then return out end
    if not require_fields then return out end
    local declared = H.record_fields(type_path)

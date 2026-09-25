@@ -191,6 +191,9 @@ pub struct DependencyError {
     pub required_by: PathBuf,
     /// `file:line:col: message`, formatted as the file's own errors are.
     pub text: String,
+    /// The same error in its parts, as the checker kept them: what a report reads rather
+    /// than the text.
+    pub diagnostic: Diagnostic,
 }
 
 /// How safely a [`Fix`] can be applied without a human looking at it.
@@ -359,7 +362,9 @@ pub struct ModuleCandidate {
 /// Result of a static contract check (see [`Htl::contract_check`]).
 #[derive(Debug, Clone, Default)]
 pub struct ContractResult {
-    /// Type errors from `local m: <T> = require("<mod>")`.
+    /// Type errors from `local m: <T> = require("<mod>")`: each the checker's sentence
+    /// alone, without the position in the stub it was checked through, which says nothing
+    /// about the module.
     pub errors: Vec<String>,
     /// Declared fields absent from the module's returned table literal; `None` when the
     /// return value is not a literal (not decidable statically).
@@ -515,12 +520,8 @@ pub fn contract_lints(
             ));
             continue;
         }
-        for e in &r.errors {
-            // The stub's own "<contract ...>:L:C: " prefix says nothing useful; keep the
-            // message. The same reading of a diagnostic's text every other caller makes.
-            let msg = diagnostic::position(e)
-                .map_or(e.as_str(), |(_, _, _, msg)| msg)
-                .trim();
+        for msg in &r.errors {
+            let msg = msg.trim();
             out.push(Diagnostic::new(
                 Severity::Lint,
                 file.display().to_string(),
@@ -2289,10 +2290,22 @@ fn read_dependency_errors(list: &Table) -> Result<Vec<DependencyError>> {
     let mut out = Vec::new();
     for e in list.sequence_values::<Table>() {
         let e = e?;
+        let item: Table = e.get("item")?;
         out.push(DependencyError {
             file: PathBuf::from(e.get::<String>("file")?),
             required_by: PathBuf::from(e.get::<String>("required_by")?),
             text: e.get::<String>("text")?,
+            diagnostic: Diagnostic {
+                severity: Severity::Error,
+                file: item.get("file")?,
+                line: item.get("line")?,
+                col: item.get("col")?,
+                rule: item.get("rule")?,
+                message: item.get("message")?,
+                fix: None,
+                required_by: None,
+                origin: None,
+            },
         });
     }
     Ok(out)
