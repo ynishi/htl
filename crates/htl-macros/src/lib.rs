@@ -307,14 +307,12 @@ enum Payload {
     Bytes(Vec<u8>),
 }
 
-/// Check + generate `rel` (relative to `manifest_dir`). Search paths match the CLI:
-/// the file's own directory, the nearest `mlua-pkg.toml` project's installed deps at
-/// their entries (and `target_dir` copies), and the bundled `htl.test` declarations.
-/// A checker set up the way the CLI would be for `path`: `htl.toml` lints, the file's
-/// own dir, the crate's `src/`, the mlua-pkg project, `[check] paths`, the test lib.
-/// Never the process cwd (cargo's), which has nothing to do with the script.
-/// A checker set up for one macro expansion, with what the run cache needs to key and
-/// validate what the checker produces.
+/// A checker set up for one macro expansion, the way the CLI sets one up for the file:
+/// the project model when the file is in a project (`Htl::apply_model`, after
+/// `reset_search_path`), and the file's own directory when it is not
+/// (`project::file_view`) — never the process cwd, which is cargo's and has nothing to
+/// do with the script. Carries what the run cache needs to key and validate what the
+/// checker produces.
 struct Checker {
     h: htl_core::Htl,
     cfg: Option<htl_core::config::HtlConfig>,
@@ -336,9 +334,9 @@ impl Checker {
         (!self.spec.is_empty()).then_some(self.spec.as_str())
     }
 
-    /// The run cache, when there is a project to keep one in: an `htl.toml` was found
-    /// (that is the opt-in; `htl init` / `htl new` write it and gitignore `.htl/`), and
-    /// its directory is not build scratch — the copy `cargo publish` verifies under
+    /// The run cache, when there is a project to keep one in: a model was built — an
+    /// `htl.toml` or an `mlua-pkg.toml` above the file, either is enough, and `htl init` /
+    /// `htl new` write the first and gitignore `.htl/` — and its root is not build scratch — the copy `cargo publish` verifies under
     /// `target/package/`, where a new file aborts the publish, or a registry checkout.
     /// Otherwise `None`, silently: everything is generated, which is what happened before
     /// there was a store. `HTL_CACHE_DEBUG` says which of the two it was.

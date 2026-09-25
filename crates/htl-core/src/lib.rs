@@ -659,12 +659,13 @@ pub fn declaration_conflict_lints(
 }
 
 /// `contract-unenforced` lint: a contract only becomes a run-time guarantee when the
-/// host builds its resolver from it. Scan the host crate's Rust sources (under
-/// `cargo_root`) for `contract_resolvers(`. No host crate (`cargo_root` = None) means a
+/// host builds its resolver from it. Scan the host crate's Rust sources — `src/`,
+/// `examples/`, `tests/` and `benches/` under `cargo_root`, a directory that is absent
+/// skipped — for `contract_resolvers(`. No host crate (`cargo_root` = None) means a
 /// script-only project: nothing to enforce.
 ///
-/// One call to look for, not four. `contract_resolvers(root, &config)` is what the README
-/// documents and what keeps the host and `htl check` reading the same markers; a resolver
+/// One call to look for, not four. `contract_resolvers(root, &config)` is the documented
+/// way and what keeps the host and `htl check` reading the same markers; a resolver
 /// assembled by hand from `expect_type` / `require_fields` now has to restate what the
 /// record already says, so recognising it would be recognising the drift this lint
 /// exists to prevent. Enforcement the scan cannot see at all — a Lua-side validator, a
@@ -1741,8 +1742,9 @@ end
         self.compile_with(name, lua_src, true)
     }
 
-    /// Compile to bytecode; `strip` drops debug info (line numbers, local and upvalue
-    /// names, and the chunk name: tracebacks then show the name given at load).
+    /// Compile to bytecode; `strip` drops debug info — line numbers, local and upvalue
+    /// names, and the chunk name, so every frame from the stripped payload reads `?`
+    /// whatever name the load was given ([`preload_bytes`](Self::preload_bytes)).
     pub fn compile_with(&self, name: &str, lua_src: &str, strip: bool) -> Result<Vec<u8>> {
         let f = self
             .lua

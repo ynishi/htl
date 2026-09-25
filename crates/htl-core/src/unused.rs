@@ -93,7 +93,7 @@ pub struct Options<'a> {
     pub cache: cache::Options,
 }
 
-/// Why a file is an entry — the four the project already declares (see the module doc).
+/// Why a file is an entry — the five the project already declares (see the module doc).
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum EntryKind {

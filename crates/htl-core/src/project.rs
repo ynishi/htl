@@ -1401,7 +1401,8 @@ pub struct NeverRan {
 /// What a run covered of one module.
 #[derive(Serialize, Debug, Clone)]
 pub struct CoverageModule {
-    /// As the report prints it — relative to the project root when there is one.
+    /// As the report prints it — relative to the directory the command ran in, absolute
+    /// outside it (the lcov `SF` is relative to the project root instead).
     pub path: String,
     /// Statements at least one test ran.
     pub executed: usize,

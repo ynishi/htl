@@ -361,7 +361,7 @@ impl Rule {
     }
 }
 
-/// Every rule there is. The first twenty-six are the lint surface, in the order
+/// Every rule there is. The first twenty-seven are the lint surface, in the order
 /// `htl check --list-lints` prints them: the file-level rules first, in the order
 /// `lint.lua` runs them, then the ones the project layer asks once the files have been
 /// checked, then the warning kinds the vendored Teal compiler reports for itself. The last

@@ -2362,7 +2362,7 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
     // `lint.lua` implements.
     if list_lints {
         // The name and the level a project that says nothing gets. Two columns rather than
-        // one because the default is a level now, and the three rules at `allow` are
+        // one because the default is a level now, and the five rules at `allow` are
         // otherwise invisible: a reader would have to turn one on to find out it was off.
         // Still one rule per line, name first, so it reads and greps as it always did.
         let width = htl::lint::rule_names()

@@ -99,8 +99,8 @@ pub struct FileReport {
     pub error: Option<String>,
     /// Tests the library reported as passing.
     pub passed: usize,
-    /// Tests it reported as failing. `ok` is false while this is non-zero, and the run's
-    /// exit code is the sum of it over every file.
+    /// Tests it reported as failing. `ok` is false while this is non-zero, and a run with
+    /// any such file exits 1.
     pub failed: usize,
     /// One message per failure, already formatted by the library — the runner owns no
     /// assertion and so has nothing of its own to say about why one failed.

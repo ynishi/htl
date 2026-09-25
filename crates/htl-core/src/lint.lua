@@ -31,8 +31,13 @@
 --   no-global        `global` declarations (prefer locals + module return).
 --   no-any           explicit `any` in annotations or `as any` casts.   [allow: not said
 --                    unless a project asks for it]
---   explicit-number  unannotated local initialized with a numeric literal (`local n = 0`
---                    infers integer, `0.0` infers number); ask for the annotation. [allow]
+--   explicit-number  `local n = 0` (inferred integer) later assigned a number expression
+--                    (`n = n * 1.5`); asks for `local n: number = 0`. Plain integer
+--                    counters are not reported.   [allow]
+--   struct-fields    a table built for a record marked `---@struct` that leaves out a
+--                    field `---@optional` does not exempt; the fix is a suggestion only.
+--   union-exhaustive `if x is A then ... elseif x is B then ... end` over a union with a
+--                    variant never tested and no `else`; the members come from the checker.
 --   class-record     record declaring metamethods (a class): its metatable is not part of
 --                    the value, so serialization and the Rust boundary drop it.   [allow]
 --
@@ -173,8 +178,8 @@ end
 --
 -- Binding the call to a local is silent here on purpose: the guard that follows is what the
 -- marker asks for, and holding `local v = f(x)` to a guard is a flow question with its own
--- false positives (a check inside a helper, a check on a second local, `or error(...)`) and
--- its own rule to come.
+-- false positives (a check inside a helper, a check on a second local, `or error(...)`),
+-- which is `nil-return-unchecked`'s, below, and off by default for that reason.
 local function lint_nil_return(ast, report, extra)
    local nilable_at = extra and extra.nilable_at
    if not nilable_at then return end
@@ -1310,37 +1315,6 @@ end
 
 ---------------------------------------------------------------- struct-fields
 
--- A record marked `---@struct` is built whole: every field it declares is present at
--- every construction site, except the ones marked `---@optional`. Teal has no `?` for
--- record fields, so without this a record the program builds itself reads as if any field
--- might be absent, and every use site pays for that with a nil check.
---
--- Adding an unmarked field makes the construction sites that predate it report, which is
--- the point: the default for a new field is mandatory, and `---@optional` is the
--- exception written on purpose. Growing a record that already has sites is that report
--- arriving at all of them at once, so the way through is two steps: add the field with
--- `---@optional` on it (a marker that says "not yet"), fill the sites at whatever pace
--- the work allows, then delete the marker line — every site still short is reported, and
--- a clean check says the last one is done. `htl fix --diff` spells the missing field into
--- each site as a suggestion it never writes (see `field_placeholder`): a checklist and a
--- line to paste from, not the migration done for you.
---
--- This is a lint, not a type: the markers are comments, so the file stays valid Teal and
--- other tooling ignores them, and use sites still see a nilable field. What it removes is
--- the reason to guard, and the doubt about whether a field was ever set. Data arriving
--- from outside the program — a mod's return value, a save file, a host — is a different
--- question, and a record marked `---@contract` with `---@required` on its mandatory
--- fields is what checks that (contract.rs).
---
--- The marker is also what makes a test suite feel the cost all at once: a dozen tests that
--- each spell every field are a dozen reports when a field is added. A factory in a helper
--- beside the tests -- defaults in one place, an overlay record naming only what a test
--- varies -- turns them into one; the overlay is its own record, since typed as the target
--- it would be one more construction site. No lint asks for it.
---
--- Which record a bare `{ ... }` is being built as is type information, and this rule is
--- run over a syntax-only parse (see L.run). `extra.struct_at(y, x)` answers it from the
--- checker's position report; the rule only compares key sets.
 -- Edit distance, stopped as soon as it is past `bound`: the answer here is only ever
 -- "close enough or not", and a full distance between two unrelated names is wasted work.
 --
@@ -1406,6 +1380,37 @@ local function field_placeholder(ty)
    return "htl_fixme(" .. string.format("%q", ty) .. ")"
 end
 
+-- A record marked `---@struct` is built whole: every field it declares is present at
+-- every construction site, except the ones marked `---@optional`. Teal has no `?` for
+-- record fields, so without this a record the program builds itself reads as if any field
+-- might be absent, and every use site pays for that with a nil check.
+--
+-- Adding an unmarked field makes the construction sites that predate it report, which is
+-- the point: the default for a new field is mandatory, and `---@optional` is the
+-- exception written on purpose. Growing a record that already has sites is that report
+-- arriving at all of them at once, so the way through is two steps: add the field with
+-- `---@optional` on it (a marker that says "not yet"), fill the sites at whatever pace
+-- the work allows, then delete the marker line — every site still short is reported, and
+-- a clean check says the last one is done. `htl fix --diff` spells the missing field into
+-- each site as a suggestion it never writes (see `field_placeholder`): a checklist and a
+-- line to paste from, not the migration done for you.
+--
+-- This is a lint, not a type: the markers are comments, so the file stays valid Teal and
+-- other tooling ignores them, and use sites still see a nilable field. What it removes is
+-- the reason to guard, and the doubt about whether a field was ever set. Data arriving
+-- from outside the program — a mod's return value, a save file, a host — is a different
+-- question, and a record marked `---@contract` with `---@required` on its mandatory
+-- fields is what checks that (contract.rs).
+--
+-- The marker is also what makes a test suite feel the cost all at once: a dozen tests that
+-- each spell every field are a dozen reports when a field is added. A factory in a helper
+-- beside the tests -- defaults in one place, an overlay record naming only what a test
+-- varies -- turns them into one; the overlay is its own record, since typed as the target
+-- it would be one more construction site. No lint asks for it.
+--
+-- Which record a bare `{ ... }` is being built as is type information, and this rule is
+-- run over a syntax-only parse (see L.run). `extra.struct_at(y, x)` answers it from the
+-- checker's position report; the rule only compares key sets.
 local function lint_struct_fields(ast, report, extra)
    local struct_at = extra and extra.struct_at
    if not struct_at then return end

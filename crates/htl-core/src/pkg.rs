@@ -305,7 +305,9 @@ impl TealResolver {
     /// the project's search paths visible to the checker
     /// ([`search_paths`](crate::config::HtlConfig::search_paths): `root`, its `src/` and
     /// `types/`, then `[check] paths`). `root` is the directory holding `htl.toml`. The
-    /// `contract-unenforced` lint of `htl check` recognises this call.
+    /// `contract-unenforced` lint of `htl check` looks for [`contract_resolvers`] alone
+    /// and does not recognise this call: a host that builds its resolvers here is one
+    /// the lint reports, unless `enforced_by` names where they are built.
     pub fn for_contract(
         root: &Path,
         cfg: &crate::config::HtlConfig,

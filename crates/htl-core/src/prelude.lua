@@ -1663,16 +1663,6 @@ function H.record_fields(type_path)
    return names
 end
 
--- Static contract check for one module file (the `contract` lint):
---   1. `local m: <type_path> = require("<modname>")` through the checker (type errors),
---   2. with require_fields (`true` for every declared field, or a list of names): keys
---      of the module's returned table literal vs those. The literal is found through
---      `return { … }`, `return define({ … })`, `return { … } as T`, and
---      `local m: T = { … } … m.f = … return m` (see the `as` / local cases below).
--- Returns { errors = {string}, missing = {string} | nil (nil = not decidable),
---           bad_require_fields = {string} (names the type does not declare) }.
--- Type-check a stub in a fresh env: the shared env caches module types by name, so a
--- second `Site` (another contract dir) would be judged by the first one's type.
 -- Literal `require`s of a plain Lua file (a vendored dependency), resolved like the
 -- checker resolves them. Parsed with tl in Lua mode; a file tl cannot parse yields
 -- no sites (its requires are then the host's to declare).
@@ -1901,11 +1891,21 @@ function H.executable_ranges(filename)
    return ranges, funcs
 end
 
+-- Type-check a stub in a fresh env: the shared env caches module types by name, so a
+-- second `Site` (another contract dir) would be judged by the first one's type.
 function H.check_stub(src, filename)
    local result = tl.check_string(src, new_env(), filename)
    return collect_errors(filename, result, src)
 end
 
+-- Static contract check for one module file (the `contract` lint):
+--   1. `local m: <type_path> = require("<modname>")` through the checker (type errors),
+--   2. with require_fields (`true` for every declared field, or a list of names): keys
+--      of the module's returned table literal vs those. The literal is found through
+--      `return { … }`, `return define({ … })`, `return { … } as T`, and
+--      `local m: T = { … } … m.f = … return m` (see the `as` / local cases below).
+-- Returns { errors = {string}, missing = {string} | nil (nil = not decidable),
+--           bad_require_fields = {string} (names the type does not declare) }.
 function H.contract_check(filename, modname, type_path, require_fields)
    local module = type_path:match("^([^.]+)%.")
    local out = { errors = {}, missing = nil }
