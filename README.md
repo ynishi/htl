@@ -250,9 +250,8 @@ Where the checker did not see it — the far side of a cast, a `load` from a str
 source the host gave `exec` — Lua 5.4 reads `"10" + 1` as `11`; `h.strict_strings()?` in
 `preload` makes that an error
 ([`Htl::strict_strings`](https://docs.rs/htl/latest/htl/struct.Htl.html#method.strict_strings)).
-A value that arrives as `any` is converted once, where it arrives, by the program:
-`s:match("^%-?%d+$")` and `math.tointeger` when hex, an exponent and surrounding
-whitespace are not wanted, `tonumber` when they are, and never a cast. A host parameter
+A value that arrives as `any` is converted once, where it arrives (`s:match("^%-?%d+$")`
+and `math.tointeger`, or `tonumber`), never by a cast. A host parameter
 that may see a value from that edge is a `Strict<T>` — `n: Strict<i64>` is declared
 `integer`; `Strict<String>`, `Strict<bool>` and `Strict<f64>` are the same for their
 kinds; it derefs to `T`.
@@ -270,9 +269,7 @@ opt-level = 3
 ```
 
 `htl new --embed` writes that section; add it by hand to a host that predates it (one
-rebuild of the macro's dependencies, then every build after). The `.tl` edit loop belongs
-to `htl check` / `htl test` in any case — an edit to a leaf module costs a few
-milliseconds from the cache — and `cargo build` to the Rust host and the binary.
+rebuild of the macro's dependencies, then every build after).
 
 A table `#[derive(TealRecord)]` converts that does not fit says which record, which
 field, what the record declared and what arrived:
@@ -355,11 +352,6 @@ let h = Htl::with_checker_lua(&checker, lua)?; // the program runs here; `os` an
 
 `Htl::from_lua(lua)` is the shared form.
 
-The checker state `Htl::new` makes uses `string`, `table`, `math` and `package`, and `os.getenv` and
-`io.stderr` on its debug paths — and it is not the state a mod runs in.
-
-`htl check` settles what a module *is*; what it may *do* is settled here, by the host.
-
 ### Shipping the declaration to your users (`[package.metadata.htl] dts`)
 
 A crate that registers a module in someone else's Lua state names the declaration files
@@ -410,7 +402,7 @@ With nothing to write at all — no `Cargo.toml` with a `[package]` above, and n
 ```toml
 [dependencies]
 htl = "0.8"
-htl-mq = "0.8"          # macroquad comes with it, which is why it is not a feature of `htl`
+htl-mq = "0.8"          # macroquad comes with it
 ```
 
 ```rust
@@ -453,12 +445,9 @@ return {
 
 `HTL_MQ_FRAMES=60` stops after sixty frames, and `HTL_MQ_SHOT=out.png` writes the last
 frame drawn as a PNG. `run` reads them; `run_with` takes a `Hooks` instead, and
-`Hooks::NONE` turns them off. A machine with no
-display fails before the first frame (`XOpenDisplay() failed!` on Linux); `xvfb-run`
-is enough to get the PNG out of one.
+`Hooks::NONE` turns them off; `xvfb-run` on a machine with no display.
 
-Not in `htl-mq`: textures and audio (they need asset paths, which is a host decision),
-and the web target (macroquad's wasm path and mlua's are different targets).
+Not in `htl-mq`: textures, audio, and the web target.
 
 ### Publishing a crate that embeds Teal
 
@@ -494,8 +483,7 @@ Three things follow from mlua, not from htl:
   value exclusively meanwhile. Prefer `&self` over `&mut self`.
 - **The future must be `'static`**, and `Send` as well when mlua's `send` feature is on.
 
-The feature is off by default: it turns on mlua's `async`, and a host with no async
-method should be built as it was without it.
+The feature is off by default.
 
 Runtime resolution through mlua-pkg. A host describes the directories it serves once, as
 a project model (features `pkg` and `dts`):
@@ -770,20 +758,9 @@ A table built as a `Judged`, or an `as` cast to one, outside `gate.tl` is report
 Naming functions narrows it (`built only in gate.tl by gate.open or gate.reopen`).
 `-- htl: allow(sealed-record)` keeps one site the project stands behind.
 
-A test that compares a whole sealed value builds one, and is reported like anywhere else:
-`t.expect(gate.judge("yes")):to_equal({ verdict = "yes", at = 1 })` writes a literal typed
-as `gate.Judged` in a file that is not `gate.tl`, which is the rule working rather than
-misfiring. Both ways through are ordinary. Either the assertion carries
-`-- htl: allow(sealed-record)`, which says this literal exists to be compared and never
-leaves the test, or the test asserts the fields it is about
-(`t.expect(j.verdict):to_equal("yes")`), which builds nothing and says which field
-differed when it fails.
-
-Like `---@struct`, this is a lint and not a type: the file stays valid Teal, other tooling
-ignores the comment, and what it adds is the one thing a run-time check cannot — that no
-other code minted the value. It pairs with `---@struct` on the same record, which says
-every field is set where this says who may set them; both report at the same site with
-their own message.
+A test that compares a whole sealed value is reported too; it either carries
+`-- htl: allow(sealed-record)` or asserts the fields it is about
+(`t.expect(j.verdict):to_equal("yes")`).
 
 ### Records a table may carry more than (`---@extensible`)
 
@@ -807,13 +784,7 @@ published gets what the declaring project has.
 A program that wants to *read* what it did not declare wants a map field —
 `extra: {string: any}`.
 
-What it costs is one case, and it is worth knowing before you write the marker: a
-misspelled **optional** field becomes silence. `colour` is no longer an unknown field, and
-`struct-fields` has nothing to say because nothing is missing — the required case is still
-caught, the optional case is not. That is the price of the marker rather than an
-oversight. A near-miss heuristic here would fire on the very keys the marker exists to
-allow, and a warning that is wrong whenever the marker is doing its job is worse than the
-silence.
+What it costs: a misspelled **optional** field becomes silence.
 
 ### Functions that may return nothing (`---@nilable`)
 
@@ -840,10 +811,6 @@ of its own above it. mlua-batteries (0.7.3, the version htl's `std` feature take
 `path.parent` / `filename` / `stem` / `ext` and `env.get` / `home`, so a project using
 `std.*` gets the rule without writing anything; `regex.find` / `captures` carry it too, in a
 host that turns that module on (it is not in the default set htl carries, see `std.*`).
-
-An unmarked function says nothing: no marker means *unknown*, not *nilable*, which is why
-adding the rule is silent on a project until someone writes a marker or depends on a
-declaration that has one.
 
 **Following the local (`nil-return-unchecked`, off by default).** A second rule reports
 the first use of the local as the base of a chain before anything checks it:
@@ -1000,12 +967,6 @@ above is generated as `require("@/mathx")`).
 checker would not look (an SDK cache, a mods dir). `types/` is searched without any
 configuration; `htl new` creates it.
 
-Four kinds arrive there, and `types/` below means the declaration root wherever
-`[layout] types` puts it: every one of them is written there. The ones written by hand; the ones a Rust dependency ships; the
-ones a Lua dependency published; and the ones for a library that published none of its
-own. Only the first are anyone's to edit — the rest are copies, and a change to one
-belongs in the crate or package it came from.
-
 A Rust crate that registers a module in its user's Lua state names the declarations it
 ships in its manifest (`[package.metadata.htl] dts = ["dts/mq.d.tl"]`, see "Embedding in
 Rust"). `htl dts` — and `check` / `run` / `test` / `build` and the other commands that
@@ -1113,11 +1074,6 @@ return defs
 Every module under `mods/` must return a value assignable to `defs.Mod` and set the three
 marked fields.
 
-The default is the opposite of `---@struct`'s, and each marker says which regime its
-record is under: `---@struct` is about a record the program builds itself, where a new
-field is mandatory unless marked `---@optional`; `---@contract` is about a value arriving
-from outside, where a new field is optional unless marked `---@required`.
-
 A module that sets a key the record does not declare is refused;
 [`---@extensible`](#records-a-table-may-carry-more-than----extensible) beside
 `---@contract` allows it.
@@ -1184,10 +1140,7 @@ onto that dependency in `mlua-pkg.toml`, and records the commit it was taken fro
 From there the directory is the project's code: edited, diffed, reviewed and committed
 with git like anything else in the tree. The copy's entry directory is on the search path
 because the manifest names it
-([Publishing a crate that embeds Teal](#publishing-a-crate-that-embeds-teal)). This is
-the shape of Cargo's `[patch]` with a `path` source, and of Go's `replace` pointing at a
-directory in the module tree. Removing `patch_dir` and the directory returns the
-dependency to its fetched form at the next install.
+([Publishing a crate that embeds Teal](#publishing-a-crate-that-embeds-teal)).
 
 **What is checked, and what is not.** `htl check` walks the copy; `htl fmt`, `htl fix`
 and `htl test` do not touch it
@@ -1223,16 +1176,13 @@ print(pretty.dump({ name = str.trim(name), rows = #rows }))
 reached from Teal — under the namespace `std`: the `htl` binary carries the crate's
 default set, `json`, `env`, `path`, `time`, `string`, `validate`, `pretty` and `argparse`,
 preloads each as `std.<name>` (and the namespace table as `require("std")`), and `htl
-check`, `htl test` and `include_tl!` type them without the project holding a copy. Every
-one raises on failure rather than returning `nil, err`, so a result-style call is
-`pcall`, or a host module under `errors = "return"`. What `pcall` receives is a string,
-one line — `json.decode: EOF while parsing an object at line 1 column 1`.
+check`, `htl test` and `include_tl!` type them without the project holding a copy. A
+result-style call is `pcall`, or a host module under `errors = "return"`; what `pcall`
+receives is one line — `json.decode: EOF while parsing an object at line 1 column 1`.
 
-What version of the modules a script sees follows where the script runs. Under `htl run`
-/ `htl test` it is the binary's, pinned like everything else the binary does by
-`[toolchain] htl` in `htl.toml`. Under a Rust host the `std` feature (on by default, off
-with `default-features = false`) brings the crate in, and `h.install_std()?` in the
-host's `preload` — which `htl new --target` writes — installs it.
+Under a Rust host the `std` feature (on by default, off with `default-features = false`)
+brings the crate in, and `h.install_std()?` in the host's `preload` — which `htl new
+--target` writes — installs it.
 
 ## Tests
 
@@ -1260,9 +1210,6 @@ module `--lib` names — wherever it is and whatever it is called.
 
 `tests/` (`[layout] tests`) is the project's place for tests and for helpers only tests
 may reach; a helper is named by its path below it (`tests/common/fx.tl` is `common.fx`).
-Keep tests in a file of their own rather than in the module: a module that loads the
-test library loads it wherever the module is required, including in the program that
-ships it.
 
 A matcher that is not one of these is a type error too — `invalid key 'to_be' in type
 Expect<integer>` — with the list above appended.
@@ -1374,7 +1321,7 @@ and `--format json` carries the edits. `htl fix [paths]` applies them:
 
 `htl check --format json`, `htl test --format json` and `htl unused --format json` print
 one JSON document on stdout and nothing on stderr; `htl resolve`, `cache status` and
-`bundle info` print both forms on stdout. The exit code is the same as in text mode.
+`bundle info` print both forms on stdout.
 
 - `check`: `{ files, patched, diagnostics: [{ severity: "error"|"warning"|"lint", file,
   line, col, rule?, message, fix?, required_by?, origin? }], summary: { errors, warnings,
@@ -1483,8 +1430,7 @@ the files `htl test`, `htl build`, `[[contract]]` and a Rust host are pointed at
   has no `src/main.tl`, and its entry is named there and nowhere else.
 
 The exit code is 0 whatever it finds, unless `--exit-non-zero-on-unused` says otherwise.
-Deleting is nobody's business here either — `htl fix` applies mechanical rewrites, and
-"this module is unreachable" is not one of those; the fix is a decision.
+`htl fix` deletes nothing.
 
 ## Layout of a project (`htl new`)
 
@@ -1572,10 +1518,6 @@ caller that is not written in Rust:
 ├── examples/c/            main.c + a Makefile: every returned char * goes back to _free
 └── examples/python/       run.py: restype = c_void_p and ctypes.cast, never c_char_p
 ```
-
-What the callers have is a Lua `error()` and a Rust `Err` to handle — the generated
-`greet` refuses an empty name in Teal and `reset` refuses a no-op in Rust — so both error
-paths are in front of the reader rather than described.
 
 #### The window target (`--target window`)
 

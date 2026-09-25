@@ -385,6 +385,13 @@ pub struct LayoutConfig {
     pub source: String,
     /// Hand-written `.d.tl` for modules something else provides at run time, the
     /// DefinitelyTyped shape. Default `types`.
+    ///
+    /// Four kinds of declaration arrive here, wherever this key puts the directory: the
+    /// ones written by hand; the ones a Rust dependency ships (`types/<crate>/`,
+    /// [`crate::dep_dts`]); the ones a Lua dependency published (`htl pkg install` copies
+    /// them in); and the ones for a library that published none of its own (`htl types
+    /// add`). Only the first are anyone's to edit — the rest are copies, and a change to
+    /// one belongs in the crate or package it came from.
     #[serde(default = "default_types")]
     pub types: String,
     /// The project's tests and the helpers only tests may `require`. Default `tests`.

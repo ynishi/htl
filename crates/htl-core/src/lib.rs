@@ -1110,7 +1110,10 @@ impl Htl {
     /// state for `htl run`, for the checker, and for a host running Teal it wrote. A host
     /// running Teal it did not write (a mods directory, a script a user dropped in)
     /// decides what that Teal may reach, and decides it on the `Lua` it builds itself:
-    /// [`with_checker_lua`](Self::with_checker_lua) takes that state.
+    /// [`with_checker_lua`](Self::with_checker_lua) takes that state. The checker state
+    /// this makes uses `string`, `table`, `math` and `package`, and `os.getenv` and
+    /// `io.stderr` on its debug paths — and under the split it is not the state a mod
+    /// runs in.
     pub fn new() -> Result<Self> {
         // SAFETY: we accept binary chunks only from bundles we produced ourselves.
         let lua = unsafe { Lua::unsafe_new() };
@@ -1148,7 +1151,8 @@ impl Htl {
     /// `set_global_hook` reaches the coroutines a script starts, `set_hook` one thread. A
     /// thread has one hook, and a script with `debug` can replace it — a state that runs
     /// Teal the host does not trust leaves `debug` out. A memory limit is checked after
-    /// Lua's emergency collection, and `MemoryError` is what comes back.
+    /// Lua's emergency collection, and `MemoryError` is what comes back. `htl check`
+    /// settles what a module *is*; what it may *do* is settled here, by the host.
     pub fn with_checker_lua(checker: &Htl, lua: Lua) -> Result<Self> {
         let r: Table = lua
             .load(RUNTIME_PRELUDE)
@@ -1659,7 +1663,11 @@ impl Htl {
     /// which is the vendored Lua's to set); `"10" < "9"` (a string comparison, true, and
     /// not a conversion); and `tonumber` / `math.tointeger`, which convert because they
     /// were asked to. `__index` stays, so `s:upper()` and every other string method are
-    /// untouched.
+    /// untouched. Between this layer and the host's own arguments (`Strict<T>`) sits the
+    /// program's: a value that arrives as `any` is converted once, where it arrives, by the
+    /// program — `s:match("^%-?%d+$")` and `math.tointeger` when hex, an exponent and
+    /// surrounding whitespace are not wanted, `tonumber` when they are — and never by a
+    /// cast, which converts nothing and only tells the checker to stop looking.
     ///
     /// Opt-in, for a host's `preload` beside `install_std`; the CLI does not turn it on,
     /// since `htl run` and `htl test` run Teal the checker has passed. Calling it twice is

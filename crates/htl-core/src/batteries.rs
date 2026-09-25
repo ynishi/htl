@@ -9,8 +9,13 @@
 //! searches, so a `.tl` that requires one is typed in `htl check`, `htl test` and
 //! `include_tl!` without the project holding a copy.
 //!
-//! Under `htl run` / `htl test` the version of the modules a script sees is the
-//! binary's, pinned like everything else the binary does by `[toolchain] htl`. Under a
+//! Every function raises on failure rather than returning `nil, err`, so a result-style
+//! call is `pcall`, or a host module under `errors = "return"`; what `pcall` receives is
+//! the one-line text (`WRAP_LOADERS` is what turns the traceback userdata into it).
+//!
+//! What version of the modules a script sees follows where the script runs. Under `htl
+//! run` / `htl test` it is the binary's, pinned like everything else the binary does by
+//! `[toolchain] htl`. Under a
 //! Rust host it is the `htl` crate's, pinned by the host's `Cargo.toml`: the `std`
 //! feature (on by default, off with `default-features = false`) brings the crate in, and
 //! `h.install_std()?` in the host's `preload` — which `htl new --target` writes —

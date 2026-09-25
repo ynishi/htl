@@ -17,6 +17,14 @@
 //!
 //! Declaration text (`.d.tl`) comes from `htl_core::dts`, the same code `htl dts` runs
 //! from the CLI, so the files can also be produced before any `cargo build`.
+//!
+//! The macros run the checker — htl-core and the vendored Lua that hosts `tl` — inside
+//! the proc macro, under `[profile.dev.build-override]`, whose default `opt-level = 0`
+//! makes a `cargo build` that touches a `.tl` about three times slower than the
+//! release-built CLI; `htl new --embed` writes `opt-level = 3` into that section. The
+//! `.tl` edit loop belongs to `htl check` / `htl test` in any case — an edit to a leaf
+//! module costs a few milliseconds from the cache — and `cargo build` to the Rust host
+//! and the binary.
 
 mod ty;
 

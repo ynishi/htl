@@ -1337,7 +1337,10 @@ impl MluaProject {
     /// tree, and install resolves the dependency from it for as long as the pin still
     /// resolves to the revision the copy was taken from (`patch_base` in the lockfile).
     /// When the pin moves on, install uses the new revision, leaves the copy alone and
-    /// says so on every install until the patch is refreshed or removed.
+    /// says so on every install until the patch is refreshed or removed. This is the
+    /// shape of Cargo's `[patch]` with a `path` source, and of Go's `replace` pointing at
+    /// a directory in the module tree; removing `patch_dir` and the directory returns the
+    /// dependency to its fetched form at the next install.
     ///
     /// On a dependency that is already patched this refreshes the copy from the revision
     /// the pin now resolves to and records that as the new base. The copy is overwritten

@@ -1,6 +1,6 @@
 //! `--format json`: the same facts the text output prints, as one JSON document on
-//! stdout (text goes to stderr, so the two never mix). Field names are stable; new
-//! fields may be added, existing ones are not renamed.
+//! stdout (text goes to stderr, so the two never mix), and the same exit code as in text
+//! mode. Field names are stable; new fields may be added, existing ones are not renamed.
 
 use anyhow::Result;
 use htl::testing::FileReport;

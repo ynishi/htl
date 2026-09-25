@@ -235,6 +235,9 @@ end
 -- What `struct_at` returns for a position that holds a `---@struct` record:
 -- { name = "MonsterDef", required = { id = true, hp = true },
 --   fields = { { name = "id", type = "string" }, { name = "hp", type = "integer" } } }.
+-- A field is required unless marked `---@optional`: the default is mandatory, which is
+-- the opposite of `---@contract`'s (optional unless `---@required`; see contract.rs),
+-- because this record is one the program builds itself and that one arrives from outside.
 local function struct_spec(cache, t)
    local lines = source_lines(cache, t.file)
    if not lines then return nil end
@@ -477,6 +480,13 @@ end
 -- Nothing here relaxes which *declared* fields a literal must set. `---@struct` and
 -- `---@required` are answered elsewhere and are untouched by this, so a record can be
 -- open at one end (keys nobody declared) and closed at the other (fields it does).
+--
+-- What it costs is one case: a misspelled *optional* field becomes silence. `colour` is
+-- no longer an unknown field, and `struct-fields` has nothing to say because nothing is
+-- missing -- the required case is still caught, the optional case is not. That is the
+-- price of the marker rather than an oversight: a near-miss heuristic here would fire on
+-- the very keys the marker exists to allow, and a warning that is wrong whenever the
+-- marker is doing its job is worse than the silence.
 local function extensible_declared(cache, t)
    local lines = source_lines(cache, t.file)
    if not lines then return nil end

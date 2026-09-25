@@ -161,7 +161,9 @@ end
 -- because every Teal type accepts nil, so nothing in the check stops the chain; the marker
 -- beside the declaration is what says the call may hand back nothing, and this is the one
 -- use of the result that cannot be right whatever the run-time value is. The rule is
--- silent until a declaration carries the marker: an unmarked function says nothing.
+-- silent until a declaration carries the marker: an unmarked function says nothing -- no
+-- marker means *unknown*, not *nilable* -- which is why turning the rule on is silent on
+-- a project until someone writes a marker or depends on a declaration that has one.
 --
 -- Which function a call reaches is type information, so `extra.nilable_at(y, x)` answers it
 -- from the checker's position report (see prelude.lua) — the marker travels with the
@@ -1497,6 +1499,21 @@ end
 -- the name the marker uses. A function that is assigned rather than declared
 -- (`gate.judge = function() ... end`) has no name of its own here, and the site counts as
 -- being in the enclosing function -- as a callback written inside `gate.judge` does.
+--
+-- A test that compares a whole sealed value builds one, and is reported like anywhere
+-- else: `t.expect(gate.judge("yes")):to_equal({ verdict = "yes", at = 1 })` writes a
+-- literal typed as `gate.Judged` in a file that is not `gate.tl`, which is the rule
+-- working rather than misfiring. Both ways through are ordinary: the assertion carries
+-- `-- htl: allow(sealed-record)`, which says this literal exists to be compared and never
+-- leaves the test, or the test asserts the fields it is about
+-- (`t.expect(j.verdict):to_equal("yes")`), which builds nothing and says which field
+-- differed when it fails.
+--
+-- Like `---@struct`, this is a lint and not a type: the file stays valid Teal, other
+-- tooling ignores the comment, and what it adds is the one thing a run-time check cannot
+-- -- that no other code minted the value. It pairs with `---@struct` on the same record,
+-- which says every field is set where this says who may set them; both report at the
+-- same site with their own message.
 local FUNCTION_KINDS = {
    ["function"] = true, ["local_function"] = true, ["global_function"] = true,
    ["record_function"] = true, ["macroexp"] = true, ["local_macroexp"] = true,

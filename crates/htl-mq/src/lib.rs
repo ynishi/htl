@@ -13,7 +13,11 @@
 //! needs. The declaration file `dts/mq.d.tl` is written by the `#[host_module]` macro
 //! at build time and shipped through `[package.metadata.htl] dts`. [`macroquad`] is
 //! re-exported, so a project that draws on its own side reaches it through this crate
-//! rather than naming a version of its own.
+//! rather than naming a version of its own — which is also why a window is a crate and
+//! not a feature of `htl`: macroquad comes with it.
+//!
+//! Not here: textures and audio, which need asset paths, and that is a host decision;
+//! and the web target, since macroquad's wasm path and mlua's are different targets.
 
 use htl::mlua::{Function, Table};
 use htl::{Htl, TealRecord, host_module};
@@ -354,7 +358,9 @@ impl Mq {
 /// What a run without a person at the window needs: stop after `frames` frames, and
 /// write the last frame drawn to `shot` as a PNG. Read from `HTL_MQ_FRAMES` and
 /// `HTL_MQ_SHOT` by [`Hooks::from_env`], which [`run`] does; [`run_with`] takes them
-/// explicitly, and [`Hooks::NONE`] turns both off.
+/// explicitly, and [`Hooks::NONE`] turns both off. A machine with no display fails before
+/// the first frame (`XOpenDisplay() failed!` on Linux); `xvfb-run` is enough to get the
+/// PNG out of one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Hooks {
     pub frames: Option<u64>,

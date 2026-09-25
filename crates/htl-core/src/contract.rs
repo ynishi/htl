@@ -21,7 +21,12 @@
 //! `htl check` is right to pass it: a `#[derive(TealRecord)]` on the Rust side reports a
 //! missing field only when the value crosses at run time, and a record marked
 //! `---@contract` with `---@required` on the fields that must be there is the check-time
-//! counterpart, for a module's table that is meant to be complete.
+//! counterpart, for a module's table that is meant to be complete. The default is the
+//! opposite of `---@struct`'s, and each marker says which regime its record is under:
+//! `---@struct` is about a record the program builds itself, where a new field is
+//! mandatory unless marked `---@optional` (`prelude.lua`, `struct_spec`); `---@contract`
+//! is about a value arriving from outside, where a new field is optional unless marked
+//! `---@required`.
 //!
 //! `htl.toml` holds the directory, and two narrowings the marker can also spell:
 //!

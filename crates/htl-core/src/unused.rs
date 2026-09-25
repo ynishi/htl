@@ -44,6 +44,11 @@
 //! `mlua-pkg.toml` says where it is, and the project model has it — and the paths are
 //! applied to the answer.
 //!
+//! # Nothing is deleted
+//!
+//! `htl fix` applies mechanical rewrites, and "this module is unreachable" is not one of
+//! those: the fix is a decision, so the report names the module and stops there.
+//!
 //! # Exports are not a kind here
 //!
 //! A third kind — a module-record field no reached module reads — was considered and left

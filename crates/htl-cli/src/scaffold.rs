@@ -400,6 +400,10 @@ const BIN: TargetProfile = TargetProfile {
 /// [`BuildTarget::Cdylib`] answers refuses `--target cdylib` without `--lib` rather than
 /// writing a `src/main.rs` nothing would run. The `staticlib` alongside is what Unity on
 /// iOS links; it costs a second artefact and nothing else.
+///
+/// The sample shows both error paths rather than describing them: the generated `greet`
+/// refuses an empty name in Teal (a Lua `error()`) and `reset` refuses a no-op in Rust (an
+/// `Err`), so the callers have each kind to handle in front of the reader.
 const CDYLIB: TargetProfile = TargetProfile {
     target: BuildTarget::Cdylib,
     deps: &[

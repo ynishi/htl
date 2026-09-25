@@ -176,7 +176,9 @@ pub fn discover_tests_skipping(paths: &[PathBuf], skip: &[PathBuf]) -> Result<Ve
 /// that does not load it is a helper: its tests `require` it, and it is not run on its own.
 /// Neither the directory nor the name is part of the rule: `tests/` is where a project
 /// keeps tests and the helpers only tests may reach, and `*_test.tl` beside a source file
-/// is a convention that reads well, not a rule.
+/// is a convention that reads well, not a rule. What the rule does ask is that tests stay
+/// in a file of their own rather than in the module: a module that loads the test library
+/// loads it wherever the module is required, including in the program that ships it.
 ///
 /// Which names a file requires is read from its syntax, not from a type check: every
 /// `.tl` in the tree is asked, and parsing is cheap where checking is not. A file that does
