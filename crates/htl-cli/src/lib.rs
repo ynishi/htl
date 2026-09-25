@@ -2018,15 +2018,28 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
     // patched dependency is left alone whatever the fixes would be. An edit there belongs
     // in the diff the project makes against the revision it took, written by a person.
     let skip = project::not_walked(model.as_ref(), &paths, htl::model::Purpose::Own);
-    let files = htl::collect_tl_skipping(&paths, &skip)?;
+    // Only what a module of the project holds, as `htl check` walks it.
+    let (files, outside) = project::held_by_modules(
+        model.as_ref(),
+        &paths,
+        htl::collect_tl_skipping(&paths, &skip)?,
+    );
+    if let Some(note) = project::outside_modules_note(model.as_ref(), &outside, "fixed") {
+        eprintln!("htl fix: {note}");
+    }
     // But checked as `htl check` walks: the copy is still the project's code, and what is
     // wrong in it is what the two commands both judge the tree by. Only checked, never
     // handed to `fix_file`.
     let check_skip = project::not_walked(model.as_ref(), &paths, htl::model::Purpose::Check);
-    let checked_only: Vec<PathBuf> = htl::collect_tl_skipping(&paths, &check_skip)?
-        .into_iter()
-        .filter(|f| !files.contains(f))
-        .collect();
+    let checked_only: Vec<PathBuf> = project::held_by_modules(
+        model.as_ref(),
+        &paths,
+        htl::collect_tl_skipping(&paths, &check_skip)?,
+    )
+    .0
+    .into_iter()
+    .filter(|f| !files.contains(f))
+    .collect();
 
     // The working tree is the undo: refuse to rewrite what git could not give back.
     if !flags.dry_run {
@@ -2355,7 +2368,14 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
         );
     }
     let skip = project::not_walked(walk_model.as_ref(), &paths, htl::model::Purpose::Check);
-    let files = htl::collect_tl_skipping(&paths, &skip)?;
+    let (files, outside) = project::held_by_modules(
+        walk_model.as_ref(),
+        &paths,
+        htl::collect_tl_skipping(&paths, &skip)?,
+    );
+    if let Some(note) = project::outside_modules_note(walk_model.as_ref(), &outside, "checked") {
+        eprintln!("htl check: {note}");
+    }
     if !json {
         report_patched(&paths);
     }

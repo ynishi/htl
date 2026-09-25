@@ -439,6 +439,67 @@ pub fn not_walked(
     model.map(|m| m.not_walked(purpose)).unwrap_or_default()
 }
 
+/// `files` split into those a module of the project holds and those none does, in walk
+/// order. A module holds a file one of its roots names ([`Project::locate`]) and, for a
+/// module other than the project's own, any file in its home. A project is its modules, and the project
+/// root is not one unless it is the source root: a `.tl` directly under it, or in a
+/// directory no module owns, cannot be required by any name the project gives it, so a
+/// walk does not check it as the project's or count it as a module. The caller says which
+/// were left out ([`outside_modules_note`]).
+///
+/// A file named in `paths` is kept whatever holds it: that question was asked outright.
+/// Outside a project there are no modules, and every file is kept.
+///
+/// [`Project::locate`]: crate::model::Project::locate
+pub fn held_by_modules(
+    model: Option<&crate::model::Project>,
+    paths: &[PathBuf],
+    files: Vec<PathBuf>,
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let Some(model) = model else {
+        return (files, Vec::new());
+    };
+    let named: Vec<PathBuf> = paths
+        .iter()
+        .filter(|p| p.is_file())
+        .map(|p| crate::model::canon(p))
+        .collect();
+    files.into_iter().partition(|f| {
+        // Named by a module's root, or inside another module's home (a patched copy's
+        // `tests/`, which no root of the copy names but the copy owns). What is left is
+        // the project's own home outside every root it has: the root itself, and a
+        // directory the layout does not name.
+        model.locate(f).is_some()
+            || model
+                .home_of(f)
+                .is_some_and(|m| m.owner != crate::model::Owner::Own)
+            || named.contains(&crate::model::canon(f))
+    })
+}
+
+/// The one line a walk says about the files [`held_by_modules`] left out, or `None` when it
+/// left none: which, and where the project's modules are.
+pub fn outside_modules_note(
+    model: Option<&crate::model::Project>,
+    outside: &[PathBuf],
+    what: &str,
+) -> Option<String> {
+    if outside.is_empty() {
+        return None;
+    }
+    let source = model.map_or("src", |m| m.config.layout.source.as_str());
+    Some(format!(
+        "{} file(s) belong to no module of the project and were not {what}: {}; move them \
+         under {source}/",
+        outside.len(),
+        outside
+            .iter()
+            .map(|f| f.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
 /// `store`, probing with `model`'s answers when there is a model
 /// ([`Cache::with_answers`](cache::Cache::with_answers)): an entry then says what each name
 /// its module required resolves to, which is the question its probes were for.
