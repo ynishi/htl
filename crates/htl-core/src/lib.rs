@@ -2099,6 +2099,15 @@ pub fn strip_traceback(text: &str) -> String {
 /// Write `text` to `path` only if the content differs. Returns `true` when written.
 /// Used by the derive macros to emit `.d.tl` files without churning cargo's fingerprints.
 pub fn write_if_changed(path: &Path, text: &str) -> std::io::Result<bool> {
+    write_if_changed_when(path, text, true)
+}
+
+/// [`write_if_changed`], writing only when `write` is set. Without it the answer is whether
+/// the file would change — what a dry run reports — and nothing on disk is touched.
+pub fn write_if_changed_when(path: &Path, text: &str, write: bool) -> std::io::Result<bool> {
+    if !write {
+        return Ok(std::fs::read_to_string(path).map_or(true, |cur| cur != text));
+    }
     if let Ok(cur) = std::fs::read_to_string(path)
         && cur == text
     {

@@ -1224,6 +1224,12 @@ pub fn find_cargo_package_root(start: &Path) -> Option<PathBuf> {
 /// Scan `src/`, `examples/`, `tests/`, `benches/` under a crate root and write every
 /// requested `.d.tl` (only when content changed). Returns `(target, written)` pairs.
 pub fn generate_crate(manifest_dir: &Path) -> Result<Vec<(PathBuf, bool)>, String> {
+    generate_crate_to(manifest_dir, true)
+}
+
+/// [`generate_crate`], writing only when `write` is set; without it each pair says whether
+/// the file would change.
+pub fn generate_crate_to(manifest_dir: &Path, write: bool) -> Result<Vec<(PathBuf, bool)>, String> {
     let mut results = Vec::new();
     for sub in ["src", "examples", "tests", "benches"] {
         let dir = manifest_dir.join(sub);
@@ -1237,7 +1243,7 @@ pub fn generate_crate(manifest_dir: &Path) -> Result<Vec<(PathBuf, bool)>, Strin
                 continue;
             }
             for g in scan_rust_file(p, manifest_dir)? {
-                let written = crate::write_if_changed(&g.target, &g.text)
+                let written = crate::write_if_changed_when(&g.target, &g.text, write)
                     .map_err(|err| format!("writing {}: {err}", g.target.display()))?;
                 results.push((g.target, written));
             }

@@ -748,6 +748,7 @@ impl Scope {
             contracts: &self.contracts,
             contract_problems: &self.contract_problems,
             cargo_root: self.cargo_root.as_deref(),
+            publish: true,
         }
     }
 }
@@ -1263,6 +1264,9 @@ pub struct Whole<'a> {
     /// The Rust crate around the project, where `contract-unenforced` looks for the host's
     /// enforcement.
     pub cargo_root: Option<&'a Path>,
+    /// Whether the contracts' types are written where they are published. A dry run
+    /// works out the same problems and writes nothing ([`crate::contract::publish_to`]).
+    pub publish: bool,
 }
 
 /// How many errors and lints [`project_findings`] said.
@@ -1300,7 +1304,7 @@ pub fn project_findings<O: Output>(
     // published: reported once for the run, and before the enforcement question, which
     // cannot be asked about a contract there is no agreement on.
     let publish_problems = match w.config {
-        Some((r, _, _)) => crate::contract::publish(r, w.contracts).1,
+        Some((r, _, _)) => crate::contract::publish_to(r, w.contracts, w.publish).1,
         None => Vec::new(),
     };
     // Both report under `contract`, so both go through the selection. Publishing itself is
