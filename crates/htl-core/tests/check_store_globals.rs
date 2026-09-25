@@ -5,7 +5,12 @@
 //! file that required the declaration saw the global and every later one did not.
 //!
 //! These cases pin the property the store must not break: a file's diagnostics do not
-//! depend on what was checked before it.
+//! depend on what was checked before it. The second half of that property is the one
+//! #302 traded away: walking the declaring module once per requiring environment gives
+//! every environment its own instance of each record the module declares, and Teal
+//! compares records by instance — so a value made through one requirer could not be
+//! passed to a function typed by another. One walk per run, and the globals delivered to
+//! each environment that requires the module, is what these cases pin now.
 
 use htl_core::Htl;
 use std::path::{Path, PathBuf};
@@ -122,6 +127,34 @@ fn assert_order_free(root: &Path, decl_dir: &str) {
     assert!(backward.is_empty(), "m3, m2, m1: {backward:?}");
 }
 
+/// Check the named files under `lib/` in the order given, in one checker, and return every
+/// error as `<module>: message`.
+fn errors_for(root: &Path, decl_dir: &str, order: &[&str]) -> Vec<String> {
+    let h = checker(root, decl_dir);
+    let mut out = Vec::new();
+    for m in order {
+        let f = root.join(format!("lib/{m}/init.tl"));
+        let c = h.check(&f).unwrap();
+        for e in c.errors {
+            out.push(format!("{m}: {e}"));
+        }
+    }
+    out
+}
+
+fn assert_files_order_free(root: &Path, decl_dir: &str, files: &[&str]) {
+    for m in files {
+        let alone = errors_for(root, decl_dir, &[m]);
+        assert!(alone.is_empty(), "{m} alone: {alone:?}");
+    }
+    let forward = errors_for(root, decl_dir, files);
+    assert!(forward.is_empty(), "{files:?}: {forward:?}");
+    let mut rev: Vec<&str> = files.to_vec();
+    rev.reverse();
+    let backward = errors_for(root, decl_dir, &rev);
+    assert!(backward.is_empty(), "{rev:?}: {backward:?}");
+}
+
 #[test]
 fn a_global_declared_in_a_d_tl_reaches_every_file_that_requires_it() {
     let root = tree("dtl", "types/host_globals.d.tl", DECL_DTL, 3);
@@ -132,6 +165,69 @@ fn a_global_declared_in_a_d_tl_reaches_every_file_that_requires_it() {
 fn a_global_declared_in_an_ordinary_module_reaches_every_file_that_requires_it() {
     let root = tree("tl", "lib/host_globals.tl", DECL_TL, 3);
     assert_order_free(&root, "lib");
+}
+
+/// A value of a record the declaration file declares crosses a module boundary: `modx`
+/// makes an `Ev`, `midx` takes one and hands it back to `modx`, and two consumers drive
+/// that. With `midx` served from the store and `host_ev` walked again in each consumer's
+/// environment, the `Ev` in `midx`'s signature and the `Ev` the consumer holds were two
+/// instances of one declaration, and the call was an error naming the same line twice.
+#[test]
+fn a_record_a_global_declaring_file_declares_is_one_type_in_every_requirer() {
+    let root = scratch("record-dtl");
+    write(
+        &root.join("types/host_ev.d.tl"),
+        "global record Ev\n   kind: string\nend\n",
+    );
+    write(
+        &root.join("lib/modx/init.tl"),
+        "require(\"host_ev\")\nlocal record M\n   mk: function(): Ev\n   use: function(Ev): string\nend\n\
+         function M.mk(): Ev return nil end\nfunction M.use(e: Ev): string return e.kind end\nreturn M\n",
+    );
+    write(
+        &root.join("lib/midx/init.tl"),
+        "require(\"host_ev\")\nlocal k = require(\"modx\")\nlocal record S\n   whole: function(Ev, string): string\nend\n\
+         function S.whole(e: Ev, _who: string): string return k.use(e) end\nreturn S\n",
+    );
+    for (m, who) in [("topx", "x"), ("topy", "y")] {
+        write(
+            &root.join(format!("lib/{m}/init.tl")),
+            &format!(
+                "require(\"host_ev\")\nlocal k = require(\"modx\")\nlocal S = require(\"midx\")\n\
+                 local function go(e: Ev): string return S.whole(e, \"{who}\") end\nprint(go(k.mk()))\n"
+            ),
+        );
+    }
+    assert_files_order_free(&root, "types", &["modx", "midx", "topx", "topy"]);
+}
+
+/// The same seam in an ordinary module: a `global` beside a `local record` that the
+/// module exposes as a nested type. Nothing about the record is global; it split because
+/// the file declaring it was walked once per requirer.
+#[test]
+fn a_record_declared_beside_a_global_is_one_type_in_every_requirer() {
+    let root = scratch("record-tl");
+    write(
+        &root.join("lib/modx/init.tl"),
+        "global knl: {string:any}\nlocal record SessionX\n   id: function(SessionX): string\nend\n\
+         local record M\n   type Session = SessionX\n   open: function(): SessionX\n   use: function(SessionX): string\nend\n\
+         function M.open(): SessionX return nil end\nfunction M.use(s: SessionX): string return s:id() end\nreturn M\n",
+    );
+    write(
+        &root.join("lib/midx/init.tl"),
+        "local k = require(\"modx\")\nlocal record S\n   whole: function(k.Session, string): string\nend\n\
+         function S.whole(s: k.Session, _who: string): string return s:id() end\nreturn S\n",
+    );
+    for (m, who) in [("topx", "x"), ("topy", "y")] {
+        write(
+            &root.join(format!("lib/{m}/init.tl")),
+            &format!(
+                "local k = require(\"modx\")\nlocal S = require(\"midx\")\n\
+                 local function go(s: k.Session): string return S.whole(s, \"{who}\") end\nprint(go(k.open()))\n"
+            ),
+        );
+    }
+    assert_files_order_free(&root, "lib", &["modx", "midx", "topx", "topy"]);
 }
 
 /// The control: a module that declares no global is still replayed from the store, which
