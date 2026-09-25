@@ -111,12 +111,14 @@ enum PkgCmd {
 enum CacheCmd {
     /// Delete this project's stored check results
     Clear {
-        /// A path inside the project; the store is found beside its htl.toml
+        /// A path inside the project; the store is .htl/cache at the project root, the
+        /// nearest htl.toml or mlua-pkg.toml above
         path: Option<PathBuf>,
     },
     /// Report what the store holds
     Status {
-        /// A path inside the project; the store is found beside its htl.toml
+        /// A path inside the project; the store is .htl/cache at the project root, the
+        /// nearest htl.toml or mlua-pkg.toml above
         path: Option<PathBuf>,
         /// Output format
         #[arg(long, value_enum, default_value_t = Format::Text)]
@@ -203,6 +205,8 @@ Examples:
   htl check src --lint -tl:hint  a warning kind of the Teal compiler silenced
   htl check --list-lints         every rule with its default level, then exit
 
+The store is .htl/cache at the project root, the nearest htl.toml or mlua-pkg.toml above
+the paths; --no-cache skips it, --explain-cache says why a lookup missed.
 Caching: https://github.com/ynishi/htl#caching
 ")]
     Check {
@@ -557,10 +561,12 @@ Examples:
   htl resolve socket.http        a name with dots, as a require spells it
   htl resolve mq --format json   the same rows as one JSON document
 
-Exits 1 when the name resolves to nothing, so a script can ask.
+Exits 1 when the name resolves to nothing, when two files implement it, or when a file of
+the project implements a name the host provides, so a script can ask.
 
-`htl.test` is not on a project's search path: `htl test` preloads it into the state it
-runs, and the declarations behind it come from the binary rather than the project.
+`htl.test` is answered like a host-provided name: no file of the project implements it
+(`htl test` preloads it into the state it runs), and its one row is the declaration the
+binary carries, `provided by the environment`.
 ")]
     Resolve {
         /// The module name a `require` would spell (`mq`, `socket.http`)

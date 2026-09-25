@@ -269,7 +269,7 @@ htl resolve mq: src/mq.d.tl
   order  file                  kind         status
   1      src/mq.d.tl           declaration  read
   2      types/mq.d.tl         declaration  shadowed by 1
-  3      types/htl-mq/mq.d.tl  declaration  shadowed by 1  (shipped by htl-mq 0.2.0)
+  3      types/htl-mq/mq.d.tl  declaration  shadowed by 1  (shipped by htl-mq 0.8.0)
 
   answered by the project model
 ```

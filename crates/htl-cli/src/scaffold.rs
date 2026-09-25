@@ -1066,7 +1066,8 @@ fn t_htl_toml(target: Option<BuildTarget>) -> String {
      indent = 3\n\n\
      [check]\n\
      # paths = [\"mods\"]   # extra dirs require() resolves from while checking\n\
-     # (src/ and types/ are always searched; hand-written .d.tl go under types/)\n\n\
+     # ([layout] source and types are searched, src/ and types/ by default;\n\
+     #  hand-written .d.tl go under types/)\n\n\
      # Where this project accepts modules written outside it:\n\
      # [[contract]]\n\
      # dir = \"mods\"             # relative to this file; \"sites/*\" = each subdirectory\n\
@@ -1156,7 +1157,7 @@ fn t_readme(ctx: &Ctx<'_>, target: Option<&'static TargetProfile>) -> String {
     if ctx.script && target.is_none() {
         s.push_str("htl run src/main.tl    # run the entry script\n");
     }
-    s.push_str("htl test               # tests/*_test.tl via htl.test\nhtl fmt .              # whitespace formatter\n");
+    s.push_str("htl test               # every .tl that loads htl.test\nhtl fmt .              # whitespace formatter\n");
     if !ctx.htlx {
         s.push_str("htl pkg install        # fetch [deps] from mlua-pkg.toml\n");
     }
