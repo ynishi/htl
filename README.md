@@ -487,8 +487,6 @@ reg.add(NativeResolver::new().add("host", |lua| { /* Rust table */ }));
 reg.add(htl::pkg::TealResolver::from_project(&project)?); // .tl -> check + gen; .d.tl -> type-only table
 reg.add(mlua_pkg::resolvers::FsResolver::new(root.join("scripts"))?);
 reg.install(h.lua())?;
-// or, with an mlua-pkg.toml (`find` is None without one):
-// htl::pkg::MluaProject::find(dir).expect("mlua-pkg.toml").registry()?
 ```
 
 `Htl::apply_config`, `Htl::add_path`, `Htl::add_package_path` and a `TealResolver` over one
@@ -546,7 +544,7 @@ Add `htl = { version = "…", features = ["ffi"] }` and `crate-type = ["rlib", "
 |---|---|---|
 | `const char *` | `&str` / `String`, or any serde type as JSON | borrowed for the call; free it when you like afterwards |
 | `char *` | a `String` or a serde type returned | **ours**: hand it back to `game_free`, always |
-| `int` | a status, never a value | `GAME_OK` and friends |
+| `int` | an `i32` argument, or a status when returned | `GAME_OK` and friends |
 | `int *` | the out-parameter an `i32` result is written through | so no function returns three meanings in one `int` |
 | `game_handle *` | the opaque handle | from `game_open`, to `game_close` |
 
@@ -621,10 +619,8 @@ htl check src --lint nil-index=deny,no-any=warn,-tl:hint
 summary says both: `0 error(s), 2 warning(s), 1 lint(s), 1 at deny`.
 
 Silence one occurrence with a trailing `-- htl: allow(nil-index)`, at the line the
-finding points at; Teal's kinds too: `-- htl: allow(tl:hint)`. There is one
-exception: `contract-unenforced` points at the `---@contract` marker, and a marker owns
-the rest of its line, so a comment there is read as an argument to it. Turn that one off
-by name, or answer it with `enforced_by`.
+finding points at; Teal's kinds too: `-- htl: allow(tl:hint)`. `contract-unenforced` is
+turned off by name, or answered with `enforced_by`.
 
 Where two rules land on one line — a local over a required module is both
 `tl:redeclaration` and `shadow-local` — a line that wants both quiet says
