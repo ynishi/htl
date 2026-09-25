@@ -1636,6 +1636,9 @@ fn cmd_test(
     let model = project::model_of(&cfg, &paths[0])?;
     let skip = project::not_walked(model.as_ref(), &paths, htl::model::Purpose::Test);
     let files = htl::testing::discover_tests_for(&paths, &skip, lib)?;
+    // A test at the root of a project laid out flat without saying so would only fail on
+    // its first `require`; say what is wrong instead, as `check` does.
+    project::refuse_flat_root(model.as_ref(), &paths, &files)?;
     if files.is_empty() {
         eprintln!("htl test: no test files found (looked for .tl files that require(\"{lib}\"))");
         return Ok(ExitCode::FAILURE);
@@ -2032,7 +2035,7 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
         model.as_ref(),
         &paths,
         htl::collect_tl_skipping(&paths, &skip)?,
-    );
+    )?;
     if let Some(note) = project::outside_modules_note(model.as_ref(), &outside, "fixed") {
         eprintln!("htl fix: {note}");
     }
@@ -2044,7 +2047,7 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
         model.as_ref(),
         &paths,
         htl::collect_tl_skipping(&paths, &check_skip)?,
-    )
+    )?
     .0
     .into_iter()
     .filter(|f| !files.contains(f))
@@ -2384,7 +2387,7 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
         walk_model.as_ref(),
         &paths,
         htl::collect_tl_skipping(&paths, &skip)?,
-    );
+    )?;
     if let Some(note) = project::outside_modules_note(walk_model.as_ref(), &outside, "checked") {
         eprintln!("htl check: {note}");
     }

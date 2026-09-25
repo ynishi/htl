@@ -206,7 +206,7 @@ pub fn unused(opts: &Options<'_>) -> Result<Report> {
     let skip = project::not_walked(opts.model, &walk, crate::model::Purpose::Own);
     // A file no module holds is not a module, so it is neither reached nor unused.
     let (files, _) =
-        project::held_by_modules(opts.model, &walk, crate::collect_tl_skipping(&walk, &skip)?);
+        project::held_by_modules(opts.model, &walk, crate::collect_tl_skipping(&walk, &skip)?)?;
 
     // The graph, from the check that already resolves every `require` — replayed from the
     // store when nothing moved. The diagnostics are the check's business, not this
