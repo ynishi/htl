@@ -20,8 +20,10 @@ local record test
       to_not_match: function(self, pattern: string)
       to_have_length: function(self, n: integer)
       to_error: function(self, pattern?: string)
-      -- compare with tests/__snapshots__/<file>/<name>.snap; first run writes it,
-      -- `htl test --update` rewrites a differing one
+      -- compare with __snapshots__/<file stem>/<name>.snap in the test file's own
+      -- directory; the first run writes it (and says so), a later run fails with a
+      -- `-expected +actual` line diff when the value changed, and `htl test --update`
+      -- rewrites a differing one
       to_match_snapshot: function(self, name: string)
    end
 

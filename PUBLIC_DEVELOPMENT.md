@@ -96,7 +96,8 @@ after, see [After a disclosure](#after-a-disclosure).
   produced ([`.github/pull_request_template.md`](.github/pull_request_template.md)).
 - **Code documentation** — the current contract: what a type is, what a function
   promises, and why it is built that way.
-- **README** — the user-facing reference.
+- **README** — the front door: what htl is, how to install it, and where the
+  reference is (docs.rs, `htl --help`).
 
 A reader with this repository and nothing else should be able to follow all four.
 

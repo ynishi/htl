@@ -31,8 +31,13 @@
 --   no-global        `global` declarations (prefer locals + module return).
 --   no-any           explicit `any` in annotations or `as any` casts.   [allow: not said
 --                    unless a project asks for it]
---   explicit-number  unannotated local initialized with a numeric literal (`local n = 0`
---                    infers integer, `0.0` infers number); ask for the annotation. [allow]
+--   explicit-number  `local n = 0` (inferred integer) later assigned a number expression
+--                    (`n = n * 1.5`); asks for `local n: number = 0`. Plain integer
+--                    counters are not reported.   [allow]
+--   struct-fields    a table built for a record marked `---@struct` that leaves out a
+--                    field `---@optional` does not exempt; the fix is a suggestion only.
+--   union-exhaustive `if x is A then ... elseif x is B then ... end` over a union with a
+--                    variant never tested and no `else`; the members come from the checker.
 --   class-record     record declaring metamethods (a class): its metatable is not part of
 --                    the value, so serialization and the Rust boundary drop it.   [allow]
 --
@@ -160,7 +165,10 @@ end
 -- `f(x)[k]`, `f(x)()` where `f` is declared `---@nilable`. Teal types the result `T`
 -- because every Teal type accepts nil, so nothing in the check stops the chain; the marker
 -- beside the declaration is what says the call may hand back nothing, and this is the one
--- use of the result that cannot be right whatever the run-time value is.
+-- use of the result that cannot be right whatever the run-time value is. The rule is
+-- silent until a declaration carries the marker: an unmarked function says nothing -- no
+-- marker means *unknown*, not *nilable* -- which is why turning the rule on is silent on
+-- a project until someone writes a marker or depends on a declaration that has one.
 --
 -- Which function a call reaches is type information, so `extra.nilable_at(y, x)` answers it
 -- from the checker's position report (see prelude.lua) — the marker travels with the
@@ -170,8 +178,8 @@ end
 --
 -- Binding the call to a local is silent here on purpose: the guard that follows is what the
 -- marker asks for, and holding `local v = f(x)` to a guard is a flow question with its own
--- false positives (a check inside a helper, a check on a second local, `or error(...)`) and
--- its own rule to come.
+-- false positives (a check inside a helper, a check on a second local, `or error(...)`),
+-- which is `nil-return-unchecked`'s, below, and off by default for that reason.
 local function lint_nil_return(ast, report, extra)
    local nilable_at = extra and extra.nilable_at
    if not nilable_at then return end
@@ -597,7 +605,8 @@ local function literal_tests(exp)
 end
 
 -- `extra.enums`: name -> enumset the checker resolved (nested in records, required
--- modules). `extra.subject_enum(y, x, key)`: the checker's type of a subject —
+-- modules), so an enum declared inside a record or in a required module counts like one
+-- declared in the file. `extra.subject_enum(y, x, key)`: the checker's type of a subject —
 -- (enumset, name) for an enum, `false` for a known non-enum, nil when unknown.
 -- `if` statements that have statements after them in their block: when every branch
 -- ends in `return`, what follows is the implicit `else`, not a missing branch.
@@ -790,7 +799,10 @@ end
 -- and how far it is indented are all things only the lines know.
 --
 -- `opts.entry(name)` writes one entry and defaults to the identity mapping `enum-table`
--- fills a lookup in with; `opts.applicability` classes the fix; `opts.split` gives every
+-- fills a lookup in with — safe, because the entry it adds is the mapping the table
+-- already states for every other value, so what the program does does not change. For a
+-- `{E: T}` table the rule reports and changes nothing: what an entry maps to is not
+-- something a fix can invent. `opts.applicability` classes the fix; `opts.split` gives every
 -- name an edit of its own, so an editor can offer one code action per name rather than
 -- one for the lot.
 local function table_entry_fix(lines, n, names, opts)
@@ -983,7 +995,18 @@ end
 -- wherever the last branch happened to lead.
 --
 -- The union's members come from the checker (`extra.union_at`), not from the tests: a
--- chain that names two variants tells you nothing about how many there are.
+-- chain that names two variants tells you nothing about how many there are. The
+-- exemptions are `enum-exhaustive`'s: a chain with an `else`, a single `is` (a guard, not
+-- a dispatch), and a chain where every branch returns and code follows, which is the
+-- `else` written differently.
+--
+-- When a union is worth its records at all: only when the variants carry different data.
+-- A `where` clause uses `self` once, so one record answers to one tag value, and a type
+-- with seven tags that carry the same fields is seven structurally identical records to
+-- gain nothing an enum field on one record does not already give -- `enum-exhaustive`
+-- guards those branches just the same. The question is not "does this have a tag" but
+-- "do the variants hold different things". (The rule's message could carry this the way
+-- clippy links a lint to its explanation; that surface does not exist yet.)
 local function lint_union_exhaustive(ast, report, extra)
    extra = extra or {}
    local union_at = extra.union_at
@@ -1037,6 +1060,12 @@ local function lint_shadow(ast, report)
    -- say is that the name it saw came from a `require`, and in a growing codebase the
    -- typical hit is exactly that — a new parameter or local taking the name of a module
    -- required at the top of the file, which the rest of the scope then cannot reach.
+   -- `tl:redeclaration` also sees two declarations in the *same* scope, which this never
+   -- could. On a local over a required module both fire at one position, and they say
+   -- different things about it — one that a name is shadowed, the other which module it
+   -- was — so a line that wants both quiet allows both names:
+   -- `-- htl: allow(tl:redeclaration, shadow-local)`. An allow comment silences the names
+   -- it lists and no others.
    local function declare(name, y, x, module)
       if type(name) ~= "string" or name == "self" or name == "..." or name:sub(1, 1) == "_" then
          return
@@ -1286,14 +1315,6 @@ end
 
 ---------------------------------------------------------------- struct-fields
 
--- A record marked `---@struct` is built whole: every field it declares is present at
--- every construction site, except the ones marked `---@optional`. Teal has no `?` for
--- record fields, so without this a record the program builds itself reads as if any field
--- might be absent, and every use site pays for that with a nil check.
---
--- Which record a bare `{ ... }` is being built as is type information, and this rule is
--- run over a syntax-only parse (see L.run). `extra.struct_at(y, x)` answers it from the
--- checker's position report; the rule only compares key sets.
 -- Edit distance, stopped as soon as it is past `bound`: the answer here is only ever
 -- "close enough or not", and a full distance between two unrelated names is wasted work.
 --
@@ -1359,6 +1380,37 @@ local function field_placeholder(ty)
    return "htl_fixme(" .. string.format("%q", ty) .. ")"
 end
 
+-- A record marked `---@struct` is built whole: every field it declares is present at
+-- every construction site, except the ones marked `---@optional`. Teal has no `?` for
+-- record fields, so without this a record the program builds itself reads as if any field
+-- might be absent, and every use site pays for that with a nil check.
+--
+-- Adding an unmarked field makes the construction sites that predate it report, which is
+-- the point: the default for a new field is mandatory, and `---@optional` is the
+-- exception written on purpose. Growing a record that already has sites is that report
+-- arriving at all of them at once, so the way through is two steps: add the field with
+-- `---@optional` on it (a marker that says "not yet"), fill the sites at whatever pace
+-- the work allows, then delete the marker line — every site still short is reported, and
+-- a clean check says the last one is done. `htl fix --diff` spells the missing field into
+-- each site as a suggestion it never writes (see `field_placeholder`): a checklist and a
+-- line to paste from, not the migration done for you.
+--
+-- This is a lint, not a type: the markers are comments, so the file stays valid Teal and
+-- other tooling ignores them, and use sites still see a nilable field. What it removes is
+-- the reason to guard, and the doubt about whether a field was ever set. Data arriving
+-- from outside the program — a mod's return value, a save file, a host — is a different
+-- question, and a record marked `---@contract` with `---@required` on its mandatory
+-- fields is what checks that (contract.rs).
+--
+-- The marker is also what makes a test suite feel the cost all at once: a dozen tests that
+-- each spell every field are a dozen reports when a field is added. A factory in a helper
+-- beside the tests -- defaults in one place, an overlay record naming only what a test
+-- varies -- turns them into one; the overlay is its own record, since typed as the target
+-- it would be one more construction site. No lint asks for it.
+--
+-- Which record a bare `{ ... }` is being built as is type information, and this rule is
+-- run over a syntax-only parse (see L.run). `extra.struct_at(y, x)` answers it from the
+-- checker's position report; the rule only compares key sets.
 local function lint_struct_fields(ast, report, extra)
    local struct_at = extra and extra.struct_at
    if not struct_at then return end
@@ -1466,6 +1518,21 @@ end
 -- the name the marker uses. A function that is assigned rather than declared
 -- (`gate.judge = function() ... end`) has no name of its own here, and the site counts as
 -- being in the enclosing function -- as a callback written inside `gate.judge` does.
+--
+-- A test that compares a whole sealed value builds one, and is reported like anywhere
+-- else: `t.expect(gate.judge("yes")):to_equal({ verdict = "yes", at = 1 })` writes a
+-- literal typed as `gate.Judged` in a file that is not `gate.tl`, which is the rule
+-- working rather than misfiring. Both ways through are ordinary: the assertion carries
+-- `-- htl: allow(sealed-record)`, which says this literal exists to be compared and never
+-- leaves the test, or the test asserts the fields it is about
+-- (`t.expect(j.verdict):to_equal("yes")`), which builds nothing and says which field
+-- differed when it fails.
+--
+-- Like `---@struct`, this is a lint and not a type: the file stays valid Teal, other
+-- tooling ignores the comment, and what it adds is the one thing a run-time check cannot
+-- -- that no other code minted the value. It pairs with `---@struct` on the same record,
+-- which says every field is set where this says who may set them; both report at the
+-- same site with their own message.
 local FUNCTION_KINDS = {
    ["function"] = true, ["local_function"] = true, ["global_function"] = true,
    ["record_function"] = true, ["macroexp"] = true, ["local_macroexp"] = true,

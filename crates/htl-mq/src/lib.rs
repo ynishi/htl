@@ -1,5 +1,11 @@
 //! A macroquad window for an htl program.
 //!
+//! `htl new --target bin` writes a host whose script runs to completion. A game wants the
+//! other shape — a window, a frame loop, input, drawing — and the part of that which is
+//! the same for every project is this crate; `htl new --target window` writes a project
+//! on it. The project keeps its engine and its rules in Teal, and its own
+//! `#[host_module]` beside `mq` for whatever wants the GPU.
+//!
 //! [`Mq`] is a [`#[host_module]`](htl::host_module) that re-exports macroquad's drawing
 //! and input to Teal as `require("mq")`. [`run`] drives a Teal game table (with
 //! `load`, `update(dt): boolean`, and `draw` methods) through the frame loop.
@@ -7,7 +13,57 @@
 //! needs. The declaration file `dts/mq.d.tl` is written by the `#[host_module]` macro
 //! at build time and shipped through `[package.metadata.htl] dts`. [`macroquad`] is
 //! re-exported, so a project that draws on its own side reaches it through this crate
-//! rather than naming a version of its own.
+//! rather than naming a version of its own — which is also why a window is a crate and
+//! not a feature of `htl`: macroquad comes with it.
+//!
+//! Not here: textures and audio, which need asset paths, and that is a host decision;
+//! and the web target, since macroquad's wasm path and mlua's are different targets.
+//!
+//! # A window, end to end
+//!
+//! ```toml
+//! [dependencies]
+//! htl = "0.8"
+//! htl-mq = "0.8"          # macroquad comes with it
+//! ```
+//!
+//! ```rust,ignore
+//! use htl::bundle::Bundle;
+//! use htl::mlua::Table;
+//! use htl::{Htl, include_bundle};
+//!
+//! // `mq` is htl-mq's: its declaration is `types/htl-mq/mq.d.tl`, which `htl dts` writes.
+//! // `host` is this crate's `#[host_module]`, which the build knows without being told.
+//! const MAIN: &[u8] = include_bundle!("src/main.tl", host = ["game", "mq"], debug = true);
+//!
+//! fn main() -> anyhow::Result<()> {
+//!     let h = Htl::new()?;
+//!     game::preload(&h)?;                       // the project's own host module and Teal
+//!     htl_mq::Mq.htl_preload(&h)?;              // `require("mq")`
+//!     h.install_bundle(&Bundle::decode(MAIN)?)?;
+//!     let game: Table = h.lua().load("return require('main')").eval()?;
+//!     htl_mq::run(h, game, htl_mq::conf("game", 800, 600))
+//! }
+//! ```
+//!
+//! The entry script returns the game table:
+//!
+//! ```lua
+//! local mq = require("mq")
+//! local x = 40.0
+//!
+//! return {
+//!    update = function(dt: number): boolean
+//!       x = x + 120 * dt
+//!       return not mq:is_key_pressed("Escape")
+//!    end,
+//!    draw = function()
+//!       mq:clear_background({r = 0.08, g = 0.08, b = 0.12, a = 1})
+//!       mq:draw_circle(x, 300, 24, {r = 1, g = 0.6, b = 0.2, a = 1})
+//!       mq:draw_text("fps " .. mq:fps(), 16, 32, 28, {r = 1, g = 1, b = 1, a = 1})
+//!    end,
+//! }
+//! ```
 
 use htl::mlua::{Function, Table};
 use htl::{Htl, TealRecord, host_module};
@@ -237,7 +293,10 @@ impl From<MouseButton> for macroquad::input::MouseButton {
 
 /// Stateless, because macroquad keeps its state process-global; every method calls
 /// macroquad and panics when no window is open, which is why a Teal test never calls
-/// them — `htl test` sees only the declaration.
+/// them — `htl test` sees only the declaration, which declares and does nothing. So an
+/// engine module that takes what it needs as arguments is testable headless, and
+/// `main.tl` — the one file that calls `mq` — is not what a test requires; that panic is
+/// the other reason to keep the loop out of the engine.
 pub struct Mq;
 
 #[host_module(name = "mq", dts = "dts/mq.d.tl", records = [Color, Vec2, Key, MouseButton])]
@@ -345,7 +404,9 @@ impl Mq {
 /// What a run without a person at the window needs: stop after `frames` frames, and
 /// write the last frame drawn to `shot` as a PNG. Read from `HTL_MQ_FRAMES` and
 /// `HTL_MQ_SHOT` by [`Hooks::from_env`], which [`run`] does; [`run_with`] takes them
-/// explicitly, and [`Hooks::NONE`] turns both off.
+/// explicitly, and [`Hooks::NONE`] turns both off. A machine with no display fails before
+/// the first frame (`XOpenDisplay() failed!` on Linux); `xvfb-run` is enough to get the
+/// PNG out of one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Hooks {
     pub frames: Option<u64>,

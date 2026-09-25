@@ -1,6 +1,26 @@
 //! `--format json`: the same facts the text output prints, as one JSON document on
-//! stdout (text goes to stderr, so the two never mix). Field names are stable; new
-//! fields may be added, existing ones are not renamed.
+//! stdout (text goes to stderr, so the two never mix), and the same exit code as in text
+//! mode. Field names are stable; new fields may be added, existing ones are not renamed.
+//!
+//! - `check`: `{ files, patched, diagnostics: [{ severity: "error"|"warning"|"lint", file,
+//!   line, col, rule?, message, fix?, required_by?, origin? }], summary: { errors, warnings,
+//!   lints, denied, strict, ok, cached, replayed } }` ([`CheckReport`], [`CheckSummary`],
+//!   `htl::Diagnostic`). `fix` is `{ applicability: "safe"|"unsafe"|"suggest", edits: [{
+//!   line, col, end_line, end_col, text }] }`.
+//! - `test`: `{ files: [{ path, ok, diagnostics, error?, file_level, passed, failed,
+//!   failures, tests: [{ name, ok, ms }], duration_ms, snapshots_written,
+//!   snapshots_updated }], summary: { files, files_run, passed, failed, files_with_errors,
+//!   replayed, duration_ms, ok, seed }, coverage?: { modules: [{ path, executed, total,
+//!   unexecuted: [[first, last]], never_ran?: [{ name, line }] }], executed, total } }`
+//!   ([`TestFile`], [`TestSummary`]; `coverage` with `--coverage`).
+//! - `unused` and `resolve`: `htl::unused` and `htl::resolve` say their shapes.
+//!
+//! GitHub Actions annotations from a check, for instance:
+//!
+//! ```sh
+//! htl check . --format json | jq -r '.diagnostics[] |
+//!   "::\(if .severity == "error" then "error" else "warning" end) file=\(.file),line=\(.line),col=\(.col)::\(.message)"'
+//! ```
 
 use anyhow::Result;
 use htl::testing::FileReport;
@@ -69,7 +89,9 @@ pub struct CheckReport {
     /// How many of `files` came out of a `patch_dir` dependency: the project's committed
     /// copy of somebody else's package, which a check reads and neither `htl fmt` nor
     /// `htl test` touches. Subtract it from `files` for the project's own, which is how
-    /// the text summary prints the pair.
+    /// the text summary prints the pair: `15 file(s) + 10 in patched dependencies`, the
+    /// two adding up to `files`, and the one number alone when this is zero — a project
+    /// with no patch reads as it read before the split existed.
     pub patched: usize,
     pub diagnostics: Vec<Diagnostic>,
     pub summary: CheckSummary,
@@ -108,13 +130,16 @@ pub struct TestFile {
     pub path: String,
     pub ok: bool,
     pub diagnostics: Vec<Diagnostic>,
-    /// Runtime error outside any test (the file itself raised).
+    /// Runtime error outside any test (the file itself raised): the text `htl test`
+    /// prints for it, [`htl::developer_message`] with its frames, carried unchanged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// No test library was used: the file passed by running to completion.
     pub file_level: bool,
     pub passed: usize,
     pub failed: usize,
+    /// One entry per failing test: the message and traceback as the text output prints
+    /// them under the file, unchanged.
     pub failures: Vec<String>,
     pub tests: Vec<TestCase>,
     pub duration_ms: f64,

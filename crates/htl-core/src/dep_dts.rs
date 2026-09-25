@@ -48,9 +48,11 @@
 //!
 //! Copying rather than searching the dependency where cargo unpacked it is what makes a
 //! fresh clone check: the registry cache is machine-local and empty until someone builds,
-//! `types/` is in the repository. It is also what keeps `include_tl!` out of cargo — the
-//! macro reads `types/` as it always has, and a proc macro shelling out to `cargo
-//! metadata` on every build is the cost this avoids.
+//! `types/` is in the repository. The shipping crate keeps its files current the same way
+//! — the macro rewrites them, CI diffs them — and commits them: they are what a
+//! consumer's checkout copies from, before anything of the crate is built. It is also
+//! what keeps `include_tl!` out of cargo — the macro reads `types/` as it always has, and
+//! a proc macro shelling out to `cargo metadata` on every build is the cost this avoids.
 //!
 //! # Why a subprocess, and why the graph
 //!
@@ -58,7 +60,8 @@
 //! versions, not the ones that were resolved, and a registry dependency's files are under
 //! `$CARGO_HOME/registry/src/<registry>/<name>-<version>/`, a layout no project should be
 //! reimplementing. `cargo metadata` reports both — the resolved graph, and each package's
-//! `manifest_path` wherever cargo put it — and it does not build.
+//! `manifest_path` wherever cargo put it — and it does not build. A project whose
+//! dependencies are already resolved and fetched needs no network for it.
 //!
 //! It is run with `--locked` when the project has a `Cargo.lock`, which is what keeps a
 //! read a read. Resolving a graph is what writes a lockfile, and a project that pins a git
@@ -77,6 +80,22 @@
 //! It is the whole graph rather than the direct dependencies because a runtime crate may
 //! well be pulled in by the one the project names; a module is registered in the Lua state
 //! either way.
+//!
+//! # What `htl dts` reports, and what it exits on
+//!
+//! One line per declaration; the commands that generate before they work print only what
+//! moved, prefixed `dts:`, and never an `unchanged` line:
+//!
+//! | line | meaning |
+//! |---|---|
+//! | `wrote <file>` | written now |
+//! | `unchanged <file>` | already what it should be |
+//! | `not written: <why>` | asked for and not written: a crate names a file in `[package.metadata.htl] dts` that is not a `.d.tl`, or is not in the package, or does not start at the `dts_root` that manifest declares, or names two that would be one file under `types/<crate>/`, or the file could not be written ([`materialise`]) |
+//! | `left in place: <file>` | under `types/<crate>/` from an earlier run, and not what is read now — the crate is gone from the graph, or still there and no longer naming the file, or one this binary carries itself (`std.*`, whose copy an htl built without that feature may have written) ([`orphans`]) |
+//!
+//! The exit code is about `not written` and nothing else; `left in place` fails nothing
+//! and deletes nothing. With nothing to write at all — no `Cargo.toml` with a `[package]`
+//! above, and no `---@contract` type — `htl dts` is an error, and exits 2.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};

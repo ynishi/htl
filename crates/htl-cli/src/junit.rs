@@ -10,6 +10,9 @@
 //! Jenkins' JUnit plugin, GitLab's report ingestion, and the GitHub Actions reporters
 //! (`dorny/test-reporter`, `mikepenz/action-junit-report`) all read.
 //!
+//! The flag composes with `--filter`, `--seed` and `--format json`, and changes neither
+//! the text output nor the JSON document: the report is a third rendering of the same run.
+//!
 //! Deliberately left out, because the consumers differ on them and nothing here needs
 //! them: `<properties>` (so the run's seed lives in the text summary, not the report),
 //! `<system-out>` / `<system-err>`, `timestamp` / `hostname` / `id` / `package`

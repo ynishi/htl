@@ -805,6 +805,8 @@ pub fn check_one<O: Output>(
 /// Asked while the search path `f` was checked under is still in place, since the
 /// declaration lints resolve against it. [`check_one`] is a check plus this; `htl fix`
 /// calls it on the check it ends with, so a file it leaves says what `htl check` would.
+/// The errors of what `f` required are said here because `htl run` would refuse the
+/// module at that `require`: the check says so first.
 pub fn file_findings<O: Output>(
     h: &Htl,
     sink: &mut Sink<O>,
@@ -849,7 +851,11 @@ pub fn file_findings<O: Output>(
 /// In a project nothing: the model's resolver decides from the requiring file, and a test
 /// reads the test root because it is under it. Outside a project there is no model to
 /// ask, and a file given on its own resolves its `require`s in its own directory — the one
-/// place a single file names by itself — and not in the working directory.
+/// place a single file names by itself — and not in the working directory. `include_tl!`
+/// gets the same two answers: in a project (an `htl.toml` or `mlua-pkg.toml` above the
+/// file) the model's `[layout]` directories and dependencies, so a crate whose Teal lives
+/// in `scripts/` says `[layout] source = "scripts"`; with neither file, the modules beside
+/// the one included.
 pub fn file_view(h: &Htl, model: Option<&crate::model::Project>, f: &Path) -> Result<()> {
     match model {
         Some(_) => Ok(()),
@@ -1395,7 +1401,8 @@ pub struct NeverRan {
 /// What a run covered of one module.
 #[derive(Serialize, Debug, Clone)]
 pub struct CoverageModule {
-    /// As the report prints it — relative to the project root when there is one.
+    /// As the report prints it — relative to the directory the command ran in, absolute
+    /// outside it (the lcov `SF` is relative to the project root instead).
     pub path: String,
     /// Statements at least one test ran.
     pub executed: usize,
@@ -1436,7 +1443,9 @@ pub struct CoverageReport {
 }
 
 impl CoverageReport {
-    /// The run as an lcov tracefile, one record per module in the report's order.
+    /// The run as an lcov tracefile, one record per module in the report's order: what
+    /// Codecov, Coveralls, GitLab, `genhtml` and editor gutters read. `htl test --lcov`
+    /// implies `--coverage` and leaves the table and the JSON as they are.
     ///
     /// `DA` is one entry per line a statement starts on, with a count of `1` or `0`:
     /// the hook records whether a line ran, not how often, and a number it does not

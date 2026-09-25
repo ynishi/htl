@@ -1,7 +1,11 @@
 //! The rules a finding can be reported under, and which of them a run has on.
 //!
 //! Every rule name htl prints — the ` [htl <rule>]` suffix a finding's message ends with,
-//! and the `rule` field of `--format json` — is one entry of [`RULES`]. Fifteen of them are
+//! and the `rule` field of `--format json` — is one entry of [`RULES`], and everything
+//! printed with that suffix is a finding about the project's code. `htl dts`'s `not
+//! written` and `left in place` lines are not: they are the command reporting on the
+//! declarations it was asked to write, carry no rule name, and are in no listing here.
+//! Fifteen of them are
 //! implemented in `lint.lua`, five in the project layer and seven by the vendored Teal
 //! compiler, and that difference used to decide what a project could say about them: the
 //! registry was `L.DEFAULT` in `lint.lua`, so `--lint` and `[lint]` knew the thirteen and
@@ -38,6 +42,164 @@
 //! fix filters match by string, so without the entry `--rule error` would select nothing
 //! and report that it fixed nothing — which reads exactly like a project with nothing to
 //! fix.
+//!
+//! # The rules
+//!
+//! Every rule has a level; the default column is each rule's level for a project that
+//! says nothing, and nothing defaults to `deny`.
+//!
+//! | rule | default | catches |
+//! |---|---|---|
+//! | `nil-index` | warn | `t[k].x`, `t[k]:m()`, `t[k]()`, `t[k][j]` — Teal types a map/array lookup as `V`, not `V \| nil` |
+//! | `nil-return` | warn | the same four shapes over a call — `f(x).y`, `f(x):m()`, `f(x)()`, `f(x)[k]` — where `f` is declared `---@nilable`. Silent until a declaration carries the marker |
+//! | `nil-return-unchecked` | allow | the local such a call was bound to, used as the base of a chain before any statement looks at it — `local d = f(x)` then `d:upper()`. One report per local, at the first use. Off by default: it is a flow question, and the shapes it gets wrong are the ones where something did check |
+//! | `htlx-available` | allow | a `for i = 1, #t do` loop whose whole body is a function htl-x already has — `list.map`, `list.to_set`, `list.filter` — in a project that depends on htl-x. Silent in a project that does not. Off by default: what it reports is right, and the call it names is a library's |
+//! | `struct-fields` | warn | a table built for a record marked `---@struct` that leaves out a field the record declares and `---@optional` does not exempt. Silent until a record carries the marker. `htl fix` spells the missing fields at the site, as a suggestion it never applies |
+//! | `sealed-record` | warn | a table built for a record marked `---@sealed`, or an `as` cast to one, outside the file that declares it — outside the functions the marker names, when it names any (`---@sealed(gate.judge)`). Silent until a record carries the marker |
+//! | `enum-exhaustive` | warn | `if e == "a" ... elseif e == "b" ... end` over an enum with a value left unhandled and no `else`; enums nested in records and enums from required modules count |
+//! | `enum-cast` | warn | `e as E` where `E` is an enum and the checker types `e` as `string`: `as` is erased, so the word enters the enum with nothing checking it. A string literal (`"open" as E`) and a value already typed as the enum are not reported |
+//! | `enum-table` | warn | a table constructor whose declared type maps an enum (`{string: E}`, `{E: T}`) and that leaves a value of the enum out, or lists a word that is not one. An array of the enum (`{E}`) is a selection, not a mapping, and is not reported. `htl fix enum-table` fills a `{string: E}` one in |
+//! | `union-exhaustive` | warn | `if x is A ... elseif x is B ... end` over a union with a variant never tested and no `else`. The variants come from the checker, so a chain that predates a variant is reported once the union gains it |
+//! | `shadow-local` | warn | a local / loop var / parameter reusing the name an enclosing scope bound to a `require`d module: the message names the module, where it was required, and that the module is unreachable for the rest of that scope. Shadowing an *ordinary* outer local is `tl:redeclaration`, which reports the same line and column and says more about it |
+//! | `no-global` | warn | `global` declarations |
+//! | `no-any` | allow | explicit `any` annotations and `as any` casts |
+//! | `explicit-number` | allow | `local n = 0` (inferred `integer`) that is later assigned a number expression (`n = n * 1.5`, `n = a / b`): names the declaration and the assignment; write `local n: number = 0`. Plain integer counters are not reported |
+//! | `class-record` | allow | a record declaring metamethods (`metamethod __index: Actor` = a class): its metatable is attached by `setmetatable` at run time and is not part of the value, so serialization and the Rust boundary drop it; keep such records out of saved data and host signatures |
+//! | `duplicate-declaration` | warn | two `.d.tl` for one module: an order decides which is read ([`crate::config::HtlConfig::search_paths`]) and nothing in either file says so. Names the one read and the one that was not |
+//! | `host-module-shadowed` | warn | for a file in no project: a `require` of a name a `#[host_module]` in the surrounding crate registers that resolved to a Teal file of that name — `package.preload` beats the path searcher at run time, so the file is what is checked and the host is what runs. In a project the same state is an error ([`crate::model`]) |
+//! | `contract` | warn | a module under a `[[contract]]` directory that does not satisfy the contract's type or its `---@required` fields, and a `---@contract` marker that cannot be turned into a contract or published ([`crate::contract`]) |
+//! | `contract-unenforced` | warn | a contract the host never builds resolvers for, so it is documentation rather than a run-time guarantee. Say where the enforcement lives with `[[contract]] enforced_by` when the scan cannot see it |
+//! | `require-cycle` | warn | a loop in the require graph of the files `htl check <dir>` just checked, e.g. `a.tl -> b.tl -> a.tl`. Teal types the back edge as an opaque circular require, so without this the symptom is "cannot index" somewhere else |
+//!
+//! Teal's own warnings are reported under their kind's name in the `tl:` namespace — as
+//! `warning: src/a.tl:5:10: unused variable n: integer [htl tl:unused]`, and as `"rule":
+//! "tl:unused"` in `--format json`:
+//!
+//! | rule | default | catches |
+//! |---|---|---|
+//! | `tl:unused` | warn | a local, parameter, label or loop variable nothing uses |
+//! | `tl:unread` | warn | a variable written and never read after |
+//! | `tl:redeclaration` | warn | a declaration over a name already declared, naming the kind declared and the line and column of the one it shadows. This is where shadowing is reported, `shadow-local` having been narrowed to the one thing the compiler cannot say — that the shadowed name was a required module. It also sees two declarations in the *same* scope |
+//! | `tl:unknown` | warn | a variable the checker cannot resolve |
+//! | `tl:branch` | warn | a test that can never hold, e.g. `x is B` where `x` has been narrowed out of `B` |
+//! | `tl:hint` | warn | the compiler's suggestions: `.` where `:` was meant, `pairs` over an array, a `string.format` pattern that does not match its arguments, and more |
+//! | `tl:debug` | warn | the checker reporting an ambiguity in what it inferred |
+//!
+//! # Setting levels
+//!
+//! Every name in either table takes a level: `--lint contract=deny`, `[lint.rules]
+//! require-cycle = "allow"`, `HTL_LINTS=tl:unused=allow`, and `htl check --list-lints`
+//! lists them all with their defaults. `+rule` and `-rule` are the older spelling of
+//! `=warn` and `=allow`; later entries win, so `htl check src --lint
+//! nil-index=deny,no-any=warn,-tl:hint` raises or lowers what `htl.toml` set.
+//! `[lint] strict` and `--strict` make every `warn` of the run count as `deny`; the
+//! summary says both (`0 error(s), 2 warning(s), 1 lint(s), 1 at deny`). For
+//! `include_tl!` and `include_bundle!`, `HTL_LINTS` does what `--lint` does, `HTL_LINT=deny`
+//! makes every finding fail the build and `HTL_LINT=warn` lets it through whatever the
+//! levels say.
+//!
+//! One occurrence is silenced with a trailing `-- htl: allow(nil-index)` at the line the
+//! finding points at, Teal's kinds included (`-- htl: allow(tl:hint)`); a comment
+//! silences the names it lists and no others, so a local over a required module, which
+//! is both `tl:redeclaration` and `shadow-local`, wants `-- htl: allow(tl:redeclaration,
+//! shadow-local)`. `contract-unenforced` is turned off by name, or answered with
+//! `enforced_by`.
+//!
+//! # The markers
+//!
+//! Four rules are silent until a record or a function carries a marker. A marker is a
+//! comment, read from the file that *declares* the record or function — on the line
+//! itself, or on a line of its own above it — so the file stays valid Teal and other
+//! tooling ignores it; the report lands where the thing is *built* or *called*. The
+//! implementations, and the reasoning behind each, are the comments above the rule in
+//! `lint.lua` and the marker readers in `prelude.lua`.
+//!
+//! **`---@struct`** (`struct-fields`): every field the record declares is set where it is
+//! built, except the ones marked `---@optional`:
+//!
+//! ```text
+//! local record MonsterDef   ---@struct
+//!    id: string
+//!    hp: integer
+//!    inflicts: Status       ---@optional
+//!    ---@optional
+//!    home: BranchId
+//! end
+//! ```
+//!
+//! Every construction site counts — a bare literal, an element of an array or map of
+//! that record, a literal passed as a typed argument, a function's `return`. A key that
+//! is a near miss for the missing one (one edit; two once the name is eight characters
+//! or longer) is named: ``MonsterDef is built without color (the literal sets `colour`)``.
+//! Growing a record that already has sites: add the field with `---@optional` on it,
+//! fill the sites, then delete the marker line; `htl fix --diff` spells the missing field
+//! into each site as a suggestion it never writes (`color = htl_fixme("string")`).
+//!
+//! **`---@sealed`** (`sealed-record`): the record is built, and `as`-cast to, only in its
+//! declaring file, or only in the functions the marker names:
+//!
+//! ```text
+//! local record gate
+//!    record Judged        ---@sealed
+//!       verdict: Verdict
+//!       at: integer
+//!    end
+//!
+//!    ---@sealed(gate.open, gate.reopen)
+//!    record Draft
+//!       who: string
+//!    end
+//! end
+//! ```
+//!
+//! A site elsewhere reads `` `gate.Judged` is sealed: built only in gate.tl `` (`by
+//! gate.open or gate.reopen` when functions are named); `-- htl: allow(sealed-record)`
+//! keeps one site the project stands behind, a test that compares a whole sealed value
+//! among them.
+//!
+//! **`---@extensible`**: a table built as the record may carry keys it does not declare —
+//! the key a newer SDK or a later save file adds. On a contract record it travels with the
+//! published declaration. The keys stay unreadable (a program that wants to *read* them
+//! wants a map field, `extra: {string: any}`), and what it costs is that a misspelled
+//! optional field becomes silence.
+//!
+//! **`---@nilable`** (`nil-return`, `nil-return-unchecked`): the first return value may be
+//! nothing:
+//!
+//! ```text
+//!    -- nil when there is no parent.
+//!    parent: function(p: string): string      ---@nilable
+//!    ---@nilable
+//!    find: function(s: string, pat: string): string
+//! ```
+//!
+//! Indexing the call itself is reported (`call result may be nil at runtime: path.parent
+//! is marked ---@nilable; bind it to a local and nil-check first`); with
+//! `nil-return-unchecked` turned on, so is the first use of the local as the base of a
+//! chain before anything checks it (`'d' may be nil at runtime: it comes from
+//! path.parent, which is marked ---@nilable, and nothing checks it before this`).
+//! mlua-batteries writes the marker on its own declarations, so a project using `std.*`
+//! gets the rule without writing anything.
+//!
+//! **`htlx-available`** reports three loops htl-x already has, each the body of a
+//! `for i = 1, #t do` with nothing else in it — `out[i] = f(t[i])` (`list.map`),
+//! `out[t[i]] = true` (`list.to_set`), `if p(t[i]) then out[#out + 1] = t[i] end`
+//! (`list.filter`) — as ``this loop is list.map(rows, row_summary): htlx is a dependency
+//! of this project, and `require("htlx.list")` has it``, with the rewrite as a `htl fix`
+//! suggestion `--diff` shows and never applies.
+//!
+//! **`enum-cast` and `enum-table`**: a Teal enum is a string at run time and `as` is
+//! erased, so `h.state as defs.State` is reported when the checker types the value as
+//! `string`; the hand-written answer is a lookup table, `local states: {string:
+//! defs.State} = { open = "open", ... }` read as `states[s] or "open"`, and `enum-table`
+//! is what keeps that table level with the enum (`htl fix enum-table` fills a `{string:
+//! E}` one in; a `{E: T}` one it reports and leaves).
+//!
+//! **`union-exhaustive`**: Teal refuses a union of two record types on its own (`cannot
+//! discriminate a union between multiple table types`); a `where self.kind == "…"` clause
+//! on each record lifts it, `is` then narrows, and this rule reports an `is` chain that
+//! leaves a variant untested, with `enum-exhaustive`'s exemptions. `where` uses `self`
+//! once, so a union is worth its records only when the variants carry different data.
 
 use crate::Diagnostic;
 use anyhow::{Result, bail};
@@ -199,7 +361,7 @@ impl Rule {
     }
 }
 
-/// Every rule there is. The first twenty-six are the lint surface, in the order
+/// Every rule there is. The first twenty-seven are the lint surface, in the order
 /// `htl check --list-lints` prints them: the file-level rules first, in the order
 /// `lint.lua` runs them, then the ones the project layer asks once the files have been
 /// checked, then the warning kinds the vendored Teal compiler reports for itself. The last

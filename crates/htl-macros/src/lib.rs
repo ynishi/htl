@@ -9,12 +9,22 @@
 //! Paths are relative to `CARGO_MANIFEST_DIR`. Teal type errors become `compile_error!`s,
 //! and so do the warnings and lints `htl check` would fail on — a rule at `deny`, or any
 //! under `[lint] strict` (`htl_core::verdict`); the rest are printed and the build goes on.
-//! `HTL_LINT=deny` makes every one fail, `HTL_LINT=warn` none. Every `.tl` consulted is registered with
+//! `HTL_LINT=deny` makes every one fail, `HTL_LINT=warn` none. `HTL_LINTS` configures
+//! which rules run and at what level, as `--lint` does for the command; it is read after
+//! `htl.toml`'s `[lint]`, so the environment wins. Every `.tl` consulted is registered with
 //! `include_str!` so edits trigger a rebuild. Generated code refers to `::htl::...`, so
 //! use these through the `htl` umbrella crate.
 //!
 //! Declaration text (`.d.tl`) comes from `htl_core::dts`, the same code `htl dts` runs
 //! from the CLI, so the files can also be produced before any `cargo build`.
+//!
+//! The macros run the checker — htl-core and the vendored Lua that hosts `tl` — inside
+//! the proc macro, under `[profile.dev.build-override]`, whose default `opt-level = 0`
+//! makes a `cargo build` that touches a `.tl` about three times slower than the
+//! release-built CLI; `htl new --embed` writes `opt-level = 3` into that section. The
+//! `.tl` edit loop belongs to `htl check` / `htl test` in any case — an edit to a leaf
+//! module costs a few milliseconds from the cache — and `cargo build` to the Rust host
+//! and the binary.
 
 mod ty;
 
@@ -297,14 +307,12 @@ enum Payload {
     Bytes(Vec<u8>),
 }
 
-/// Check + generate `rel` (relative to `manifest_dir`). Search paths match the CLI:
-/// the file's own directory, the nearest `mlua-pkg.toml` project's installed deps at
-/// their entries (and `target_dir` copies), and the bundled `htl.test` declarations.
-/// A checker set up the way the CLI would be for `path`: `htl.toml` lints, the file's
-/// own dir, the crate's `src/`, the mlua-pkg project, `[check] paths`, the test lib.
-/// Never the process cwd (cargo's), which has nothing to do with the script.
-/// A checker set up for one macro expansion, with what the run cache needs to key and
-/// validate what the checker produces.
+/// A checker set up for one macro expansion, the way the CLI sets one up for the file:
+/// the project model when the file is in a project (`Htl::apply_model`, after
+/// `reset_search_path`), and the file's own directory when it is not
+/// (`project::file_view`) — never the process cwd, which is cargo's and has nothing to
+/// do with the script. Carries what the run cache needs to key and validate what the
+/// checker produces.
 struct Checker {
     h: htl_core::Htl,
     cfg: Option<htl_core::config::HtlConfig>,
@@ -326,9 +334,9 @@ impl Checker {
         (!self.spec.is_empty()).then_some(self.spec.as_str())
     }
 
-    /// The run cache, when there is a project to keep one in: an `htl.toml` was found
-    /// (that is the opt-in; `htl init` / `htl new` write it and gitignore `.htl/`), and
-    /// its directory is not build scratch — the copy `cargo publish` verifies under
+    /// The run cache, when there is a project to keep one in: a model was built — an
+    /// `htl.toml` or an `mlua-pkg.toml` above the file, either is enough, and `htl init` /
+    /// `htl new` write the first and gitignore `.htl/` — and its root is not build scratch — the copy `cargo publish` verifies under
     /// `target/package/`, where a new file aborts the publish, or a registry checkout.
     /// Otherwise `None`, silently: everything is generated, which is what happened before
     /// there was a store. `HTL_CACHE_DEBUG` says which of the two it was.
@@ -888,6 +896,40 @@ fn union_from(en: &ItemEnum, name: &str, variants: &[dts::UnionVariant]) -> Toke
 
 // ------------------------------------------------------------------ #[host_module]
 
+/// Turn a plain `impl` block into a `mlua::UserData` impl, and write its Teal
+/// declaration (`dts = "scripts/host.d.tl"`) when the macro expands, so a script sees
+/// `host:scale(p: Point, k: number): Point` and `host.Point`. Change a Rust signature and
+/// the next `cargo build` fails inside the `.tl` that relied on it: the declaration is
+/// rewritten first, and `include_tl!` / `include_bundle!` check against it. The
+/// breakdown is `htl_core::dts::host_decl`, which `htl dts` runs without building.
+///
+/// `&str`, `&[T]` and `&Record` parameters are accepted (`&mut` is not); an `Option<T>`
+/// parameter is declared `name?: T`, so a caller may write `api:find("x")`; another host
+/// type comes in as `UserDataRef<T>` (`UserDataRefMut<T>` to mutate it, `UserDataOwned<T>`
+/// to keep it) and is declared as `T`; types from other modules come in via `uses =
+/// [Name]`, nested `#[derive(TealRecord)]` types via `records = [..]`. `Result<T, E>`
+/// returns raise a Lua error on `Err` by default; with `errors = "return"` on the
+/// attribute they come back Lua-style (`v, nil` / `nil, err`), so `local ok, err =
+/// store:write(name, text)` needs no `pcall`. A parameter that may see a value from
+/// outside checked Teal is a `Strict<T>` (`htl::teal::Strict`).
+///
+/// With the `async` feature a method may be `async`, in the same `impl` as the sync
+/// ones:
+///
+/// ```rust,ignore
+/// #[host_module(name = "api")]
+/// impl Api {
+///     pub fn seen(&self) -> u32 { self.calls }
+///     pub async fn fetch(&self, path: String) -> String { /* … */ }
+/// }
+/// ```
+///
+/// Three things follow from mlua, not from htl: the executor is the caller's (the method
+/// runs under `call_async` or an `AsyncThread` the host drives; a plain `load(..).eval()`
+/// raises rather than blocking); the receiver is borrowed across every await
+/// (`add_async_method` hands over a `UserDataRef<T>` the future holds until it resolves,
+/// so prefer `&self` over `&mut self`); and the future must be `'static`, and `Send` as
+/// well when mlua's `send` feature is on.
 #[proc_macro_attribute]
 pub fn host_module(attr: TokenStream, item: TokenStream) -> TokenStream {
     let metas = match Punctuated::<Meta, Token![,]>::parse_terminated.parse(attr) {

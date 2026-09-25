@@ -49,7 +49,36 @@
 //! have to be keyed on the strip and debug flags and on the Lua the bytecode is for, for
 //! no saving. What a bundle contains — module order, fingerprint, host modules — is the
 //! same whether a module was generated or replayed.
-
+//!
+//! # `htl build`, and the bundle from Rust
+//!
+//! `htl build src/main.tl -o app.hb` follows `require("<literal>")` from the entry and
+//! links everything it reaches into one file; `htl run app.hb` runs it, and a host does
+//! [`Htl::run_bundle`] after registering its modules. A missing `require` is said once,
+//! and the line says where to declare the module: in an `x.d.tl`, under `[build] host`,
+//! or under `[build] extra` for a dynamic `require` (`--extra`, `--host` on the command
+//! line). The payload is stripped bytecode unless `--debug` ([`LinkOptions::debug`]) or
+//! `--source` ([`LinkOptions::source`]); `htl bundle info app.hb` prints what the file
+//! records ([`crate::bundle`]). `htl build <dir>` is the older form, every `.tl` under a
+//! directory. A second [`Htl::install_bundle`] writes nothing; a newer bundle goes into a
+//! running state with [`Htl::replace_bundle`].
+//!
+//! From Rust, `include_bundle!` does the same at `cargo build`:
+//!
+//! ```rust,ignore
+//! const BUNDLE: &[u8] = htl::include_bundle!("src/main.tl", extra = ["modkit"]);
+//! // The host's names are the project's, as for `htl build`: `Host`'s `#[host_module]`, `[build]
+//! // host` and `std.*` are not bundled. `host = [..]` is optional, for a module the project
+//! // cannot see (registered by hand, or by another crate). payload = "source" for a target
+//! // whose Lua header differs (big-endian, non-default number types; see `bundle`);
+//! // debug = true keeps line numbers. [build] extra in htl.toml is merged in.
+//! Host { .. }.htl_preload(&h)?;
+//! h.run_bundle(&htl::bundle::Bundle::decode(BUNDLE)?, &args)?;
+//! ```
+//!
+//! From a `build.rs`, [`link`] does the same: take the bundle through [`Linked::bundle`]
+//! / [`Linked::into_bundle`], and emit `cargo:rerun-if-changed=<file>` for each of
+//! [`Linked::inputs`].
 use crate::bundle::{Bundle, Kind, Module};
 use crate::cache::{self, Cache};
 use crate::{CheckInfo, Htl, RequireSite};
@@ -64,9 +93,13 @@ use std::path::{Path, PathBuf};
 /// half of a link's inputs is [`LinkStore`].
 #[derive(Debug, Clone, Default)]
 pub struct LinkOptions {
-    /// Keep debug info (line numbers, local names) in bytecode. Off = stripped.
+    /// Keep debug info (line numbers, local names) in bytecode. Off = stripped, and
+    /// stripping takes the traceback with it: every frame of a run-time failure reads `?`,
+    /// with no line. On, a frame reads `depth:8` — the module the bundle knows, since a
+    /// bundle holds modules rather than files.
     pub debug: bool,
-    /// Store generated Lua source instead of bytecode (portable across Lua builds).
+    /// Store generated Lua source instead of bytecode (portable across Lua builds):
+    /// larger and readable, bound to no Lua build, and named the same way as `debug`.
     pub source: bool,
     /// Modules to include even if no literal `require` reaches them.
     pub extra: Vec<String>,
@@ -147,7 +180,9 @@ pub struct LinkedModule {
 /// was arrived at.
 ///
 /// The bundle is private because an incomplete one must not escape — see
-/// [`errors`](Self::errors) and [`bundle`](Self::bundle).
+/// [`errors`](Self::errors) and [`bundle`](Self::bundle). [`link`] itself returns `Ok`
+/// with the errors inside, so a caller (a `build.rs`, the macros) can show the whole list
+/// rather than the first one; the bundle is handed out only when the list is empty.
 #[derive(Debug, Default)]
 pub struct Linked {
     bundle: Bundle,
@@ -252,7 +287,10 @@ impl Linked {
     }
 
     /// Every file the bundle was built from (entry, modules, and what the checker read
-    /// for them, e.g. `.d.tl`s): what a build script or macro should watch for changes.
+    /// for them, e.g. `.d.tl`s): what a build script or macro should watch for changes,
+    /// one `cargo:rerun-if-changed=<file>` each. Files, not the directory: cargo compares
+    /// the mtime of the path it is given, and editing a file inside a directory does not
+    /// change the directory's.
     pub fn inputs(&self) -> Vec<PathBuf> {
         let mut out: Vec<PathBuf> = self.modules.iter().map(|m| m.path.clone()).collect();
         for (_, ci) in &self.checks {

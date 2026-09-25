@@ -82,7 +82,10 @@ pub struct Diagnostic {
     /// The column, counted from 1, and `0` under the same condition as
     /// [`line`](Self::line).
     pub col: usize,
-    /// The lint rule (`nil-index`, `contract`, ...) for `lint` diagnostics.
+    /// The lint rule (`nil-index`, `contract`, ...) for `lint` diagnostics, or a Teal
+    /// warning's kind (`tl:unused`, ...) for a `warning`, kept apart from the message. On
+    /// an error the checker raised it is the class `htl fix` files that error's fix under
+    /// (`forward-ref`, `tl:error`), the same name `htl fix --format json` gives it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rule: Option<String>,
     /// What the finding says, with the position prefix and the ` [htl <rule>]` suffix
@@ -96,9 +99,12 @@ pub struct Diagnostic {
     /// require pulled it in. Absent on the project's own diagnostics.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub required_by: Option<String>,
-    /// Where such a file lives: `dependency` (installed under `.htl/modules`, or a
-    /// vendored copy) or `external` (a `[check] paths` or contract directory). Absent for
-    /// a file of the project's own, and on the project's own diagnostics.
+    /// Where such a file lives: `dependency` (installed under `.htl/modules`, a vendored
+    /// copy, or the declarations a crate ships under `types/<crate>/`) or `external` (a
+    /// `[check] paths` or contract directory). Absent for a file of the project's own, a
+    /// patched dependency included, and on the project's own diagnostics. Decided by the
+    /// module whose directory holds the file ([`crate::model::Owner::origin`]), the same
+    /// module `htl resolve` names a file's origin from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
 }

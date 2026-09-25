@@ -5,22 +5,55 @@
 //! *before* any `cargo build`, so `htl check` works on a fresh checkout.
 //!
 //! Type mapping is syntactic: `f64 -> number`, integers -> `integer`, `String`/`&str`
-//! -> `string`, `bool -> boolean`, `Vec<T> -> {T}`, `HashMap<K, V> -> {K:V}`,
-//! `Option<T> -> T`, `Result<T, _> -> T`, `Strict<T> -> T`, other identifiers pass through
-//! as record names.
+//! -> `string`, `bool -> boolean`, `Vec<T>` / `&[T]` / `[T; N]` / `VecDeque<T>` /
+//! `HashSet<T>` -> `{T}`, `HashMap<K, V>` / `BTreeMap<K, V>` -> `{K:V}`, `mlua::Value` /
+//! `serde_json::Value` -> `any` (the deliberate escape hatch), `Option<T> -> T`,
+//! `Result<T, _> -> T`, `Strict<T> -> T`, other identifiers pass through as record names.
+//! There is no reflection on types in either direction: a Rust field of type `Foo` is
+//! declared as `Foo`, and it is on the host that a Teal `Foo` exists; the module a
+//! `---@contract` type is declared in goes the other way, Teal to `.d.tl`, with each
+//! signature carried across as it was written ([`crate::contract::publish`]).
 //! An `Option<T>` *parameter* is declared `name?: T` where Teal accepts the mark (a
-//! trailing run of them); a field and a return value stay `T`.
+//! trailing run of them); a field and a return value stay `T`, because a Teal record
+//! field is nilable already and a return position has no `?`, while the mark on a
+//! parameter is what lets a caller leave the argument out.
+//!
+//! # What each Rust shape becomes
+//!
+//! | Rust | Teal declaration | crosses as |
+//! |---|---|---|
+//! | `struct Point { x: f64, y: f64 }` | `record Point` | a table |
+//! | `enum Mode { Fast, Careful }` | `enum Mode "Fast" "Careful" end` | the variant name, a string; any other string is refused: `Mode: expected one of "Fast", "Careful", got "fst"` |
+//! | `enum Shape { Dot, Circle(f64), Rect { w: f64, h: f64 } }` | `record Shape_Dot`, `record Shape_Circle`, `record Shape_Rect`, each `where self.kind == "…"`, and `type Shape = Shape_Dot \| Shape_Circle \| Shape_Rect` | a table with `kind`; a newtype payload under `value`, struct fields under their names; `union-exhaustive` counts the variants, and a missing field reads `Shape.Rect.h: expected number, got nil` |
+//! | `#[teal(rename_all = "snake_case")] enum State { Open, InReview }` | `enum State "open" "in_review" end` | the renamed word: `"open"` is accepted, `"Open"` is refused (`State: expected one of "open", "in_review", got "Open"`) |
+//! | `struct Label(String)` | `type Label = string` | whatever the inner type crosses as |
+//! | `Option<T>` | `T` as a field and as a return, `name?: T` as a method parameter | nil where the Rust side has `None`; the mark on a parameter is what lets a caller write `api:find("x")` |
+//! | `Vec<T>` / `&[T]` / `[T; N]` / `VecDeque<T>` / `HashSet<T>` | `{T}` | a table used as a sequence |
+//! | `HashMap<K, V>` / `BTreeMap<K, V>` | `{K:V}` | a table keyed by `K` |
+//! | `mlua::Value` / `serde_json::Value` | `any` | unchanged: the deliberate escape hatch |
+//!
+//! A data-carrying enum is declared nested in the host module (`records = [Shape]`),
+//! where its variant records are reachable as `host.Shape_Circle` for `is`; `uses =
+//! [Name]` imports a type from another module with `local type Name = require("Name")`.
+//! `#[teal(rename_all = "..")]` on an enum takes serde's set — `lowercase`, `UPPERCASE`,
+//! `PascalCase`, `camelCase`, `snake_case`, `SCREAMING_SNAKE_CASE`, `kebab-case`,
+//! `SCREAMING-KEBAB-CASE` — and `#[teal(name = "..")]` on one variant overrides it. A
+//! table coming back that does not fit says which record, which field, what was declared
+//! and what arrived ([`crate::teal::FieldError`]): `Outcome.cause: expected string, got
+//! nil`.
 //!
 //! # Why `#[derive(TealRecord)]` lowers the way it does
 //!
-//! What each Rust shape becomes on the Teal side is tabled in README "Embedding in
-//! Rust"; this is the reasoning behind the choices there.
+//! This is the reasoning behind the table above.
 //!
 //! - **A data-carrying enum is a union of `where`-discriminated records**, not one
 //!   record with every variant's fields optional. Teal refuses a plain union of two
-//!   table types (it cannot tell them apart at run time), and a `where` clause on each
-//!   record is its own answer to that; with it, `is N_A` narrows and `union-exhaustive`
-//!   counts the variants, which is the whole point of declaring a closed set.
+//!   table types (`cannot discriminate a union between multiple table types`): `is`
+//!   narrows with a `type()` check, and two records are both `table`. A `where` clause
+//!   on each record is its own answer to that; with it, `is N_A` narrows and
+//!   `union-exhaustive` counts the variants, which is the whole point of declaring a
+//!   closed set. The derive covers enums and aliases as well as structs for the same
+//!   reason: a host's closed sets reach Teal as declarations rather than as `any`.
 //! - **It can only be declared nested** (`records = [N]` in the host module). A caller
 //!   narrows with `is module.N_A`, so it needs the variant records by name, and a
 //!   `.d.tl` module exports one name — the union. `#[teal(dts = ..)]` on one is refused
@@ -833,14 +866,18 @@ pub struct HostParam {
     /// caller passes positionally, but the name is what the signature reads as.
     pub name: String,
     /// Type the Lua side hands over (`&str` -> `String`, `&[T]` -> `Vec<T>`, `&T` -> `T`).
+    /// A `&mut` parameter is refused: the wrapper owns the value it converted, and nothing
+    /// on the Lua side would see a mutation of it.
     pub owned_ty: Type,
     /// The Rust fn takes a reference; the wrapper passes `&value`.
     pub by_ref: bool,
     /// The Teal type, already mapped — `string` for a `&str`, `{T}` for a `Vec<T>`. The
     /// declaration's half of [`owned_ty`](Self::owned_ty).
     pub teal: String,
-    /// Declared `name?: T` — an `Option<T>` the Lua caller may leave out. Only a
-    /// *trailing* run of them can be marked (see `host_decl`).
+    /// Declared `name?: T` — an `Option<T>` the Lua caller may leave out (or pass nil),
+    /// and the method sees `None`. Only a *trailing* run of them can be marked (see
+    /// `host_decl`): Teal parses `?` on the last parameters only, so an `Option` with a
+    /// required parameter after it is declared as the plain `T` and has to be passed.
     pub optional: bool,
 }
 
@@ -865,9 +902,13 @@ pub struct HostMethod {
     /// The success value is `()` (nothing to hand back but "it worked").
     pub ret_is_unit: bool,
     /// `async fn`: registered through mlua's async variant, and callable only from inside
-    /// a Lua coroutine. The Teal declaration is the same either way — an async function
-    /// yields internally and hands back the same values — so this changes the generated
-    /// Rust, not the `.d.tl`.
+    /// a Lua coroutine. The executor is the caller's — mlua yields to whatever is polling
+    /// and provides nothing of its own — so the method runs under `call_async`, which
+    /// creates the coroutine, or an `AsyncThread` the host drives; called from a plain
+    /// `load(..).eval()` there is nothing to suspend, and Lua raises rather than blocking.
+    /// The Teal declaration is the same either way — an async function yields internally
+    /// and hands back the same values — so this changes the generated Rust, not the
+    /// `.d.tl`.
     pub is_async: bool,
 }
 

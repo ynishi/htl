@@ -2,10 +2,49 @@
 //!
 //! The runner owns nothing about assertions. A test file `require`s a library; the
 //! bundled default is `htl.test` (`describe` / `it` / `expect`, typed via `test.d.tl`).
-//! Any library exposing `run(filter) -> { passed, failed, failures }` under the
-//! module name the runner is told about plugs in the same way. A file that uses no
-//! such library is judged at file level: it passes if it runs to completion.
-
+//! Any library exposing `run(filter, opts) -> { passed, failed, failures, tests?,
+//! snapshots_written?, snapshots_updated? }` (and optionally `configure({ snapshot_dir,
+//! update, mkdir })`, called before the file runs) under the module name `--lib` names
+//! plugs in the same way, bringing its own `.d.tl`; `test.lua`'s header is the contract in
+//! full. A file that uses no such library is judged at file level: it passes if it runs
+//! to completion.
+//!
+//! # Writing a test
+//!
+//! ```lua
+//! local t = require("htl.test")            -- typed via test.d.tl
+//! t.describe("util.add", function()
+//!    t.it("adds", function()
+//!       t.expect(util.add({x=1,y=2}, {x=10,y=20})):to_equal({x=11,y=22})
+//!    end)
+//! end)
+//! ```
+//!
+//! `expect(x)` is generic, so `t.expect(1 + 1):to_equal("2")` is a *type* error and the
+//! file is refused before it runs; the matchers are `test.d.tl`'s `Expect<T>`, and a
+//! matcher that is not one of them is a type error with the list appended. A function
+//! returning two values is asserted with `t.expect_all(f()):to_equal(false, "no door")`.
+//! `t.rng()` is the run's seeded stream (`rng()`, `rng(m)`, `rng(m, n)`; `math.random` is
+//! the same stream), and `to_match_snapshot("name")` compares with a `.snap` under
+//! [`snapshot_dir`].
+//!
+//! # Running
+//!
+//! `htl test [paths] [--filter substr] [--lib MOD] [--lint rule=level] [--fail-fast] [-v |
+//! -q] [--slow MS] [--update] [--seed N] [--coverage [--coverage-lines]] [--lcov FILE]
+//! [--junit FILE] [--format json] [--no-cache] [--explain-cache]`. Every run ends with
+//! `htl test: seed 8014255196 (repeat with --seed 8014255196)`; `--coverage` prints, per
+//! `.tl` module of the project's own, how many of its statements ran, and under a module
+//! the functions nothing entered:
+//!
+//! ```text
+//! coverage: src/combat.tl      124/181   68.4%
+//!           never ran: resolve_counter (61), flee_path (130)
+//! ```
+//!
+//! `--coverage-lines` adds the unexecuted line ranges; `--lcov` writes the same run as an
+//! lcov tracefile ([`crate::project::CoverageReport::lcov`]) and `--junit` as a JUnit XML
+//! report; `HTL_PROFILE=1` prints per-phase and per-file timings to stderr.
 use crate::{CheckInfo, Htl, parent_dir, write_if_changed};
 use anyhow::{Context, Result};
 use mlua::{Function, Table, Value};
@@ -60,8 +99,8 @@ pub struct FileReport {
     pub error: Option<String>,
     /// Tests the library reported as passing.
     pub passed: usize,
-    /// Tests it reported as failing. `ok` is false while this is non-zero, and the run's
-    /// exit code is the sum of it over every file.
+    /// Tests it reported as failing. `ok` is false while this is non-zero, and a run with
+    /// any such file exits 1.
     pub failed: usize,
     /// One message per failure, already formatted by the library — the runner owns no
     /// assertion and so has nothing of its own to say about why one failed.
@@ -106,7 +145,9 @@ pub struct RunOptions {
     /// Seed for the run (`htl test --seed`). Each file draws from a stream derived from
     /// this and its own path, so one file's values do not depend on which other files ran
     /// or in what order: `--filter` reproduces what the full run did, and a failure can be
-    /// looked at again on its own. `None` leaves the state's own seeding alone.
+    /// looked at again on its own. The runner prints the seed of every run, not only a
+    /// failing one: the seed of a run that passed is what reproduces it when a failure two
+    /// commits later is compared against it. `None` leaves the state's own seeding alone.
     pub seed: Option<u64>,
 }
 
@@ -127,7 +168,11 @@ pub fn file_seed(run_seed: u64, path: &Path) -> u64 {
     z ^ (z >> 31)
 }
 
-/// Where a test file's snapshots live: `<dir>/__snapshots__/<file stem>/`.
+/// Where a test file's snapshots live: `<dir>/__snapshots__/<file stem>/`, in the test
+/// file's own directory — `tests/__snapshots__/session_test/first_floor.snap` for
+/// `tests/session_test.tl`, and beside the module for a test kept under `src/`. The file
+/// is `<name>.snap` with every run of characters outside letters, digits, `-`, `.` and
+/// `_` in the name turned into one `_` (`test.lua`, `to_match_snapshot`).
 pub fn snapshot_dir(test_file: &Path) -> PathBuf {
     let stem = test_file
         .file_stem()
@@ -167,7 +212,9 @@ pub fn discover_tests_skipping(paths: &[PathBuf], skip: &[PathBuf]) -> Result<Ve
 /// that does not load it is a helper: its tests `require` it, and it is not run on its own.
 /// Neither the directory nor the name is part of the rule: `tests/` is where a project
 /// keeps tests and the helpers only tests may reach, and `*_test.tl` beside a source file
-/// is a convention that reads well, not a rule.
+/// is a convention that reads well, not a rule. What the rule does ask is that tests stay
+/// in a file of their own rather than in the module: a module that loads the test library
+/// loads it wherever the module is required, including in the program that ships it.
 ///
 /// Which names a file requires is read from its syntax, not from a type check: every
 /// `.tl` in the tree is asked, and parsing is cheap where checking is not. A file that does

@@ -23,7 +23,13 @@
 //! Anything else is refused at compile time, naming the type and this set: `bool` (C#,
 //! Swift and Rust do not agree on its width), a bare enum (its underlying type is
 //! implementation-defined), a float (the ABI differs by platform in ways a JSON number
-//! does not), an integer of another width, a struct by value, and variadics.
+//! does not), an integer of another width, a struct by value, and variadics. A generic
+//! method and an `async fn` are refused as well (`check_signature`): the first has no
+//! one C signature, the second no executor on the C side to poll it with.
+//!
+//! The opener takes one JSON object, `options_json`: absolute paths, a seed, names —
+//! whatever the host has to say — go in it, rather than the library reading the
+//! environment or the working directory, which a plugin host does not control.
 //!
 //! # The four wrapper shapes
 //!
@@ -42,6 +48,37 @@
 //! integer case is the one a hand-written layer usually gets wrong by returning `1 / 0 /
 //! -1` with three meanings; here the value has its own out-parameter and the return is
 //! only ever a status.
+//!
+//! # A block, end to end
+//!
+//! ```rust,ignore
+//! use htl::{Htl, c_export, ffi};
+//!
+//! pub struct Game { h: Htl, depth: i32 }
+//!
+//! #[c_export(prefix = "game", header = "include/game.h")]
+//! impl Game {
+//!     // The opener: options as one JSON object, plus the flag `game_interrupt` sets.
+//!     pub fn open(options: &str, interrupt: ffi::Interrupt) -> Result<Self, String> {
+//!         let h = Htl::new().map_err(|e| e.to_string())?;
+//!         interrupt.install(&h).map_err(|e| e.to_string())?;   // hook: stops a runaway mod
+//!         Ok(Game { h, depth: 0 })
+//!     }
+//!     pub fn frame(&self) -> String { /* … */ }                // char *: the text
+//!     pub fn state(&self) -> Frame { /* … */ }                 // char *: JSON, via serde
+//!     pub fn key(&mut self, k: &str) -> Result<(), String> { } // int: a status
+//!     pub fn depth(&self) -> i32 { self.depth }                // int status, value in `out`
+//! }
+//! ```
+//!
+//! The host's `Cargo.toml` adds `htl = { version = "…", features = ["ffi"] }` and
+//! `crate-type = ["rlib", "cdylib"]` (plus `"staticlib"` for Unity on iOS); `cargo build`
+//! writes `include/game.h`, and so does `htl dts` without a build. What the caller holds
+//! and who frees it, the status codes, the panic guard, threads and interrupts are
+//! [`crate::ffi`]'s; the payload's `"v"` and `GAME_ABI_VERSION` are
+//! [`crate::ffi::PAYLOAD_VERSION`] and [`crate::ffi::ABI_VERSION`]. `htl new --lib
+//! --target cdylib <name>` writes a project of this shape, with a caller in C and one in
+//! Python that do the round trip and free what they are handed.
 
 use crate::dts::{HostDecl, HostMethod, HostParam, is_result};
 use syn::punctuated::Punctuated;
@@ -351,7 +388,8 @@ pub fn plan(hd: &HostDecl, imp: &ItemImpl, attrs: CAttrs) -> Result<CPlan, Strin
     })
 }
 
-/// The opener: one options parameter, plus optionally the interrupt flag.
+/// The opener: one options parameter — the JSON object the module doc describes — plus
+/// optionally the interrupt flag.
 fn open_fn(type_name: &str, prefix: &str, m: &HostMethod) -> Result<CFn, String> {
     let mut params = Vec::new();
     let mut options = 0;

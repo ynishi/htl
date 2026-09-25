@@ -27,7 +27,10 @@
 //! runs on all of them: an arm64 Mac's bundle loads on x86_64 Linux. What the check
 //! refuses is a big-endian host, and a Lua built with a non-default `LUA_INT_TYPE` /
 //! `LUA_FLOAT_TYPE`. Source modules (`--source`) load anywhere and are the answer for
-//! those cases, and for a bundle that has to outlive a Lua upgrade.
+//! those cases, and for a bundle that has to outlive a Lua upgrade. There is no dual
+//! bytecode-plus-source payload: shipping the source is what the bytecode form exists to
+//! avoid. Nor is there Luau — PUC Lua 5.4 and LuaJIT, through mlua's features, are the
+//! Luas a bundle is for.
 //!
 //! The header cannot tell one 5.4.x from another, and htl pins the vendored Lua through
 //! mlua, so `htl version` is the only record of which Lua produced the bytes. It is
@@ -37,6 +40,12 @@
 //!
 //! Version 1 bundles (`HTLB\x01`: entry + bytecode modules, no metadata) still decode;
 //! [`format_version`] tells the two apart from the bytes.
+//!
+//! `htl bundle info app.hb` prints what the file records — format version, the htl that
+//! built it, payload kind, the Lua the bytecode is for in the same words as the mismatch
+//! message, entry, modules, host-provided names — without creating a Lua state, which is
+//! what a build step checks in and a bug report pastes; `--format json` for the same. A
+//! `--source` bundle says its Lua is `any`; a format 1 bundle says it was not recorded.
 
 use anyhow::{Result, bail};
 use serde::Serialize;

@@ -48,6 +48,26 @@ pub use mlua_pkg;
 /// directory is the host's: a mod dropped into it after the host started is one the next
 /// `require` finds.
 ///
+/// # Modules that exist only at run time
+///
+/// Teal resolves every `require("literal")` at check time, and htl keeps it that way. A
+/// module that exists only at run time — the user's `Tasks.tl` that a long-built host
+/// loads — takes one of the two shapes TypeScript, Kotlin scripting and Gradle settled on:
+///
+/// - **Declare it** (`declare module` / `.d.ts` in TS terms): the host's tree ships
+///   `Tasks.d.tl` with the contract (`local tsk = require("tsk")  local Tasks: tsk.Tasks
+///   return Tasks`). The build checks the host's scripts against the declaration; at run
+///   time a resolver rooted at the user's project serves the real file.
+/// - **Hand the user a typed constructor** (`defineConfig` / `satisfies UserConfig` in TS
+///   terms): the SDK exports `define: function(t: tsk.Tasks): tsk.Tasks` and the user
+///   writes `return tsk.define({ ... })`. Field-level errors with line numbers, no
+///   annotation on the user's side, and [`expect_type`](Self::expect_type) becomes a
+///   belt-and-braces check.
+///
+/// A dynamic `require(name_in_a_variable)` typed as `any` is the escape hatch, like
+/// GDScript's `load()` or a shorthand `declare module "x"`, for the case where the module
+/// name itself is unknown until run time and no other.
+///
 /// # One description for the check and the run
 ///
 /// A host that serves its directories describes them as a model
@@ -285,7 +305,9 @@ impl TealResolver {
     /// the project's search paths visible to the checker
     /// ([`search_paths`](crate::config::HtlConfig::search_paths): `root`, its `src/` and
     /// `types/`, then `[check] paths`). `root` is the directory holding `htl.toml`. The
-    /// `contract-unenforced` lint of `htl check` recognises this call.
+    /// `contract-unenforced` lint of `htl check` looks for [`contract_resolvers`] alone
+    /// and does not recognise this call: a host that builds its resolvers here is one
+    /// the lint reports, unless `enforced_by` names where they are built.
     pub fn for_contract(
         root: &Path,
         cfg: &crate::config::HtlConfig,
@@ -514,8 +536,9 @@ impl TealResolver {
 ///
 /// Installed deps go under [`pkgs_dir`] — `<root>/.htl/modules`, beside the check cache
 /// and regenerated the same way: from the manifest and the lockfile rather than from the
-/// project's own sources. Deps that are *committed* are the other thing, and they are
-/// declared: `target_dirs`.
+/// project's own sources. The installer is mlua-pkg's library rather than its binary, so
+/// there is no second process to agree with and nothing on `PATH` to install. Deps that
+/// are *committed* are the other thing, and they are declared: `target_dirs`.
 #[derive(Debug, Clone)]
 pub struct MluaProject {
     /// The directory holding `mlua-pkg.toml`, and what every other path here is derived
@@ -769,9 +792,10 @@ pub const PATCHES_DIR: &str = "patches";
 /// Where a project's installed deps go: `<root>/.htl/modules`, always.
 ///
 /// One directory, named in one place. htl does not read the location out of the
-/// environment and does not infer it from whether `target/` happens to exist — it decides
-/// it here and hands it to mlua-pkg when it runs one (`htl pkg`), so the installer and the
-/// checker cannot name different directories.
+/// environment (`MLUA_PKG_DIR`, which the `mlua-pkg` binary reads, is not consulted) and
+/// does not infer it from whether `target/` happens to exist in the working directory —
+/// it decides it here and hands it to mlua-pkg when it runs one (`htl pkg`), so the
+/// installer and the checker cannot name different directories.
 ///
 /// What goes on *inside* is mlua-pkg's: [`mlua_pkg::PkgDir`] derives `cache/` and
 /// `vendored/` from the base, and this returns one so htl does not spell that layout out a
@@ -1124,7 +1148,12 @@ impl MluaProject {
     }
 
     /// Registry with the project's deps: Teal first, then plain Lua. Add your
-    /// `NativeResolver`s *before* calling `install` if Teal code declares them in `.d.tl`.
+    /// `NativeResolver`s *before* calling `install` if Teal code declares them in `.d.tl`:
+    /// the Teal resolver answers a `.d.tl` with a type-only table unless a resolver ahead
+    /// of it, or `package.preload`, already holds the module (it steps aside for a plain
+    /// `.lua` a later resolver serves, and for a name the host preloaded, but not for a
+    /// resolver after it). The same holds for a [`TealResolver::from_project`] added by
+    /// hand: native modules go in first, and a `.d.tl` types them for the checker.
     pub fn registry(&self) -> anyhow::Result<mlua_pkg::Registry> {
         let mut reg = mlua_pkg::Registry::new();
         reg.add(self.teal_resolver()?);
@@ -1148,9 +1177,10 @@ impl MluaProject {
     /// result survive a fresh clone: [`pkgs_dir`] is machine-local and empty until someone
     /// installs, while `types/` is committed.
     ///
-    /// A name `types/` already has is left alone and reported. Two libraries publishing a
-    /// module of the same name is a real situation, and there is no registry to arbitrate
-    /// it with, so the project decides rather than the last install winning.
+    /// A name `types/` already has is left alone and reported; `htl types add --force`
+    /// ([`add_types`](Self::add_types) with `force`) replaces it. Two libraries publishing
+    /// a module of the same name is a real situation, and there is no registry to
+    /// arbitrate it with, so the project decides rather than the last install winning.
     pub fn sync_types(&self, types: &Path) -> anyhow::Result<TypesSync> {
         let mut out = TypesSync::default();
         if !self.installed() {
@@ -1329,7 +1359,23 @@ impl MluaProject {
     /// tree, and install resolves the dependency from it for as long as the pin still
     /// resolves to the revision the copy was taken from (`patch_base` in the lockfile).
     /// When the pin moves on, install uses the new revision, leaves the copy alone and
-    /// says so on every install until the patch is refreshed or removed.
+    /// says so on every install until the patch is refreshed or removed. This is the
+    /// shape of Cargo's `[patch]` with a `path` source, and of Go's `replace` pointing at
+    /// a directory in the module tree; removing `patch_dir` and the directory returns the
+    /// dependency to its fetched form at the next install.
+    ///
+    /// ```text
+    ///   patched patches/mathx (mathx at 3f2a9c1)
+    ///   dropped .git, .github, .gitignore (the repository's, not the package's)
+    /// ```
+    ///
+    /// and, on every install after the pin moved:
+    ///
+    /// ```text
+    ///   patch   patches/mathx is not in use (taken from 3f2a9c1, mathx is now at 8b07e44)
+    ///           carry the change forward: commit it, then `htl pkg patch mathx`
+    ///           drop it: remove patch_dir from mlua-pkg.toml and delete patches/mathx
+    /// ```
     ///
     /// On a dependency that is already patched this refreshes the copy from the revision
     /// the pin now resolves to and records that as the new base. The copy is overwritten
@@ -1543,7 +1589,9 @@ fn drop_dot_entries(dir: &Path) -> anyhow::Result<Vec<String>> {
 /// The refresh replaces the directory with the pinned upstream, and the project's own
 /// change survives that only through git: it is carried forward by merging the new copy
 /// with the history of the old one. A change git cannot see is a change that cannot be
-/// carried forward, so it is named here and the refresh does not happen.
+/// carried forward, so it is named here and the refresh does not happen. Outside a
+/// repository the question cannot be asked at all, and that is said rather than guessed
+/// at: the `Err` names what could not be asked, not what came back dirty.
 fn refuse_if_uncommitted(root: &Path, rel: &Path) -> anyhow::Result<()> {
     match uncommitted(root, rel) {
         Ok(changes) if changes.is_empty() => Ok(()),
@@ -1716,6 +1764,21 @@ fn no_such_library(checkout: &Path, library: &str) -> String {
 /// host and `htl check` enforce the same contracts from the same source. `root` is the
 /// directory holding `htl.toml` (the path [`HtlConfig::find`](crate::config::HtlConfig::find)
 /// returns, minus the file name). Add them to a `Registry` before the plain resolvers.
+///
+/// ```rust,ignore
+/// let (path, cfg) = htl::config::HtlConfig::find(Path::new("."))?.expect("htl.toml");
+/// let mut reg = mlua_pkg::Registry::new();
+/// for r in htl::pkg::contract_resolvers(&htl::parent_dir(&path), &cfg)? {
+///     reg.add(r); // TealResolver for <root>/mods, expecting the record marked
+///                 // ---@contract for that directory and its ---@required fields
+/// }
+/// ```
+///
+/// Built by hand instead, the same resolver is
+/// `TealResolver::new("mods")?.expect_type("defs.Mod").require_fields(["name", "monsters"])`
+/// ([`expect_type`](TealResolver::expect_type), [`require_fields`](TealResolver::require_fields),
+/// [`require_all_fields`](TealResolver::require_all_fields)) — which restates what the
+/// record already says, and is the drift the `contract-unenforced` lint exists to catch.
 pub fn contract_resolvers(
     root: &Path,
     cfg: &crate::config::HtlConfig,
@@ -1784,7 +1847,13 @@ impl crate::Htl {
     /// `entry`; the links are written first if the lockfile calls for any that are missing.
     ///
     /// **A `patch_dir` dependency is on the path in its own right**, at
-    /// [`MluaProject::patch_search_dirs`]. The copy is committed and the manifest names it,
+    /// [`MluaProject::patch_search_dirs`]. A crate whose Teal has no dependency needs none
+    /// of this: the `.tl` is in the package because `src/` is, and the macro reads it
+    /// where cargo puts it. A crate whose `mlua-pkg.toml` names a dependency ships the
+    /// dependency itself, as that copy — the whole recipe is `htl pkg patch <dep>` and
+    /// `git add patches/<dep> mlua-pkg.toml mlua-pkg.lock`; nothing else is written by
+    /// hand, no `[check] paths` pointing at the copy and no `exclude` in `Cargo.toml`.
+    /// The copy is committed and the manifest names it,
     /// so the two together are the whole of what a `require` of that dependency needs:
     /// no install, no link, no network, and nothing that has to exist outside what a
     /// clone or a tarball carries. That is the arrangement `cargo vendor` and Go's

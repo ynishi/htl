@@ -26,7 +26,53 @@
 //! it: those rows are [`Status::Refused`], the report carries the resolver's message
 //! ([`Resolution::error`]), and the verdict is a failure, as for a name two files
 //! implement.
-
+//!
+//! # What the report looks like
+//!
+//! ```text
+//! $ htl resolve mq
+//! htl resolve mq: src/mq.d.tl
+//!
+//!   order  file                  kind         status
+//!   1      src/mq.d.tl           declaration  read
+//!   2      types/mq.d.tl         declaration  shadowed by 1
+//!   3      types/htl-mq/mq.d.tl  declaration  shadowed by 1  (shipped by htl-mq 0.8.0)
+//!
+//!   answered by the project model
+//! ```
+//!
+//! A `.lua` under a declaration reads `runtime, typed by <n>` rather than `shadowed`; two
+//! implementations of one name are both `ambiguous`, and the command fails. A name the
+//! project does not have is looked up on Lua's search path, and the report ends with
+//! `searched, in order: …`. A name the host provides, and a name the project has only a
+//! declaration for:
+//!
+//! ```text
+//! $ htl resolve host
+//! htl resolve host: provided by the host (#[host_module] in Cargo.toml's crate), typed by src/host.d.tl
+//!
+//!   order  file           kind         status
+//!   1      src/host.d.tl  declaration  read
+//!
+//! $ htl resolve socket.http
+//! htl resolve socket.http: types/socket/http.d.tl, provided by the environment (declared by types/socket/http.d.tl)
+//!
+//!   order  file                    kind         status
+//!   1      types/socket/http.d.tl  declaration  read
+//! ```
+//!
+//! A `.tl` or `.lua` of the project under a name the host provides is the error the check
+//! reports at its `require`: the header is that error, the file's row is `refused`, and
+//! the command exits 1. `htl.test` is answered like any host-provided name: its one row
+//! is the declaration the binary carries, and the header says `provided by the
+//! environment`.
+//!
+//! `--format json` carries the same rows: `{ module, read?, candidates: [{ order, path,
+//! dir, kind: "source"|"declaration"|"lua", status:
+//! "read"|"shadowed"|"runtime"|"ambiguous"|"refused", shadowed_by?, origin?: { kind:
+//! "crate"|"dependency"|"vendored"|"patched", name, version? } }], answered_by:
+//! "model"|"path", searched: [dir], provided_by?, error?, summary: { candidates, shadowed,
+//! ok } }`; `provided_by` is worded as the text header words it.
 use crate::{Htl, ModuleCandidate, ModuleKind, same_file};
 use anyhow::Result;
 use serde::Serialize;
@@ -160,7 +206,8 @@ pub struct Summary {
     /// happening.
     pub shadowed: usize,
     /// The name resolves to a file, or the host provides it, and the model does not
-    /// refuse it. What the exit code says.
+    /// refuse it. What the exit code says: a name that resolves to nothing says so and
+    /// exits non-zero, so a script can ask, and `--format json` carries the same rows.
     pub ok: bool,
 }
 
@@ -294,6 +341,9 @@ struct ModelRows {
 
 /// The rows for a name the model has: every file of the model under it, the one the
 /// resolver answers with marked `read`. `None` when the model does not have the name.
+/// The rows are in the order a name is answered, by kind first — a source, then a
+/// declaration, then plain Lua — so row 1 is not necessarily the earliest directory: a
+/// source beats a declaration wherever the two sit.
 ///
 /// A name the host provides that a file implements as well reads its declaration, when
 /// it has one — the check types the `require` from it — and marks the implementations

@@ -17,7 +17,7 @@ Teal project managed with [htl](https://github.com/ynishi/htl).
 ```sh
 htl pkg install        # fetch [deps] from mlua-pkg.toml — first, htlx is one of them
 htl check .            # type-check + lints
-htl test               # tests/*_test.tl via htl.test
+htl test               # every .tl that loads htl.test
 htl fmt .              # whitespace formatter
 ```
 
@@ -47,7 +47,8 @@ indent = 3
 
 [check]
 # paths = ["mods"]   # extra dirs require() resolves from while checking
-# (src/ and types/ are always searched; hand-written .d.tl go under types/)
+# ([layout] source and types are searched, src/ and types/ by default;
+#  hand-written .d.tl go under types/)
 
 # Where this project accepts modules written outside it:
 # [[contract]]

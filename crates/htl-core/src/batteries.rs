@@ -9,6 +9,21 @@
 //! searches, so a `.tl` that requires one is typed in `htl check`, `htl test` and
 //! `include_tl!` without the project holding a copy.
 //!
+//! Every function raises on failure rather than returning `nil, err`, so a result-style
+//! call is `pcall`, or a host module under `errors = "return"`; what `pcall` receives is
+//! the one-line text (`WRAP_LOADERS` is what turns the traceback userdata into it).
+//!
+//! What version of the modules a script sees follows where the script runs. Under `htl
+//! run` / `htl test` it is the binary's, pinned like everything else the binary does by
+//! `[toolchain] htl`. Under a
+//! Rust host it is the `htl` crate's, pinned by the host's `Cargo.toml`: the `std`
+//! feature (on by default, off with `default-features = false`) brings the crate in, and
+//! `h.install_std()?` in the host's `preload` — which `htl new --target` writes —
+//! installs it. The checker inside the proc macros sees `std.*` whether or not the host
+//! installs it, as it sees `htl.test`, so a host that leaves the call out has its scripts
+//! typed against `std.*` and failing at the first `require`; a host that leaves the
+//! feature off does so knowingly.
+//!
 //! What is in it is the crate's default feature set and not `full`: json, env, path, time,
 //! string, validate, pretty, argparse. Those add serde_json to the build and nothing else.
 //! A module that reaches the file system, the network or a runtime (fs / http / llm /
@@ -16,13 +31,23 @@
 //! own `Cargo.toml` with its own prefix — not something a toolchain turns on for every
 //! project it runs.
 //!
-//! The declarations are the crate's, written verbatim; the only generated file is
+//! The declarations are the crate's, written verbatim — `---@nilable` markers included,
+//! so a project using `std.*` gets the `nil-return` rule on those functions without
+//! writing anything. The only generated file is
 //! `std/init.d.tl`, the record behind `require("std")`, which the crate renders for the
 //! prefix. Both are written with [`write_if_changed`] rather than the crate's own
 //! `dts::write_to`, which rewrites unconditionally: this directory is read by every
 //! command on every run, and a file whose mtime moves on each of them is a file every
 //! cache above it has to re-read.
-
+//!
+//! ```lua
+//! local json = require("std.json")         -- typed via std/json.d.tl, inside the binary
+//! local str = require("std.string")
+//! local pretty = require("std.pretty")
+//!
+//! local rows: {Row} = json.decode(text)    -- decode is generic: annotate the result
+//! print(pretty.dump({ name = str.trim(name), rows = #rows }))
+//! ```
 use crate::{Htl, lib_dir, write_if_changed};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
