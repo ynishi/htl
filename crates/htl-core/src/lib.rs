@@ -163,6 +163,15 @@ pub struct CheckInfo {
     /// raise at run time ([`Htl::install_searcher`]), which is why a caller reporting on a
     /// project treats these as errors too (`htl check`, `include_tl!`).
     pub dependency_errors: Vec<DependencyError>,
+    /// [`errors`](Self::errors), [`warnings`](Self::warnings) and [`lints`](Self::lints)
+    /// as the checker produced them, in their parts: `error_items[i]` is `errors[i]`, its
+    /// fix attached. What [`diagnostics`](Self::diagnostics) hands out, so that no reader
+    /// takes the text apart to learn a position, a rule or which class of error it is.
+    pub error_items: Vec<Diagnostic>,
+    /// See [`error_items`](Self::error_items).
+    pub warning_items: Vec<Diagnostic>,
+    /// See [`error_items`](Self::error_items).
+    pub lint_items: Vec<Diagnostic>,
 }
 
 /// A type error in a module a check reached through `require` (see
@@ -855,33 +864,20 @@ impl CheckInfo {
         out
     }
 
-    /// [`errors`](Self::errors) with their positions and their fixes.
+    /// [`errors`](Self::errors) with their positions, their class and their fixes.
     pub fn error_diagnostics(&self) -> Vec<Diagnostic> {
-        parsed(Severity::Error, &self.errors, &self.error_fixes)
+        self.error_items.clone()
     }
 
-    /// [`warnings`](Self::warnings) with their positions. Warnings carry no fix.
+    /// [`warnings`](Self::warnings) with their positions and kinds. Warnings carry no fix.
     pub fn warning_diagnostics(&self) -> Vec<Diagnostic> {
-        parsed(Severity::Warning, &self.warnings, &[])
+        self.warning_items.clone()
     }
 
     /// [`lints`](Self::lints) with their positions, their rule names and their fixes.
     pub fn lint_diagnostics(&self) -> Vec<Diagnostic> {
-        parsed(Severity::Lint, &self.lints, &self.lint_fixes)
+        self.lint_items.clone()
     }
-}
-
-/// `texts[i]` parsed, with `fixes[i]` attached when there is one.
-fn parsed(severity: Severity, texts: &[String], fixes: &[Option<Fix>]) -> Vec<Diagnostic> {
-    texts
-        .iter()
-        .enumerate()
-        .map(|(i, text)| {
-            let mut d = Diagnostic::parse(severity, text);
-            d.fix = fixes.get(i).and_then(|f| f.clone());
-            d
-        })
-        .collect()
 }
 
 /// An mlua state with the Teal compiler loaded.
@@ -2208,17 +2204,53 @@ fn read_checkinfo(t: &Table) -> Result<CheckInfo> {
         Ok(list) => read_dependency_errors(&list)?,
         Err(_) => Vec::new(),
     };
+    let warnings = seq("warnings")?;
+    let error_items = read_items(t, "error_items", Severity::Error, &error_fixes)?;
+    let warning_items = read_items(t, "warning_items", Severity::Warning, &[])?;
+    let lint_items = read_items(t, "lint_items", Severity::Lint, &lint_fixes)?;
     Ok(CheckInfo {
         errors,
         syntax_errors: t.get::<Option<usize>>("syntax_errors")?.unwrap_or(0),
-        warnings: seq("warnings")?,
+        warnings,
         deps: seq("deps")?.into_iter().map(PathBuf::from).collect(),
         lints,
         requires,
         error_fixes,
         lint_fixes,
         dependency_errors,
+        error_items,
+        warning_items,
+        lint_items,
     })
+}
+
+/// The parts the checker kept beside each diagnostic's text (`item` in `prelude.lua`),
+/// `fixes[i]` attached to the `i`th.
+fn read_items(
+    t: &Table,
+    key: &str,
+    severity: Severity,
+    fixes: &[Option<Fix>],
+) -> Result<Vec<Diagnostic>> {
+    let Ok(list) = t.get::<Table>(key) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for (i, e) in list.sequence_values::<Table>().enumerate() {
+        let e = e?;
+        out.push(Diagnostic {
+            severity,
+            file: e.get("file")?,
+            line: e.get("line")?,
+            col: e.get("col")?,
+            rule: e.get("rule")?,
+            message: e.get("message")?,
+            fix: fixes.get(i).and_then(|f| f.clone()),
+            required_by: None,
+            origin: None,
+        });
+    }
+    Ok(out)
 }
 
 fn read_dependency_errors(list: &Table) -> Result<Vec<DependencyError>> {

@@ -657,6 +657,14 @@ local function fmt(filename, e)
    return string.format("%s:%d:%d: %s", e.filename or filename, e.y or 0, e.x or 0, e.msg or "?")
 end
 
+-- The parts of a diagnostic, kept beside its text: what the Rust side reads instead of
+-- taking the text apart again. `msg` is the sentence alone, without the position and
+-- without the ` [htl <rule>]` suffix; `rule` names what said it (a lint, a Teal warning
+-- kind, or for an error the class a fix is filed under).
+local function item(filename, e, msg, rule)
+   return { file = e.filename or filename, line = e.y or 0, col = e.x or 0, message = msg or e.msg or "?", rule = rule }
+end
+
 -- The warnings a check result carries, as text, each under the name of its kind.
 --
 -- Teal tags every warning it raises (`Errors:add_warning(tag, ...)` in the vendored
@@ -695,16 +703,19 @@ local function warnings_of(filename, result, src)
       end
       return a and a[y] and a[y][rule] == true
    end
+   local items = {}
    for _, w in ipairs(result.warnings or {}) do
       local rule = w.tag and ("tl:" .. w.tag)
       local file = w.filename or filename
       if not rule then
          out[#out + 1] = fmt(filename, w)
+         items[#out] = item(filename, w)
       elseif H.tl_cfg[rule] ~= false and not allowed(file, w.y, rule) then
          out[#out + 1] = fmt(filename, w) .. " [htl " .. rule .. "]"
+         items[#out] = item(filename, w, w.msg, rule)
       end
    end
-   return out
+   return out, items
 end
 
 local function norm_path(p)
@@ -1158,12 +1169,16 @@ local function collect_errors(filename, result, src)
    -- already checked) would otherwise re-walk its AST for require sites and re-resolve
    -- each one on disk: ~11 ms per module, ~1.4 s over a 261-test run [measured].
    if result.htl_errors and result.htl_errors_for == filename then
-      return result.htl_errors, result.htl_error_fixes
+      return result.htl_errors, result.htl_error_fixes, result.htl_error_items
    end
    local errors = {}
    -- error_fixes[i] = fix for errors[i], or false: a rewrite `htl fix` may apply.
    local error_fixes = {}
+   -- error_items[i] = the parts of errors[i] (`item`), its rule the class its fix is filed
+   -- under: `forward-ref`, or `tl:error` for anything else the checker said.
+   local error_items = {}
    result.htl_errors, result.htl_error_fixes, result.htl_errors_for = errors, error_fixes, filename
+   result.htl_error_items = error_items
    -- The file's text, read from disk once and only when something below asks for it: the
    -- caller has it on some paths and not on others, and a check whose file both parses
    -- and requires nothing suspicious never needs it.
@@ -1184,6 +1199,7 @@ local function collect_errors(filename, result, src)
       if not where_dropped[i] then
          errors[#errors + 1] =
             fmt(filename, { filename = e.filename, y = e.y, x = e.x, msg = where_msgs[i] or e.msg })
+         error_items[#errors] = item(filename, e, where_msgs[i] or e.msg, "tl:error")
       end
    end
    if result.ast and #syntax_errors == 0 then
@@ -1200,7 +1216,10 @@ local function collect_errors(filename, result, src)
          if found and norm_path(found) == norm_path(filename) then suspicious = true break end
       end
       if suspicious then
-         for _, e in ipairs(self_require_errors(filename, result.ast)) do errors[#errors + 1] = fmt(filename, e) end
+         for _, e in ipairs(self_require_errors(filename, result.ast)) do
+            errors[#errors + 1] = fmt(filename, e)
+            error_items[#errors] = item(filename, e, e.msg, "tl:error")
+         end
       end
    end
    local hinted = {} -- lines where an arity error was explained by a multi-value call
@@ -1217,10 +1236,13 @@ local function collect_errors(filename, result, src)
       local msg = explain_self_require(filename, e)
       local own = e.filename == nil or e.filename == filename
       local fix
+      local class = "tl:error"
       if own then
          local explained = explain_arity(result.ast, e, msg)
          if explained ~= msg then hinted[e.y] = true end
          msg, fix = explain_forward_ref(result.ast, src, e, explained)
+         -- Said here, where it is known, so nothing reads it back out of the sentence.
+         if msg ~= explained then class = "forward-ref" end
       end
       -- `invalid key 'to_be' in type Expect<integer>`: the assertion library's own type
       -- said no, so the answer is the set of names it says yes to. Teal's text stays the
@@ -1242,13 +1264,14 @@ local function collect_errors(filename, result, src)
       if not dropped then
          errors[#errors + 1] = fmt(filename, { filename = e.filename, y = e.y, x = e.x, msg = msg })
          error_fixes[#errors] = fix or false
+         error_items[#errors] = item(filename, e, msg, class)
       end
    end
    -- syntax / self-require errors carry no fix
    for i = 1, #errors do
       if error_fixes[i] == nil then error_fixes[i] = false end
    end
-   return errors, error_fixes
+   return errors, error_fixes, error_items
 end
 
 -- Collect every enum reachable from a tl type object (records nest enums via
@@ -1434,12 +1457,12 @@ function H.check(filename, env, opts)
       return { ok = false, errors = { tostring(err) }, warnings = {} }
    end
    t0 = os.clock()
-   local errors, error_fixes = collect_errors(filename, result)
-   local warnings = warnings_of(filename, result)
+   local errors, error_fixes, error_items = collect_errors(filename, result)
+   local warnings, warning_items = warnings_of(filename, result)
    local deps = {}
    for _, fname in pairs(result.dependencies or {}) do deps[#deps + 1] = fname end
    table.sort(deps)
-   local lints, lint_fixes = {}, {}
+   local lints, lint_fixes, lint_items = {}, {}, {}
    if opts.lints ~= false and result.ast and #(result.syntax_errors or {}) == 0 then
       local src
       local fd = io.open(filename, "rb")
@@ -1468,6 +1491,7 @@ function H.check(filename, env, opts)
          for _, l in ipairs(found or {}) do
             lints[#lints + 1] = fmt(filename, l)
             lint_fixes[#lints] = l.fix or false
+            lint_items[#lints] = item(filename, l, l.bare, l.rule)
          end
       end
    end
@@ -1480,6 +1504,7 @@ function H.check(filename, env, opts)
    local dep_errors = dependency_errors(filename, result, env)
    return { ok = #errors == 0, errors = errors, error_fixes = error_fixes, warnings = warnings, deps = deps,
       lints = lints, lint_fixes = lint_fixes, requires = requires, dependency_errors = dep_errors,
+      error_items = error_items, warning_items = warning_items, lint_items = lint_items,
       syntax_errors = #(result.syntax_errors or {}), result = result }
 end
 

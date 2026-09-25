@@ -508,3 +508,45 @@ fn a_name_that_is_not_a_rule_is_refused_before_anything_is_read() {
         "{err}"
     );
 }
+
+/// What the checker hands over in parts is what its text says: for an error, a Teal
+/// warning and a lint, the file, position, rule and sentence of each item are those the
+/// text spells, so a reader moving from the text to the items reads the same thing. The
+/// one part the text never carried is an error's class, which the checker sets where it
+/// writes the error.
+#[test]
+fn the_items_a_check_carries_are_what_its_text_says() {
+    let dir = scratch("items");
+    write(
+        &dir.join("all.tl"),
+        "local record R\nend\nfunction R.a(): integer return R.b() end\nfunction R.b(): integer return 1 end\n\
+         local names: {string:string} = {}\nif names[\"a\"] then print(names[\"a\"]:upper()) end\n\
+         local shadowed = 1\ndo\n   local shadowed = 2\n   print(shadowed)\nend\nprint(shadowed)\nreturn R\n",
+    );
+    let h = Htl::new().unwrap();
+    h.add_path(&dir).unwrap();
+    let c = h.check(&dir.join("all.tl")).unwrap();
+    assert!(
+        !c.errors.is_empty() && !c.warnings.is_empty() && !c.lints.is_empty(),
+        "{c:?}"
+    );
+    for (sev, texts, items) in [
+        (htl_core::Severity::Error, &c.errors, &c.error_items),
+        (htl_core::Severity::Warning, &c.warnings, &c.warning_items),
+        (htl_core::Severity::Lint, &c.lints, &c.lint_items),
+    ] {
+        assert_eq!(texts.len(), items.len(), "{sev:?}: {texts:?} / {items:?}");
+        for (text, item) in texts.iter().zip(items) {
+            let parsed = htl_core::Diagnostic::parse(sev, text);
+            assert_eq!(
+                (&parsed.file, parsed.line, parsed.col, &parsed.message),
+                (&item.file, item.line, item.col, &item.message),
+                "{text}"
+            );
+            if sev != htl_core::Severity::Error {
+                assert_eq!(parsed.rule, item.rule, "{text}");
+            }
+        }
+    }
+    assert_eq!(c.error_items[0].rule.as_deref(), Some("forward-ref"));
+}

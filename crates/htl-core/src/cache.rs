@@ -84,7 +84,7 @@ use crate::{CheckInfo, DependencyError, Fix, RequireSite};
 /// emits different text is a different checker and every warm entry misses on its own.
 /// What this number is for is a change to the shape of what is stored — a field, a key, a
 /// meaning — which the hash cannot see.
-const FORMAT: u32 = 6;
+const FORMAT: u32 = 7;
 
 /// Where the store lives under the project root. Generated, and `htl init` puts it in
 /// `.gitignore`.
@@ -399,6 +399,18 @@ pub struct CheckInfoJson {
     /// check said. Absent in entries written before the field existed.
     #[serde(default)]
     pub dependency_errors: Vec<DependencyErrorJson>,
+    /// [`CheckInfo::error_items`], [`CheckInfo::warning_items`] and
+    /// [`CheckInfo::lint_items`], in the same order as the text, the fixes left in
+    /// `error_fixes` / `lint_fixes` beside them. Entries written before these existed are
+    /// a format behind and are not read (the stamp's format).
+    #[serde(default)]
+    pub error_items: Vec<ItemJson>,
+    /// See `error_items`.
+    #[serde(default)]
+    pub warning_items: Vec<ItemJson>,
+    /// See `error_items`.
+    #[serde(default)]
+    pub lint_items: Vec<ItemJson>,
     /// [`CheckInfo::syntax_errors`]. Absent in entries written before the field existed,
     /// and read back as none — which they were: only a file that generated is stored with
     /// its check, and a file the parser rejected generates nothing.
@@ -406,10 +418,60 @@ pub struct CheckInfoJson {
     pub syntax_errors: usize,
 }
 
+/// A [`crate::Diagnostic`]'s parts as an entry stores them: the position, the rule and the
+/// sentence. Its severity is the list it is in, and its fix is the one stored beside it.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct ItemJson {
+    /// [`Diagnostic::file`](crate::Diagnostic::file).
+    pub file: String,
+    /// [`Diagnostic::line`](crate::Diagnostic::line).
+    pub line: usize,
+    /// [`Diagnostic::col`](crate::Diagnostic::col).
+    pub col: usize,
+    /// [`Diagnostic::rule`](crate::Diagnostic::rule).
+    pub rule: Option<String>,
+    /// [`Diagnostic::message`](crate::Diagnostic::message).
+    pub message: String,
+}
+
+impl ItemJson {
+    fn from_diagnostic(d: &crate::Diagnostic) -> Self {
+        Self {
+            file: d.file.clone(),
+            line: d.line,
+            col: d.col,
+            rule: d.rule.clone(),
+            message: d.message.clone(),
+        }
+    }
+
+    fn to_diagnostic(
+        &self,
+        severity: crate::Severity,
+        fix: Option<crate::Fix>,
+    ) -> crate::Diagnostic {
+        crate::Diagnostic {
+            severity,
+            file: self.file.clone(),
+            line: self.line,
+            col: self.col,
+            rule: self.rule.clone(),
+            message: self.message.clone(),
+            fix,
+            required_by: None,
+            origin: None,
+        }
+    }
+}
+
 impl CheckInfoJson {
     /// What a check reported, in the form an entry stores it.
     pub fn from_check(c: &CheckInfo) -> Self {
+        let items = |ds: &[crate::Diagnostic]| ds.iter().map(ItemJson::from_diagnostic).collect();
         Self {
+            error_items: items(&c.error_items),
+            warning_items: items(&c.warning_items),
+            lint_items: items(&c.lint_items),
             errors: c.errors.clone(),
             syntax_errors: c.syntax_errors,
             warnings: c.warnings.clone(),
@@ -441,23 +503,34 @@ impl CheckInfoJson {
     /// And back, for a replayed module: the test runner puts it into its report, the
     /// linker reads its lints, requires and dependency errors.
     pub fn to_check(&self) -> CheckInfo {
+        let error_fixes: Vec<Option<crate::Fix>> = self
+            .error_fixes
+            .iter()
+            .map(|f| f.as_ref().map(FixJson::to_fix))
+            .collect();
+        let lint_fixes: Vec<Option<crate::Fix>> = self
+            .lint_fixes
+            .iter()
+            .map(|f| f.as_ref().map(FixJson::to_fix))
+            .collect();
+        let items = |list: &[ItemJson], severity, fixes: &[Option<crate::Fix>]| {
+            list.iter()
+                .enumerate()
+                .map(|(i, it)| it.to_diagnostic(severity, fixes.get(i).and_then(|f| f.clone())))
+                .collect()
+        };
         CheckInfo {
+            error_items: items(&self.error_items, crate::Severity::Error, &error_fixes),
+            warning_items: items(&self.warning_items, crate::Severity::Warning, &[]),
+            lint_items: items(&self.lint_items, crate::Severity::Lint, &lint_fixes),
             errors: self.errors.clone(),
             syntax_errors: self.syntax_errors,
             warnings: self.warnings.clone(),
             lints: self.lints.clone(),
             deps: self.deps.iter().map(PathBuf::from).collect(),
             requires: requires_from_json(&self.requires),
-            error_fixes: self
-                .error_fixes
-                .iter()
-                .map(|f| f.as_ref().map(FixJson::to_fix))
-                .collect(),
-            lint_fixes: self
-                .lint_fixes
-                .iter()
-                .map(|f| f.as_ref().map(FixJson::to_fix))
-                .collect(),
+            error_fixes,
+            lint_fixes,
             dependency_errors: self
                 .dependency_errors
                 .iter()
