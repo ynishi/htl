@@ -34,6 +34,7 @@
 //! Reading them is a scan of the search paths, not a type-check: a record is found by the
 //! line it is declared on, the way `---@struct` is (see `prelude.lua`).
 
+use crate::Diagnostic;
 use crate::config::{Contract, HtlConfig, RequireFields};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -173,6 +174,18 @@ pub fn held_name(dir: &Path, file: &Path) -> Option<String> {
     crate::naming::name_of("", rel)
 }
 
+/// A problem with a contract, said under `contract` at `line` of `file`.
+fn problem(file: &Path, line: usize, message: String) -> Diagnostic {
+    Diagnostic::new(
+        crate::Severity::Lint,
+        file.display().to_string(),
+        line,
+        1,
+        message,
+        Some("contract"),
+    )
+}
+
 /// What the `---@contract` on one record says, before the directory is settled.
 struct Marker {
     dir: Option<String>,
@@ -198,7 +211,7 @@ struct Marker {
 /// inherit from, two markers claiming one directory, a marker on a record that is not
 /// nested inside its module. They are returned rather than raised because one broken
 /// contract should not take the other contracts of the project with it.
-pub fn resolve(root: &Path, cfg: &HtlConfig) -> (Vec<Resolved>, Vec<String>) {
+pub fn resolve(root: &Path, cfg: &HtlConfig) -> (Vec<Resolved>, Vec<Diagnostic>) {
     let mut out = Vec::new();
     let mut problems = Vec::new();
     problems.extend(markers_outside_the_project(root, cfg));
@@ -231,16 +244,17 @@ pub fn resolve(root: &Path, cfg: &HtlConfig) -> (Vec<Resolved>, Vec<String>) {
     // there.
     for i in 0..out.len() {
         if let Some(j) = out[..i].iter().position(|c| c.dir == out[i].dir) {
-            problems.push(format!(
-                "{}:{}:1: {} claims directory {:?}, which {} already claims at {}:{} \
-                 [htl contract]",
-                out[i].declared_in.display(),
+            problems.push(problem(
+                &out[i].declared_in,
                 out[i].declared_at,
-                out[i].type_path,
-                out[i].dir,
-                out[j].type_path,
-                out[j].declared_in.display(),
-                out[j].declared_at,
+                format!(
+                    "{} claims directory {:?}, which {} already claims at {}:{}",
+                    out[i].type_path,
+                    out[i].dir,
+                    out[j].type_path,
+                    out[j].declared_in.display(),
+                    out[j].declared_at,
+                ),
             ));
         }
     }
@@ -302,7 +316,7 @@ fn same_record(root: &Path, earlier: &Resolved, later: &Resolved) -> bool {
 /// its own marker and leaving the other's as the author left it, so the two passes
 /// disagree, `dts: wrote` is said twice, and the file never settles. A file's markers are
 /// made self-contained together, once.
-pub fn publish(root: &Path, contracts: &[Resolved]) -> (Vec<(PathBuf, bool)>, Vec<String>) {
+pub fn publish(root: &Path, contracts: &[Resolved]) -> (Vec<(PathBuf, bool)>, Vec<Diagnostic>) {
     publish_to(root, contracts, true)
 }
 
@@ -313,7 +327,7 @@ pub fn publish_to(
     root: &Path,
     contracts: &[Resolved],
     write: bool,
-) -> (Vec<(PathBuf, bool)>, Vec<String>) {
+) -> (Vec<(PathBuf, bool)>, Vec<Diagnostic>) {
     let mut written = Vec::new();
     let mut problems = Vec::new();
     // Each file to write and the module it is written from, in the order the contracts
@@ -331,15 +345,16 @@ pub fn publish_to(
             // Two modules cannot both be one declaration: whichever was written last
             // would be the file, and the other would have been published and lost.
             Some((_, first)) if !crate::same_file(&first.declared_in, &c.declared_in) => problems
-                .push(format!(
-                    "{}:{}:1: {} publishes to {}, where {} is already published from {} \
-                     [htl contract]",
-                    c.declared_in.display(),
+                .push(problem(
+                    &c.declared_in,
                     c.declared_at,
-                    c.type_path,
-                    target.display(),
-                    first.type_path,
-                    first.declared_in.display(),
+                    format!(
+                        "{} publishes to {}, where {} is already published from {}",
+                        c.type_path,
+                        target.display(),
+                        first.type_path,
+                        first.declared_in.display(),
+                    ),
                 )),
             Some(_) => {}
             None => targets.push((target, c)),
@@ -358,12 +373,11 @@ pub fn publish_to(
         let text = match declaration_of(&src) {
             Ok(t) => t,
             Err(msgs) => {
-                problems.extend(msgs.into_iter().map(|m| {
-                    format!(
-                        "{}:{m} publishing {} to {} [htl contract]",
-                        c.declared_in.display(),
-                        c.type_path,
-                        target.display()
+                problems.extend(msgs.into_iter().map(|(line, m)| {
+                    problem(
+                        &c.declared_in,
+                        line,
+                        format!("{m}: publishing {} to {}", c.type_path, target.display()),
                     )
                 }));
                 continue;
@@ -371,10 +385,10 @@ pub fn publish_to(
         };
         match crate::write_if_changed_when(&target, &text, write) {
             Ok(w) => written.push((target, w)),
-            Err(e) => problems.push(format!(
-                "{}:1:1: writing {}: {e} [htl contract]",
-                c.declared_in.display(),
-                target.display()
+            Err(e) => problems.push(problem(
+                &c.declared_in,
+                1,
+                format!("writing {}: {e}", target.display()),
             )),
         }
     }
@@ -435,7 +449,7 @@ struct Implementation {
 /// The `.d.tl` for a module's source: every function body removed and its signature moved
 /// into the record it belongs to. `Err` when a `function` statement cannot be placed,
 /// rather than a file with a silently missing function in it.
-pub fn declaration_of(src: &str) -> Result<String, Vec<String>> {
+pub fn declaration_of(src: &str) -> Result<String, Vec<(usize, String)>> {
     let lines: Vec<&str> = src.lines().collect();
     let mut problems = Vec::new();
     let mut found: Vec<Implementation> = Vec::new();
@@ -451,10 +465,11 @@ pub fn declaration_of(src: &str) -> Result<String, Vec<String>> {
             first -= 1;
         }
         let Some(end) = body_end(&lines, i) else {
-            problems.push(format!(
-                "{}:1: this function has no `end` at its own indentation, so its body \
-                 cannot be told from what follows:",
-                i + 1
+            problems.push((
+                i + 1,
+                "this function has no `end` at its own indentation, so its body cannot be \
+                 told from what follows"
+                    .to_string(),
             ));
             break;
         };
@@ -473,7 +488,7 @@ pub fn declaration_of(src: &str) -> Result<String, Vec<String>> {
                         .collect(),
                     field: Some((path, field)),
                 }),
-                Err(e) => problems.push(format!("{}:1: {e}:", i + 1)),
+                Err(e) => problems.push((i + 1, e)),
             },
         }
         i = end + 1;
@@ -506,10 +521,12 @@ pub fn declaration_of(src: &str) -> Result<String, Vec<String>> {
                 let doc: String = imp.doc.iter().map(|l| format!("{indent}{l}\n")).collect();
                 out[at] = Some(format!("{doc}{indent}{field}\n{existing}"));
             }
-            None => problems.push(format!(
-                "{}:1: nothing declares a record {} for this function to be a field of:",
+            None => problems.push((
                 imp.span.0 + 1,
-                path.join(".")
+                format!(
+                    "nothing declares a record {} for this function to be a field of",
+                    path.join(".")
+                ),
             )),
         }
     }
@@ -690,7 +707,7 @@ fn scan_targets(root: &Path, cfg: &HtlConfig) -> Vec<(PathBuf, PathBuf)> {
 /// It was read before the project model decided which directories hold the project's
 /// modules, so a project written then finds its contract gone. This is how it finds out
 /// why rather than finding a contract that silently holds nothing.
-fn markers_outside_the_project(root: &Path, cfg: &HtlConfig) -> Vec<String> {
+fn markers_outside_the_project(root: &Path, cfg: &HtlConfig) -> Vec<Diagnostic> {
     let top = crate::config::without_cur_dir(root);
     if cfg.marker_roots(root).contains(&top) {
         return Vec::new();
@@ -712,14 +729,15 @@ fn markers_outside_the_project(root: &Path, cfg: &HtlConfig) -> Vec<String> {
         let Some(at) = src.lines().position(|l| l.contains("---@contract")) else {
             continue;
         };
-        out.push(format!(
-            "{}:{}:1: this ---@contract is not read: the project root is not where the \
-             project's modules are, so a file there declares nothing. Move it under \
-             [layout] source ({}) or types ({}) [htl contract]",
-            f.display(),
+        out.push(problem(
+            &f,
             at + 1,
-            cfg.layout.source,
-            cfg.layout.types,
+            format!(
+                "this ---@contract is not read: the project root is not where the project's \
+                 modules are, so a file there declares nothing. Move it under [layout] source \
+                 ({}) or types ({})",
+                cfg.layout.source, cfg.layout.types,
+            ),
         ));
     }
     out
@@ -739,7 +757,7 @@ fn read_file(
     file: &Path,
     src: &str,
     cfg: &HtlConfig,
-) -> Result<Vec<Resolved>, Vec<String>> {
+) -> Result<Vec<Resolved>, Vec<Diagnostic>> {
     let lines: Vec<&str> = src.lines().collect();
     // Named as every module of the project is: its path below the root it was found in.
     let Some(module) = file
@@ -764,21 +782,19 @@ fn read_file(
         let marker = match parse_marker(&marker) {
             Ok(m) => m,
             Err(e) => {
-                problems.push(format!(
-                    "{}:{}:1: {e} [htl contract]",
-                    file.display(),
-                    i + 1
-                ));
+                problems.push(problem(file, i + 1, e));
                 continue;
             }
         };
         let Some(path) = type_path(&lines, i, &module, &record) else {
-            problems.push(format!(
-                "{}:{}:1: {record} is the module {module} returns, not a type inside it: \
-                 a contract type is written as <module>.<Type>, so declare it as a record \
-                 within one [htl contract]",
-                file.display(),
-                i + 1
+            problems.push(problem(
+                file,
+                i + 1,
+                format!(
+                    "{record} is the module {module} returns, not a type inside it: a \
+                     contract type is written as <module>.<Type>, so declare it as a record \
+                     within one"
+                ),
             ));
             continue;
         };
@@ -786,22 +802,24 @@ fn read_file(
             (Some(d), _) => d,
             (None, [one]) => one.dir.clone(),
             (None, []) => {
-                problems.push(format!(
-                    "{}:{}:1: ---@contract names no directory and htl.toml declares none: \
-                     write ---@contract(\"<dir>\") here, or a [[contract]] dir = \"<dir>\" \
-                     in htl.toml [htl contract]",
-                    file.display(),
-                    i + 1
+                problems.push(problem(
+                    file,
+                    i + 1,
+                    "---@contract names no directory and htl.toml declares none: write \
+                     ---@contract(\"<dir>\") here, or a [[contract]] dir = \"<dir>\" in htl.toml"
+                        .to_string(),
                 ));
                 continue;
             }
             (None, many) => {
-                problems.push(format!(
-                    "{}:{}:1: ---@contract names no directory and htl.toml declares {}: \
-                     write the directory on the marker [htl contract]",
-                    file.display(),
+                problems.push(problem(
+                    file,
                     i + 1,
-                    many.len()
+                    format!(
+                        "---@contract names no directory and htl.toml declares {}: write the \
+                         directory on the marker",
+                        many.len()
+                    ),
                 ));
                 continue;
             }
@@ -834,10 +852,10 @@ fn read_file(
         {
             continue;
         }
-        problems.push(format!(
-            "{}:{}:1: ---@contract is not on a record declaration [htl contract]",
-            file.display(),
-            i + 1
+        problems.push(problem(
+            file,
+            i + 1,
+            "---@contract is not on a record declaration".to_string(),
         ));
     }
     if problems.is_empty() {

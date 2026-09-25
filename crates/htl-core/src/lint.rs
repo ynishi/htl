@@ -39,7 +39,7 @@
 //! and report that it fixed nothing — which reads exactly like a project with nothing to
 //! fix.
 
-use crate::{Diagnostic, Severity};
+use crate::Diagnostic;
 use anyhow::{Result, bail};
 use serde::Deserialize;
 use std::cell::RefCell;
@@ -500,17 +500,14 @@ impl Lints {
         self.sel.level_of(rule)
     }
 
-    /// The findings of `lines` this run says: the rest are a rule the run has off, or a
+    /// The findings of `found` this run says: the rest are a rule the run has off, or a
     /// site whose line allows the rule by name.
     ///
-    /// Text with no ` [htl <rule>]` suffix is kept. Nothing the project layer produces is
-    /// in that shape, and dropping a finding because its name could not be read would be
-    /// the wrong way round.
-    pub fn keep(&self, lines: Vec<String>) -> Vec<String> {
-        lines
+    /// A finding with no rule is kept: it is not a lint, and nothing turns it off.
+    pub fn keep(&self, found: Vec<Diagnostic>) -> Vec<Diagnostic> {
+        found
             .into_iter()
-            .filter(|l| {
-                let d = Diagnostic::parse(Severity::Lint, l);
+            .filter(|d| {
                 let Some(rule) = d.rule.as_deref() else {
                     return true;
                 };
@@ -779,11 +776,13 @@ mod tests {
     #[test]
     fn a_finding_is_dropped_by_the_rule_being_off() {
         let lints = Lints::parse("-require-cycle").unwrap();
+        let lint =
+            |line, rule| Diagnostic::new(crate::Severity::Lint, "a.tl", line, 1, "x", Some(rule));
         let kept = lints.keep(vec![
-            "a.tl:1:1: a -> b -> a [htl require-cycle]".to_string(),
-            "a.tl:2:1: x is declared more than once [htl duplicate-declaration]".to_string(),
+            lint(1, "require-cycle"),
+            lint(2, "duplicate-declaration"),
         ]);
         assert_eq!(kept.len(), 1);
-        assert!(kept[0].contains("duplicate-declaration"));
+        assert_eq!(kept[0].rule.as_deref(), Some("duplicate-declaration"));
     }
 }

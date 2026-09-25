@@ -181,7 +181,7 @@ pub struct Project {
     /// What reading the project could not make sense of, as messages. The model is built
     /// from the rest; nothing here stops a load. Today these come from `---@contract`
     /// markers that do not parse.
-    pub problems: Vec<String>,
+    pub problems: Vec<crate::Diagnostic>,
     /// The Rust crate that hosts the project: the nearest directory at or above the root
     /// whose `Cargo.toml` has a `[package]` ([`find_cargo_package_root`]). `None` for a
     /// project with no Cargo package around it, which has no `#[host_module]` names.
