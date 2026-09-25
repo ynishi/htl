@@ -73,7 +73,11 @@ from the crates.io tarball pins a version; the scaffold never writes for a relea
 it does not link.
 
 `HTL_PROFILE=1` prints per-phase timings; a performance change quotes them,
-before and after, and says which build produced them.
+before and after, and says which build produced them. A number that is to outlive
+the pull request — one a doc comment or the README states — comes from a case in
+`just bench` (`crates/htl-core/benches/`, `crates/htl-cli/benches/`), and the doc
+names the case; a timing taken by hand on a project nobody else can run goes in
+the pull request and nowhere else.
 
 ## Documentation
 

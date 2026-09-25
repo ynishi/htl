@@ -48,6 +48,26 @@ pub use mlua_pkg;
 /// directory is the host's: a mod dropped into it after the host started is one the next
 /// `require` finds.
 ///
+/// # Modules that exist only at run time
+///
+/// Teal resolves every `require("literal")` at check time, and htl keeps it that way. A
+/// module that exists only at run time — the user's `Tasks.tl` that a long-built host
+/// loads — takes one of the two shapes TypeScript, Kotlin scripting and Gradle settled on:
+///
+/// - **Declare it** (`declare module` / `.d.ts` in TS terms): the host's tree ships
+///   `Tasks.d.tl` with the contract (`local tsk = require("tsk")  local Tasks: tsk.Tasks
+///   return Tasks`). The build checks the host's scripts against the declaration; at run
+///   time a resolver rooted at the user's project serves the real file.
+/// - **Hand the user a typed constructor** (`defineConfig` / `satisfies UserConfig` in TS
+///   terms): the SDK exports `define: function(t: tsk.Tasks): tsk.Tasks` and the user
+///   writes `return tsk.define({ ... })`. Field-level errors with line numbers, no
+///   annotation on the user's side, and [`expect_type`](Self::expect_type) becomes a
+///   belt-and-braces check.
+///
+/// A dynamic `require(name_in_a_variable)` typed as `any` is the escape hatch, like
+/// GDScript's `load()` or a shorthand `declare module "x"`, for the case where the module
+/// name itself is unknown until run time and no other.
+///
 /// # One description for the check and the run
 ///
 /// A host that serves its directories describes them as a model

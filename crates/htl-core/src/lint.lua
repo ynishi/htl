@@ -994,6 +994,14 @@ end
 -- exemptions are `enum-exhaustive`'s: a chain with an `else`, a single `is` (a guard, not
 -- a dispatch), and a chain where every branch returns and code follows, which is the
 -- `else` written differently.
+--
+-- When a union is worth its records at all: only when the variants carry different data.
+-- A `where` clause uses `self` once, so one record answers to one tag value, and a type
+-- with seven tags that carry the same fields is seven structurally identical records to
+-- gain nothing an enum field on one record does not already give -- `enum-exhaustive`
+-- guards those branches just the same. The question is not "does this have a tag" but
+-- "do the variants hold different things". (The rule's message could carry this the way
+-- clippy links a lint to its explanation; that surface does not exist yet.)
 local function lint_union_exhaustive(ast, report, extra)
    extra = extra or {}
    local union_at = extra.union_at
@@ -1323,6 +1331,12 @@ end
 -- from outside the program — a mod's return value, a save file, a host — is a different
 -- question, and a record marked `---@contract` with `---@required` on its mandatory
 -- fields is what checks that (contract.rs).
+--
+-- The marker is also what makes a test suite feel the cost all at once: a dozen tests that
+-- each spell every field are a dozen reports when a field is added. A factory in a helper
+-- beside the tests -- defaults in one place, an overlay record naming only what a test
+-- varies -- turns them into one; the overlay is its own record, since typed as the target
+-- it would be one more construction site. No lint asks for it.
 --
 -- Which record a bare `{ ... }` is being built as is type information, and this rule is
 -- run over a syntax-only parse (see L.run). `extra.struct_at(y, x)` answers it from the

@@ -18,7 +18,14 @@
 //! header, and the library exports the `<prefix>_*` functions and nothing else.
 //!
 //! The `async` feature is off by default for the same reason: it turns on mlua's own
-//! `async`, and a host with no async method should be built as it was without it. The two are named and linked in the paragraph this page
+//! `async`, and a host with no async method should be built as it was without it.
+//!
+//! A consumer building against a checkout of htl before a change is published patches
+//! all three crates in its `[patch.crates-io]`, not this one alone: `htl` re-exports
+//! `htl-core`, and the proc macros in `htl-macros` run `htl-core` at expansion time, so
+//! patching only `htl` builds two versions of the same code into one graph. Cargo keeps
+//! the version `Cargo.lock` already resolved until `cargo update -p htl -p htl-core -p
+//! htl-macros` is run once; the same command, with the block deleted, goes back. The two are named and linked in the paragraph this page
 //! shows when the feature is on; without it there is nothing on this page to link to, and
 //! a link to an item that is not compiled is a broken one.
 #![cfg_attr(

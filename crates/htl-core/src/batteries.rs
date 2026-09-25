@@ -31,7 +31,9 @@
 //! own `Cargo.toml` with its own prefix — not something a toolchain turns on for every
 //! project it runs.
 //!
-//! The declarations are the crate's, written verbatim; the only generated file is
+//! The declarations are the crate's, written verbatim — `---@nilable` markers included,
+//! so a project using `std.*` gets the `nil-return` rule on those functions without
+//! writing anything. The only generated file is
 //! `std/init.d.tl`, the record behind `require("std")`, which the crate renders for the
 //! prefix. Both are written with [`write_if_changed`] rather than the crate's own
 //! `dts::write_to`, which rewrites unconditionally: this directory is read by every

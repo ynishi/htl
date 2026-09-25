@@ -168,11 +168,7 @@ says how much: `[cached]`, `[36/48 cached]`, or nothing when none was replayed.
 the same store, and `htl build` says so with the same `[cached]` / `[31/32 cached]`
 suffix (the directory form of `build`, the older snapshot, is not cached). `build` takes
 `--no-cache` and `--explain-cache`; for the macros, `HTL_NO_CACHE=1` turns the store off
-and `HTL_CACHE_DEBUG=1` has them say how much they replayed or why they did not. On a
-30-module, 16,000-line project (release CLI): a cold build 1.3 s; nothing edited 0.03 s;
-one leaf edited 0.7 s, `[30/32 cached]` — the leaf and the entry that requires it are
-generated, the rest replay; the module every other one requires edited, 1.3 s again,
-since every entry read it.
+and `HTL_CACHE_DEBUG=1` has them say how much they replayed or why they did not.
 
 **Whether to cache** is `--no-cache`. **How the cache is grained** is `--cache-mode`, or
 `[cache] mode` in `htl.toml` with the flag overriding it:
@@ -182,16 +178,6 @@ since every entry read it.
 | `per-module` (default) | one per module | that module, whatever requires it, and what those pull in |
 | `whole-run` | one for the walk | the whole walk, wherever the edit landed |
 
-Measured on a 57-module project of about 14,000 lines, release build, wall clock:
-
-| | per-module | whole-run |
-|---|---|---|
-| cold (`--no-cache`) | 1.81 s | 1.81 s |
-| nothing edited | 0.018 s | 0.017 s |
-| a module nothing requires | 0.33 s | 1.75 s |
-| a module 10 others require | 0.81 s | 1.75 s |
-| the type module 32 others require | 1.74 s | 1.75 s |
-
 Which mode wins is on
 [`cache::Mode`](https://docs.rs/htl/latest/htl/cache/enum.Mode.html).
 
@@ -200,9 +186,7 @@ one rule between `warn` and `deny` changes no diagnostic, and re-checks anyway.
 
 `htl test` shares the store for checking a test file and generating its Lua. The summary
 says how many files had their checking reused (`27 checked from cache`), and `--no-cache`
-opts out as it does for `htl check`. The modules a test requires are stored too. Measured
-on a 27-file suite: 4.65 s without any of this, 5.03 s on the first run (which stores what
-it generated) and 3.03 s on every run after.
+opts out as it does for `htl check`. The modules a test requires are stored too.
 
 `htl cache status` says what the store holds — entries by kind, total size, how recently they
 were used, and with `--entries` the files each one covers. `htl cache clear` empties it.
@@ -511,22 +495,10 @@ reg.install(h.lua())?;
 directory (`TealResolver::new(dir)`, `.holding_packages()`) are still there, for a host
 that does not describe a project; they part ways with the resolver (#320).
 
-Teal resolves every `require("literal")` at check time, and htl keeps it that way. When a
-module exists only at run time (the user's `Tasks.tl` that a long-built host loads), the
-same two shapes that TypeScript, Kotlin scripting and Gradle use apply:
-
-- **Declare it** (`declare module` / `.d.ts` in TS terms): ship `Tasks.d.tl` in the host's
-  tree with the contract (`local tsk = require("tsk")  local Tasks: tsk.Tasks  return Tasks`).
-  The build checks the host's scripts against the declaration; at run time a
-  `TealResolver` rooted at the user's project serves the real file.
-- **Hand the user a typed constructor** (`defineConfig` / `satisfies UserConfig` in TS
-  terms): the SDK exports `define: function(t: tsk.Tasks): tsk.Tasks` and the user writes
-  `return tsk.define({ ... })`. Field-level errors with line numbers, no annotation on the
-  user's side, and `expect_type` becomes a belt-and-braces check.
-
-A dynamic `require(name_in_a_variable)` typed as `any` is the escape hatch, like
-GDScript's `load()` or a shorthand `declare module "x"`; use it only when the module name
-itself is unknown until run time.
+A module that exists only at run time is either declared (`Tasks.d.tl` in the host's
+tree) or handed to the user as a typed constructor (`return tsk.define({ ... })`);
+[`TealResolver`](https://docs.rs/htl/latest/htl/pkg/struct.TealResolver.html) has both
+shapes.
 
 A host chooses by audience: `htl::developer_message(&err)` returns the cause with the
 frames below it; `htl::user_message(&err)` returns the innermost cause alone. The C ABI
@@ -807,10 +779,8 @@ lint: src/main.tl:4:19: call result may be nil at runtime: path.parent is marked
 occurrence with a trailing `-- htl: allow(nil-return)`.
 
 The marker goes where the function is **declared**, in both forms — trailing, or on a line
-of its own above it. mlua-batteries (0.7.3, the version htl's `std` feature takes) writes it on
-`path.parent` / `filename` / `stem` / `ext` and `env.get` / `home`, so a project using
-`std.*` gets the rule without writing anything; `regex.find` / `captures` carry it too, in a
-host that turns that module on (it is not in the default set htl carries, see `std.*`).
+of its own above it. mlua-batteries writes it on its own declarations, so a project using
+`std.*` gets the rule without writing anything.
 
 **Following the local (`nil-return-unchecked`, off by default).** A second rule reports
 the first use of the local as the base of a chain before anything checks it:
@@ -1214,39 +1184,6 @@ may reach; a helper is named by its path below it (`tests/common/fx.tl` is `comm
 A matcher that is not one of these is a type error too — `invalid key 'to_be' in type
 Expect<integer>` — with the list above appended.
 
-A test builds values far more often than it asserts them, and what it builds is usually
-one valid value with a single thing varied, so a record with a handful of fields and a
-dozen tests is a dozen places that spell every field. Adding a field to it then means a
-dozen edits, and under `---@struct` a dozen reports at once. A factory in a helper module
-beside the tests turns those into one place — a table of defaults, and a parameter that
-names what this test varies:
-
-```tl
-local record factory
-   record Over          -- what a test varies, not the record itself
-      id: string
-      hp: integer
-   end
-end
-
-function factory.make_def(over: factory.Over): defs.MonsterDef
-   return {
-      id = over.id or "rat",
-      hp = over.hp or 3,
-      color = "grey",
-   }
-end
-```
-
-`factory.make_def{ hp = 1 }` then reads as the one thing the test is about, and a field
-added to `MonsterDef` is filled in the factory and nowhere else. The overlay is a record
-of its own, listing the fields a test may vary — usually fewer than all of them — and it
-has to be: typed as `MonsterDef` it would make every call a literal built as that record,
-reported like any other construction site, which is the factory handing back exactly what
-it was written to remove. No lint asks for any of this; it is one way of writing tests
-among others, and it is here because the marker is what makes the cost of the other way
-arrive all at once.
-
 Snapshots: `t.expect(session.frame(s)):to_match_snapshot("first floor")` compares the
 value with `tests/__snapshots__/session_test/first_floor.snap` for
 `tests/session_test.tl`; the first run writes the file, and `htl test --update` rewrites
@@ -1571,27 +1508,9 @@ fields are not in scope — reaching for one is `invalid key 'weight' in record 
 Monster` — and a partially narrowed value keeps its remaining variants, so after `is A`
 over `A | B | C` the value is `B | C` and a field only `B` has is still an error.
 
-That "once" is the cost of the form, and it decides where the form belongs. One record
-cannot answer to two tag values:
-
-```text
-cannot use argument 'self' multiple times in macroexp
-```
-
-So a type with seven tag values needs seven records, and it is worth writing them only
-when the variants carry different data. Where several tags carry the *same* data, a union
-buys nothing an enum field on one record does not already give: the branches are guarded
-by `enum-exhaustive` either way, and the declarations are the only thing that grew.
-
-A worked example from a project that decided against one. Its `Effect` has five fields and
-seven tag values, but only four payload shapes among them — `power`, `power` + `damage`,
-`status`, and nothing at all. As a union that is seven records, four of them structurally
-identical, around thirty lines of declaration, to gain field safety at the one place it is
-read. It stayed an enum plus a record, and that was the right call.
-
-The question to ask is not "does this have a tag" — plenty of records do — but "do the
-variants hold different things". When they do, the union pays for itself at every use
-site. When they do not, the tag was already saying it.
+One record cannot answer to two tag values (`cannot use argument 'self' multiple times
+in macroexp`), so a union is worth its records only when the variants carry different
+data; otherwise an enum field on one record is enough.
 
 A variant nobody handled is reported by the `union-exhaustive` lint, with the same
 exemptions as `enum-exhaustive`.
@@ -1643,20 +1562,8 @@ htl-core = { path = "/path/to/htl/crates/htl-core" }
 htl-macros = { path = "/path/to/htl/crates/htl-macros" }
 ```
 
-All three, not one. `htl` re-exports `htl-core`, and the proc macros in `htl-macros` run
-`htl-core` at expansion time, so patching only `htl` builds two versions of the same code
-into one graph.
-
-**The patch is ignored until the lockfile is updated.** `Cargo.lock` keeps the version it
-already resolved, and cargo says so rather than switching:
-
-```
-warning: patch `htl v0.4.0 (...)` was not used in the crate graph
-```
-
-Run `cargo update -p htl -p htl-core -p htl-macros` once and the lock points at the local
-paths. To go back once the version is published, delete the `[patch.crates-io]` block and
-run the same `cargo update` again.
+All three, not one; then `cargo update -p htl -p htl-core -p htl-macros` once, and the
+same command again with the block deleted to go back.
 
 ## What is deliberately not here
 
