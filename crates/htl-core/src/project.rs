@@ -337,20 +337,21 @@ pub fn not_walked(
 /// Outside a project there are no modules, and every file is kept.
 ///
 /// [`Project::locate`]: crate::model::Project::locate
+///
+/// A project whose source directory does not exist and whose root holds `.tl` is refused
+/// ([`refuse_flat_root`]) rather than walked: those files are not stray, they are where the
+/// project keeps its code, and skipping them would pass a check nothing ran.
 pub fn held_by_modules(
     model: Option<&crate::model::Project>,
     paths: &[PathBuf],
     files: Vec<PathBuf>,
-) -> (Vec<PathBuf>, Vec<PathBuf>) {
+) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     let Some(model) = model else {
-        return (files, Vec::new());
+        return Ok((files, Vec::new()));
     };
-    let named: Vec<PathBuf> = paths
-        .iter()
-        .filter(|p| p.is_file())
-        .map(|p| crate::model::canon(p))
-        .collect();
-    files.into_iter().partition(|f| {
+    refuse_flat_root(Some(model), paths, &files)?;
+    let named = named_files(paths);
+    Ok(files.into_iter().partition(|f| {
         // Named by a module's root, or inside another module's home (a patched copy's
         // `tests/`, which no root of the copy names but the copy owns). What is left is
         // the project's own home outside every root it has: the root itself, and a
@@ -360,7 +361,62 @@ pub fn held_by_modules(
                 .home_of(f)
                 .is_some_and(|m| m.owner != crate::model::Owner::Own)
             || named.contains(&crate::model::canon(f))
-    })
+    }))
+}
+
+/// The files `paths` names outright, canonical: kept whatever holds them.
+fn named_files(paths: &[PathBuf]) -> Vec<PathBuf> {
+    paths
+        .iter()
+        .filter(|p| p.is_file())
+        .map(|p| crate::model::canon(p))
+        .collect()
+}
+
+/// Refuse a walk over a project laid out flat without saying so: `.tl` directly under the
+/// project root, and no source directory (`[layout] source`, `src` by default).
+///
+/// Such a project keeps its code beside `htl.toml`, which htl supports as
+/// `[layout] source = "."`. Without that line the root is no module's root, so every
+/// command that walks the project would skip the files — `htl check` would pass having
+/// checked nothing, and `htl test` would fail on the first `require` of the project's own
+/// code. The layout is the project's to state rather than htl's to guess, so the answer is
+/// an error that names both ways out. A project that has its source directory keeps the
+/// notice ([`outside_modules_note`]); a file named in `paths` is never the reason.
+pub fn refuse_flat_root(
+    model: Option<&crate::model::Project>,
+    paths: &[PathBuf],
+    files: &[PathBuf],
+) -> Result<()> {
+    let Some(model) = model else {
+        return Ok(());
+    };
+    let source = &model.config.layout.source;
+    if crate::config::resolve_path(&model.root, source).is_dir() {
+        return Ok(());
+    }
+    let root = crate::model::canon(&model.root);
+    let named = named_files(paths);
+    let at_root: Vec<&PathBuf> = files
+        .iter()
+        .filter(|f| {
+            let c = crate::model::canon(f);
+            c.parent() == Some(root.as_path()) && !named.contains(&c) && model.locate(f).is_none()
+        })
+        .collect();
+    if at_root.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{} file(s) at the project root belong to no module ({}): add [layout] source = \".\" \
+         to htl.toml, or move them under {source}/",
+        at_root.len(),
+        at_root
+            .iter()
+            .map(|f| display_path(f))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 /// The one line a walk says about the files [`held_by_modules`] left out, or `None` when it
@@ -376,7 +432,8 @@ pub fn outside_modules_note(
     let source = model.map_or("src", |m| m.config.layout.source.as_str());
     Some(format!(
         "{} file(s) belong to no module of the project and were not {what}: {}; move them \
-         under {source}/",
+         under {source}/, or set [layout] source = \".\" if the project root is where its \
+         modules are",
         outside.len(),
         outside
             .iter()

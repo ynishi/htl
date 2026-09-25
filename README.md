@@ -110,8 +110,15 @@ project — one directly under the project root, which is no module's root unles
 `[layout] source = "."`, or in a directory the layout does not name: nothing can require
 it by a name the project gives it, so it is not the project's to check or to count as
 unused. The run names such files once, with where they go (`1 file(s) belong to no module
-of the project and were not checked: stray.tl; move them under src/`); a file named on
-the command line is checked all the same.
+of the project and were not checked: stray.tl; move them under src/, or set [layout]
+source = "." if the project root is where its modules are`); a file named on the command
+line is checked all the same. A project that has no source directory at all and keeps its
+`.tl` at the root is not skipped but refused: `check`, `fix`, `unused` and `test` stop
+with `htl: 3 file(s) at the project root belong to no module (lib.tl, lib_test.tl,
+main.tl): add [layout] source = "." to htl.toml, or move them under src/` and exit 2,
+because those files are where the project keeps its code and a run that skipped them
+would pass having checked nothing. The layout is the project's to state, not htl's to
+guess.
 `mlua-pkg install` rewrites it every time it runs — checking it would report a dependency's
 errors as the project's, `htl fmt` would write a diff against upstream that the next
 install undoes, and its `*_test.tl` are a dependency's suite (Go's `./...` has excluded
@@ -1428,7 +1435,9 @@ directory it names (`src`, `types`, `tests`), which is what `htl new` writes and
 command searched before the section existed — a project that keeps its code somewhere
 else now says so instead of being told. Each is **one directory, not a list**: a module
 name resolves to exactly one file, so a directory that answers a name has to be the only
-one that could. `"."` is a flat project, with the sources beside `htl.toml`.
+one that could. `"."` is a flat project, with the sources beside `htl.toml` — and the one
+line a project laid out that way needs: without it, a project with `.tl` at its root and
+no `src/` is refused by every walk (see above) rather than read as flat.
 
 Two keys naming one directory is refused when the file is parsed, before any source is
 read — including a `[check] paths` entry that names the source or types directory. The
