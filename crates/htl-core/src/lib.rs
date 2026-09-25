@@ -473,7 +473,7 @@ pub fn contract_lints(
     cfg: &config::HtlConfig,
     contracts: &[contract::Resolved],
     file: &Path,
-) -> Result<Vec<String>> {
+) -> Result<Vec<Diagnostic>> {
     let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let file_abs = canon(file);
     let mut out = Vec::new();
@@ -501,12 +501,17 @@ pub fn contract_lints(
         if !r.bad_require_fields.is_empty() {
             // A `---@required` the checker cannot see as a field of the record: the
             // marker is on something else, and no module under the dir can satisfy it.
-            out.push(format!(
-                "{}:{}:1: ---@required on field(s) {} does not declare: {} [htl contract]",
-                c.declared_in.display(),
+            out.push(Diagnostic::new(
+                Severity::Lint,
+                c.declared_in.display().to_string(),
                 c.declared_at,
-                c.type_path,
-                r.bad_require_fields.join(", ")
+                1,
+                format!(
+                    "---@required on field(s) {} does not declare: {}",
+                    c.type_path,
+                    r.bad_require_fields.join(", ")
+                ),
+                Some("contract"),
             ));
             continue;
         }
@@ -516,23 +521,32 @@ pub fn contract_lints(
             let msg = diagnostic::position(e)
                 .map_or(e.as_str(), |(_, _, _, msg)| msg)
                 .trim();
-            out.push(format!(
-                "{}:1:1: does not satisfy contract {} ({}): {msg} [htl contract]",
-                file.display(),
-                c.type_path,
-                c.dir
+            out.push(Diagnostic::new(
+                Severity::Lint,
+                file.display().to_string(),
+                1,
+                1,
+                format!(
+                    "does not satisfy contract {} ({}): {msg}",
+                    c.type_path, c.dir
+                ),
+                Some("contract"),
             ));
         }
         if let Some(missing) = &r.missing
             && !missing.is_empty()
         {
-            out.push(format!(
-                "{}:{}:{}: returned table lacks declared field(s) of {}: {} [htl contract]",
-                file.display(),
+            out.push(Diagnostic::new(
+                Severity::Lint,
+                file.display().to_string(),
                 r.missing_at.0,
                 r.missing_at.1,
-                c.type_path,
-                missing.join(", ")
+                format!(
+                    "returned table lacks declared field(s) of {}: {}",
+                    c.type_path,
+                    missing.join(", ")
+                ),
+                Some("contract"),
             ));
         }
     }
@@ -579,7 +593,7 @@ pub fn declaration_conflict_lints(
     file: &Path,
     info: &CheckInfo,
     host_modules: &[String],
-) -> Result<Vec<String>> {
+) -> Result<Vec<Diagnostic>> {
     let f: Function = h.h.get("declaration_sites")?;
     let mut out = Vec::new();
     let mut seen: Vec<&str> = Vec::new();
@@ -594,16 +608,19 @@ pub fn declaration_conflict_lints(
         if !is_declaration(read) {
             if host_modules.contains(&site.module) {
                 seen.push(&site.module);
-                out.push(format!(
-                    "{}:{}:{}: {} is a host module of this crate and also {}: the check \
-                     reads the file, the run loads the host — package.preload is consulted \
-                     before any path searcher, so what is checked here is not what runs \
-                     [htl host-module-shadowed]",
-                    file.display(),
+                out.push(Diagnostic::new(
+                    Severity::Lint,
+                    file.display().to_string(),
                     site.line,
                     site.col,
-                    site.module,
-                    read.display(),
+                    format!(
+                        "{} is a host module of this crate and also {}: the check reads the \
+                         file, the run loads the host — package.preload is consulted before \
+                         any path searcher, so what is checked here is not what runs",
+                        site.module,
+                        read.display(),
+                    ),
+                    Some("host-module-shadowed"),
                 ));
             }
             continue;
@@ -621,15 +638,19 @@ pub fn declaration_conflict_lints(
             continue;
         }
         seen.push(&site.module);
-        out.push(format!(
-            "{}:{}:{}: {} is declared more than once: {} is read, {} {} not [htl duplicate-declaration]",
-            file.display(),
+        out.push(Diagnostic::new(
+            Severity::Lint,
+            file.display().to_string(),
             site.line,
             site.col,
-            site.module,
-            read.display(),
-            shadowed.join(" and "),
-            if shadowed.len() == 1 { "is" } else { "are" },
+            format!(
+                "{} is declared more than once: {} is read, {} {} not",
+                site.module,
+                read.display(),
+                shadowed.join(" and "),
+                if shadowed.len() == 1 { "is" } else { "are" },
+            ),
+            Some("duplicate-declaration"),
         ));
     }
     Ok(out)
@@ -654,7 +675,7 @@ pub fn contract_enforcement_lints(
     cfg_path: &Path,
     contracts: &[contract::Resolved],
     cargo_root: Option<&Path>,
-) -> Vec<String> {
+) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     if contracts.is_empty() {
         return out;
@@ -691,28 +712,33 @@ pub fn contract_enforcement_lints(
             Some(p) => {
                 let at = config::resolve_path(root_of(cfg_path), p);
                 if !at.exists() {
-                    out.push(format!(
-                        "{}:1:1: contract {} -> {} says it is enforced by {:?}, and there \
-                         is no such file: name where the enforcement lives, or drop the \
-                         key and let the scan look for \
-                         htl::pkg::contract_resolvers(root, &config) \
-                         [htl contract-unenforced]",
-                        cfg_path.display(),
-                        c.dir,
-                        c.type_path,
-                        p,
+                    out.push(Diagnostic::new(
+                        Severity::Lint,
+                        cfg_path.display().to_string(),
+                        1,
+                        1,
+                        format!(
+                            "contract {} -> {} says it is enforced by {:?}, and there is no \
+                             such file: name where the enforcement lives, or drop the key and \
+                             let the scan look for htl::pkg::contract_resolvers(root, &config)",
+                            c.dir, c.type_path, p,
+                        ),
+                        Some("contract-unenforced"),
                     ));
                 }
             }
-            None if !by_config => out.push(format!(
-                "{}:{}:1: contract {} -> {} is declared but the host does not enforce it: \
-                 build resolvers with htl::pkg::contract_resolvers(root, &config), or say \
-                 where it is enforced with [[contract]] enforced_by \
-                 [htl contract-unenforced]",
-                c.declared_in.display(),
+            None if !by_config => out.push(Diagnostic::new(
+                Severity::Lint,
+                c.declared_in.display().to_string(),
                 c.declared_at,
-                c.dir,
-                c.type_path,
+                1,
+                format!(
+                    "contract {} -> {} is declared but the host does not enforce it: build \
+                     resolvers with htl::pkg::contract_resolvers(root, &config), or say where \
+                     it is enforced with [[contract]] enforced_by",
+                    c.dir, c.type_path,
+                ),
+                Some("contract-unenforced"),
             )),
             None => {}
         }
@@ -728,7 +754,7 @@ fn root_of(cfg_path: &Path) -> &Path {
 /// anchored at the first edge's call site. Teal types a circular require as an opaque
 /// `circular_require`, so a cycle shows up elsewhere as "cannot index" errors; naming
 /// the loop is the useful part. Files outside `infos` are treated as leaves.
-pub fn require_cycles(infos: &[(PathBuf, CheckInfo)]) -> Vec<String> {
+pub fn require_cycles(infos: &[(PathBuf, CheckInfo)]) -> Vec<Diagnostic> {
     use std::collections::{HashMap, HashSet};
     let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let mut edges: HashMap<PathBuf, Vec<(PathBuf, &RequireSite)>> = HashMap::new();
@@ -760,7 +786,7 @@ pub fn require_cycles(infos: &[(PathBuf, CheckInfo)]) -> Vec<String> {
         stack: &mut Vec<(PathBuf, Option<&'a RequireSite>)>,
         reported: &mut HashSet<Vec<PathBuf>>,
         display: &HashMap<PathBuf, PathBuf>,
-        out: &mut Vec<String>,
+        out: &mut Vec<Diagnostic>,
     ) {
         state.insert(node.clone(), 1);
         if let Some(list) = edges.get(&node) {
@@ -797,13 +823,18 @@ pub fn require_cycles(infos: &[(PathBuf, CheckInfo)]) -> Vec<String> {
                                 .unwrap_or_else(|| members[0].clone());
                             // anchor: the edge leaving the cycle's first member
                             let anchor = stack.get(start + 1).and_then(|(_, s)| *s).unwrap_or(site);
-                            out.push(format!(
-                                "{}:{}:{}: require cycle: {} (Teal types the back edge as an opaque circular require; \
-                                 break it by moving shared types into a module both sides require) [htl require-cycle]",
-                                first_file.display(),
+                            out.push(Diagnostic::new(
+                                Severity::Lint,
+                                first_file.display().to_string(),
                                 anchor.line,
                                 anchor.col,
-                                chain.join(" -> ")
+                                format!(
+                                    "require cycle: {} (Teal types the back edge as an opaque \
+                                     circular require; break it by moving shared types into a \
+                                     module both sides require)",
+                                    chain.join(" -> ")
+                                ),
+                                Some("require-cycle"),
                             ));
                         }
                     }
@@ -834,7 +865,8 @@ pub fn require_cycles(infos: &[(PathBuf, CheckInfo)]) -> Vec<String> {
             stack.pop();
         }
     }
-    out.sort();
+    // In the order the text sorts, which is the order the report has always had.
+    out.sort_by_cached_key(|d| d.to_string());
     out
 }
 

@@ -81,7 +81,11 @@ fn contracts(root: &Path, cfg: &HtlConfig) -> Vec<htl_core::contract::Resolved> 
 
 /// `contract_lints` for one file of a project, resolving the markers first.
 fn lints_for(h: &Htl, root: &Path, cfg: &HtlConfig, rel: &str) -> Vec<String> {
-    contract_lints(h, root, cfg, &contracts(root, cfg), &root.join(rel)).unwrap()
+    contract_lints(h, root, cfg, &contracts(root, cfg), &root.join(rel))
+        .unwrap()
+        .iter()
+        .map(ToString::to_string)
+        .collect()
 }
 
 /// Load each mod through resolvers the caller built, and say what happened: `Ok` for a
@@ -498,14 +502,20 @@ fn unenforced_contract_is_reported_against_host_sources() {
 
     let none = host("fn main() {}\n");
     assert_eq!(none.len(), 1, "{none:?}");
-    assert!(none[0].contains("contract-unenforced"), "{}", none[0]);
     assert!(
-        none[0].contains("htl::pkg::contract_resolvers(root, &config)"),
+        none[0].to_string().contains("contract-unenforced"),
+        "{}",
+        none[0]
+    );
+    assert!(
+        none[0]
+            .to_string()
+            .contains("htl::pkg::contract_resolvers(root, &config)"),
         "tells the host what to write: {}",
         none[0]
     );
     assert!(
-        none[0].contains("src/defs.tl:2:"),
+        none[0].to_string().contains("src/defs.tl:2:"),
         "points at the marker, not at htl.toml: {}",
         none[0]
     );
@@ -573,12 +583,12 @@ fn enforced_by_naming_nothing_is_reported() {
         let out = contract_enforcement_lints(&cfg_path, &found, Some(&root));
         assert_eq!(out.len(), 1, "{out:?}");
         assert!(
-            out[0].contains("no such file") && out[0].contains("_gone.lua"),
+            out[0].to_string().contains("no such file") && out[0].to_string().contains("_gone.lua"),
             "says the named file is missing, not that the host does not enforce it: {}",
             out[0]
         );
         assert!(
-            out[0].contains("htl.toml:1:1"),
+            out[0].to_string().contains("htl.toml:1:1"),
             "points at the config, where the key is: {}",
             out[0]
         );
@@ -629,7 +639,7 @@ fn enforced_by_is_per_contract() {
 
     let out = contract_enforcement_lints(&cfg_path, &found, Some(&root));
     assert_eq!(out.len(), 1, "only the one without the key: {out:?}");
-    assert!(out[0].contains("defs.Plug"), "{}", out[0]);
+    assert!(out[0].to_string().contains("defs.Plug"), "{}", out[0]);
 }
 
 #[test]
@@ -724,7 +734,9 @@ fn contract_glob_dir_and_module_filter() {
     let blog = lint("sites/blog/Site.tl");
     assert_eq!(blog.len(), 1, "{blog:?}");
     assert!(
-        blog[0].contains("does not satisfy contract defs.Site (sites/*)"),
+        blog[0]
+            .to_string()
+            .contains("does not satisfy contract defs.Site (sites/*)"),
         "{}",
         blog[0]
     );
@@ -1237,15 +1249,21 @@ fn a_marker_at_the_project_root_is_not_read_and_says_where_to_move_it() {
     let (found, problems) = htl_core::contract::resolve(&root, &cfg);
     assert!(found.is_empty(), "{found:?}");
     assert!(
-        problems
-            .iter()
-            .any(|p| p.contains("defs.tl:2:1: this ---@contract is not read")
-                && p.contains("Move it under [layout] source (src) or types (types)")),
+        problems.iter().any(|p| p
+            .to_string()
+            .contains("defs.tl:2:1: this ---@contract is not read")
+            && p.to_string()
+                .contains("Move it under [layout] source (src) or types (types)")),
         "{problems:?}"
     );
     let model = htl_core::model::Project::load(&root, cfg).unwrap();
     assert!(model.contracts.is_empty());
-    assert!(model.problems.iter().any(|p| p.contains("is not read")));
+    assert!(
+        model
+            .problems
+            .iter()
+            .any(|p| p.to_string().contains("is not read"))
+    );
 }
 
 /// A flat project (`[layout] source = "."`) has its modules at the root, so a marker there
@@ -1458,7 +1476,9 @@ fn a_function_with_no_record_to_join_is_reported() {
     assert!(written.is_empty(), "{written:?}");
     assert_eq!(problems.len(), 1, "{problems:?}");
     assert!(
-        problems[0].contains("nothing declares a record other"),
+        problems[0]
+            .to_string()
+            .contains("nothing declares a record other"),
         "{}",
         problems[0]
     );
@@ -1543,9 +1563,11 @@ fn two_records_claiming_one_directory_are_reported_with_both_sources() {
     assert_eq!(found.len(), 2, "{found:?}");
     assert_eq!(problems.len(), 1, "{problems:?}");
     assert!(
-        problems[0].contains("p2.Mod claims directory \"mods\"")
-            && problems[0].contains("p1.Mod already claims")
-            && problems[0].contains("p1/init.tl"),
+        problems[0]
+            .to_string()
+            .contains("p2.Mod claims directory \"mods\"")
+            && problems[0].to_string().contains("p1.Mod already claims")
+            && problems[0].to_string().contains("p1/init.tl"),
         "both sources named: {}",
         problems[0]
     );

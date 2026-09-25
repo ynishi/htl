@@ -142,14 +142,7 @@ impl<O: Output> Sink<O> {
         self.walked = files.iter().map(|f| canonical(f)).collect();
     }
 
-    /// Say a finding this layer wrote as text: the project-level findings and the lints the
-    /// check asks of a file. Taken apart once, here, until those producers build a
-    /// [`Diagnostic`] themselves.
-    pub fn diag(&mut self, severity: Severity, text: &str) {
-        self.say(Diagnostic::parse(severity, text), None);
-    }
-
-    /// Say a finding the checker handed over in its parts.
+    /// Say a finding: one the checker handed over in its parts, or one this layer made.
     pub fn diagnostic(&mut self, d: &Diagnostic) {
         self.say(d.clone(), None);
     }
@@ -635,7 +628,7 @@ pub struct Scope {
     /// question of them.
     pub contracts: Vec<crate::contract::Resolved>,
     /// Markers that could not be turned into a contract.
-    pub contract_problems: Vec<String>,
+    pub contract_problems: Vec<Diagnostic>,
     /// The Rust crate around the project: the model's own `host_crate` when there is a
     /// model, which found it when it was loaded; otherwise the one around the first path.
     /// It is where the host modules below come from, and where `contract-unenforced`
@@ -806,7 +799,7 @@ pub fn file_findings<O: Output>(
     // when the run reports at least one of the two, since one walk answers both.
     if lints.on("duplicate-declaration") || lints.on("host-module-shadowed") {
         for l in lints.keep(crate::declaration_conflict_lints(h, f, c, host_modules)?) {
-            sink.diag(Severity::Lint, &l);
+            sink.diagnostic(&l);
             lints_said += 1;
         }
     }
@@ -816,7 +809,7 @@ pub fn file_findings<O: Output>(
         && lints.on("contract")
     {
         for l in lints.keep(crate::contract_lints(h, root, cfg, contracts, f)?) {
-            sink.diag(Severity::Lint, &l);
+            sink.diagnostic(&l);
             lints_said += 1;
         }
     }
@@ -1248,7 +1241,7 @@ pub struct Whole<'a> {
     /// be turned into one.
     pub contracts: &'a [crate::contract::Resolved],
     /// See `contracts`.
-    pub contract_problems: &'a [String],
+    pub contract_problems: &'a [Diagnostic],
     /// The Rust crate around the project, where `contract-unenforced` looks for the host's
     /// enforcement.
     pub cargo_root: Option<&'a Path>,
@@ -1284,7 +1277,7 @@ pub fn project_findings<O: Output>(
     // Project-level: cycles in the require graph of the files just checked.
     if w.lints.on("require-cycle") {
         for cyc in w.lints.keep(crate::require_cycles(infos)) {
-            sink.diag(Severity::Lint, &cyc);
+            sink.diagnostic(&cyc);
             out.lints += 1;
         }
     }
@@ -1298,14 +1291,14 @@ pub fn project_findings<O: Output>(
     // Both report under `contract`, so both go through the selection. Publishing itself is
     // not gated on it: writing a contract's type where the config says to put it is work
     // the command was asked to do, and only what it has to say about it is a finding.
-    let problems: Vec<String> = w
+    let problems: Vec<Diagnostic> = w
         .contract_problems
         .iter()
         .chain(&publish_problems)
         .cloned()
         .collect();
     for p in w.lints.keep(problems) {
-        sink.diag(Severity::Lint, &p);
+        sink.diagnostic(&p);
         out.lints += 1;
     }
     // A name two modules implement: the project's own `src/mathx.tl` and a dependency
@@ -1320,7 +1313,7 @@ pub fn project_findings<O: Output>(
             .map(|(_, p, _)| display_path(p))
             .unwrap_or_else(|| crate::config::CONFIG_NAME.to_string());
         for p in m.import_problems() {
-            sink.diag(Severity::Error, &format!("{at}:1:1: {p}"));
+            sink.diagnostic(&Diagnostic::new(Severity::Error, at.clone(), 1, 1, p, None));
             out.errors += 1;
         }
         for c in m.conflicts(crate::model::View::Source) {
@@ -1330,16 +1323,19 @@ pub fn project_findings<O: Output>(
                 .map(|cl| format!("{} ({})", cl.module.describe(), display_path(&cl.file)))
                 .collect();
             for cl in &c.claims {
-                sink.diag(
+                sink.diagnostic(&Diagnostic::new(
                     Severity::Error,
-                    &format!(
-                        "{}:1:1: module name '{}' has more than one owner: {}. A name \
-                         belongs to one module; rename one of them",
-                        display_path(&cl.file),
+                    display_path(&cl.file),
+                    1,
+                    1,
+                    format!(
+                        "module name '{}' has more than one owner: {}. A name belongs to one \
+                         module; rename one of them",
                         c.name,
                         owners.join(", ")
                     ),
-                );
+                    None,
+                ));
                 out.errors += 1;
             }
         }
@@ -1354,7 +1350,7 @@ pub fn project_findings<O: Output>(
             w.contracts,
             w.cargo_root,
         )) {
-            sink.diag(Severity::Lint, &l);
+            sink.diagnostic(&l);
             out.lints += 1;
         }
     }

@@ -39,7 +39,10 @@ fn two_file_cycle_is_reported_once() {
         "local a = require(\"a\")\nlocal record b\nend\nprint(a)\nreturn b\n",
     );
     let infos = check_all(&dir, &["a.tl", "b.tl"]);
-    let cycles = require_cycles(&infos);
+    let cycles: Vec<String> = require_cycles(&infos)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
     assert_eq!(cycles.len(), 1, "{cycles:?}");
     let c = &cycles[0];
     assert!(c.contains("require cycle: a.tl -> b.tl -> a.tl"), "{c}");
@@ -82,7 +85,10 @@ fn three_file_cycle_names_the_loop() {
         "local a = require(\"a\")\nprint(a)\nreturn {}\n",
     );
     let infos = check_all(&dir, &["a.tl", "b.tl", "c.tl"]);
-    let cycles = require_cycles(&infos);
+    let cycles: Vec<String> = require_cycles(&infos)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
     assert_eq!(cycles.len(), 1, "{cycles:?}");
     assert!(
         cycles[0].contains("a.tl -> b.tl -> c.tl -> a.tl"),

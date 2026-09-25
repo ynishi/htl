@@ -125,6 +125,31 @@ impl std::fmt::Display for Diagnostic {
 }
 
 impl Diagnostic {
+    /// A finding made by htl rather than read from the checker: `file` as the report
+    /// should spell it, the 1-based position, the sentence alone, and the rule it is said
+    /// under (`None` for an error that is not a lint's). `fix`, `required_by` and `origin`
+    /// start empty.
+    pub fn new(
+        severity: Severity,
+        file: impl Into<String>,
+        line: usize,
+        col: usize,
+        message: impl Into<String>,
+        rule: Option<&str>,
+    ) -> Self {
+        Self {
+            severity,
+            file: file.into(),
+            line,
+            col,
+            rule: rule.map(str::to_string),
+            message: message.into(),
+            fix: None,
+            required_by: None,
+            origin: None,
+        }
+    }
+
     /// `"<file>:<line>:<col>: <message>"` — what the checker formats — into its parts.
     /// Text that is not in that shape keeps the whole of itself as the message, with no
     /// file and no position.
