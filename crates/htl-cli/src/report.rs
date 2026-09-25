@@ -1,6 +1,26 @@
 //! `--format json`: the same facts the text output prints, as one JSON document on
 //! stdout (text goes to stderr, so the two never mix), and the same exit code as in text
 //! mode. Field names are stable; new fields may be added, existing ones are not renamed.
+//!
+//! - `check`: `{ files, patched, diagnostics: [{ severity: "error"|"warning"|"lint", file,
+//!   line, col, rule?, message, fix?, required_by?, origin? }], summary: { errors, warnings,
+//!   lints, denied, strict, ok, cached, replayed } }` ([`CheckReport`], [`CheckSummary`],
+//!   `htl::Diagnostic`). `fix` is `{ applicability: "safe"|"unsafe"|"suggest", edits: [{
+//!   line, col, end_line, end_col, text }] }`.
+//! - `test`: `{ files: [{ path, ok, diagnostics, error?, file_level, passed, failed,
+//!   failures, tests: [{ name, ok, ms }], duration_ms, snapshots_written,
+//!   snapshots_updated }], summary: { files, files_run, passed, failed, files_with_errors,
+//!   replayed, duration_ms, ok, seed }, coverage?: { modules: [{ path, executed, total,
+//!   unexecuted: [[first, last]], never_ran?: [{ name, line }] }], executed, total } }`
+//!   ([`TestFile`], [`TestSummary`]; `coverage` with `--coverage`).
+//! - `unused` and `resolve`: `htl::unused` and `htl::resolve` say their shapes.
+//!
+//! GitHub Actions annotations from a check, for instance:
+//!
+//! ```sh
+//! htl check . --format json | jq -r '.diagnostics[] |
+//!   "::\(if .severity == "error" then "error" else "warning" end) file=\(.file),line=\(.line),col=\(.col)::\(.message)"'
+//! ```
 
 use anyhow::Result;
 use htl::testing::FileReport;

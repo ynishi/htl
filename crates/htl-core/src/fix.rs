@@ -7,7 +7,27 @@
 //! is reverted; everything applied is reported, not only what remains. A file the
 //! parser rejects is never touched; type errors do not block (their positions are
 //! sound, and a fix may be what removes them), the revert is the guard.
-
+//!
+//! # What `htl fix` does today
+//!
+//! Every fix has an [`Applicability`]: `safe` (what the program does at run time is
+//! unchanged), `unsafe` (it may change; applied only with `--unsafe`), `suggest` (shown,
+//! never applied). A forward reference gets its declaration inserted into the record
+//! (safe); `explicit-number` gets `: number` (safe); `enum-table` gets the entries a
+//! `{string: E}` lookup is missing (safe); `struct-fields` gets the fields the site leaves
+//! out, one entry each, in the order the record declares them (suggest — what it writes is
+//! `hp = htl_fixme("integer")`); `no-global` becomes `local` (unsafe). `htl.toml`
+//! `[fix] unsafe = ["no-global"]` promotes a rule, `disable = [..]` turns its fix off,
+//! `--rule a,b` limits a run; the names are every rule `htl check --list-lints` names plus
+//! `forward-ref` and `tl:error`, and a name from neither set is refused (`--rule
+//! forwardref` is an error, not a run that fixed nothing).
+//!
+//! A file git reports as modified or staged is refused (`--allow-dirty`), and so is a file
+//! outside a repository (`--allow-no-vcs`); `--dry-run` reports without writing, `--diff`
+//! prints a unified diff per file instead. Everything applied is listed (`fixed:
+//! file:line: rule (safe)`), as is everything skipped and why; what is left is reported and
+//! judged as `htl check` reports and judges it, and `--exit-non-zero-on-fix` also fails
+//! when a file changed, for CI.
 use crate::{Applicability, CheckInfo, Diagnostic, Edit, Htl};
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeSet;

@@ -18,10 +18,33 @@
 //! field is nilable already and a return position has no `?`, while the mark on a
 //! parameter is what lets a caller leave the argument out.
 //!
+//! # What each Rust shape becomes
+//!
+//! | Rust | Teal declaration | crosses as |
+//! |---|---|---|
+//! | `struct Point { x: f64, y: f64 }` | `record Point` | a table |
+//! | `enum Mode { Fast, Careful }` | `enum Mode "Fast" "Careful" end` | the variant name, a string; any other string is refused: `Mode: expected one of "Fast", "Careful", got "fst"` |
+//! | `enum Shape { Dot, Circle(f64), Rect { w: f64, h: f64 } }` | `record Shape_Dot`, `record Shape_Circle`, `record Shape_Rect`, each `where self.kind == "…"`, and `type Shape = Shape_Dot \| Shape_Circle \| Shape_Rect` | a table with `kind`; a newtype payload under `value`, struct fields under their names; `union-exhaustive` counts the variants, and a missing field reads `Shape.Rect.h: expected number, got nil` |
+//! | `#[teal(rename_all = "snake_case")] enum State { Open, InReview }` | `enum State "open" "in_review" end` | the renamed word: `"open"` is accepted, `"Open"` is refused (`State: expected one of "open", "in_review", got "Open"`) |
+//! | `struct Label(String)` | `type Label = string` | whatever the inner type crosses as |
+//! | `Option<T>` | `T` as a field and as a return, `name?: T` as a method parameter | nil where the Rust side has `None`; the mark on a parameter is what lets a caller write `api:find("x")` |
+//! | `Vec<T>` / `&[T]` / `[T; N]` / `VecDeque<T>` / `HashSet<T>` | `{T}` | a table used as a sequence |
+//! | `HashMap<K, V>` / `BTreeMap<K, V>` | `{K:V}` | a table keyed by `K` |
+//! | `mlua::Value` / `serde_json::Value` | `any` | unchanged: the deliberate escape hatch |
+//!
+//! A data-carrying enum is declared nested in the host module (`records = [Shape]`),
+//! where its variant records are reachable as `host.Shape_Circle` for `is`; `uses =
+//! [Name]` imports a type from another module with `local type Name = require("Name")`.
+//! `#[teal(rename_all = "..")]` on an enum takes serde's set — `lowercase`, `UPPERCASE`,
+//! `PascalCase`, `camelCase`, `snake_case`, `SCREAMING_SNAKE_CASE`, `kebab-case`,
+//! `SCREAMING-KEBAB-CASE` — and `#[teal(name = "..")]` on one variant overrides it. A
+//! table coming back that does not fit says which record, which field, what was declared
+//! and what arrived ([`crate::teal::FieldError`]): `Outcome.cause: expected string, got
+//! nil`.
+//!
 //! # Why `#[derive(TealRecord)]` lowers the way it does
 //!
-//! What each Rust shape becomes on the Teal side is tabled in README "Embedding in
-//! Rust"; this is the reasoning behind the choices there.
+//! This is the reasoning behind the table above.
 //!
 //! - **A data-carrying enum is a union of `where`-discriminated records**, not one
 //!   record with every variant's fields optional. Teal refuses a plain union of two

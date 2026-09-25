@@ -57,7 +57,20 @@
 //! a `---@contract` type published for mod authors, an SDK a consumer requires. Every one
 //! of those reads a field no walk of this project's `.tl` can see, and a rule that fires
 //! on them is a rule nobody can act on.
-
+//!
+//! # What it prints
+//!
+//! ```text
+//! module: src/legacy/parser.tl (legacy.parser)
+//! dependency: strx
+//! htl unused: 1 module, 1 dependency [68 considered, 67 reached, 39 entries]
+//! ```
+//!
+//! The exit code is 0 whatever it finds, unless `--exit-non-zero-on-unused` says
+//! otherwise: "unused" is a question about intent, so CI opts in rather than out.
+//! `--format json`: `{ modules: [{ path, module? }], dependencies: [{ name }], entries: [{
+//! path, module?, kind: "main"|"test"|"contract"|"build"|"host" }], summary: { considered,
+//! reached, entries, modules, dependencies, no_entry, check_errors, ok } }`.
 use crate::cache;
 use crate::project::{self, Config};
 use anyhow::Result;

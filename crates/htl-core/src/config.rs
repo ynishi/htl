@@ -2,38 +2,48 @@
 //!
 //! ```toml
 //! [toolchain]
-//! htl = "0.4"               # the htl command this project expects; a mismatch is refused
+//! htl = "0.8"               # the htl command this project expects; a mismatch is refused
 //!
 //! [lint]
-//! strict = true             # every `warn` counts as `deny`: fails htl check, htl fix,
+//! strict = true             # every warn counts as deny: fails htl check, htl fix,
 //!                           # htl build and include_tl! (not htl test / run / gen)
 //!
-//! [lint.rules]              # a level per rule: allow (not reported) / warn (reported,
-//! nil-index = "deny"        # advisory) / deny (reported, fails htl check)
-//! class-record = "warn"
+//! [lint.rules]              # allow = not reported, warn = reported, deny = fails the run
+//! nil-index = "deny"
+//! class-record = "warn"     # allow by default: seen without failing the run
 //! shadow-local = "allow"
-//! "tl:hint" = "allow"       # Teal's warning kinds: quote the key, `:` is not a bare one
+//! "tl:hint" = "allow"       # a warning kind of the Teal compiler; quote the `:`
 //!
 //! [fmt]
 //! indent = 3
 //!
-//! [layout]
-//! source = "src"     # this project's own .tl; "." for a flat project
-//! types  = "types"   # hand-written .d.tl for modules something else provides
-//! tests  = "tests"   # tests, and helpers only tests may require
+//! [layout]                  # where this project's own files live
+//! source = "src"            # its .tl; "." for a flat project
+//! types = "types"           # hand-written .d.tl for modules something else provides
+//! tests = "tests"           # tests, and the helpers only tests may require
 //!
 //! [check]
-//! paths = ["mods"]   # extra dirs the checker resolves require() from
+//! paths = ["mods", "~/.cache/tsk/sdk"]   # extra dirs require() resolves from while checking
 //!
 //! [imports]
-//! mathx = "dep:mathx"  # a name the project and a dependency share: which one it means
+//! mathx = "dep:mathx"       # a name the project and a dependency share: which one it means
+//! mathx_local = "own:mathx" # the project's own mathx, under a name of its choosing
 //!
-//! [[contract]]
-//! dir = "mods"                 # or "sites/*" for one level of subdirectories
-//! type = "defs.Mod"
-//! require_fields = ["name", "monsters"]  # or `true` for every declared field
-//! exclude = ["defs", "modkit"] # modules in `dir` that are not held to the contract
-//! # module = "Site"            # only this module name (in each dir) is held to it
+//! [build]
+//! target = "bin"            # what runs this project's output: hb (the default when absent),
+//!                           # bin, cdylib, window
+//! # extra = ["modkit"]      # modules only a dynamic require reaches, for htl build
+//! # host = ["engine"]       # a module the host provides that the project cannot see
+//!
+//! [[contract]]              # where this project accepts modules written outside it
+//! dir = "mods"              # relative to htl.toml; "sites/*" = every subdirectory of sites/
+//! # module = "Site"         # optional: only this module name (in each dir) is held to it
+//! # exclude = ["defs"]      # optional: modules in dir not held to it (a helper, an SDK)
+//! # enforced_by = "mods/_validate.lua"   # where the host enforces it, when the scan cannot see
+//!
+//! [fix]
+//! # unsafe = ["no-global"]  # rules whose fix htl fix applies without --unsafe
+//! # disable = ["contract"]  # rules whose fix is never applied
 //! ```
 //!
 //! Found by walking up from a file or directory, like `mlua-pkg.toml`. Command-line
@@ -167,6 +177,12 @@ impl HtlConfig {
 ///
 /// htl does not install anything — it is one binary, not a toolchain manager — so a
 /// mismatch is reported and the message names `cargo install htl-cli`.
+///
+/// The crate and the CLI are released together, so `htl check` also prints one line when
+/// the `htl = "0.8"` in the project's `Cargo.toml` does not admit the command running —
+/// `htl 0.8.0; Cargo.toml asks for htl 0.7.1 — the crate and the CLI are meant to move
+/// together (cargo install htl-cli --version 0.7.1, or bump the dependency)`. A warning
+/// and nothing more; a `path` or `git` dependency states no version and is passed over.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolchainConfig {

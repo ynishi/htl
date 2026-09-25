@@ -1,7 +1,9 @@
 # htl — pointers for coding agents
 
-- What htl is, the CLI, embedding, lints, tests, `htl.toml`, bundles, pitfalls,
-  running a consumer against an unpublished htl: [README.md](README.md)
+- What htl is, how to install it, one example of each way in, running a consumer
+  against an unpublished htl: [README.md](README.md). The reference — the CLI,
+  embedding, lints, tests, `htl.toml`, bundles — is the doc comments: `cargo doc`,
+  `htl --help`, `htl check --list-lints`.
 - Issue labels, branches, verification, commit format, pull requests:
   [CONTRIBUTING.md](CONTRIBUTING.md)
 - Never work on `main`; one branch per issue (`<type>/<slug>`), a worktree under

@@ -13,9 +13,20 @@ use std::str::FromStr;
 
 /// **A build target is what runs htl's output.** The `htl` binary runs a `.hb` bundle; the
 /// OS runs a native binary; a caller written in C, Python or C# loads a `cdylib`. That is
-/// the axis, and it is the only thing the entries below differ about — README
-/// "[Build targets](https://github.com/ynishi/htl#build-targets---target-name)" has the
-/// table of what each one produces.
+/// the axis, and it is the only thing the entries below differ about:
+///
+/// | target | what runs the output | output | Rust in the project |
+/// |---|---|---|---|
+/// | `hb` (the default) — plain `htl new`, then `htl build` | the `htl` binary, `htl run app.hb` | a `.hb` bundle | no |
+/// | `bin` | the OS, as a binary | a binary (library + a thin `main.rs`) | the user's crate |
+/// | `cdylib` | a C / Python / Unity caller | `cdylib` + `staticlib` + a header | the user's crate |
+/// | `window` | the OS, as a window | a binary that opens a window (library + `main.rs` calling `htl_mq::run`) | the user's crate, plus `htl-mq` |
+///
+/// *Host* is the other axis: the Rust side that embeds the Lua state, what `[build] host`
+/// and `htl build --host` name the modules of. `htl.toml` records the target as `[build]
+/// target` (absent means `hb`), `htl new --target <name>` writes it, `htl init --target
+/// <name>` adds the Rust side to a project that predates it, and `htl build` refuses a
+/// project whose target is not `hb`, naming the command that does build it.
 ///
 /// # What is in the enum, and what is derived from it
 ///

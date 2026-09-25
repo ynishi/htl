@@ -48,6 +48,37 @@
 //! integer case is the one a hand-written layer usually gets wrong by returning `1 / 0 /
 //! -1` with three meanings; here the value has its own out-parameter and the return is
 //! only ever a status.
+//!
+//! # A block, end to end
+//!
+//! ```rust,ignore
+//! use htl::{Htl, c_export, ffi};
+//!
+//! pub struct Game { h: Htl, depth: i32 }
+//!
+//! #[c_export(prefix = "game", header = "include/game.h")]
+//! impl Game {
+//!     // The opener: options as one JSON object, plus the flag `game_interrupt` sets.
+//!     pub fn open(options: &str, interrupt: ffi::Interrupt) -> Result<Self, String> {
+//!         let h = Htl::new().map_err(|e| e.to_string())?;
+//!         interrupt.install(&h).map_err(|e| e.to_string())?;   // hook: stops a runaway mod
+//!         Ok(Game { h, depth: 0 })
+//!     }
+//!     pub fn frame(&self) -> String { /* … */ }                // char *: the text
+//!     pub fn state(&self) -> Frame { /* … */ }                 // char *: JSON, via serde
+//!     pub fn key(&mut self, k: &str) -> Result<(), String> { } // int: a status
+//!     pub fn depth(&self) -> i32 { self.depth }                // int status, value in `out`
+//! }
+//! ```
+//!
+//! The host's `Cargo.toml` adds `htl = { version = "…", features = ["ffi"] }` and
+//! `crate-type = ["rlib", "cdylib"]` (plus `"staticlib"` for Unity on iOS); `cargo build`
+//! writes `include/game.h`, and so does `htl dts` without a build. What the caller holds
+//! and who frees it, the status codes, the panic guard, threads and interrupts are
+//! [`crate::ffi`]'s; the payload's `"v"` and `GAME_ABI_VERSION` are
+//! [`crate::ffi::PAYLOAD_VERSION`] and [`crate::ffi::ABI_VERSION`]. `htl new --lib
+//! --target cdylib <name>` writes a project of this shape, with a caller in C and one in
+//! Python that do the round trip and free what they are handed.
 
 use crate::dts::{HostDecl, HostMethod, HostParam, is_result};
 use syn::punctuated::Punctuated;

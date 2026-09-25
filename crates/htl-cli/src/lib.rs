@@ -8,7 +8,7 @@
 
 use htl::cache;
 mod junit;
-mod report;
+pub mod report;
 mod scaffold;
 
 /// Output format of every command that has `--format`. One enum, so its help must be
@@ -376,8 +376,8 @@ Examples:
                                    built against a local checkout of this repository
   htl new hello --no-x             without the htlx dependency the manifest gets by default
 
-Build targets: https://github.com/ynishi/htl#build-targets---target-name
-The cdylib target: https://github.com/ynishi/htl#the-cdylib-target---target-cdylib
+Build targets: https://docs.rs/htl/latest/htl/build_target/enum.BuildTarget.html
+Layout of a project: https://github.com/ynishi/htl#layout-of-a-project-htl-new
 ")]
     New {
         name: String,

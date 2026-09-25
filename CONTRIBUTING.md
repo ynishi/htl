@@ -95,12 +95,18 @@ thick rather than thin: the design is in there, not only the signatures.
 - The same for `.tl`: the module record is the public API, `---` comments above
   it and its functions are the doc.
 
-`cargo doc` is where a reader is sent. When a comment and an issue or a chat
-disagree, the code wins, then the comment.
+`cargo doc` is where a reader is sent, the way godoc and docs.rs are: the
+reference *is* the doc comments, and there is no second one. A new flag is done
+when its clap doc says what it does, a new lint when its entry in `lint::RULES`
+and the `htl::lint` module doc do, a new config key when its field in `config.rs`
+does; nothing has to be repeated anywhere for the change to count. When a comment
+and an issue or a chat disagree, the code wins, then the comment.
 
-Beyond doc comments there is one place, and nothing else: README.md, the
-user-facing reference (CLI table, embedding, lints, tests, `htl.toml`, bundles,
-pitfalls). A new flag, lint or config key is not done until it is in there.
+README.md is the front door, not a reference: what htl is, how to install it, one
+example of each way in, and links into docs.rs for the rest. A paragraph that
+explains a rule belongs on the item that decides the rule, and the README links
+to it; a second copy is the one that drifts, which is how the README came to
+disagree with the code in sixteen places before #323.
 
 Write a rule once, where the thing it constrains is defined, and link to it
 from anywhere else; a second copy is the one nobody updates.

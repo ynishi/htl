@@ -1153,6 +1153,20 @@ impl Htl {
     /// Teal the host does not trust leaves `debug` out. A memory limit is checked after
     /// Lua's emergency collection, and `MemoryError` is what comes back. `htl check`
     /// settles what a module *is*; what it may *do* is settled here, by the host.
+    ///
+    /// ```rust,ignore
+    /// use htl::Htl;
+    /// use htl::mlua::{Lua, LuaOptions, StdLib};
+    ///
+    /// let checker = Htl::new()?;                     // the checker keeps everything it needs
+    /// // SAFETY: a state that loads bundles has to accept binary chunks, which mlua's safe
+    /// // `new_with` refuses; this one loads only what the host hands it.
+    /// let lua = unsafe {
+    ///     Lua::unsafe_new_with(StdLib::ALL_SAFE ^ StdLib::OS ^ StdLib::IO, LuaOptions::default())
+    /// };
+    /// lua.set_memory_limit(8 << 20)?;                // mlua's: past it, an allocation is `MemoryError`
+    /// let h = Htl::with_checker_lua(&checker, lua)?; // the program runs here; `os` and `io` are nil
+    /// ```
     pub fn with_checker_lua(checker: &Htl, lua: Lua) -> Result<Self> {
         let r: Table = lua
             .load(RUNTIME_PRELUDE)

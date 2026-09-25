@@ -20,7 +20,9 @@
 //! will put into the diagnostics, plus the lint selection and the working directory.
 //! `--strict` and `--format` are deliberately absent: they change how a run is summarized
 //! and what it exits with, not what any module reports, so runs that differ only in those
-//! share their modules' entries.
+//! share their modules' entries. A level is in the key because it is written in the same spec as
+//! which rules run — moving one rule between `warn` and `deny` changes no diagnostic, and
+//! re-checks anyway.
 //!
 //! The **inputs** are the module and everything reading it required, by content hash. The
 //! **probes** say what each name the module required resolves to — a new `.tl` appearing

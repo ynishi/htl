@@ -40,6 +40,12 @@
 //!
 //! Version 1 bundles (`HTLB\x01`: entry + bytecode modules, no metadata) still decode;
 //! [`format_version`] tells the two apart from the bytes.
+//!
+//! `htl bundle info app.hb` prints what the file records — format version, the htl that
+//! built it, payload kind, the Lua the bytecode is for in the same words as the mismatch
+//! message, entry, modules, host-provided names — without creating a Lua state, which is
+//! what a build step checks in and a bug report pastes; `--format json` for the same. A
+//! `--source` bundle says its Lua is `any`; a format 1 bundle says it was not recorded.
 
 use anyhow::{Result, bail};
 use serde::Serialize;

@@ -8,7 +8,43 @@
 //! plugs in the same way, bringing its own `.d.tl`; `test.lua`'s header is the contract in
 //! full. A file that uses no such library is judged at file level: it passes if it runs
 //! to completion.
-
+//!
+//! # Writing a test
+//!
+//! ```lua
+//! local t = require("htl.test")            -- typed via test.d.tl
+//! t.describe("util.add", function()
+//!    t.it("adds", function()
+//!       t.expect(util.add({x=1,y=2}, {x=10,y=20})):to_equal({x=11,y=22})
+//!    end)
+//! end)
+//! ```
+//!
+//! `expect(x)` is generic, so `t.expect(1 + 1):to_equal("2")` is a *type* error and the
+//! file is refused before it runs; the matchers are `test.d.tl`'s `Expect<T>`, and a
+//! matcher that is not one of them is a type error with the list appended. A function
+//! returning two values is asserted with `t.expect_all(f()):to_equal(false, "no door")`.
+//! `t.rng()` is the run's seeded stream (`rng()`, `rng(m)`, `rng(m, n)`; `math.random` is
+//! the same stream), and `to_match_snapshot("name")` compares with a `.snap` under
+//! [`snapshot_dir`].
+//!
+//! # Running
+//!
+//! `htl test [paths] [--filter substr] [--lib MOD] [--lint rule=level] [--fail-fast] [-v |
+//! -q] [--slow MS] [--update] [--seed N] [--coverage [--coverage-lines]] [--lcov FILE]
+//! [--junit FILE] [--format json] [--no-cache] [--explain-cache]`. Every run ends with
+//! `htl test: seed 8014255196 (repeat with --seed 8014255196)`; `--coverage` prints, per
+//! `.tl` module of the project's own, how many of its statements ran, and under a module
+//! the functions nothing entered:
+//!
+//! ```text
+//! coverage: src/combat.tl      124/181   68.4%
+//!           never ran: resolve_counter (61), flee_path (130)
+//! ```
+//!
+//! `--coverage-lines` adds the unexecuted line ranges; `--lcov` writes the same run as an
+//! lcov tracefile ([`crate::project::CoverageReport::lcov`]) and `--junit` as a JUnit XML
+//! report; `HTL_PROFILE=1` prints per-phase and per-file timings to stderr.
 use crate::{CheckInfo, Htl, parent_dir, write_if_changed};
 use anyhow::{Context, Result};
 use mlua::{Function, Table, Value};

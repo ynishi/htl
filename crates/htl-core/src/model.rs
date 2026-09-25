@@ -735,6 +735,23 @@ impl Project {
     /// [`TealResolver::from_project`](crate::pkg::TealResolver::from_project). Every name
     /// is then answered by the same module, from the same file, on both sides.
     ///
+    /// ```rust,ignore
+    /// use htl::model::{HostDir, Project, View};
+    ///
+    /// let project = Project::for_host(root, &[
+    ///     HostDir::Modules("scripts".into()),     // scripts/a/b.tl is a.b
+    ///     HostDir::Packages("mods".into()),       // mods/mathx/mathx.tl is mathx, mods/mathx/sub.tl mathx.sub
+    ///     HostDir::Declarations("types".into()),  // types/htl-mq/mq.d.tl is mq
+    /// ]);
+    /// h.apply_model(&project, View::Source)?;     // the checker: what every htl command uses
+    ///
+    /// let mut reg = mlua_pkg::Registry::new();
+    /// reg.add(NativeResolver::new().add("host", |lua| { /* Rust table */ }));   // before the Teal resolver
+    /// reg.add(htl::pkg::TealResolver::from_project(&project)?); // .tl -> check + gen; .d.tl -> type-only table
+    /// reg.add(mlua_pkg::resolvers::FsResolver::new(root.join("scripts"))?);
+    /// reg.install(h.lua())?;
+    /// ```
+    ///
     /// # What the model holds
     ///
     /// - The host's own module ([`Owner::Own`]), named after `root`'s last component, with

@@ -47,7 +47,31 @@
 //! The markers are comments, so the file stays valid Teal and other tooling ignores them.
 //! Reading them is a scan of the search paths, not a type-check: a record is found by the
 //! line it is declared on, the way `---@struct` is (see `prelude.lua`).
-
+//!
+//! # What is published, and the two lints
+//!
+//! The declaring module is written out with its bodies removed, to `types/<module>.d.tl`
+//! or where `---@contract(dts = "…")` says ([`publish`]):
+//!
+//! ```text
+//! function defs.describe(m: Mod): string    -->    describe: function(m: Mod): string
+//!    return m.name
+//! end
+//! ```
+//!
+//! `contract` reports a module under the directory whose return value is not assignable
+//! to the record, or whose returned table literal leaves a `---@required` field out (the
+//! literal is found through `return { … }`, `return define({ … })`, `return { … } as T`,
+//! and `local m: T = { … } … m.f = … return m`), and a marker that cannot be turned into
+//! a contract. `contract-unenforced` reports a contract the host never builds resolvers
+//! for ([`crate::pkg::contract_resolvers`]); enforcement the scan cannot see is named
+//! instead, and that contract alone is then not held to the scan:
+//!
+//! ```toml
+//! [[contract]]
+//! dir = "mods"
+//! enforced_by = "mods/_validate.lua"   # relative to htl.toml; ~ and absolute paths work
+//! ```
 use crate::Diagnostic;
 use crate::config::{Contract, HtlConfig, RequireFields};
 use anyhow::Result;

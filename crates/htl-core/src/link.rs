@@ -49,7 +49,36 @@
 //! have to be keyed on the strip and debug flags and on the Lua the bytecode is for, for
 //! no saving. What a bundle contains — module order, fingerprint, host modules — is the
 //! same whether a module was generated or replayed.
-
+//!
+//! # `htl build`, and the bundle from Rust
+//!
+//! `htl build src/main.tl -o app.hb` follows `require("<literal>")` from the entry and
+//! links everything it reaches into one file; `htl run app.hb` runs it, and a host does
+//! [`Htl::run_bundle`] after registering its modules. A missing `require` is said once,
+//! and the line says where to declare the module: in an `x.d.tl`, under `[build] host`,
+//! or under `[build] extra` for a dynamic `require` (`--extra`, `--host` on the command
+//! line). The payload is stripped bytecode unless `--debug` ([`LinkOptions::debug`]) or
+//! `--source` ([`LinkOptions::source`]); `htl bundle info app.hb` prints what the file
+//! records ([`crate::bundle`]). `htl build <dir>` is the older form, every `.tl` under a
+//! directory. A second [`Htl::install_bundle`] writes nothing; a newer bundle goes into a
+//! running state with [`Htl::replace_bundle`].
+//!
+//! From Rust, `include_bundle!` does the same at `cargo build`:
+//!
+//! ```rust,ignore
+//! const BUNDLE: &[u8] = htl::include_bundle!("src/main.tl", extra = ["modkit"]);
+//! // The host's names are the project's, as for `htl build`: `Host`'s `#[host_module]`, `[build]
+//! // host` and `std.*` are not bundled. `host = [..]` is optional, for a module the project
+//! // cannot see (registered by hand, or by another crate). payload = "source" for a target
+//! // whose Lua header differs (big-endian, non-default number types; see `bundle`);
+//! // debug = true keeps line numbers. [build] extra in htl.toml is merged in.
+//! Host { .. }.htl_preload(&h)?;
+//! h.run_bundle(&htl::bundle::Bundle::decode(BUNDLE)?, &args)?;
+//! ```
+//!
+//! From a `build.rs`, [`link`] does the same: take the bundle through [`Linked::bundle`]
+//! / [`Linked::into_bundle`], and emit `cargo:rerun-if-changed=<file>` for each of
+//! [`Linked::inputs`].
 use crate::bundle::{Bundle, Kind, Module};
 use crate::cache::{self, Cache};
 use crate::{CheckInfo, Htl, RequireSite};

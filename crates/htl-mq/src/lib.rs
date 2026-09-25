@@ -18,6 +18,52 @@
 //!
 //! Not here: textures and audio, which need asset paths, and that is a host decision;
 //! and the web target, since macroquad's wasm path and mlua's are different targets.
+//!
+//! # A window, end to end
+//!
+//! ```toml
+//! [dependencies]
+//! htl = "0.8"
+//! htl-mq = "0.8"          # macroquad comes with it
+//! ```
+//!
+//! ```rust,ignore
+//! use htl::bundle::Bundle;
+//! use htl::mlua::Table;
+//! use htl::{Htl, include_bundle};
+//!
+//! // `mq` is htl-mq's: its declaration is `types/htl-mq/mq.d.tl`, which `htl dts` writes.
+//! // `host` is this crate's `#[host_module]`, which the build knows without being told.
+//! const MAIN: &[u8] = include_bundle!("src/main.tl", host = ["game", "mq"], debug = true);
+//!
+//! fn main() -> anyhow::Result<()> {
+//!     let h = Htl::new()?;
+//!     game::preload(&h)?;                       // the project's own host module and Teal
+//!     htl_mq::Mq.htl_preload(&h)?;              // `require("mq")`
+//!     h.install_bundle(&Bundle::decode(MAIN)?)?;
+//!     let game: Table = h.lua().load("return require('main')").eval()?;
+//!     htl_mq::run(h, game, htl_mq::conf("game", 800, 600))
+//! }
+//! ```
+//!
+//! The entry script returns the game table:
+//!
+//! ```lua
+//! local mq = require("mq")
+//! local x = 40.0
+//!
+//! return {
+//!    update = function(dt: number): boolean
+//!       x = x + 120 * dt
+//!       return not mq:is_key_pressed("Escape")
+//!    end,
+//!    draw = function()
+//!       mq:clear_background({r = 0.08, g = 0.08, b = 0.12, a = 1})
+//!       mq:draw_circle(x, 300, 24, {r = 1, g = 0.6, b = 0.2, a = 1})
+//!       mq:draw_text("fps " .. mq:fps(), 16, 32, 28, {r = 1, g = 1, b = 1, a = 1})
+//!    end,
+//! }
+//! ```
 
 use htl::mlua::{Function, Table};
 use htl::{Htl, TealRecord, host_module};

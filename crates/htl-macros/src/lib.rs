@@ -904,6 +904,34 @@ fn union_from(en: &ItemEnum, name: &str, variants: &[dts::UnionVariant]) -> Toke
 /// the next `cargo build` fails inside the `.tl` that relied on it: the declaration is
 /// rewritten first, and `include_tl!` / `include_bundle!` check against it. The
 /// breakdown is `htl_core::dts::host_decl`, which `htl dts` runs without building.
+///
+/// `&str`, `&[T]` and `&Record` parameters are accepted (`&mut` is not); an `Option<T>`
+/// parameter is declared `name?: T`, so a caller may write `api:find("x")`; another host
+/// type comes in as `UserDataRef<T>` (`UserDataRefMut<T>` to mutate it, `UserDataOwned<T>`
+/// to keep it) and is declared as `T`; types from other modules come in via `uses =
+/// [Name]`, nested `#[derive(TealRecord)]` types via `records = [..]`. `Result<T, E>`
+/// returns raise a Lua error on `Err` by default; with `errors = "return"` on the
+/// attribute they come back Lua-style (`v, nil` / `nil, err`), so `local ok, err =
+/// store:write(name, text)` needs no `pcall`. A parameter that may see a value from
+/// outside checked Teal is a `Strict<T>` (`htl::teal::Strict`).
+///
+/// With the `async` feature a method may be `async`, in the same `impl` as the sync
+/// ones:
+///
+/// ```rust,ignore
+/// #[host_module(name = "api")]
+/// impl Api {
+///     pub fn seen(&self) -> u32 { self.calls }
+///     pub async fn fetch(&self, path: String) -> String { /* … */ }
+/// }
+/// ```
+///
+/// Three things follow from mlua, not from htl: the executor is the caller's (the method
+/// runs under `call_async` or an `AsyncThread` the host drives; a plain `load(..).eval()`
+/// raises rather than blocking); the receiver is borrowed across every await
+/// (`add_async_method` hands over a `UserDataRef<T>` the future holds until it resolves,
+/// so prefer `&self` over `&mut self`); and the future must be `'static`, and `Send` as
+/// well when mlua's `send` feature is on.
 #[proc_macro_attribute]
 pub fn host_module(attr: TokenStream, item: TokenStream) -> TokenStream {
     let metas = match Punctuated::<Meta, Token![,]>::parse_terminated.parse(attr) {

@@ -1362,6 +1362,19 @@ impl MluaProject {
     /// a directory in the module tree; removing `patch_dir` and the directory returns the
     /// dependency to its fetched form at the next install.
     ///
+    /// ```text
+    ///   patched patches/mathx (mathx at 3f2a9c1)
+    ///   dropped .git, .github, .gitignore (the repository's, not the package's)
+    /// ```
+    ///
+    /// and, on every install after the pin moved:
+    ///
+    /// ```text
+    ///   patch   patches/mathx is not in use (taken from 3f2a9c1, mathx is now at 8b07e44)
+    ///           carry the change forward: commit it, then `htl pkg patch mathx`
+    ///           drop it: remove patch_dir from mlua-pkg.toml and delete patches/mathx
+    /// ```
+    ///
     /// On a dependency that is already patched this refreshes the copy from the revision
     /// the pin now resolves to and records that as the new base. The copy is overwritten
     /// rather than merged — carrying the project's own change forward onto it is a merge
@@ -1749,6 +1762,21 @@ fn no_such_library(checkout: &Path, library: &str) -> String {
 /// host and `htl check` enforce the same contracts from the same source. `root` is the
 /// directory holding `htl.toml` (the path [`HtlConfig::find`](crate::config::HtlConfig::find)
 /// returns, minus the file name). Add them to a `Registry` before the plain resolvers.
+///
+/// ```rust,ignore
+/// let (path, cfg) = htl::config::HtlConfig::find(Path::new("."))?.expect("htl.toml");
+/// let mut reg = mlua_pkg::Registry::new();
+/// for r in htl::pkg::contract_resolvers(&htl::parent_dir(&path), &cfg)? {
+///     reg.add(r); // TealResolver for <root>/mods, expecting the record marked
+///                 // ---@contract for that directory and its ---@required fields
+/// }
+/// ```
+///
+/// Built by hand instead, the same resolver is
+/// `TealResolver::new("mods")?.expect_type("defs.Mod").require_fields(["name", "monsters"])`
+/// ([`expect_type`](TealResolver::expect_type), [`require_fields`](TealResolver::require_fields),
+/// [`require_all_fields`](TealResolver::require_all_fields)) — which restates what the
+/// record already says, and is the drift the `contract-unenforced` lint exists to catch.
 pub fn contract_resolvers(
     root: &Path,
     cfg: &crate::config::HtlConfig,
@@ -1820,7 +1848,10 @@ impl crate::Htl {
     /// [`MluaProject::patch_search_dirs`]. A crate whose Teal has no dependency needs none
     /// of this: the `.tl` is in the package because `src/` is, and the macro reads it
     /// where cargo puts it. A crate whose `mlua-pkg.toml` names a dependency ships the
-    /// dependency itself, as that copy. The copy is committed and the manifest names it,
+    /// dependency itself, as that copy — the whole recipe is `htl pkg patch <dep>` and
+    /// `git add patches/<dep> mlua-pkg.toml mlua-pkg.lock`; nothing else is written by
+    /// hand, no `[check] paths` pointing at the copy and no `exclude` in `Cargo.toml`.
+    /// The copy is committed and the manifest names it,
     /// so the two together are the whole of what a `require` of that dependency needs:
     /// no install, no link, no network, and nothing that has to exist outside what a
     /// clone or a tarball carries. That is the arrangement `cargo vendor` and Go's

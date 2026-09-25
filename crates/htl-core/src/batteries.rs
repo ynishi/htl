@@ -39,7 +39,15 @@
 //! `dts::write_to`, which rewrites unconditionally: this directory is read by every
 //! command on every run, and a file whose mtime moves on each of them is a file every
 //! cache above it has to re-read.
-
+//!
+//! ```lua
+//! local json = require("std.json")         -- typed via std/json.d.tl, inside the binary
+//! local str = require("std.string")
+//! local pretty = require("std.pretty")
+//!
+//! local rows: {Row} = json.decode(text)    -- decode is generic: annotate the result
+//! print(pretty.dump({ name = str.trim(name), rows = #rows }))
+//! ```
 use crate::{Htl, lib_dir, write_if_changed};
 use anyhow::{Context, Result};
 use std::path::PathBuf;

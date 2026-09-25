@@ -364,7 +364,17 @@ pub struct TargetProfile {
 
 /// The default target: the OS runs the output as a binary. A library crate holding the
 /// host module and the embedded scripts, with a thin binary on top when the project has an
-/// entry script.
+/// entry script. `--target bin`, and `--embed` which is its shorthand, add to the tree:
+///
+/// ```text
+/// ├── Cargo.toml             htl + anyhow, and [profile.dev.build-override] opt-level = 3
+/// ├── src/lib.rs             #[host_module] Host, its records, the embedded module,
+/// │                          and pub fn preload(&Htl) registering both
+/// ├── src/host.d.tl          generated from src/lib.rs — by cargo build, and by
+/// │                          htl dts / htl check without building
+/// └── src/main.rs            the binary: preload, then the bundle of src/main.tl it embeds
+///                            (omitted with --lib)
+/// ```
 const BIN: TargetProfile = TargetProfile {
     target: BuildTarget::Bin,
     deps: &[
@@ -404,6 +414,16 @@ const BIN: TargetProfile = TargetProfile {
 /// The sample shows both error paths rather than describing them: the generated `greet`
 /// refuses an empty name in Teal (a Lua `error()`) and `reset` refuses a no-op in Rust (an
 /// `Err`), so the callers have each kind to handle in front of the reader.
+///
+/// ```text
+/// ├── Cargo.toml             crate-type = ["rlib", "cdylib", "staticlib"], htl with
+/// │                          features = ["ffi"], serde
+/// ├── src/lib.rs             the #[host_module] the scripts call, and a #[c_export] Game
+/// │                          the caller holds: open / a text call / JSON / a status / close
+/// ├── include/<mod>.h        written by #[c_export] at cargo build (and by htl dts), committed
+/// ├── examples/c/            main.c + a Makefile: every returned char * goes back to _free
+/// └── examples/python/       run.py: restype = c_void_p and ctypes.cast, never c_char_p
+/// ```
 const CDYLIB: TargetProfile = TargetProfile {
     target: BuildTarget::Cdylib,
     deps: &[
@@ -472,7 +492,19 @@ const CDYLIB: TargetProfile = TargetProfile {
 /// Both generated declarations are committed — `src/fx.d.tl` from the project's own
 /// `#[host_module]`, `types/htl-mq/mq.d.tl` copied out of the dependency — and the first
 /// command in a fresh clone is `htl check .`, which writes both; `cargo build` reads the
-/// second when `include_bundle!` links `mq`.
+/// second when `include_bundle!` links `mq`. `HTL_MQ_FRAMES=60 HTL_MQ_SHOT=out.png cargo
+/// run` stops after sixty frames and writes the last one as a PNG.
+///
+/// ```text
+/// ├── Cargo.toml             htl + htl-mq (under the same pin) + anyhow
+/// ├── src/lib.rs             #[host_module] Fx — the project's own GPU side — the embedded
+/// │                          engine, and preload registering it, `fx` and htl-mq's `mq`
+/// ├── src/fx.d.tl            generated from src/lib.rs by cargo build / htl dts / htl check
+/// ├── src/<mod>/init.tl      the engine: balls in a box, pure rules, no window
+/// ├── src/main.tl            the game table htl_mq::run drives: update(dt), draw()
+/// ├── src/main.rs            the binary: preload, then htl_mq::run
+/// └── types/htl-mq/mq.d.tl   the dependency's declaration, copied in by htl check
+/// ```
 const WINDOW: TargetProfile = TargetProfile {
     target: BuildTarget::Window,
     deps: &[
