@@ -298,7 +298,7 @@ fn candidates(
 ) -> Vec<Candidate> {
     let mut out = Vec::new();
     for (d, fix, is_error) in fixable(check) {
-        let rule = rule_of(&d, is_error);
+        let rule = rule_of(&d);
         let line = d.line;
         if !opts.only.is_empty() && !opts.only.iter().any(|r| r == &rule) {
             continue;
@@ -361,7 +361,7 @@ fn suggestions(check: &CheckInfo, opts: &FixOptions) -> Vec<Candidate> {
         if fix.applicability != Applicability::Suggest {
             continue;
         }
-        let rule = rule_of(&d, is_error);
+        let rule = rule_of(&d);
         if !opts.only.is_empty() && !opts.only.iter().any(|r| r == &rule) {
             continue;
         }
@@ -380,21 +380,17 @@ fn suggestions(check: &CheckInfo, opts: &FixOptions) -> Vec<Candidate> {
     out
 }
 
-/// What `--rule` and `[fix] disable` name a diagnostic by: a lint's own rule, or a class
-/// name for an error, which has none of its own.
+/// What `--rule` and `[fix] disable` name a diagnostic by: a lint's own rule, or for an
+/// error the class its fix is filed under, which the checker sets where it writes the error
+/// (`forward-ref` for a record key used before the function that defines it, `tl:error` for
+/// the rest) rather than this reading it back out of the sentence.
 ///
 /// Both classes are registered rules ([`crate::lint::RULES`], `Surfaces::FixOnly`), so a
 /// filter naming one is a filter naming something that exists. `tl:error` is spelt in the
 /// compiler's namespace like its warning kinds, and for the same reason: it is the
 /// compiler speaking, and bare `error` as a rule name would collide with everything.
-fn rule_of(d: &Diagnostic, is_error: bool) -> String {
-    if !is_error && let Some(rule) = &d.rule {
-        return rule.clone();
-    }
-    if d.message.contains("invalid key '") && d.message.contains("is defined at line") {
-        return "forward-ref".into();
-    }
-    "tl:error".into()
+fn rule_of(d: &Diagnostic) -> String {
+    d.rule.clone().unwrap_or_else(|| "tl:error".into())
 }
 
 /// Apply the candidates whose edits do not overlap an already accepted edit, in

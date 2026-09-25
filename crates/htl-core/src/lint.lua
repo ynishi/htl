@@ -1590,7 +1590,7 @@ function L.run(src, filename, cfg, extra)
    -- Positions are 1-based line / byte column; an insertion has end == start.
    local function report(rule, y, x, msg, fix)
       if allows[y] and allows[y][rule] then return end
-      out[#out + 1] = { rule = rule, y = y or 0, x = x or 0, msg = msg .. " [htl " .. rule .. "]", fix = fix }
+      out[#out + 1] = { rule = rule, y = y or 0, x = x or 0, msg = msg .. " [htl " .. rule .. "]", bare = msg, fix = fix }
    end
    local profile = os.getenv("HTL_PROFILE") ~= nil
    for _, r in ipairs(RULES) do
