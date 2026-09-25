@@ -102,6 +102,28 @@ pub struct Diagnostic {
     pub origin: Option<String>,
 }
 
+/// The text form, and the only place it is made: `<file>:<line>:<col>: <message>`, the
+/// position left out when there is none, and ` [htl <rule>]` after a warning's or a lint's
+/// message. An error's rule is the class its fix is filed under and is not printed: the
+/// text of an error has never carried one.
+///
+/// Every line htl prints about a finding comes from here, whether the finding was just made
+/// or read back from the store, so the two cannot drift apart.
+impl std::fmt::Display for Diagnostic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if !self.file.is_empty() || self.line != 0 {
+            write!(f, "{}:{}:{}: ", self.file, self.line, self.col)?;
+        }
+        f.write_str(&self.message)?;
+        if self.severity != Severity::Error
+            && let Some(rule) = &self.rule
+        {
+            write!(f, " [htl {rule}]")?;
+        }
+        Ok(())
+    }
+}
+
 impl Diagnostic {
     /// `"<file>:<line>:<col>: <message>"` — what the checker formats — into its parts.
     /// Text that is not in that shape keeps the whole of itself as the message, with no

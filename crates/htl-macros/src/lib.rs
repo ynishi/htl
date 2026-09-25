@@ -185,16 +185,21 @@ fn resolve_bundle(
         .map_err(|e| format!("include_bundle!: {e:#}"))?;
     let typed = linked.modules.iter().filter(|m| m.typed).count();
     let cached = (linked.cached, typed);
-    let warnings: Vec<String> = linked
+    let warnings: Vec<htl_core::Diagnostic> = linked
         .checks
         .iter()
-        .flat_map(|(_, ci)| ci.warnings.iter().cloned())
+        .flat_map(|(_, ci)| ci.warning_items.iter().cloned())
+        .collect();
+    let lints: Vec<htl_core::Diagnostic> = linked
+        .checks
+        .iter()
+        .flat_map(|(_, ci)| ci.lint_items.iter().cloned())
         .collect();
     judge(
         "include_bundle!",
         &ck,
         &warnings,
-        &linked.lints,
+        &lints,
         std::env::var("HTL_LINT").ok().as_deref(),
     )?;
     let inputs: Vec<String> = linked
@@ -425,8 +430,8 @@ fn checker_for(tag: &str, manifest_dir: &Path, path: &Path) -> Result<Checker, S
 fn judge(
     tag: &str,
     ck: &Checker,
-    warnings: &[String],
-    lints: &[String],
+    warnings: &[htl_core::Diagnostic],
+    lints: &[htl_core::Diagnostic],
     htl_lint: Option<&str>,
 ) -> Result<(), String> {
     use htl_core::verdict::{Findings, Policy, is_denied, verdict};
@@ -437,11 +442,11 @@ fn judge(
         .with_env(htl_lint)
         .map_err(|e| format!("{tag}: {e}"))?;
     if verdict(&Findings::of(warnings, lints, levels), &policy) {
-        let failing: Vec<&str> = warnings
+        let failing: Vec<String> = warnings
             .iter()
             .chain(lints)
-            .filter(|t| policy.strict || is_denied(t, levels))
-            .map(String::as_str)
+            .filter(|d| policy.strict || is_denied(d, levels))
+            .map(ToString::to_string)
             .collect();
         let why = if policy.strict {
             "strict: every warning and lint fails the build"
@@ -499,8 +504,8 @@ fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Includ
     judge(
         "include_tl!",
         &ck,
-        &ci.warnings,
-        &ci.lints,
+        &ci.warning_items,
+        &ci.lint_items,
         std::env::var("HTL_LINT").ok().as_deref(),
     )?;
 
@@ -1724,7 +1729,10 @@ mod tests {
         let root = scratch("htl-lint-env");
         write(&root.join("src/main.tl"), "local x: any = 1\nprint(x)\n");
         let path = root.join("src/main.tl");
-        let lints = vec![format!("{}:1:7: x is any [htl no-any]", path.display())];
+        let lints = vec![htl_core::Diagnostic::parse(
+            htl_core::Severity::Lint,
+            &format!("{}:1:7: x is any [htl no-any]", path.display()),
+        )];
         let judged = |toml: &str, env: Option<&str>| {
             write(&root.join("htl.toml"), toml);
             let ck = checker_for("include_tl!", &root, &path).unwrap();

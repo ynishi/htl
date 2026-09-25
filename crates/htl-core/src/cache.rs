@@ -84,7 +84,7 @@ use crate::{CheckInfo, DependencyError, Fix, RequireSite};
 /// emits different text is a different checker and every warm entry misses on its own.
 /// What this number is for is a change to the shape of what is stored — a field, a key, a
 /// meaning — which the hash cannot see.
-const FORMAT: u32 = 7;
+const FORMAT: u32 = 8;
 
 /// Where the store lives under the project root. Generated, and `htl init` puts it in
 /// `.gitignore`.
@@ -211,9 +211,10 @@ pub struct Recorded {
     /// because an entry outlives the build that wrote it, and a word this build does not
     /// know has to read back as itself rather than fail the whole entry.
     pub severity: String,
-    /// The finished line, position prefix and `[htl <rule>]` suffix included — what the
-    /// sink was handed, not what it was assembled from.
-    pub text: String,
+    /// The diagnostic's parts. Its text is made from them by the one formatter
+    /// ([`crate::Diagnostic`]'s `Display`) at replay as it was at the original run, which is
+    /// why storing the parts reproduces the run: there is no second way to spell the line.
+    pub item: ItemJson,
     /// The fix the diagnostic carried, for `htl fix` replaying instead of re-checking.
     /// `None` when the diagnostic had none, which is most of them.
     pub fix: Option<FixJson>,
@@ -435,7 +436,8 @@ pub struct ItemJson {
 }
 
 impl ItemJson {
-    fn from_diagnostic(d: &crate::Diagnostic) -> Self {
+    /// `d`'s parts as an entry stores them.
+    pub fn from_diagnostic(d: &crate::Diagnostic) -> Self {
         Self {
             file: d.file.clone(),
             line: d.line,
@@ -445,7 +447,8 @@ impl ItemJson {
         }
     }
 
-    fn to_diagnostic(
+    /// The diagnostic these parts are, with `severity` and `fix`.
+    pub fn to_diagnostic(
         &self,
         severity: crate::Severity,
         fix: Option<crate::Fix>,

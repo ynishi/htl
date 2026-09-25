@@ -23,6 +23,7 @@
 //! lints the editor called warnings), and the answer that held there is this one — one
 //! severity model, and strictness a knob the invoker turns ([`Policy::with_env`]).
 
+use crate::Diagnostic;
 use crate::config::HtlConfig;
 use crate::lint::{Level, Selection};
 
@@ -101,10 +102,10 @@ impl Policy {
 }
 
 impl Findings {
-    /// The findings of a run that holds them as text: Teal's `warnings` and htl's `lints`,
-    /// each counted as `denied` too when its rule is at `deny` in `levels`. What a caller
-    /// with no [`Sink`](crate::project::Sink) counts, by the reading the sink uses.
-    pub fn of(warnings: &[String], lints: &[String], levels: &Selection) -> Self {
+    /// The findings of a run that holds them as values: Teal's `warnings` and htl's
+    /// `lints`, each counted as `denied` too when its rule is at `deny` in `levels`. What a
+    /// caller with no [`Sink`](crate::project::Sink) counts, by the reading the sink uses.
+    pub fn of(warnings: &[Diagnostic], lints: &[Diagnostic], levels: &Selection) -> Self {
         Self {
             errors: 0,
             warnings: warnings.len(),
@@ -112,16 +113,19 @@ impl Findings {
             denied: warnings
                 .iter()
                 .chain(lints)
-                .filter(|t| is_denied(t, levels))
+                .filter(|d| is_denied(d, levels))
                 .count(),
         }
     }
 }
 
-/// Whether a warning or lint, as printed, was said under a rule at `deny` in `levels`: the
-/// rule is the `[htl <rule>]` name it ends with. An error has no rule and no level.
-pub fn is_denied(text: &str, levels: &Selection) -> bool {
-    crate::diagnostic::rule_of(text).is_some_and(|rule| levels.level_of(rule) == Level::Deny)
+/// Whether `d` was said under a rule at `deny` in `levels`. An error is judged as an error
+/// whatever its rule: an error's rule is the class its fix is filed under, not a level.
+pub fn is_denied(d: &Diagnostic, levels: &Selection) -> bool {
+    d.severity != crate::Severity::Error
+        && d.rule
+            .as_deref()
+            .is_some_and(|rule| levels.level_of(rule) == Level::Deny)
 }
 
 /// Whether a run with `findings`, judged by `policy`, fails.
@@ -215,14 +219,14 @@ mod tests {
     }
 
     #[test]
-    fn findings_of_text_count_deny_by_the_rule_each_ends_with() {
+    fn findings_count_deny_by_each_ones_rule() {
         let levels = crate::lint::Lints::parse("require-cycle=deny")
             .unwrap()
             .selection()
             .clone();
         let lints = vec![
-            "a.tl:1:1: x [htl require-cycle]".to_string(),
-            "a.tl:2:1: y [htl nil-index]".to_string(),
+            Diagnostic::parse(crate::Severity::Lint, "a.tl:1:1: x [htl require-cycle]"),
+            Diagnostic::parse(crate::Severity::Lint, "a.tl:2:1: y [htl nil-index]"),
         ];
         let found = Findings::of(&[], &lints, &levels);
         assert_eq!(found, f(0, 0, 2, 1));
