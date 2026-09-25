@@ -145,3 +145,28 @@ fn coverage_is_reported_over_the_modules_the_tests_reached() {
     // And it is the same value the lcov writer works from.
     assert!(cov.lcov(Path::new("/")).contains("purse.tl"));
 }
+
+/// What a host's `#[test]` asserts on names a file the way `htl check` does: the file
+/// folded and spelled by `display_path`, then the checker's error through the one
+/// formatter with the same spelling — not the path as the walk was handed it.
+#[test]
+fn a_failed_check_names_its_file_one_way() {
+    let dir = scratch("check-spelled");
+    write(&dir.join("htl.toml"), "");
+    write(
+        &dir.join("tests").join("x_test.tl"),
+        "local t = require(\"htl.test\")\nlocal x: integer = \"no\"\nt.it(\"a\", function() t.expect(x):to_equal(1) end)\n",
+    );
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+
+    let via = dir.join("sub").join("..");
+    let rep = run_tests(std::slice::from_ref(&via), &Suite::default()).unwrap();
+
+    assert!(!rep.ok());
+    let file = htl_core::project::display_path(&dir.join("tests").join("x_test.tl"));
+    let why = rep.failures();
+    assert!(!why.is_empty());
+    for line in &why {
+        assert!(line.starts_with(&format!("{file}: {file}:2:")), "{why:?}");
+    }
+}

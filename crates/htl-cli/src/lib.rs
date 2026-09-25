@@ -1591,7 +1591,13 @@ fn junit_suite(rep: &htl::testing::FileReport) -> junit::Suite {
         Some(junit::Error {
             message: "type check failed".to_string(),
             kind: "check",
-            body: rep.check.errors.join("\n"),
+            body: rep
+                .check
+                .error_items
+                .iter()
+                .map(|d| d.clone().spelled().to_string())
+                .collect::<Vec<_>>()
+                .join("\n"),
         })
     } else {
         rep.error.as_ref().map(|e| junit::Error {

@@ -160,6 +160,33 @@ fn type_error_withholds_the_bundle() {
     assert!(err.contains("util.tl"), "{err}");
 }
 
+/// The error `into_bundle` hands back — what a failed `include_bundle!` shows — spells a
+/// file as `htl check` does, folded and through `display_path`, rather than as the walk
+/// was handed it.
+#[test]
+fn a_type_error_names_its_file_one_way() {
+    let root = scratch("typeerr-spelled");
+    write(
+        &root.join("src/main.tl"),
+        "local x: integer = \"no\"\nprint(x)\n",
+    );
+    std::fs::create_dir_all(root.join("src/sub")).unwrap();
+    let h = checker(&root);
+    let via = root.join("src/sub/../main.tl");
+    let linked = link(&h, &via, &LinkOptions::default()).unwrap();
+    let file = htl_core::project::display_path(&root.join("src/main.tl"));
+    assert!(
+        linked
+            .errors
+            .iter()
+            .any(|e| e.starts_with(&format!("{file}:1:"))),
+        "{:?}",
+        linked.errors
+    );
+    let err = linked.into_bundle().unwrap_err().to_string();
+    assert!(!err.contains("/sub/.."), "{err}");
+}
+
 #[test]
 fn inputs_list_every_file_the_bundle_depends_on() {
     let root = project("inputs");
