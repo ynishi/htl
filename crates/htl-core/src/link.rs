@@ -180,9 +180,45 @@ pub struct Linked {
     /// How many typed modules came from the store rather than the checker. Zero without
     /// a store. The total to say it against is the typed count of [`modules`](Self::modules).
     pub cached: usize,
+    /// The checks' errors a linker error says instead: a `require` the checker could not
+    /// find is its `module not found`, and the linker's error at the same place says the
+    /// same thing and where to declare the module. One `require` is said once, by the
+    /// linker; [`errors`](Self::errors) carries that line in the check's place, and
+    /// [`reported`](Self::reported) leaves the check's out.
+    superseded: Vec<(PathBuf, usize, usize)>,
 }
 
 impl Linked {
+    /// The check of `path` as a report says it: `check` without the errors a linker error
+    /// at the same place says instead ([`link_errors`](Self::link_errors)). The checks in
+    /// [`checks`](Self::checks) are left as the checker made them.
+    pub fn reported(&self, path: &Path, check: &CheckInfo) -> CheckInfo {
+        let taken = |d: &crate::Diagnostic| {
+            self.superseded
+                .iter()
+                .any(|(p, l, c)| p == path && *l == d.line && *c == d.col)
+        };
+        let mut out = check.clone();
+        if !check.error_items.iter().any(taken) {
+            return out;
+        }
+        // `errors`, `error_fixes` and `error_items` are parallel: the i-th of each is one
+        // error, so they are filtered together.
+        out.errors.clear();
+        out.error_fixes.clear();
+        out.error_items.clear();
+        for (i, d) in check.error_items.iter().enumerate() {
+            if taken(d) {
+                continue;
+            }
+            out.errors.push(check.errors[i].clone());
+            out.error_fixes
+                .push(check.error_fixes.get(i).cloned().flatten());
+            out.error_items.push(d.clone());
+        }
+        out
+    }
+
     /// `true` when every module linked cleanly (lints are not errors here).
     pub fn ok(&self) -> bool {
         self.errors.is_empty()
@@ -279,6 +315,7 @@ pub fn link_with(
 
     while let Some((name, path)) = queue.pop_front() {
         let typed = path.extension().is_none_or(|e| e != "lua");
+        let mut checked_errors: Option<(usize, Vec<(usize, usize)>)> = None;
         let (code, requires) = if typed {
             let Generated {
                 code,
@@ -289,6 +326,12 @@ pub fn link_with(
                 out.cached += 1;
             }
             debug_assert_eq!(ci.error_items.len(), ci.errors.len());
+            // Where this file's errors start in `errors`, and where each sits: a linker
+            // error at one of those places says it instead (`superseded`).
+            let first = out.errors.len();
+            let at_positions: Vec<(usize, usize)> =
+                ci.error_items.iter().map(|d| (d.line, d.col)).collect();
+            checked_errors = Some((first, at_positions));
             out.errors.extend(
                 ci.error_items
                     .iter()
@@ -335,7 +378,26 @@ pub fn link_with(
                 Target::Host => {
                     host.insert(r.module.clone());
                 }
-                Target::Missing => out.link_error(unresolved(&path, r)),
+                Target::Missing => {
+                    let d = unresolved(&path, r);
+                    // The checker's own error at this `require`, when it has one, is
+                    // `module not found`: the same finding, said without where to declare
+                    // the module. The linker's line takes its place.
+                    let own = checked_errors.as_ref().and_then(|(first, at)| {
+                        at.iter()
+                            .position(|&(l, c)| l == r.line && c == r.col)
+                            .map(|i| first + i)
+                    });
+                    match own {
+                        Some(i) => {
+                            let d = d.spelled();
+                            out.errors[i] = d.to_string();
+                            out.superseded.push((path.clone(), r.line, r.col));
+                            out.link_errors.push(d);
+                        }
+                        None => out.link_error(d),
+                    }
+                }
                 // A checked file's `require` of it is already an error of the check, at
                 // the same place; a plain `.lua` is checked by nobody, so it is said here.
                 Target::Ambiguous(why) | Target::Shadowed(why) if !typed => {

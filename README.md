@@ -2179,7 +2179,11 @@ file of the project is recorded as **host-provided**: one the host provides (bel
 the project has only a `.d.tl` for — no `.tl`, no `.lua` — which the environment provides at
 run time (a Lua library installed on the machine, a module registered where the project
 cannot see it). Any other unresolved `require` is a build error, so "module not found"
-happens here and not on the first `require` at the user's machine. `htl run app.hb` runs it; a host
+happens here and not on the first `require` at the user's machine. The build says it once
+per `require`: in a checked file the checker's `module not found` and the linker's error
+are one finding, and the build prints the linker's, which also says where to declare the
+module: in an `x.d.tl`, under `[build] host`, or under `[build] extra` for a dynamic
+`require`. `htl run app.hb` runs it; a host
 does `Htl::run_bundle(&Bundle::decode(bytes)?, &args)` after registering its modules,
 and is refused up front, naming them, if one is missing.
 

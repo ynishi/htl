@@ -110,7 +110,14 @@ fn unresolved_require_is_a_link_error_unless_declared_host() {
     );
     let h = checker(&root);
     let linked = link(&h, &root.join("src/main.tl"), &LinkOptions::default()).unwrap();
-    // The checker already reports the missing module; the linker adds where to declare it.
+    // The checker reports the missing module and the linker says where to declare it, at
+    // the same `require`: said once, by the linker, in the check's place.
+    assert_eq!(
+        linked.errors.iter().filter(|e| e.contains("ghost")).count(),
+        1,
+        "{:?}",
+        linked.errors
+    );
     assert!(
         linked
             .errors
@@ -119,6 +126,10 @@ fn unresolved_require_is_a_link_error_unless_declared_host() {
         "{:?}",
         linked.errors
     );
+    // The check itself is left as the checker made it; only the report leaves its line out.
+    let (p, c) = &linked.checks[0];
+    assert!(!c.ok(), "{:?}", c.errors);
+    assert!(linked.reported(p, c).errors.is_empty());
     assert!(
         linked
             .errors
