@@ -3030,8 +3030,8 @@ fn cmd_build(
     // once per run is said once for the build rather than once per module.
     let mut sink = text_sink();
     sink.judge_by(lints.selection());
-    for (_, c) in &linked.checks {
-        sink.checkinfo(c);
+    for (p, c) in &linked.checks {
+        sink.checkinfo(&linked.reported(p, c));
     }
     let n_err = linked.errors.len();
     let found = htl::verdict::Findings {

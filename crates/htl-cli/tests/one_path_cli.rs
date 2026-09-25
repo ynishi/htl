@@ -133,6 +133,11 @@ fn build_spells_the_linkers_errors_as_the_checks() {
         "{err}"
     );
     assert!(!err.contains("./src/main.tl"), "{err}");
+    // One `require`, one line: the linker's, which says where to declare the module, in
+    // place of the checker's `module not found` at the same place.
+    assert!(!err.contains("module not found"), "{err}");
+    assert_eq!(err.matches("src/main.tl:1:").count(), 1, "{err}");
+    assert!(err.contains("htl build: 2 error(s)"), "{err}");
     assert_eq!(
         err.matches("error: extra module 'ghost' not found on the search path")
             .count(),
