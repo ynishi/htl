@@ -159,6 +159,10 @@ pub struct Linked {
     /// Type errors and unresolved requires. A module with a type error is *absent* from
     /// the bundle, so the bundle is only handed out ([`bundle`](Self::bundle)) when this
     /// is empty: a program missing a module dies at its first `require`, far from here.
+    ///
+    /// Each is a [`Diagnostic`](crate::Diagnostic)'s text with its path spelled as
+    /// `htl check` spells it ([`spelled`](crate::Diagnostic::spelled)), so the error a
+    /// failed `include_bundle!` or `into_bundle` shows names a file the way the report does.
     pub errors: Vec<String>,
     /// The part of [`errors`](Self::errors) the linker found itself — a `require` nothing
     /// answers, an `extra` module that is not there, a name two files claim — as values.
@@ -284,8 +288,17 @@ pub fn link_with(
             if cached {
                 out.cached += 1;
             }
-            out.errors.extend(ci.errors.iter().cloned());
-            out.lints.extend(ci.lints.iter().cloned());
+            debug_assert_eq!(ci.error_items.len(), ci.errors.len());
+            out.errors.extend(
+                ci.error_items
+                    .iter()
+                    .map(|d| d.clone().spelled().to_string()),
+            );
+            out.lints.extend(
+                ci.lint_items
+                    .iter()
+                    .map(|d| d.clone().spelled().to_string()),
+            );
             let reqs = ci.requires.clone();
             out.checks.push((path.clone(), ci));
             (code, reqs)
@@ -495,6 +508,7 @@ impl Linked {
     /// Record an error the linker found itself: as a value, and in the flattened
     /// [`errors`](Self::errors) as its text.
     fn link_error(&mut self, d: crate::Diagnostic) {
+        let d = d.spelled();
         self.errors.push(d.to_string());
         self.link_errors.push(d);
     }

@@ -140,3 +140,23 @@ fn build_spells_the_linkers_errors_as_the_checks() {
         "{err}"
     );
 }
+
+/// A junit report's `check` error is the checker's errors through the one formatter, the
+/// file spelled as `htl check` spells it from the same directory.
+#[test]
+fn junit_spells_a_failed_check_as_the_report_does() {
+    let root = scratch("junit");
+    write(
+        &root.join("mlua-pkg.toml"),
+        "[package]\nname = \"game\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        &root.join("tests/x_test.tl"),
+        "local t = require(\"htl.test\")\nlocal x: integer = \"no\"\nt.it(\"a\", function() t.expect(x):to_equal(1) end)\n",
+    );
+    htl(&["test", "--junit", "report.xml", "."], &root);
+    let out = std::fs::read_to_string(root.join("report.xml")).unwrap();
+    let body = out.split("type=\"check\">").nth(1).expect(&out);
+    assert!(body.starts_with("tests/x_test.tl:2:"), "{out}");
+    assert!(!out.contains("./tests/x_test.tl:"), "{out}");
+}

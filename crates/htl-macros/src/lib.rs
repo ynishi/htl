@@ -446,7 +446,7 @@ fn judge(
             .iter()
             .chain(lints)
             .filter(|d| policy.strict || is_denied(d, levels))
-            .map(ToString::to_string)
+            .map(|d| d.clone().spelled().to_string())
             .collect();
         let why = if policy.strict {
             "strict: every warning and lint fails the build"
@@ -459,10 +459,10 @@ fn judge(
         ));
     }
     for w in warnings {
-        eprintln!("{tag} warning: {w}");
+        eprintln!("{tag} warning: {}", w.clone().spelled());
     }
     for l in lints {
-        eprintln!("{tag} lint: {l}");
+        eprintln!("{tag} lint: {}", l.clone().spelled());
     }
     Ok(())
 }
@@ -485,7 +485,14 @@ fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Includ
         .map_err(|e| format!("include_tl!: {e:#}"))?;
 
     let Some(code) = code else {
-        return Err(format!("Teal type check failed:\n{}", ci.errors.join("\n")));
+        // The path spelled as `htl check` spells it from where cargo runs the compiler,
+        // rather than as the checker was handed it (absolute, from the manifest dir).
+        let lines: Vec<String> = ci
+            .error_items
+            .iter()
+            .map(|d| d.clone().spelled().to_string())
+            .collect();
+        return Err(format!("Teal type check failed:\n{}", lines.join("\n")));
     };
     // The file checked, but something it required did not. The generated code would
     // build, and the module's first `require` would raise at run time; the build is where
@@ -494,7 +501,13 @@ fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Includ
         let lines: Vec<String> = ci
             .dependency_errors
             .iter()
-            .map(|e| format!("{}\n  (required by {})", e.text, e.required_by.display()))
+            .map(|e| {
+                format!(
+                    "{}\n  (required by {})",
+                    e.diagnostic.clone().spelled(),
+                    htl_core::diagnostic::display_path(&e.required_by)
+                )
+            })
             .collect();
         return Err(format!(
             "Teal type check failed in a required module:\n{}",

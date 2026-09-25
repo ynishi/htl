@@ -1516,6 +1516,17 @@ function H.check_written(filename)
    return H.check(filename, nil, { seed = false, store = false })
 end
 
+-- A file that checked but did not generate: the one error it has is that, in both forms a
+-- check carries (`errors[i]` and its parts `error_items[i]`), so a reader of either sees the
+-- same one. The message has no position of its own, which is the shape `Diagnostic::parse`
+-- gives this text: no file, the whole of it as the message.
+local function generate_failed(c, filename, gerr)
+   local msg = filename .. ": generate failed: " .. tostring(gerr)
+   c.errors = { msg }
+   c.error_fixes = {}
+   c.error_items = { { file = "", line = 0, col = 0, message = msg } }
+end
+
 -- Type-check + generate Lua source. Returns code, checkinfo (code is nil on failure).
 -- Type-check + generate Lua for one program. Uses the shared env on purpose: a module
 -- already checked while checking its requirer (or an earlier `require`) is served from
@@ -1544,7 +1555,7 @@ function H.gen(filename, opts)
    if code then c.result.htl_code = code end
    if not code then
       c.ok = false
-      c.errors = { filename .. ": generate failed: " .. tostring(gerr) }
+      generate_failed(c, filename, gerr)
       return nil, c
    end
    return code, c
@@ -1554,16 +1565,19 @@ end
 -- sandbox already read the file). Same return shape as H.gen.
 function H.gen_string(src, filename)
    local result = tl.check_string(src, H.env, filename)
-   local errors = collect_errors(filename, result, src)
+   local errors, error_fixes, error_items = collect_errors(filename, result, src)
    local warnings = warnings_of(filename, result, src)
-   local c = { ok = #errors == 0, errors = errors, warnings = warnings, deps = {}, lints = {}, result = result }
+   local c = {
+      ok = #errors == 0, errors = errors, error_fixes = error_fixes, error_items = error_items,
+      warnings = warnings, deps = {}, lints = {}, result = result,
+   }
    if not c.ok or not result.ast then
       return nil, c
    end
    local code, gerr = tl.generate(result.ast, H.GEN_TARGET)
    if not code then
       c.ok = false
-      c.errors = { filename .. ": generate failed: " .. tostring(gerr) }
+      generate_failed(c, filename, gerr)
       return nil, c
    end
    -- Terminated as `H.gen` terminates it, for the reason given there: the resolver's

@@ -13,6 +13,7 @@
 
 use crate::Fix;
 use serde::Serialize;
+use std::path::{Component, Path, PathBuf};
 
 /// How loud a diagnostic is. `error` fails a check; `warning` and `lint` do not unless
 /// the caller promotes them (`htl check --strict`, `include_tl!`).
@@ -150,6 +151,22 @@ impl Diagnostic {
         }
     }
 
+    /// The same finding with its paths — [`file`](Self::file) and
+    /// [`required_by`](Self::required_by) — spelled as every report spells a path
+    /// ([`display_path`]). The checker names a file as it was handed it (`./src/a.tl`, or
+    /// absolute from a search path); a reader that prints a diagnostic takes it through
+    /// here first, so a failed `include_tl!`, a junit body and `htl check` name one file
+    /// one way.
+    pub fn spelled(mut self) -> Self {
+        if !self.file.is_empty() {
+            self.file = display_path(Path::new(&self.file));
+        }
+        if let Some(by) = &self.required_by {
+            self.required_by = Some(display_path(Path::new(by)));
+        }
+        self
+    }
+
     /// `"<file>:<line>:<col>: <message>"` — what the checker formats — into its parts.
     /// Text that is not in that shape keeps the whole of itself as the message, with no
     /// file and no position.
@@ -230,6 +247,46 @@ fn split_rule(msg: &str) -> (String, Option<String>) {
     }
 }
 
+/// Relative to the directory the command ran in when it is under it, normalised absolute
+/// when it is not — a dependency outside the project reads better that way than as a stack
+/// of `..`.
+///
+/// Public because it is how *a* path reads in this tool's output, not how a diagnostic's
+/// does: `crate::unused` reports files the walk found rather than diagnostics, and the
+/// two must spell one file the same way.
+pub fn display_path(p: &Path) -> String {
+    let Ok(cwd) = std::env::current_dir() else {
+        return lexical(p).display().to_string();
+    };
+    // Against the working directory first: a relative path's leading `..` says where it
+    // is from here, and folding it without that — `../src/a.tl` to `src/a.tl` — names a
+    // different file.
+    let norm = lexical(&cwd.join(p));
+    match norm.strip_prefix(&cwd) {
+        Ok(rel) => rel.display().to_string(),
+        Err(_) => norm.display().to_string(),
+    }
+}
+
+/// Fold `.` and `..` without touching the filesystem.
+///
+/// [`std::fs::canonicalize`] would resolve symlinks too, and `.htl/modules/entries/<dep>`
+/// is one: following it names mlua-pkg's cache directory rather than the dependency, which
+/// is the opposite of what a report wants to say.
+fn lexical(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            c => out.push(c.as_os_str()),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,5 +334,19 @@ mod tests {
             assert_eq!(Severity::parse(s.as_str()), Some(s));
         }
         assert_eq!(Severity::parse("fatal"), None);
+    }
+
+    #[test]
+    fn spelled_folds_the_file_and_the_requirer_and_leaves_a_positionless_one_alone() {
+        let cwd = std::env::current_dir().unwrap();
+        let mut d = Diagnostic::new(Severity::Error, "./src/x/../a.tl", 1, 2, "boom", None);
+        d.required_by = Some(cwd.join("src/b.tl").display().to_string());
+        let d = d.spelled();
+        assert_eq!(d.file, "src/a.tl");
+        assert_eq!(d.required_by.as_deref(), Some("src/b.tl"));
+        assert_eq!(d.to_string(), "src/a.tl:1:2: boom");
+
+        let bare = Diagnostic::new(Severity::Error, "", 0, 0, "a.tl: generate failed", None);
+        assert_eq!(bare.clone().spelled(), bare);
     }
 }

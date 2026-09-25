@@ -32,7 +32,7 @@ use anyhow::Result;
 use serde::Serialize;
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 // ------------------------------------------------------------------ output
 
@@ -215,19 +215,17 @@ impl<O: Output> Sink<O> {
                 return;
             }
             self.dependency_errors += 1;
-            d.required_by = Some(display_path(Path::new(&dep.required_by)));
+            d.required_by = Some(dep.required_by.clone());
             d.origin = dep.origin.clone();
         }
         // Every path a report carries is spelled one way, whoever made the finding: the
         // checker names a file as the walk handed it over (`./src/a.tl`), the resolver by
         // the search path that found it (absolute), a contract by where its marker was
         // read. Written here, the one place a diagnostic becomes output, relative to the
-        // working directory and absolute outside it ([`display_path`]), so the text and
-        // `--format json` agree and an entry replayed from another directory still reads
-        // against this one.
-        if !d.file.is_empty() {
-            d.file = display_path(Path::new(&d.file));
-        }
+        // working directory and absolute outside it ([`Diagnostic::spelled`]), so the text
+        // and `--format json` agree and an entry replayed from another directory still
+        // reads against this one.
+        let d = d.spelled();
         // A type error fails the run whatever any level says — it is htl being unable to
         // stand behind the code, not an opinion about it. Everything else carries the name
         // of the rule that said it, and that name has a level.
@@ -275,45 +273,7 @@ fn canonical(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
-/// Relative to the directory the command ran in when it is under it, normalised absolute
-/// when it is not — a dependency outside the project reads better that way than as a stack
-/// of `..`.
-///
-/// Public because it is how *a* path reads in this tool's output, not how a diagnostic's
-/// does: [`crate::unused`] reports files the walk found rather than diagnostics, and the
-/// two must spell one file the same way.
-pub fn display_path(p: &Path) -> String {
-    let Ok(cwd) = std::env::current_dir() else {
-        return lexical(p).display().to_string();
-    };
-    // Against the working directory first: a relative path's leading `..` says where it
-    // is from here, and folding it without that — `../src/a.tl` to `src/a.tl` — names a
-    // different file.
-    let norm = lexical(&cwd.join(p));
-    match norm.strip_prefix(&cwd) {
-        Ok(rel) => rel.display().to_string(),
-        Err(_) => norm.display().to_string(),
-    }
-}
-
-/// Fold `.` and `..` without touching the filesystem.
-///
-/// [`std::fs::canonicalize`] would resolve symlinks too, and `.htl/modules/entries/<dep>`
-/// is one: following it names mlua-pkg's cache directory rather than the dependency, which
-/// is the opposite of what a report wants to say.
-fn lexical(p: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for c in p.components() {
-        match c {
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::CurDir => {}
-            c => out.push(c.as_os_str()),
-        }
-    }
-    out
-}
+pub use crate::diagnostic::display_path;
 
 // ------------------------------------------------------------------ the store
 

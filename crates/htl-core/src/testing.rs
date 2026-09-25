@@ -312,9 +312,14 @@ impl SuiteReport {
     pub fn failures(&self) -> Vec<String> {
         let mut out = Vec::new();
         for f in self.files.iter().filter(|f| !f.ok()) {
-            let at = f.path.display();
+            let at = crate::diagnostic::display_path(&f.path);
             if !f.check.ok() {
-                out.extend(f.check.errors.iter().map(|e| format!("{at}: {e}")));
+                out.extend(
+                    f.check
+                        .error_items
+                        .iter()
+                        .map(|d| format!("{at}: {}", d.clone().spelled())),
+                );
             }
             if let Some(e) = &f.error {
                 out.push(format!("{at}: {e}"));

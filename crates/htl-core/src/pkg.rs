@@ -468,10 +468,14 @@ impl TealResolver {
         let (code, info): (Option<String>, Table) =
             gen_fn.call((src, resolved.to_string_lossy().as_ref()))?;
         let Some(code) = code else {
-            let errors: Table = info.get("errors")?;
-            let msgs: Vec<String> = errors
-                .sequence_values::<String>()
-                .collect::<mlua::Result<_>>()?;
+            // Through the one formatter, the path spelled as `htl check` spells it: the
+            // checker names the file by where the resolver found it, which is absolute.
+            let msgs: Vec<String> =
+                crate::read_items(&info, "error_items", crate::Severity::Error, &[])
+                    .map_err(mlua::Error::external)?
+                    .into_iter()
+                    .map(|d| d.spelled().to_string())
+                    .collect();
             return Err(mlua::Error::external(TealResolveError::TypeCheck {
                 module: name.to_string(),
                 errors: msgs,
