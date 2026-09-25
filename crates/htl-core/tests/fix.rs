@@ -546,6 +546,8 @@ fn the_items_a_check_carries_are_what_its_text_says() {
             if sev != htl_core::Severity::Error {
                 assert_eq!(parsed.rule, item.rule, "{text}");
             }
+            // And the one formatter spells the item as the checker spelled the text.
+            assert_eq!(item.to_string(), *text);
         }
     }
     assert_eq!(c.error_items[0].rule.as_deref(), Some("forward-ref"));

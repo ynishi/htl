@@ -27,10 +27,9 @@ use crate::cache::{self, DependencyJson, FixJson};
 use crate::config::HtlConfig;
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::testing::{FileReport, RunOptions, TestSession};
-use crate::{CheckInfo, Fix, Htl};
+use crate::{CheckInfo, Htl};
 use anyhow::Result;
 use serde::Serialize;
-use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -39,24 +38,16 @@ use std::path::{Component, Path, PathBuf};
 
 /// Where a diagnostic goes once the run has decided to say it.
 ///
-/// The text is as it should read: a dependency's path has already been rewritten against
-/// the working directory, and the once-per-run rule has already dropped what should not
-/// be said again. An implementation prints it, collects it, or forwards it; it does not
-/// decide any of the above.
+/// It is as it should read: a dependency's path has already been rewritten against the
+/// working directory, and the once-per-run rule has already dropped what should not be said
+/// again. An implementation prints it (its `Display` is the text form), collects it, or
+/// forwards it; it does not decide any of the above.
 pub trait Output {
-    /// Take one diagnostic the run has decided to say.
-    ///
-    /// `text` is the finished line. `fix` is what `htl fix` would apply, when the
-    /// diagnostic carries one. `dependency` is set when the finding is in somebody else's
-    /// package rather than in this project, which is what lets a caller file it
-    /// differently without parsing the path back out of the text.
-    fn diagnostic(
-        &mut self,
-        severity: Severity,
-        text: &str,
-        fix: Option<&Fix>,
-        dependency: Option<&DependencyJson>,
-    );
+    /// Take one diagnostic the run has decided to say. Its `fix` is what `htl fix` would
+    /// apply; its `required_by` and `origin` are set when the finding is in a module this
+    /// project required rather than in the project, which is what lets a caller file it
+    /// differently without reading the path.
+    fn diagnostic(&mut self, d: &Diagnostic);
 }
 
 /// An [`Output`] that keeps every diagnostic as a value. What a caller with no terminal
@@ -75,37 +66,9 @@ impl Collect {
 }
 
 impl Output for Collect {
-    fn diagnostic(
-        &mut self,
-        severity: Severity,
-        text: &str,
-        fix: Option<&Fix>,
-        dependency: Option<&DependencyJson>,
-    ) {
-        self.diagnostics
-            .push(diagnostic_of(severity, text, fix, dependency));
+    fn diagnostic(&mut self, d: &Diagnostic) {
+        self.diagnostics.push(d.clone());
     }
-}
-
-/// One diagnostic as a value, from the parts a run hands over.
-///
-/// The one place the three sources are put together: the text the checker wrote (which
-/// [`Diagnostic::parse`] takes apart), the fix that travels beside it, and — for an error
-/// in a required module — where that module was required from and what kind of place it
-/// lives in.
-pub fn diagnostic_of(
-    severity: Severity,
-    text: &str,
-    fix: Option<&Fix>,
-    dependency: Option<&DependencyJson>,
-) -> Diagnostic {
-    let mut d = Diagnostic::parse(severity, text);
-    d.fix = fix.cloned();
-    if let Some(dep) = dependency {
-        d.required_by = Some(dep.required_by.clone());
-        d.origin = dep.origin.clone();
-    }
-    d
 }
 
 // ------------------------------------------------------------------ sink
@@ -179,30 +142,27 @@ impl<O: Output> Sink<O> {
         self.walked = files.iter().map(|f| canonical(f)).collect();
     }
 
-    /// Say a diagnostic that carries no fix — the run's own messages, and every finding
-    /// but a fixable lint.
+    /// Say a finding this layer wrote as text: the project-level findings and the lints the
+    /// check asks of a file. Taken apart once, here, until those producers build a
+    /// [`Diagnostic`] themselves.
     pub fn diag(&mut self, severity: Severity, text: &str) {
-        self.diag_with_fix(severity, text, None);
+        self.say(Diagnostic::parse(severity, text), None);
+    }
+
+    /// Say a finding the checker handed over in its parts.
+    pub fn diagnostic(&mut self, d: &Diagnostic) {
+        self.say(d.clone(), None);
     }
 
     /// Same order as the text output has always used: warnings, lints, errors.
     pub fn checkinfo(&mut self, c: &CheckInfo) {
-        for w in &c.warnings {
-            self.diag(Severity::Warning, w);
-        }
-        for (i, l) in c.lints.iter().enumerate() {
-            self.diag_with_fix(
-                Severity::Lint,
-                l,
-                c.lint_fixes.get(i).and_then(|f| f.as_ref()),
-            );
-        }
-        for (i, e) in c.errors.iter().enumerate() {
-            self.diag_with_fix(
-                Severity::Error,
-                e,
-                c.error_fixes.get(i).and_then(|f| f.as_ref()),
-            );
+        for d in c
+            .warning_items
+            .iter()
+            .chain(&c.lint_items)
+            .chain(&c.error_items)
+        {
+            self.diagnostic(d);
         }
     }
 
@@ -228,13 +188,7 @@ impl<O: Output> Sink<O> {
                 required_by: e.required_by.display().to_string(),
                 origin: origin_of(&e.file).map(str::to_string),
             };
-            self.recorded.push(cache::Recorded {
-                severity: Severity::Error.as_str().to_string(),
-                text: e.text.clone(),
-                fix: None,
-                dependency: Some(dep.clone()),
-            });
-            self.emit(Severity::Error, &e.text, None, Some(&dep));
+            self.say(Diagnostic::parse(Severity::Error, &e.text), Some(dep));
         }
     }
 
@@ -243,14 +197,15 @@ impl<O: Output> Sink<O> {
         self.dependency_errors
     }
 
-    fn diag_with_fix(&mut self, severity: Severity, text: &str, fix: Option<&Fix>) {
+    /// Record `d` for the store, then say it.
+    fn say(&mut self, d: Diagnostic, dependency: Option<DependencyJson>) {
         self.recorded.push(cache::Recorded {
-            severity: severity.as_str().to_string(),
-            text: text.to_string(),
-            fix: fix.map(FixJson::from_fix),
-            dependency: None,
+            severity: d.severity.as_str().to_string(),
+            item: cache::ItemJson::from_diagnostic(&d),
+            fix: d.fix.as_ref().map(FixJson::from_fix),
+            dependency: dependency.clone(),
         });
-        self.emit(severity, text, fix, None);
+        self.emit(d, dependency.as_ref());
     }
 
     /// The single place a diagnostic becomes output, whether it was just produced or
@@ -260,39 +215,32 @@ impl<O: Output> Sink<O> {
     /// of the files being checked (it reports its own), and not again after the first
     /// file that required it. Deciding here, rather than where the diagnostic was made,
     /// is what makes a replayed entry and a fresh check agree — both come through this.
-    fn emit(
-        &mut self,
-        severity: Severity,
-        text: &str,
-        fix: Option<&Fix>,
-        dependency: Option<&DependencyJson>,
-    ) {
-        if let Some(d) = dependency {
-            let file = canonical(Path::new(&d.file));
+    fn emit(&mut self, mut d: Diagnostic, dependency: Option<&DependencyJson>) {
+        if let Some(dep) = dependency {
+            let file = canonical(Path::new(&dep.file));
             if self.walked.contains(&file) || !self.reported.insert(file) {
                 return;
             }
             self.dependency_errors += 1;
+            // A dependency's path is the one that does not read like the rest of the
+            // report: it came from the resolver rather than from the command line. The
+            // cache keeps what the checker said and this writes it for the reader, so an
+            // entry replayed from another directory still reads against that one.
+            if !d.file.is_empty() {
+                d.file = display_path(Path::new(&d.file));
+            }
+            d.required_by = Some(dep.required_by.clone());
+            d.origin = dep.origin.clone();
         }
-        // A dependency's path is the one that does not read like the rest of the report:
-        // it came from the resolver rather than from the command line. The cache keeps what
-        // the checker said and this writes it for the reader, so an entry replayed from
-        // another directory still reads against that one.
-        let text = match dependency {
-            Some(_) => shown(text),
-            None => Cow::Borrowed(text),
-        };
         // A type error fails the run whatever any level says — it is htl being unable to
         // stand behind the code, not an opinion about it. Everything else carries the name
         // of the rule that said it, and that name has a level.
-        if severity != Severity::Error
-            && let Some(levels) = &self.levels
-            && crate::verdict::is_denied(text.as_ref(), levels)
+        if let Some(levels) = &self.levels
+            && crate::verdict::is_denied(&d, levels)
         {
             self.denied += 1;
         }
-        self.out
-            .diagnostic(severity, text.as_ref(), fix, dependency);
+        self.out.diagnostic(&d);
     }
 
     /// Say a run recovered from the cache.
@@ -314,7 +262,7 @@ impl<O: Output> Sink<O> {
             .collect::<Result<Vec<Severity>>>()?;
         for (severity, r) in severities.into_iter().zip(recorded) {
             let fix = r.fix.as_ref().map(FixJson::to_fix);
-            self.emit(severity, &r.text, fix.as_ref(), r.dependency.as_ref());
+            self.emit(r.item.to_diagnostic(severity, fix), r.dependency.as_ref());
         }
         Ok(())
     }
@@ -329,27 +277,6 @@ impl<O: Output> Sink<O> {
 /// the search-path template that found it, the walk names a file as it was given.
 fn canonical(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
-}
-
-/// A dependency's diagnostic with its file written against the directory the command ran
-/// in, the way the rest of the report already reads. Everything else is left alone.
-///
-/// A dependency's path comes from the resolver, which searches in absolute paths, and a
-/// `[check] paths` entry keeps the `..` it was joined through — so a report would otherwise
-/// carry `src/area.tl` and `/home/me/proj/../ext/extmod.tl` side by side, and
-/// `--format json` would give two `file` spellings for what may be one directory. The walk
-/// and `required_by` carry what the command line said, which is theirs to keep.
-fn shown(text: &str) -> Cow<'_, str> {
-    // The same reading of the text [`Diagnostic::parse`] makes, and the same one place
-    // making it: a text with no position keeps every character it has.
-    let Some((file, _, _, _)) = crate::diagnostic::position(text) else {
-        return Cow::Borrowed(text);
-    };
-    let shown = display_path(Path::new(file));
-    if shown == file {
-        return Cow::Borrowed(text);
-    }
-    Cow::Owned(format!("{shown}{}", &text[file.len()..]))
 }
 
 /// Relative to the directory the command ran in when it is under it, normalised absolute

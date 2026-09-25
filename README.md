@@ -2107,8 +2107,10 @@ names are stable; fields may be added, not renamed.
 
 - `check`: `{ files, patched, diagnostics: [{ severity: "error"|"warning"|"lint", file,
   line, col, rule?, message, required_by?, origin? }], summary: { errors, warnings, lints,
-  denied, strict, ok } }`. `rule` is the lint rule (`nil-index`, `contract`, ...), split
-  out of the message. `files` is every file the walk visited and `patched` how many of
+  denied, strict, ok } }`. `rule` is the lint rule (`nil-index`, `contract`, ...) or a
+  Teal warning's kind (`tl:unused`, ...), kept apart from the message; on an error the
+  checker raised it is the class `htl fix` files that error's fix under (`forward-ref`,
+  `tl:error`), the same name `htl fix --format json` gives it. `files` is every file the walk visited and `patched` how many of
   them came out of a `patch_dir` dependency (see Patched dependencies), so the project's
   own is the difference — which is the pair the text summary prints. `denied` is how many
   of `warnings` + `lints` were said under a rule

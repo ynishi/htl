@@ -3,18 +3,13 @@
 //! fields may be added, existing ones are not renamed.
 
 use anyhow::Result;
-use htl::Fix;
 use htl::testing::FileReport;
 use serde::Serialize;
 
-// A diagnostic and its severity are the library's ([`htl::Diagnostic`]), and so is the
-// one place their text is taken apart: an LSP, a `build.rs` and this printer read the
-// same values rather than each splitting the string for itself.
-pub use htl::{Diagnostic, Severity};
-
-// The JSON shape of a dependency diagnostic is the run cache's, since the store reads it
-// back; `--format json` prints the same shape.
-pub use htl::cache::DependencyJson;
+// A diagnostic is the library's ([`htl::Diagnostic`]), and so is its text form (its
+// `Display`): an LSP, a `build.rs` and this printer read the same values, and print them
+// the one way the library does.
+pub use htl::Diagnostic;
 
 /// Where a diagnostic goes once the run has decided to say it: printed as it comes
 /// (text) or kept for the document (json).
@@ -42,21 +37,16 @@ impl Out {
 }
 
 impl htl::project::Output for Out {
-    fn diagnostic(
-        &mut self,
-        severity: Severity,
-        text: &str,
-        fix: Option<&Fix>,
-        dependency: Option<&DependencyJson>,
-    ) {
+    fn diagnostic(&mut self, d: &Diagnostic) {
+        let severity = d.severity;
         if self.json {
-            self.diagnostics
-                .push(htl::project::diagnostic_of(severity, text, fix, dependency));
-        } else if let Some(dep) = dependency {
-            eprintln!("{severity}: {text}\n  (required by {})", dep.required_by);
+            self.diagnostics.push(d.clone());
+        } else if let Some(by) = &d.required_by {
+            eprintln!("{severity}: {d}\n  (required by {by})");
         } else {
+            let text = d;
             // Text mode: say a fix exists, so `htl fix` is discoverable from the output.
-            match fix.map(|f| f.applicability.as_str()) {
+            match d.fix.as_ref().map(|f| f.applicability.as_str()) {
                 // A suggestion is shown by `htl fix` and never written by it; the command
                 // that carries the edit is still `htl fix` (`--diff` prints it), and what
                 // it does with it is what it says when it runs.
