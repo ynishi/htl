@@ -28,20 +28,8 @@ Assign at least one when you open an issue. The branch prefix follows the label.
 
 ### What an issue says
 
-- **Problem**: what happens, on what input. For dogfood reports: the project
-  size, the command, the output, verbatim.
-- **Evidence**: measured, not assumed. A timing says which build (debug or
-  release) and what it was measured on. A "type error" quotes the line.
-- **Proposal**: optional. The 4-axis habit from the design discussions applies —
-  a patch, an architecture change, a narrower requirement, or "not now" are all
-  legitimate answers, and the issue should say which one it is asking for.
-- **Acceptance**: what `htl check` / `htl test` / the CLI prints when it is done.
-
-What may appear in a public artifact, and what a public artifact owes its
-reader, are [PUBLIC_DEVELOPMENT.md](PUBLIC_DEVELOPMENT.md)'s subject rather than
-this file's. The short version: describe a project the evidence came from by its
-shape and never by its name, keep machine paths out of everything, and write so
-that somebody who has never seen this machine can act on what you wrote.
+Always use [`.github/ISSUE_TEMPLATE/issue.md`](.github/ISSUE_TEMPLATE/issue.md).
+Its comments are the rules for each section; they are not repeated here.
 
 ## Branches
 
@@ -73,8 +61,9 @@ cd sample && htl check . && htl test .
 
 `target/debug/htl` is not that binary. If no `.tl` project is at hand, `htl new`
 writes one in a second, so not having one is not a reason to skip this: "not
-verified on a dogfood project" is not a report this repository accepts. Say what
-was run — the project, the command, the arguments — and what came out.
+verified on a dogfood project" is not a report this repository accepts. What the
+pull request says about it is the Acceptance section of
+[`.github/pull_request_template.md`](.github/pull_request_template.md).
 
 A project `htl new` writes pins the htl the binary was built with: a binary built
 from a checkout pins that checkout (`--htl path:<other-checkout>` names another),
@@ -114,15 +103,9 @@ from anywhere else; a second copy is the one nobody updates.
 
 ## Commits
 
-```text
-<subject: what changed, one line>
-
-<prose: the problem, why this fix and not the alternative, what it cost>
-
-Verified: <what was run, and the outcome>
-
-Refs #<issue>
-```
+A commit message is free-form. [`.github/commit_message_template.txt`](.github/commit_message_template.txt)
+is a reference to copy, or to set as git's `commit.template`. The one part that is
+not free is the subject's prefix, which decides the next release (below).
 
 - Formatting and clippy fixes go in their own commits.
 - Never commit `workspace/`, `.worktrees/`, `.claude/`, `*.hb` or local agent
@@ -160,10 +143,10 @@ A pull request lands as a merge commit; squash and rebase are not used. So every
 commit on the branch reaches `main` — a commit is a step of the work, and several
 of them are expected rather than something to tidy away first.
 
-The body records what changed, what was verified (the commands and their
-outcome, and on which project), and what it deliberately does not cover, and
-ends with `Refs #<issue>`. Longer bodies are easier to write as a file and pass
-with `--body-file`; `workspace/` is gitignored and a fine place for one.
+Always use [`.github/pull_request_template.md`](.github/pull_request_template.md)
+for the body. Its comments are the rules for each section; they are not repeated
+here. Longer bodies are easier to write as a file and pass with `--body-file`;
+`workspace/` is gitignored and a fine place for one.
 
 ## Working with coding agents
 

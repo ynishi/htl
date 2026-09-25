@@ -1,0 +1,24 @@
+
+
+# A reference, not a rule: a commit message is free-form. Copy this file, or point
+# git at it once with
+#
+#   git config commit.template .github/commit_message_template.txt
+#
+# and git opens it for every commit. Lines starting with # are dropped when git
+# finishes the message in an editor; with `git commit -F <file>`, pass
+# `--cleanup=strip` as well, or delete them yourself.
+#
+# First line: what changed, in one line. The prefix is the one thing that is not
+# free: `feat:` makes the next release a minor one (see CONTRIBUTING.md, Commits),
+# anything else a patch.
+#
+# Then prose: the problem, why this change and not the alternative, what it cost.
+#
+# Then what shows the change is right, if the commit is a step that can say so:
+# for each point, the output it should give and the output it gave. The pull
+# request's Acceptance table (.github/pull_request_template.md) is where this is
+# required; a commit may point there instead.
+#
+# Last line: Refs #<issue>. Never close / fix / resolve before #<issue>: GitHub
+# closes the issue when a commit saying so reaches main.

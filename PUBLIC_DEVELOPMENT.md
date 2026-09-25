@@ -92,7 +92,8 @@ after, see [After a disclosure](#after-a-disclosure).
 - **Issue** — the problem, the evidence, the alternatives, and the acceptance
   criteria. Exploration belongs here, next to the change it argues for.
 - **Pull request and commit** — what changed, why this and not the alternative,
-  and what was actually run to verify it.
+  and, for each acceptance criterion, the correct output and the output the change
+  produced ([`.github/pull_request_template.md`](.github/pull_request_template.md)).
 - **Code documentation** — the current contract: what a type is, what a function
   promises, and why it is built that way.
 - **README** — the user-facing reference.
