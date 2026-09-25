@@ -84,7 +84,7 @@ use crate::{CheckInfo, DependencyError, Fix, RequireSite};
 /// emits different text is a different checker and every warm entry misses on its own.
 /// What this number is for is a change to the shape of what is stored — a field, a key, a
 /// meaning — which the hash cannot see.
-const FORMAT: u32 = 8;
+const FORMAT: u32 = 9;
 
 /// Where the store lives under the project root. Generated, and `htl init` puts it in
 /// `.gitignore`.
@@ -498,6 +498,7 @@ impl CheckInfoJson {
                     file: e.file.display().to_string(),
                     required_by: e.required_by.display().to_string(),
                     text: e.text.clone(),
+                    item: ItemJson::from_diagnostic(&e.diagnostic),
                 })
                 .collect(),
         }
@@ -541,6 +542,7 @@ impl CheckInfoJson {
                     file: PathBuf::from(&e.file),
                     required_by: PathBuf::from(&e.required_by),
                     text: e.text.clone(),
+                    diagnostic: e.item.to_diagnostic(crate::Severity::Error, None),
                 })
                 .collect(),
         }
@@ -557,6 +559,9 @@ pub struct DependencyErrorJson {
     pub required_by: String,
     /// The error as the dependency's own check phrased it.
     pub text: String,
+    /// The same error in its parts ([`crate::DependencyError::diagnostic`]).
+    #[serde(default)]
+    pub item: ItemJson,
 }
 
 /// `CheckInfo`'s requires in the form an entry stores them.

@@ -181,7 +181,7 @@ impl<O: Output> Sink<O> {
                 required_by: e.required_by.display().to_string(),
                 origin: origin_of(&e.file).map(str::to_string),
             };
-            self.say(Diagnostic::parse(Severity::Error, &e.text), Some(dep));
+            self.say(e.diagnostic.clone(), Some(dep));
         }
     }
 

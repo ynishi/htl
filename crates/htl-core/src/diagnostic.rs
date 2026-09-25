@@ -66,7 +66,7 @@ impl std::fmt::Display for Severity {
 ///
 /// The serialized form is what `htl check --format json` prints. Field names are stable;
 /// new fields may be added, existing ones are not renamed.
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     /// Which of the three this is, and so whether a run that reported it fails — the
     /// caller's to decide for a `warning` or a `lint`, settled for an `error`.
