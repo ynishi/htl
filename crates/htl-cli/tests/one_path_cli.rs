@@ -106,3 +106,37 @@ fn from_a_subdirectory_paths_read_against_it() {
         "{err}"
     );
 }
+
+/// `htl build` says the linker's own errors through the same sink as the checks': a
+/// `require` nothing answers reads `src/main.tl:…` like the check's error beside it, not
+/// the path as the command line gave it (`./src/main.tl`), and an `extra` module that is
+/// not there is said once, with no position.
+#[test]
+fn build_spells_the_linkers_errors_as_the_checks() {
+    let root = scratch("build");
+    write(&root.join("htl.toml"), "[build]\nextra = [\"ghost\"]\n");
+    write(
+        &root.join("mlua-pkg.toml"),
+        "[package]\nname = \"game\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        &root.join("src/main.tl"),
+        "local gone = require(\"nothere\")\nprint(gone)\n",
+    );
+    let (_, err) = htl(
+        &["build", "--no-cache", "./src/main.tl", "-o", "out.hb"],
+        &root,
+    );
+    assert!(
+        err.lines().any(|l| l.starts_with("error: src/main.tl:1:")
+            && l.contains("require(\"nothere\") is not on the search path")),
+        "{err}"
+    );
+    assert!(!err.contains("./src/main.tl"), "{err}");
+    assert_eq!(
+        err.matches("error: extra module 'ghost' not found on the search path")
+            .count(),
+        1,
+        "{err}"
+    );
+}

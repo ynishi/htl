@@ -160,6 +160,12 @@ pub struct Linked {
     /// the bundle, so the bundle is only handed out ([`bundle`](Self::bundle)) when this
     /// is empty: a program missing a module dies at its first `require`, far from here.
     pub errors: Vec<String>,
+    /// The part of [`errors`](Self::errors) the linker found itself — a `require` nothing
+    /// answers, an `extra` module that is not there, a name two files claim — as values.
+    /// The rest of `errors` is the modules' own checks, which [`checks`](Self::checks)
+    /// carries. A reporter says these after the checks' diagnostics; it does not have to
+    /// tell the two apart by their text.
+    pub link_errors: Vec<crate::Diagnostic>,
     /// Lints from every module, which do not stop a bundle: whether they stop the *run*
     /// is the caller's, and the caller is what knows about `strict`.
     pub lints: Vec<String>,
@@ -258,11 +264,11 @@ pub fn link_with(
             Target::Host => {
                 host.insert(name.clone());
             }
-            Target::Missing => out.errors.push(format!(
+            Target::Missing => out.link_error(positionless(format!(
                 "extra module '{name}' not found on the search path"
-            )),
+            ))),
             Target::Ambiguous(why) | Target::Shadowed(why) => {
-                out.errors.push(format!("extra module {why}"))
+                out.link_error(positionless(format!("extra module {why}")))
             }
         }
     }
@@ -302,7 +308,7 @@ pub fn link_with(
             // host's.
             if host_declared.contains(&r.module) || host.contains(&r.module) {
                 if !typed && let Some(why) = h.host_shadowing(&r.module)? {
-                    out.errors.push(at(&path, r, &why));
+                    out.link_error(at(&path, r, &why));
                     continue;
                 }
                 host.insert(r.module.clone());
@@ -316,11 +322,11 @@ pub fn link_with(
                 Target::Host => {
                     host.insert(r.module.clone());
                 }
-                Target::Missing => out.errors.push(unresolved(&path, r)),
+                Target::Missing => out.link_error(unresolved(&path, r)),
                 // A checked file's `require` of it is already an error of the check, at
                 // the same place; a plain `.lua` is checked by nobody, so it is said here.
                 Target::Ambiguous(why) | Target::Shadowed(why) if !typed => {
-                    out.errors.push(at(&path, r, &why))
+                    out.link_error(at(&path, r, &why))
                 }
                 Target::Ambiguous(_) => {}
                 // The check said it; the name is still the host's, and nothing is bundled.
@@ -433,16 +439,18 @@ fn is_decl(p: &Path) -> bool {
     p.to_string_lossy().ends_with(".d.tl")
 }
 
-fn unresolved(from: &Path, r: &RequireSite) -> String {
-    format!(
-        "{}:{}:{}: require(\"{}\") is not on the search path: nothing to bundle. If the host \
-         provides it, declare it in a `{}.d.tl` or list it under `[build] host` in htl.toml; \
-         if it is reached only through a dynamic require, list it under `[build] extra`",
-        from.display(),
-        r.line,
-        r.col,
-        r.module,
-        r.module.replace('.', "/")
+fn unresolved(from: &Path, r: &RequireSite) -> crate::Diagnostic {
+    at(
+        from,
+        r,
+        &format!(
+            "require(\"{}\") is not on the search path: nothing to bundle. If the host \
+             provides it, declare it in a `{}.d.tl` or list it under `[build] host` in \
+             htl.toml; if it is reached only through a dynamic require, list it under \
+             `[build] extra`",
+            r.module,
+            r.module.replace('.', "/")
+        ),
     )
 }
 
@@ -467,8 +475,29 @@ enum Target {
 }
 
 /// A linker error at a `require`: `file:line:col: why`, the shape a check's error has.
-fn at(file: &Path, r: &RequireSite, why: &str) -> String {
-    format!("{}:{}:{}: {why}", file.display(), r.line, r.col)
+fn at(file: &Path, r: &RequireSite, why: &str) -> crate::Diagnostic {
+    crate::Diagnostic::new(
+        crate::Severity::Error,
+        file.display().to_string(),
+        r.line,
+        r.col,
+        why,
+        None,
+    )
+}
+
+/// A linker error about no place in a file: an `extra` module named in the config.
+fn positionless(message: String) -> crate::Diagnostic {
+    crate::Diagnostic::new(crate::Severity::Error, "", 0, 0, message, None)
+}
+
+impl Linked {
+    /// Record an error the linker found itself: as a value, and in the flattened
+    /// [`errors`](Self::errors) as its text.
+    fn link_error(&mut self, d: crate::Diagnostic) {
+        self.errors.push(d.to_string());
+        self.link_errors.push(d);
+    }
 }
 
 /// The module name an entry file answers to when the project model does not name it — an
