@@ -603,7 +603,10 @@ fn run_in(h: &Htl, path: &Path, r: RunIn<'_>, out_code: &mut Option<String>) -> 
     if opts.coverage {
         h.coverage_start()?;
     }
-    if let Err(e) = h.exec(&code, &format!("@{}", path.display()), &[]) {
+    // The chunk is named as a report names the file, so a runtime error's position and
+    // its traceback read like the check's (`tests/a_test.tl:2:`, not `./tests/...`).
+    let chunk = format!("@{}", crate::diagnostic::display_path(path));
+    if let Err(e) = h.exec(&code, &chunk, &[]) {
         // With the frames: a file that raised while loading is a development failure, and
         // the per-test failures beside it have carried a traceback all along.
         rep.error = Some(crate::developer_message(&e));

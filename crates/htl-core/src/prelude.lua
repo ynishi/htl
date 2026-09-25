@@ -1518,13 +1518,14 @@ end
 
 -- A file that checked but did not generate: the one error it has is that, in both forms a
 -- check carries (`errors[i]` and its parts `error_items[i]`), so a reader of either sees the
--- same one. The message has no position of its own, which is the shape `Diagnostic::parse`
--- gives this text: no file, the whole of it as the message.
+-- same one. It is about the whole file, so it sits at 1:1 as htl's other findings about a
+-- file do, and the path is the item's `file` rather than words in the message: a reader
+-- spells it (`Diagnostic::spelled`) as it spells every other.
 local function generate_failed(c, filename, gerr)
-   local msg = filename .. ": generate failed: " .. tostring(gerr)
-   c.errors = { msg }
+   local msg = "generate failed: " .. tostring(gerr)
+   c.errors = { filename .. ":1:1: " .. msg }
    c.error_fixes = {}
-   c.error_items = { { file = "", line = 0, col = 0, message = msg } }
+   c.error_items = { { file = filename, line = 1, col = 1, message = msg } }
 end
 
 -- Type-check + generate Lua source. Returns code, checkinfo (code is nil on failure).

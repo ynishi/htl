@@ -1607,7 +1607,7 @@ fn junit_suite(rep: &htl::testing::FileReport) -> junit::Suite {
         })
     };
     junit::Suite {
-        file: rep.path.display().to_string(),
+        file: htl::diagnostic::display_path(&rep.path),
         duration_ms: rep.duration_ms,
         error,
         cases,
@@ -1674,7 +1674,8 @@ fn cmd_test(
         if flags.junit.is_some() {
             junit_suites.push(junit_suite(rep));
         }
-        let f = &rep.path;
+        // Spelled as `htl check` spells the same file, whatever path the walk was handed.
+        let f = htl::diagnostic::display_path(&rep.path);
         let tag = if rep.ok() { "ok  " } else { "FAIL" };
         let detail = if !rep.check.ok() {
             "type check failed".to_string()
@@ -1691,11 +1692,7 @@ fn cmd_test(
         // JSON: nothing on stderr, the document carries it all.
         let show_file = !flags.json && (!flags.quiet || !rep.ok());
         if show_file {
-            eprintln!(
-                "{tag} {}  ({detail}, {:.0} ms)",
-                f.display(),
-                rep.duration_ms
-            );
+            eprintln!("{tag} {f}  ({detail}, {:.0} ms)", rep.duration_ms);
             if let Some(e) = &rep.error {
                 for line in e.lines().skip(1) {
                     eprintln!("      {line}");
@@ -1707,7 +1704,7 @@ fn cmd_test(
             if !flags.json && (flags.verbose || slow) {
                 if flags.quiet && !show_file {
                     // The file line was skipped: name the file with the slow test.
-                    eprintln!("slow {}  {}  ({:.1} ms)", f.display(), tr.name, tr.ms);
+                    eprintln!("slow {f}  {}  ({:.1} ms)", tr.name, tr.ms);
                     continue;
                 }
                 let mark = if tr.ok { "ok  " } else { "FAIL" };
@@ -1725,10 +1722,16 @@ fn cmd_test(
             }
             // A snapshot written or rewritten is a change on disk: always say so, even in -q.
             for p in &rep.snapshots_written {
-                eprintln!("snapshot written: {p}");
+                eprintln!(
+                    "snapshot written: {}",
+                    htl::diagnostic::display_path(Path::new(p))
+                );
             }
             for p in &rep.snapshots_updated {
-                eprintln!("snapshot updated: {p}");
+                eprintln!(
+                    "snapshot updated: {}",
+                    htl::diagnostic::display_path(Path::new(p))
+                );
             }
         }
     })?;

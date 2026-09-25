@@ -160,3 +160,49 @@ fn junit_spells_a_failed_check_as_the_report_does() {
     assert!(body.starts_with("tests/x_test.tl:2:"), "{out}");
     assert!(!out.contains("./tests/x_test.tl:"), "{out}");
 }
+
+/// `htl test` names a file as `htl check` does, whatever path it was handed: the file
+/// line, a runtime error's position, the junit suite, the JSON document, a snapshot.
+#[test]
+fn htl_test_names_its_files_as_check_does() {
+    let root = scratch("test-files");
+    write(
+        &root.join("mlua-pkg.toml"),
+        "[package]\nname = \"game\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        &root.join("tests/boom_test.tl"),
+        "local t = require(\"htl.test\")\nerror(\"boom\")\nt.it(\"never\", function() end)\n",
+    );
+    write(
+        &root.join("tests/snap_test.tl"),
+        "local t = require(\"htl.test\")\nt.it(\"snap\", function() t.expect(1):to_match_snapshot(\"first\") end)\n",
+    );
+    let (_, err) = htl(&["test", "--junit", "r.xml", "./tests"], &root);
+    assert!(
+        err.contains("FAIL tests/boom_test.tl  (error: runtime error: tests/boom_test.tl:2: boom"),
+        "{err}"
+    );
+    assert!(err.contains("ok   tests/snap_test.tl  "), "{err}");
+    assert!(
+        err.contains("snapshot written: tests/__snapshots__/snap_test/first.snap"),
+        "{err}"
+    );
+    assert!(!err.contains("./tests"), "{err}");
+    let junit = std::fs::read_to_string(root.join("r.xml")).unwrap();
+    assert!(
+        junit.contains("<testsuite name=\"tests/boom_test.tl\""),
+        "{junit}"
+    );
+    assert!(!junit.contains("./tests"), "{junit}");
+
+    let (out, _) = htl(&["test", "--format", "json", "./tests"], &root);
+    let v: serde_json::Value = serde_json::from_str(&out).expect(&out);
+    let paths: Vec<&str> = v["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["tests/boom_test.tl", "tests/snap_test.tl"]);
+}

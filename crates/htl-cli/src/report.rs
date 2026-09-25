@@ -122,10 +122,19 @@ pub struct TestFile {
     pub snapshots_updated: Vec<String>,
 }
 
+/// Paths as a report spells them ([`htl::diagnostic::display_path`]): the text output and
+/// the document name one file the same way.
+fn spelled(paths: &[String]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|p| htl::diagnostic::display_path(std::path::Path::new(p)))
+        .collect()
+}
+
 impl TestFile {
     pub fn from_report(rep: &FileReport, diagnostics: Vec<Diagnostic>) -> Self {
         Self {
-            path: rep.path.display().to_string(),
+            path: htl::diagnostic::display_path(&rep.path),
             ok: rep.ok(),
             diagnostics,
             error: rep.error.clone(),
@@ -143,8 +152,8 @@ impl TestFile {
                 })
                 .collect(),
             duration_ms: rep.duration_ms,
-            snapshots_written: rep.snapshots_written.clone(),
-            snapshots_updated: rep.snapshots_updated.clone(),
+            snapshots_written: spelled(&rep.snapshots_written),
+            snapshots_updated: spelled(&rep.snapshots_updated),
         }
     }
 }
