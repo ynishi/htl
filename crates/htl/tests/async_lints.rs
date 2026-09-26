@@ -277,10 +277,11 @@ fn a_spec_turns_a_rule_off_or_up() {
 fn with_the_setting_off_nothing_is_reported() {
     let dir = scratch("off");
     write(&dir, "types/http.d.tl", HTTP);
+    write(&dir, "types/api.d.tl", API);
     let main = write(
         &dir,
         "main.tl",
-        "local http = require(\"http\")\nlocal await = 1\nlocal async = 2\nprint(http.get(\"/a\"), await + async)\nlocal t = { \"b\", \"a\" }\ntable.sort(t, function(a: string, b: string): boolean return a < b end)\nprint(string.gsub(\"a\", \"%w\", http.get))\n",
+        "local http = require(\"http\")\nlocal await = 1\nlocal async = 2\nprint(http.get(\"/a\"), await + async)\nlocal t = { \"b\", \"a\" }\ntable.sort(t, function(a: string, b: string): boolean return a < b end)\nprint(string.gsub(\"a\", \"%w\", http.get))\nlocal api = require(\"api\")\nprint(api:each(api.fetch), api.each(api, api.fetch))\nlocal game: api.Game = { update = api.tick, draw = function() end }\nprint(game)\n",
     );
     let ci = checker(&dir, false, "").check(&main).unwrap();
     assert!(ci.errors.is_empty(), "{:?}", ci.errors);
@@ -481,4 +482,146 @@ fn an_async_function_handed_to_a_c_callee_is_reported_at_the_argument() {
             .default,
         htl::lint::Level::Deny
     );
+}
+
+/// A host's own C boundary, declared on its `.d.tl`: `---@noyield(f)` names the parameters
+/// the host calls from C, and a bare `---@noyield` on a record field says the host calls
+/// that field of a table it is handed.
+const API: &str = "\
+local record api
+   record Game
+      update: function(dt: number): boolean ---@noyield
+      draw: function() ---@noyield
+   end
+   each: function(self: api, f: function): string ---@noyield(f)
+   each_async: function(self: api, f: function): string ---@async
+   plain: function(self: api, f: function)
+   split: function(self: api, on_ok: function, on_err: function) ---@noyield(on_ok, on_err)
+   walk: function(self: api, f?: function) ---@noyield(f)
+   fetch: function(self: api, path: string): string ---@async
+   tick: function(dt: number): boolean ---@async
+   mk: function(self: api, f: function): function(a: string, b: function) ---@noyield(f)
+   first: function( ---@noyield(f)
+      self: api,
+      f: function
+   )
+   vr: function(self: api, ...: function) ---@noyield(...)
+   run: function(self: api, game: Game)
+   record Sub
+      each: function(self: Sub, f: function) ---@noyield(f)
+   end
+   sub: Sub
+   free: function(f: function) ---@noyield(f)
+   nself: function(a: api, f: function) ---@noyield(f)
+end
+return api
+";
+
+/// Lines 10-12: an async function handed to `each`, whose declaration marks `f`: a local
+/// `async function`, an inline one, and the `.` form, where `api` itself is the first
+/// argument and `cb` the second. Line 17: both parameters of `split` are marked. Line 18:
+/// `walk`'s optional `f?`. Line 20: an async `update` in a constructor typed `api.Game`,
+/// whose field line says the host calls it. Silent: line 13 (`each_async` is async and
+/// marks nothing), line 14 (`plain`, no marker), line 15 (a Teal function calling its
+/// callback, which may yield), line 16 (a sync callback into `each`), line 21 (`draw` is
+/// marked but its value is not async), line 23 (a sync `update`). Lines 26-27: `mk`'s return
+/// type sits on `mk`'s line and has parameters of its own, none of them marked, so calling the
+/// returned function is silent. Line 28: a declaration written one parameter per line. Line
+/// 29: `...` marked, the async value second among the varargs. Line 30: a constructor in
+/// argument position, typed by the parameter. Line 32: an alias of `api.each`. Line 33: a
+/// method of a nested record. Line 34: a free function called with `.`, its `f` the first
+/// argument. Line 35: a first parameter not spelled `self`, called with `:`. Line 36: a
+/// string key. Line 37: a named async value (`tick`, declared `---@async`) bound to a field.
+const HOST_CALLBACKS: &str = "\
+local api = require(\"api\")
+local async function cb(): string
+   return await api:fetch(\"/a\")
+end
+local function sync_cb(): string return \"s\" end
+local function each(f: function): string
+   f()
+   return \"t\"
+end
+print(api:each(cb))
+print(api:each(async function(): string return await api:fetch(\"/b\") end))
+print(api.each(api, cb))
+print(await api:each_async(cb))
+api:plain(cb)
+print(each(cb))
+print(api:each(sync_cb))
+api:split(cb, async function() end)
+api:walk(cb)
+local game: api.Game = {
+   update = async function(dt: number): boolean return dt > 0 end,
+   draw = function() end,
+}
+local calm: api.Game = { update = function(dt: number): boolean return dt > 0 end, draw = function() end }
+print(game, calm)
+local r = api:mk(function() end)
+r(\"x\", cb)
+api:mk(function() end)(\"y\", cb)
+api:first(cb)
+api:vr(function() end, cb)
+api:run({ update = async function(dt: number): boolean return dt > 0 end, draw = function() end })
+local run = api.each
+print(run(api, cb))
+api.sub:each(cb)
+api.free(cb)
+api:nself(cb)
+local keyed: api.Game = { [\"update\"] = async function(dt: number): boolean return dt > 0 end, draw = function() end }
+local named: api.Game = { update = api.tick, draw = function() end }
+print(keyed, named)
+";
+
+#[test]
+fn an_async_function_handed_to_a_host_parameter_marked_noyield_is_reported_at_the_argument() {
+    let dir = scratch("noyield");
+    write(&dir, "types/api.d.tl", API);
+    let main = write(&dir, "main.tl", HOST_CALLBACKS);
+    let ci = checker(&dir, true, "").check(&main).unwrap();
+    assert!(ci.errors.is_empty(), "{:?}", ci.errors);
+    let l = &ci.lints;
+    let c = of_rule(l, "async-as-sync-callback");
+    let want = [
+        "main.tl:10:16: async function passed to api:each: its declaration says 'f' is called from C (---@noyield)",
+        "main.tl:11:16: async function passed to api:each: its declaration says 'f' is called from C (---@noyield)",
+        "main.tl:12:21: async function passed to api.each: its declaration says 'f' is called from C (---@noyield)",
+        "main.tl:17:11: async function passed to api:split: its declaration says 'on_ok' is called from C (---@noyield)",
+        "main.tl:17:15: async function passed to api:split: its declaration says 'on_err' is called from C (---@noyield)",
+        "main.tl:18:10: async function passed to api:walk: its declaration says 'f' is called from C (---@noyield)",
+        "main.tl:20:13: async function bound to update of api.Game: the record's declaration says the field is called from C (---@noyield)",
+        "main.tl:28:11: async function passed to api:first: its declaration says 'f' is called from C (---@noyield)",
+        "main.tl:29:24: async function passed to api:vr: its declaration says '...' is called from C (---@noyield)",
+        "main.tl:30:20: async function bound to update of api.Game: the record's declaration says the field is called from C (---@noyield)",
+        "main.tl:32:16: async function passed to run: its declaration says 'f' is called from C (---@noyield)",
+        "main.tl:33:14: async function passed to api.sub:each: its declaration says 'f' is called from C (---@noyield)",
+        "main.tl:34:10: async function passed to api.free: its declaration says 'f' is called from C (---@noyield)",
+        "main.tl:35:11: async function passed to api:nself: its declaration says 'f' is called from C (---@noyield)",
+        "main.tl:36:40: async function bound to update of api.Game: the record's declaration says the field is called from C (---@noyield)",
+        "main.tl:37:36: async function bound to update of api.Game: the record's declaration says the field is called from C (---@noyield)",
+    ];
+    assert_eq!(c.len(), want.len(), "{c:?}");
+    for (got, w) in c.iter().zip(want) {
+        assert!(got.contains(w), "{got} lacks {w}");
+    }
+    assert!(
+        c.iter()
+            .all(|s| s.contains("attempt to yield across a C-call boundary")),
+        "{c:?}"
+    );
+    for pos in [
+        "main.tl:13:",
+        "main.tl:14:",
+        "main.tl:15:",
+        "main.tl:16:",
+        "main.tl:21:",
+        "main.tl:23:",
+        "main.tl:26:",
+        "main.tl:27:",
+        "main.tl:29:8:",
+    ] {
+        assert!(!c.iter().any(|s| s.contains(pos)), "{pos} in {c:?}");
+    }
+    // Nothing else in the file is a finding: the awaits are in async context and awaited.
+    assert_eq!(l.len(), want.len(), "{l:?}");
 }
