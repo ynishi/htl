@@ -9,8 +9,11 @@
 
 #![cfg(feature = "ffi")]
 
+use htl::mlua::{HookTriggers, VmState};
 use htl::{Htl, c_export, ffi};
+use std::cell::Cell;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::rc::Rc;
 
 #[derive(serde::Deserialize)]
 struct Options {
@@ -29,6 +32,8 @@ pub struct Game {
     h: Htl,
     greeting: String,
     depth: i32,
+    /// How often the host's own hook callback (`count`) fired.
+    hits: Rc<Cell<i32>>,
 }
 
 #[c_export(prefix = "game")]
@@ -44,7 +49,46 @@ impl Game {
             h,
             greeting: o.greeting,
             depth: 0,
+            hits: Rc::default(),
         })
+    }
+
+    /// The host's own callback on the state's hook owner, beside the interrupt's: every
+    /// thousandth instruction, counted in `hits`.
+    pub fn count(&self) -> Result<(), String> {
+        let hits = self.hits.clone();
+        self.h
+            .hook_owner()
+            .map_err(|e| e.to_string())?
+            .add_hook(
+                HookTriggers::new().every_nth_instruction(1000),
+                move |_, _| {
+                    hits.set(hits.get() + 1);
+                    Ok(VmState::Continue)
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// `hits` since the last call.
+    pub fn counted(&self) -> i32 {
+        self.hits.replace(0)
+    }
+
+    /// Coverage on the same state: the third callback on the one hook.
+    pub fn cover(&self) -> Result<(), String> {
+        self.h.coverage_start().map_err(|e| e.to_string())
+    }
+
+    /// Stop coverage; the chunks it saw, comma-separated.
+    pub fn covered(&self) -> Result<String, String> {
+        let cov = self.h.coverage_stop().map_err(|e| e.to_string())?;
+        Ok(cov
+            .into_iter()
+            .map(|(src, _)| src)
+            .collect::<Vec<_>>()
+            .join(","))
     }
 
     /// `String` -> `char *`: the text itself.
@@ -381,6 +425,64 @@ fn interrupt_stops_a_runaway_script_from_another_thread() {
     );
 
     // The handle still works: an interrupt stops one run, not the game.
+    assert_eq!(
+        take(unsafe { game_run(h, cstr("return 'ok'").as_ptr()) }),
+        "ok"
+    );
+    unsafe { game_close(h) };
+}
+
+/// The interrupt, coverage and the host's own callback are three registrations on the
+/// state's one hook (#350): with all three on, the interrupt still stops the loop, the
+/// host's callback fired while it ran, and coverage saw the chunk. Before, whichever was
+/// installed last was the only one left.
+#[test]
+fn interrupt_stops_a_loop_with_coverage_on_and_a_host_callback_registered() {
+    let h = open("hi");
+    assert_eq!(
+        unsafe { game_count(h) },
+        ffi::Status::Ok.code(),
+        "{}",
+        last_error()
+    );
+    assert_eq!(
+        unsafe { game_cover(h) },
+        ffi::Status::Ok.code(),
+        "{}",
+        last_error()
+    );
+    let addr = h as usize;
+    let stopper = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        unsafe { game_interrupt(addr as *mut c_void) }
+    });
+
+    let started = std::time::Instant::now();
+    let src = "local t = os.clock()\nwhile os.clock() - t < 5 do end\nreturn 'finished'";
+    let p = unsafe { game_run(h, cstr(src).as_ptr()) };
+    let took = started.elapsed();
+
+    assert_eq!(stopper.join().unwrap(), ffi::Status::Ok.code());
+    assert!(p.is_null(), "the loop ran to the end of its five seconds");
+    assert_eq!(
+        game_last_status(),
+        ffi::Status::Interrupted.code(),
+        "{}",
+        last_error()
+    );
+    assert!(
+        took < std::time::Duration::from_secs(4),
+        "it stopped when it was asked to, after {took:?}"
+    );
+    let mut hits: c_int = 0;
+    assert_eq!(
+        unsafe { game_counted(h, &mut hits) },
+        ffi::Status::Ok.code()
+    );
+    assert!(hits > 0, "the host's callback fired while the loop ran");
+    let covered = take(unsafe { game_covered(h) });
+    assert!(!covered.is_empty(), "coverage saw the chunk that looped");
+
     assert_eq!(
         take(unsafe { game_run(h, cstr("return 'ok'").as_ptr()) }),
         "ok"
