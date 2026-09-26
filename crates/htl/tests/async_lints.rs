@@ -345,6 +345,79 @@ fn the_macro_declares_an_async_fn_with_the_marker() {
     );
 }
 
+/// `#[host_module]` writes `---@noyield(..)` for a sync fn's `Function` parameters, so the
+/// `.d.tl` it produced drives `async-as-sync-callback` the way a hand-written one does.
+/// Line 5: `each` (sync) is reported at `cb`. Line 6: `each_async` (an `async fn`, no marker)
+/// is not. Line 7: `on` (sync, `#[teal(yields)]`) is not. Line 8: `each_sync_call` (an `async
+/// fn`, `#[teal(noyield)]`) is. Lines 9-10: `walk`'s `Option<Function>` and both callbacks of
+/// `split`.
+#[test]
+fn the_macro_declares_a_sync_fn_s_function_parameters_noyield() {
+    use htl::mlua::Function;
+    pub struct Api;
+    #[htl::host_module(name = "api")]
+    impl Api {
+        pub async fn fetch(&self, path: String) -> String {
+            path
+        }
+        pub fn each(&self, f: Function) -> String {
+            f.call(()).unwrap()
+        }
+        pub async fn each_async(&self, f: Function) -> String {
+            f.call_async(()).await.unwrap()
+        }
+        pub fn on(&self, #[teal(yields)] f: Function) {
+            drop(f)
+        }
+        pub async fn each_sync_call(&self, #[teal(noyield)] f: Function) -> String {
+            f.call(()).unwrap()
+        }
+        pub fn walk(&self, f: Option<Function>) {
+            drop(f)
+        }
+        pub fn split(&self, on_ok: Function, on_err: Function) {
+            drop((on_ok, on_err))
+        }
+    }
+    let decl = <Api as htl::teal::HostModule>::DECL;
+    assert!(
+        decl.contains("each: function(self: api, f: function): string ---@noyield(f)\n"),
+        "{decl}"
+    );
+    let dir = scratch("macro-noyield");
+    write(&dir, "types/api.d.tl", decl);
+    let main = write(
+        &dir,
+        "main.tl",
+        "local api = require(\"api\")
+local async function cb(): string
+   return await api:fetch(\"/a\")
+end
+print(api:each(cb))
+print(await api:each_async(cb))
+api:on(cb)
+print(await api:each_sync_call(cb))
+api:walk(cb)
+api:split(cb, cb)
+",
+    );
+    let ci = checker(&dir, true, "").check(&main).unwrap();
+    assert!(ci.errors.is_empty(), "{:?}", ci.errors);
+    let c = of_rule(&ci.lints, "async-as-sync-callback");
+    let want = [
+        "main.tl:5:16: async function passed to api:each: its declaration says 'f' is called from C (---@noyield)",
+        "main.tl:8:32: async function passed to api:each_sync_call: its declaration says 'f' is called from C (---@noyield)",
+        "main.tl:9:10: async function passed to api:walk: its declaration says 'f' is called from C (---@noyield)",
+        "main.tl:10:11: async function passed to api:split: its declaration says 'on_ok' is called from C (---@noyield)",
+        "main.tl:10:15: async function passed to api:split: its declaration says 'on_err' is called from C (---@noyield)",
+    ];
+    assert_eq!(c.len(), want.len(), "{c:?}");
+    for (got, w) in c.iter().zip(want) {
+        assert!(got.contains(w), "{got} lacks {w}");
+    }
+    assert_eq!(ci.lints.len(), want.len(), "{:?}", ci.lints);
+}
+
 const ORDER: &str = "\
 local record order
    less: function(a: string, b: string): boolean ---@async

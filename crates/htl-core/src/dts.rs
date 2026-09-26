@@ -31,6 +31,7 @@
 //! | `Vec<T>` / `&[T]` / `[T; N]` / `VecDeque<T>` / `HashSet<T>` | `{T}` | a table used as a sequence |
 //! | `HashMap<K, V>` / `BTreeMap<K, V>` | `{K:V}` | a table keyed by `K` |
 //! | `mlua::Value` / `serde_json::Value` | `any` | unchanged: the deliberate escape hatch |
+//! | `mlua::Function` as a `#[host_module]` parameter | `f: function` (`Option<Function>` as any `Option` parameter), and a sync fn's ones named in a trailing `---@noyield(f)`; see the `host_module` macro doc for the rule and the overrides | a Lua function the host calls |
 //!
 //! A data-carrying enum is declared nested in the host module (`records = [Shape]`),
 //! where its variant records are reachable as `host.Shape_Circle` for `is`; `uses =
@@ -158,6 +159,37 @@ pub fn is_option(ty: &Type) -> bool {
             .last()
             .map(|s| s.ident == "Option")
             .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// `true` if the type is mlua's `Function` — a Lua function handed to the host — bare,
+/// behind a reference, or as `Option<Function>`. Matched by the
+/// path's last segment, as every mapping here is: `mlua::Function`, `htl::mlua::Function`
+/// and an imported `Function` are the same parameter to a source that is read, not
+/// resolved.
+pub fn is_function(ty: &Type) -> bool {
+    match ty {
+        Type::Reference(r) => is_function(&r.elem),
+        Type::Paren(p) => is_function(&p.elem),
+        Type::Path(p) => {
+            let Some(seg) = p.path.segments.last() else {
+                return false;
+            };
+            if seg.ident == "Function" {
+                return true;
+            }
+            if seg.ident != "Option" {
+                return false;
+            }
+            match &seg.arguments {
+                PathArguments::AngleBracketed(ab) => ab.args.iter().any(|a| match a {
+                    GenericArgument::Type(t) => is_function(t),
+                    _ => false,
+                }),
+                _ => false,
+            }
+        }
         _ => false,
     }
 }
@@ -879,6 +911,82 @@ pub struct HostParam {
     /// `host_decl`): Teal parses `?` on the last parameters only, so an `Option` with a
     /// required parameter after it is declared as the plain `T` and has to be passed.
     pub optional: bool,
+    /// Named in the line's `---@noyield(..)`, by the rule the `host_module` macro doc states
+    /// (*A Lua function as a parameter*); always `false` for a parameter that is not a
+    /// `Function`.
+    pub noyield: bool,
+}
+
+/// What `#[teal(..)]` on a `#[host_module]` parameter says about a Lua function the host is
+/// handed. The only words a parameter takes; each states the fact outright, so it reads the
+/// same on a sync fn and an `async fn` — only the default it replaces differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallbackAttr {
+    /// `#[teal(yields)]`: a suspension inside the function can reach the host's executor —
+    /// the host stores it and calls it later with `call_async` under an executor of its
+    /// own. Not named in `---@noyield`, whatever the method is.
+    Yields,
+    /// `#[teal(noyield)]`: the host calls it with the sync `Function::call` (an `async fn`
+    /// that does so on purpose says it here). Named in `---@noyield`.
+    NoYield,
+}
+
+/// `#[teal(yields)]` / `#[teal(noyield)]` on parameter `pname` of `fname`, or `None` when
+/// the parameter carries no `#[teal(..)]`. Anything else inside the attribute, both words at
+/// once, or an attribute with no word is refused rather than ignored: the macro strips the
+/// attribute before rustc sees it, so a word it did not read would be one nobody reads.
+pub fn param_callback_attr(
+    attrs: &[Attribute],
+    fname: &str,
+    pname: &str,
+) -> Result<Option<CallbackAttr>, String> {
+    let mut out: Option<CallbackAttr> = None;
+    let mut found = false;
+    for a in attrs.iter().filter(|a| a.path().is_ident("teal")) {
+        found = true;
+        let Meta::List(_) = &a.meta else {
+            return Err(format!(
+                "host_module: `{fname}`: `#[teal(..)]` on parameter `{pname}` takes `yields` or `noyield`"
+            ));
+        };
+        let list = a
+            .parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+            .map_err(|e| format!("host_module: `{fname}`: parameter `{pname}`: {e}"))?;
+        for meta in list {
+            let word = match &meta {
+                Meta::Path(p) => p.get_ident().map(|i| i.to_string()),
+                _ => None,
+            };
+            let got = match word.as_deref() {
+                Some("yields") => CallbackAttr::Yields,
+                Some("noyield") => CallbackAttr::NoYield,
+                _ => {
+                    let key = meta
+                        .path()
+                        .segments
+                        .iter()
+                        .map(|s| s.ident.to_string())
+                        .collect::<Vec<_>>()
+                        .join("::");
+                    return Err(format!(
+                        "host_module: `{fname}`: `#[teal(..)]` on parameter `{pname}` takes `yields` or `noyield`, got `{key}`"
+                    ));
+                }
+            };
+            if out.is_some_and(|prev| prev != got) {
+                return Err(format!(
+                    "host_module: `{fname}`: parameter `{pname}` is marked both `yields` and `noyield`"
+                ));
+            }
+            out = Some(got);
+        }
+    }
+    if found && out.is_none() {
+        return Err(format!(
+            "host_module: `{fname}`: `#[teal(..)]` on parameter `{pname}` takes `yields` or `noyield`"
+        ));
+    }
+    Ok(out)
 }
 
 /// One `pub fn` of a `#[host_module]` impl block, broken down for the declaration and for
@@ -972,10 +1080,26 @@ pub fn host_decl(
     let mut methods = Vec::new();
     for it in &imp.items {
         let ImplItem::Fn(f) = it else { continue };
+        let fname = f.sig.ident.to_string();
         if !matches!(f.vis, syn::Visibility::Public(_)) {
+            // A fn that does not cross has no declaration line for the attribute to shape,
+            // and the macro strips it all the same: refused, not read as nothing.
+            for a in &f.sig.inputs {
+                if let FnArg::Typed(pt) = a
+                    && pt.attrs.iter().any(|a| a.path().is_ident("teal"))
+                {
+                    let pname = match &*pt.pat {
+                        Pat::Ident(pi) => pi.ident.to_string(),
+                        _ => "_".to_string(),
+                    };
+                    return Err(format!(
+                        "host_module: `{fname}` is not `pub` and does not cross, so `#[teal(..)]` on its parameter `{pname}` says nothing"
+                    ));
+                }
+            }
             continue;
         }
-        let fname = f.sig.ident.to_string();
+        let is_async = f.sig.asyncness.is_some();
         let mut receiver: Option<bool> = None;
         let mut params = Vec::new();
         let mut teal_params = Vec::new();
@@ -1010,12 +1134,34 @@ pub fn host_decl(
                     };
                     let teal = teal_type(&owned_ty, &module)?;
                     let optional = is_option(&owned_ty);
+                    let callback = param_callback_attr(&pt.attrs, &fname, &pname)?;
+                    let is_fn = is_function(&owned_ty);
+                    if let Some(word) = callback
+                        && !is_fn
+                    {
+                        let word = match word {
+                            CallbackAttr::Yields => "yields",
+                            CallbackAttr::NoYield => "noyield",
+                        };
+                        return Err(format!(
+                            "host_module: `{fname}`: `#[teal({word})]` on parameter `{pname}`, which is not a `Function`: the word says how the host calls a Lua function it is handed"
+                        ));
+                    }
+                    // A sync fn has only `Function::call`, which a suspension cannot yield
+                    // through; an `async fn` is expected to `call_async`, which it can.
+                    let noyield = is_fn
+                        && match callback {
+                            Some(CallbackAttr::Yields) => false,
+                            Some(CallbackAttr::NoYield) => true,
+                            None => !is_async,
+                        };
                     params.push(HostParam {
                         name: pname,
                         owned_ty,
                         by_ref,
                         teal,
                         optional,
+                        noyield,
                     });
                 }
             }
@@ -1065,13 +1211,22 @@ pub fn host_decl(
         // `---@async` on the line: the Teal signature is the same either way, and the
         // marker is how the checker's `await-missing` / `await-non-async` learn that a call
         // of this method may suspend (read off the declaring line, like `---@nilable`).
-        let async_marker = if f.sig.asyncness.is_some() {
-            " ---@async"
+        let async_marker = if is_async { " ---@async" } else { "" };
+        // `---@noyield(f, g)`: the `Function` parameters the host calls from C, by the names
+        // this line spells, which is how `async-as-sync-callback` finds them for either call
+        // form (`api:each(cb)`, `api.each(api, cb)`). After `---@async` when both are there.
+        let noyield: Vec<&str> = params
+            .iter()
+            .filter(|p| p.noyield)
+            .map(|p| p.name.as_str())
+            .collect();
+        let noyield_marker = if noyield.is_empty() {
+            String::new()
         } else {
-            ""
+            format!(" ---@noyield({})", noyield.join(", "))
         };
         decl.push_str(&format!(
-            "   {fname}: function({}){ret_suffix}{async_marker}\n",
+            "   {fname}: function({}){ret_suffix}{async_marker}{noyield_marker}\n",
             teal_params.join(", ")
         ));
         methods.push(HostMethod {
@@ -1081,7 +1236,7 @@ pub fn host_decl(
             ret_teal,
             ret_is_result,
             ret_is_unit,
-            is_async: f.sig.asyncness.is_some(),
+            is_async,
         });
     }
     decl.push_str(&format!("end\n\nreturn {module}\n"));
@@ -1682,6 +1837,178 @@ mod tests {
         );
         assert!(
             hd.decl.contains("last: function(self: api): string"),
+            "{}",
+            hd.decl
+        );
+    }
+
+    /// Every callback shape of a `#[host_module]`, written as `htl dts` and the macro read it.
+    const CALLBACKS: &str = "pub struct Api;\n\
+         #[host_module(name = \"api\", dts = \"types/api.d.tl\")]\n\
+         impl Api {\n\
+         \x20   pub fn each(&self, f: Function) -> String { todo!() }\n\
+         \x20   pub fn walk(&self, f: Option<Function>) {}\n\
+         \x20   pub fn split(&self, on_ok: mlua::Function, on_err: &Function) {}\n\
+         \x20   pub async fn each_async(&self, f: Function) -> String { todo!() }\n\
+         \x20   pub fn on(&self, #[teal(yields)] f: Function) {}\n\
+         \x20   pub async fn each_sync_call(&self, #[teal(noyield)] f: Function) -> String { todo!() }\n\
+         \x20   pub fn map(&self, xs: Vec<i64>, f: Function) -> Vec<i64> { todo!() }\n\
+         \x20   pub fn plain(&self, n: i64) -> i64 { n }\n\
+         }\n";
+
+    const CALLBACK_LINES: [&str; 8] = [
+        "   each: function(self: api, f: function): string ---@noyield(f)\n",
+        "   walk: function(self: api, f?: function) ---@noyield(f)\n",
+        "   split: function(self: api, on_ok: function, on_err: function) ---@noyield(on_ok, on_err)\n",
+        "   each_async: function(self: api, f: function): string ---@async\n",
+        "   on: function(self: api, f: function)\n",
+        "   each_sync_call: function(self: api, f: function): string ---@async ---@noyield(f)\n",
+        "   map: function(self: api, xs: {integer}, f: function): {integer} ---@noyield(f)\n",
+        "   plain: function(self: api, n: integer): integer\n",
+    ];
+
+    /// A sync fn names its `Function` parameters in `---@noyield(..)`, an `async fn` does
+    /// not, and `#[teal(yields)]` / `#[teal(noyield)]` turn either default around.
+    #[test]
+    fn a_function_parameter_of_a_sync_fn_is_marked_noyield() {
+        let hd = host_impl(CALLBACKS);
+        for line in CALLBACK_LINES {
+            assert!(hd.decl.contains(line), "{line:?} not in\n{}", hd.decl);
+        }
+        let marked: Vec<(&str, Vec<&str>)> = hd
+            .methods
+            .iter()
+            .map(|m| {
+                let names = m
+                    .params
+                    .iter()
+                    .filter(|p| p.noyield)
+                    .map(|p| p.name.as_str())
+                    .collect();
+                (m.name.as_str(), names)
+            })
+            .collect();
+        assert_eq!(
+            marked,
+            vec![
+                ("each", vec!["f"]),
+                ("walk", vec!["f"]),
+                ("split", vec!["on_ok", "on_err"]),
+                ("each_async", vec![]),
+                ("on", vec![]),
+                ("each_sync_call", vec!["f"]),
+                ("map", vec!["f"]),
+                ("plain", vec![]),
+            ]
+        );
+    }
+
+    /// `htl dts` scans the file and goes through the same `host_decl`: the text it would
+    /// write is the macro's, parameter attributes and all.
+    #[test]
+    fn htl_dts_writes_the_same_noyield_lines_as_the_macro() {
+        let dir = std::env::temp_dir().join(format!("htl-dts-noyield-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let lib = dir.join("src/lib.rs");
+        std::fs::write(&lib, CALLBACKS).unwrap();
+        let generated = scan_rust_file(&lib, &dir).unwrap();
+        assert_eq!(generated.len(), 1);
+        assert_eq!(generated[0].target, dir.join("types/api.d.tl"));
+        assert_eq!(generated[0].text, host_impl(CALLBACKS).decl);
+        for line in CALLBACK_LINES {
+            assert!(
+                generated[0].text.contains(line),
+                "{line:?} not in\n{}",
+                generated[0].text
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn host_impl_err(src: &str) -> String {
+        let file: syn::File = syn::parse_str(src).unwrap();
+        let imp = file
+            .items
+            .iter()
+            .find_map(|i| match i {
+                Item::Impl(imp) => Some(imp),
+                _ => None,
+            })
+            .unwrap();
+        let attrs = parse_host_module_attr(&imp.attrs).unwrap().unwrap();
+        match host_decl(imp, attrs, Some(&file.items)) {
+            Ok(hd) => panic!("accepted: {}", hd.decl),
+            Err(e) => e,
+        }
+    }
+
+    /// A parameter's `#[teal(..)]` takes the two words and nothing else, on a `Function`,
+    /// of a fn that crosses; the rest is refused rather than read as nothing.
+    #[test]
+    fn a_parameter_attribute_other_than_the_two_words_is_refused() {
+        let wrap = |f: &str| {
+            format!("pub struct Api;\n#[host_module(name = \"api\")]\nimpl Api {{\n    {f}\n}}\n")
+        };
+        for (f, want) in [
+            (
+                "pub fn a(&self, #[teal(name = \"g\")] f: Function) {}",
+                "host_module: `a`: `#[teal(..)]` on parameter `f` takes `yields` or `noyield`, got `name`",
+            ),
+            (
+                "pub fn a(&self, #[teal(maybe)] f: Function) {}",
+                "host_module: `a`: `#[teal(..)]` on parameter `f` takes `yields` or `noyield`, got `maybe`",
+            ),
+            (
+                "pub fn a(&self, #[teal] f: Function) {}",
+                "host_module: `a`: `#[teal(..)]` on parameter `f` takes `yields` or `noyield`",
+            ),
+            (
+                "pub fn a(&self, #[teal()] f: Function) {}",
+                "host_module: `a`: `#[teal(..)]` on parameter `f` takes `yields` or `noyield`",
+            ),
+            (
+                "pub fn a(&self, #[teal(yields, noyield)] f: Function) {}",
+                "host_module: `a`: parameter `f` is marked both `yields` and `noyield`",
+            ),
+            (
+                "pub fn a(&self, #[teal(yields)] n: i64) {}",
+                "host_module: `a`: `#[teal(yields)]` on parameter `n`, which is not a `Function`: the word says how the host calls a Lua function it is handed",
+            ),
+            (
+                "pub async fn a(&self, #[teal(noyield)] t: Table) {}",
+                "host_module: `a`: `#[teal(noyield)]` on parameter `t`, which is not a `Function`: the word says how the host calls a Lua function it is handed",
+            ),
+            (
+                "fn a(&self, #[teal(yields)] f: Function) {}",
+                "host_module: `a` is not `pub` and does not cross, so `#[teal(..)]` on its parameter `f` says nothing",
+            ),
+        ] {
+            assert_eq!(host_impl_err(&wrap(f)), want, "{f}");
+        }
+    }
+
+    /// Either word states the fact, so it may repeat the default: the line is the one the
+    /// bare parameter gives.
+    #[test]
+    fn a_word_that_repeats_the_default_changes_nothing() {
+        let hd = host_impl(
+            "pub struct Api;\n\
+             #[host_module(name = \"api\")]\n\
+             impl Api {\n\
+             \x20   pub fn each(&self, #[teal(noyield)] f: Function) {}\n\
+             \x20   pub async fn later(&self, #[teal(yields)] f: Function) {}\n\
+             }\n",
+        );
+        assert!(
+            hd.decl
+                .contains("   each: function(self: api, f: function) ---@noyield(f)\n"),
+            "{}",
+            hd.decl
+        );
+        assert!(
+            hd.decl
+                .contains("   later: function(self: api, f: function) ---@async\n"),
             "{}",
             hd.decl
         );
