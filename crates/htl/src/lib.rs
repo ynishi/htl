@@ -71,7 +71,11 @@ That way out is [`ffi`] and [`macro@c_export`]."
 )]
 //!
 //! The `async` feature is off by default for the same reason: it turns on mlua's own
-//! `async`, and a host with no async method should be built as it was without it.
+//! `async` and mlua-isle's executor, and a host with no async method should be built as
+//! it was without it. With it, an `async fn` in a `#[host_module]` is a call Teal can
+//! `await`, `Htl::run_async` / `Htl::run_blocking` run a program as a root on the
+//! executor, and `htl.task` (`Htl::install_task_lib`) is the task library the
+//! `async` / `await` syntax desugars to; the README's Async section is the tour.
 //!
 //! # Against an unpublished htl
 //!

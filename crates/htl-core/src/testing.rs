@@ -154,6 +154,10 @@ pub struct RunOptions {
     /// task is preempted. [`crate::project::test`] fills it from the `htl.toml` it was
     /// given; a caller building a [`TestSession`] by hand sets it, or keeps the default.
     pub async_: crate::config::AsyncConfig,
+    /// The project's `[lang]` ([`crate::config::LangConfig`]): whether `async` / `await` are
+    /// keywords of the files this run checks. Applied to the session's checker when it is
+    /// built; filled by [`crate::project::test`] from the `htl.toml`, as `async_` is.
+    pub lang: crate::config::LangConfig,
 }
 
 /// The seed one file gets, from the run's seed and its path.
@@ -465,6 +469,7 @@ impl TestSession {
         if let Some(spec) = lint_spec {
             checker.configure_lints(spec)?;
         }
+        checker.set_lang(&opts.lang)?;
         Ok(Self {
             checker,
             lib: lib.to_string(),
@@ -604,6 +609,9 @@ fn run_in(h: &Htl, path: &Path, r: RunIn<'_>, out_code: &mut Option<String>) -> 
     h.install_test_lib()?;
     #[cfg(feature = "std")]
     h.install_std()?;
+    // A test on the executor may spawn tasks: the library that does, on the same terms.
+    #[cfg(feature = "async")]
+    h.install_task_lib()?;
     // What the file may `require`: the project's directories as a test sees them, from
     // its model. A file that belongs to no project reads its own directory, the one place
     // it names by itself. A build without the model (`pkg` or `dts` off) has no

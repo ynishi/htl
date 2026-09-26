@@ -124,6 +124,10 @@ indent = 3
 # preempt = 1       # yield a task every N cancel checks (1000 instructions each), so a
 #                   # sibling can run while it loops; off, tasks switch only at awaits
 
+[lang]
+# async = true      # async / await are keywords: local async function f, async local
+#                   # x = e (a task), await x, await f(); off, they are ordinary names
+
 [build]
 # What runs this project's output: hb (the htl binary, the default when absent), bin,
 # cdylib, window. Written by htl new --target; see README "Build targets".

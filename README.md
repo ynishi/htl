@@ -66,7 +66,7 @@ htl = "0.8"                    # embedding: engine + proc macros in one import
 |---|---|
 | `htl new <name>` / `htl init [dir]` | scaffold: `mlua-pkg.toml`, `htl.toml`, `src/<mod>/init.tl`, `src/main.tl`, `tests/<mod>_test.tl`, `types/README.md`, `.gitignore`, README — and `mise.toml` when the CLI is a published release (`--lib` for no entry script, which leaves `src/main.tl` out; `--target <name>` for what will run the output, `--embed` being the shorthand for `--target bin`; `--htl <req>` for which htl the project depends on; `--no-x` for no `htlx` dependency) |
 | `htl check [paths] [--strict] [--lint rule=level] [--list-lints] [--format json] [--no-cache] [--cache-mode per-module\|whole-run] [--explain-cache]` | type-check; htl lints as `lint:`, advisory at their default level and fatal at `deny` (`--strict` promotes every `warn` to `deny`; `--list-lints` prints every rule with its default level and exits); a module reached through `require` (an installed dep, a `[check] paths` dir) is checked with the file and its type errors are errors too, once per run, with the file that required it; what has not changed is replayed from `.htl/` (see Caching) |
-| `htl run <file.tl \| app.hb> [args]` | check then execute; `require` of a `.tl` with type errors fails. The program runs as a root coroutine on the executor, so a call of a host's `async fn` suspends and resumes with the value; Ctrl-C cancels it (`[async] grace_ms` in `htl.toml` says how long its cleanup may run), prints `htl run: interrupted` and exits 130 |
+| `htl run <file.tl \| app.hb> [args]` | check then execute, as a root coroutine on the executor (see Async); `require` of a `.tl` with type errors fails; Ctrl-C cancels the program, prints `htl run: interrupted` and exits 130 |
 | `htl test [paths] [--filter s] [--lib mod] [--lint rule=level] [--fail-fast] [-v \| -q] [--slow ms] [--update] [--seed n] [--coverage [--coverage-lines]] [--lcov file] [--junit file] [--format json] [--no-cache] [--explain-cache]` | every `.tl` that loads the test library (`htl.test`, or `--lib`), one isolated state per file; checking is replayed from `.htl/`, the run never is (see Caching; the flags are under Tests) |
 | `htl fix [paths] [--rule a,b] [--unsafe] [--dry-run] [--diff] [--allow-dirty] [--allow-no-vcs] [--exit-non-zero-on-fix] [--format json]` | apply the fixes diagnostics carry: the safe ones by default, `--unsafe` for the ones that may change what the program does (see Fixing) |
 | `htl fmt [paths] [--check] [--indent N]` | whitespace formatter (indentation from the syntax tree, blank lines, trailing space) |
@@ -174,12 +174,8 @@ The reference is [docs.rs/htl](https://docs.rs/htl): its front page walks this e
 and the pages behind it are
 
 - [`host_module`](https://docs.rs/htl/latest/htl/attr.host_module.html) — parameters,
-  `errors = "return"`, `Option`, `UserDataRef`, `uses`, `async fn` (feature `async`;
-  `htl run` / `htl test` run the program that calls one, a host awaits
-  [`Htl::run_async`](https://docs.rs/htl/latest/htl/struct.Htl.html#method.run_async)
-  or calls `run_blocking`, and a cancel reaches the program the way
-  [`config::AsyncConfig`](https://docs.rs/htl/latest/htl/config/struct.AsyncConfig.html)
-  says);
+  `errors = "return"`, `Option`, `UserDataRef`, `uses`, `async fn` (feature `async`; who
+  runs the program that calls one is under Async);
 - [`dts`](https://docs.rs/htl/latest/htl/dts/index.html) — what each Rust shape becomes
   on the Teal side (`#[derive(TealRecord)]`, `rename_all`, data enums as unions);
 - [`Strict<T>`](https://docs.rs/htl/latest/htl/teal/struct.Strict.html) and
@@ -202,7 +198,8 @@ and the pages behind it are
 
 **Both ways of holding Teal are in this repository, built and run on every commit**:
 [`examples/`](examples/README.md) has `embed`, where `include_tl!`, `include_bundle!`,
-`#[derive(TealRecord)]` and `#[host_module]` all meet in one binary, and `resolver`, where
+`#[derive(TealRecord)]` and `#[host_module]` all meet in one binary (and, with `--async`, an
+`async fn` awaited from Teal), and `resolver`, where
 nothing is embedded and `require` goes through mlua-pkg at run time. Its README says what
 each one prints and which line of the output is the point.
 
@@ -222,9 +219,9 @@ in `HTL_LINTS`; `[lint] strict` / `--strict` make every `warn` count as `deny`; 
 trailing `-- htl: allow(nil-index)` silences one occurrence. `htl check --list-lints`
 prints every rule with its default level, and
 [`htl::lint`](https://docs.rs/htl/latest/htl/lint/index.html) is the reference: what
-each rule catches, Teal's own warnings under `tl:*`, and the four markers
-(`---@struct`, `---@sealed`, `---@extensible`, `---@nilable`) that turn a rule on for
-a record or a function.
+each rule catches, Teal's own warnings under `tl:*`, and the five markers
+(`---@struct`, `---@sealed`, `---@extensible`, `---@nilable`, `---@async`) that turn a
+rule on for a record or a function.
 
 ## Project config (`htl.toml`)
 
@@ -257,9 +254,12 @@ target = "bin"            # what runs this project's output: hb (default), bin, 
 [[contract]]              # where this project accepts modules written outside it
 dir = "mods"
 
-[async]                   # the executor htl run / htl test run a program on
-grace_ms = 1000           # a cancelled program's time to clean up; 0 drops it at once
-# preempt = 1             # yield a task every N cancel checks; off: only at awaits
+[async]                   # see Async: a cancelled program's time to clean up, and preemption
+grace_ms = 1000
+# preempt = 1
+
+[lang]
+async = true              # async / await are keywords and the four rules are on (see Async)
 ```
 
 [`htl::config`](https://docs.rs/htl/latest/htl/config/index.html) has the full sample
@@ -319,10 +319,128 @@ end)
 ```
 
 A test file is any `.tl` that loads the test library, wherever it is; `htl test` runs
-each in a state of its own, on the executor — a test may call a host's `async fn` as it
-calls any other. Matchers, snapshots, the seeded `t.rng()`, `--coverage` /
+each in a state of its own, on the executor (Async) — a test may call a host's `async fn`
+as it calls any other. Matchers, snapshots, the seeded `t.rng()`, `--coverage` /
 `--lcov` / `--junit`, and the `--lib` contract for another library:
 [`htl::testing`](https://docs.rs/htl/latest/htl/testing/index.html).
+
+## Async
+
+### The executor
+
+`htl run` and `htl test` run a program as a root coroutine on an executor (mlua-isle's,
+on tokio), and so does a host that awaits
+[`Htl::run_async`](https://docs.rs/htl/latest/htl/struct.Htl.html#method.run_async) on a
+runtime of its own or calls `Htl::run_blocking` (feature `async`). Inside it a call of a
+host's `async fn` suspends the program and resumes it with the value, as any other call;
+a plain `Htl::exec` has nothing to suspend to, and such a call raises there. Ctrl-C in
+`htl run` cancels the root: the program gets its grace to clean up (Settings, below),
+`htl run: interrupted` is printed and the exit code is 130. The `embed` example
+(`cargo run -p embed -- --async`) is a host with such a method.
+
+### async / await
+
+With `[lang] async = true` in `htl.toml`, a program says which functions may suspend and
+where, and the checker holds it to that. Teal is not forked: the two words are keywords
+only for a project that says so (a Teal language server still reports them as errors),
+and `htl fmt` leaves them where they are.
+
+```lua
+local http = require("http")                    -- a #[host_module] with async fn
+
+local async function pair(a: string, b: string): string, string
+   async local x = http.get(a)                  -- a child task; x: Task<string>
+   local y = await http.get(b)                  -- the marker on a call of an async function
+   return await x, y                            -- the task's value; leaving without it cancels the task
+end
+
+print(await pair("/a", "/b"))                   -- the entry chunk of htl run / htl test is async
+```
+
+| written | meaning | generated Lua, on the same line |
+|---|---|---|
+| `local async function f(..)`, `global async function f`, `async function R.f(..)`, `async function(..)` | `f` may suspend; its type is unchanged | the function without the word |
+| `await f(x)` | the marker on a call of an async function; binds like a prefix (`await f(b) + 1` awaits `f(b)`) | `f(x)` |
+| `async local x = e` | runs `e` as a child task; `x: Task<T>`, `T` the type of `e` | `local x <close> = require("htl.task").spawn(function() return e end)` |
+| `await x`, `x` an `async local` | the task's value; what it raised is re-raised | `x:await()` |
+
+One name per `async local` (a task holds one value), and the expression is what runs as
+the task — a call of an async function, usually, since a plain value has nothing to wait
+for. The checker types `x` from `e` (it reads the declaration as `require("htl.task").of(e)`)
+where the closure the generated Lua spawns would tell it nothing. A task is awaited once;
+`await x` twice is `htl.task: task already awaited` at run time. After `.` or `:` and
+before `:` `=` `,` `)` `.` `(` the words are still names (`t.await`, `x:await()`, a field
+`await:`, `{ await = 1 }`), so a file that used them as names keeps working with the
+setting on.
+
+### The rules
+
+Four rules, on by default with the setting and silent without it (`htl check
+--list-lints` shows the level of each; the levels change like any other rule's, Lints):
+
+| rule | level | reported |
+|---|---|---|
+| `await-missing` | deny | a call of an async function — a Teal `async function`, or a host method whose declaration line carries `---@async` (what `#[host_module]` and `htl dts` write for an `async fn`) — without `await`, at the call |
+| `await-outside-async` | deny | `await` or `async local` inside a function that is not `async`, at the keyword; and at the top level of a module reached through `require`, which cannot yield |
+| `await-non-async` | warn | `await` on a call of a function that is not async, at the keyword |
+| `task-escape` | deny | an `async local` name captured by a nested function or returned bare: the task is cancelled when its scope ends, so what the capture or the caller reads is a cancelled task |
+
+The top level of the file being checked is the entry chunk of `htl run` / `htl test` and is
+async; a module's top level is not, and that is reported on the check of each file that
+requires the module, at the module's line — so `htl check src` says something about a
+module's top-level `await` once a checked file requires it. The expression of an
+`async local` runs inside the task and needs no `await` of its own. `async-as-sync-callback`
+— an async function handed to `table.sort`, `string.gsub`, `xpcall` — needs the type flow
+and is not a rule yet.
+
+### Tasks (`htl.task`)
+
+The syntax desugars to this module, and a program can use it directly — with the setting
+off, or for a task that is not one `async local`:
+
+```lua
+local task = require("htl.task")          -- typed via task.d.tl
+local a = task.spawn(function(): string return http.get("/a") end)
+local b = task.spawn(function(): string return http.get("/b") end)
+print(a:await(), b:await())              -- 300 ms for two 300 ms calls
+```
+
+`spawn` starts the closure as a task beside the caller and returns a `Task<T>`, `T` being
+the closure's declared return type (an untyped closure is a type error; a task holds one
+value). `t:await()` waits for it and hands the value back, or re-raises what the task
+raised, as it was; `t:cancel()` asks a task to stop, `t:done()` says whether it has. Tasks
+are structured: a task the parent did not await is cancelled and waited for when the parent
+returns, raises or is cancelled, and `local t <close> = task.spawn(..)` does the same at
+the end of the scope. A cancel reaches a task at its next await as an error that
+`task.is_cancelled` recognises, so a `pcall` or a `<close>` handler can clean up and let it
+pass. Under `[lang] async` the closure is written `async function(): string return await
+http.get("/a") end`: a call of an async function inside a plain closure is
+`await-missing` there. The declaration's header is the reference:
+[`htl::task`](https://docs.rs/htl/latest/htl/task/index.html).
+
+### Settings
+
+Two tables of `htl.toml`, both with every key in
+[`htl::config`](https://docs.rs/htl/latest/htl/config/index.html):
+
+- `[lang] async = true` makes the two words keywords and turns the rules on
+  (`include_tl!` reads it too). Off, the default, they are names, and `htl.task` is still
+  there.
+- `[async] grace_ms` (default 1000) is how long a cancelled program — the root, and every
+  task under it, on one deadline — may keep running its cleanup. With `0` it is dropped at
+  once: the host's future is released, its `__close` handlers run but cannot await. With
+  more, the cancel arrives as an error first, so a `<close>` handler or a `pcall` sees it
+  and may await a host call, and the drop comes when the grace ends. A host `async fn`
+  returns the cancel at its own await rather than waiting the grace out. `[async] preempt`
+  is off: a task runs from one `await` to the next without another task interleaving,
+  which is what requiring the word is for; the price is that a task in a CPU loop cannot
+  be cancelled by a sibling on the same runtime, only from another thread (Ctrl-C, an
+  `Interrupt`). `preempt = N` yields it every N cancel checks (a check every 1000
+  instructions), and then tasks interleave at points the program did not mark.
+
+`htl gen` writes plain Lua for all of this, and that Lua requires `htl.task`: it runs on a
+host that preloads the module, which is the `htl` crate with the `async` feature — mlua-isle
+on the host — running the program on the executor, and nowhere else.
 
 ## Fixing (`htl fix`)
 

@@ -7,3 +7,8 @@
 # wherever it is, so the one directory is all the layout there is.
 [layout]
 source = "scripts"
+
+# `scripts/pair.tl` is written with `async` / `await` (README, Async): the words are keywords
+# for this project, which `include_tl!` reads here as `htl check` would.
+[lang]
+async = true

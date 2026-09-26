@@ -11,5 +11,9 @@ description = "Example host: Rust binary embedding Teal scripts via include_tl!"
 bad = []
 
 [dependencies]
-htl = { workspace = true, features = ["macros", "pkg"] }
+# `async` for `http`, the `#[host_module]` with an `async fn` that `--async` awaits from
+# Teal: the executor (`Htl::run_blocking`) and `htl.task` come with it.
+htl = { workspace = true, features = ["macros", "pkg", "async"] }
 anyhow = { workspace = true }
+# `http.get` sleeps on tokio's timer; the runtime itself is the one `Htl::run_blocking` builds.
+tokio = { version = "1", features = ["time"] }

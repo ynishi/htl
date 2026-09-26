@@ -22,7 +22,10 @@ proc-macro = true
 # cannot ask which features the crate it expands in gave `htl` — so the declarations are
 # in front of every expansion, as `htl.test`'s are, and a host that left the feature off
 # finds out at the first `require`, at run time, as it would for `htl.test`.
-htl-core = { workspace = true, features = ["pkg", "dts", "std"] }
+# `async` for the declaration of `htl.task`: `include_tl!` checks a file that spawns tasks
+# against it, the way `htl check` does. The macro runs no program, so the executor the
+# feature also compiles is unused here; what the host's own state can load is its `async`.
+htl-core = { workspace = true, features = ["pkg", "dts", "std", "async"] }
 syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"

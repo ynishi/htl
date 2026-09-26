@@ -16,6 +16,7 @@ read at run time.
 ```bash
 cargo run -p embed                    # main.tl from source, util.tl as stripped bytecode
 cargo run -p embed -- --bundle a b    # the same program as one linked bundle
+cargo run -p embed -- --async         # pair.tl: an async fn awaited twice at once
 cargo build -p embed --features bad   # must fail: a Teal type error is a Rust build error
 ```
 
@@ -33,6 +34,19 @@ store:write bad ->	nil	invalid name: no/slash
 They differ in one line, inside the `pcall` on `host.parse_int`: the traceback reads
 `scripts/main.tl:19` from source and `?: in main chunk` from the bundle. Stripping drops the
 line numbers along with the chunk name, which is what a bundle is.
+
+`--async` runs [`embed/scripts/pair.tl`](embed/scripts/pair.tl) on the executor
+(`Htl::run_blocking`), with `[lang] async = true` in the example's `htl.toml`. `http.get` is
+an `async fn` that sleeps 300 ms; the Teal starts one as a task with `async local`, awaits
+the other, and collects both, and the script asserts the pair took under 400 ms. Then a
+function leaves a task behind: the host's future for it is dropped when the scope ends, and
+the host prints so before the caller prints its result.
+
+```text
+/a	/b
+dropped
+/fast
+```
 
 `--features bad` adds `include_tl!("scripts/bad.tl")`, whose second line asks for a `string`
 from a method that returns a `number`:

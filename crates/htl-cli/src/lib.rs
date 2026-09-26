@@ -873,6 +873,12 @@ fn judged(found: &htl::verdict::Findings, policy: &htl::verdict::Policy) -> Stri
 /// The lint selection `htl.toml` puts in force, applied to `h`: the rules `htl check`
 /// reports under, at the levels it judges them by. A command that checks without it
 /// reports what the project turned off and judges nothing.
+/// Hand the checker the project's `[lang]`: whether `async` / `await` are keywords in the
+/// files it is about to read. Beside [`config_lints`] on every command that parses.
+fn config_lang(h: &Htl, cfg: &project::Config) -> Result<()> {
+    h.set_lang(&project::lang_of(cfg))
+}
+
 fn config_lints(h: &Htl, cfg: &project::Config) -> Result<htl::lint::Lints> {
     let spec = cfg
         .as_ref()
@@ -1691,6 +1697,7 @@ fn cmd_test(
             seed: flags.seed,
             // `project::test` fills it from the config it is handed.
             async_: Default::default(),
+            lang: Default::default(),
         },
         cache: project::cache_options(
             !flags.no_cache,
@@ -1978,6 +1985,7 @@ fn cmd_fmt(paths: &[PathBuf], check: bool, indent: Option<usize>) -> Result<Exit
         .or_else(|| cfg.as_ref().and_then(|(_, _, c)| c.fmt.indent))
         .unwrap_or(3);
     let h = Htl::new()?;
+    config_lang(&h, &cfg)?;
     // Not a dependency's files, a patched one included: formatting the copy would turn
     // every one of its files into a diff against the revision it was taken from, and bury
     // the project's own change somewhere inside that.
@@ -2045,7 +2053,11 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
     // What `htl check` holds a file to, resolved the same way and read by the same checker,
     // so a file this run leaves reports what a check of it would.
     let scope = project::Scope::new(&cfg, model.as_ref(), &paths[0], None)?;
-    let h = project::checker(model.as_ref(), scope.lints.selection())?;
+    let h = project::checker(
+        model.as_ref(),
+        scope.lints.selection(),
+        &project::lang_of(&cfg),
+    )?;
     let opts = FixOptions {
         unsafe_fixes: flags.unsafe_fixes,
         promoted: cfg
@@ -2883,6 +2895,7 @@ fn cmd_gen(file: &Path, out: Option<&Path>) -> Result<ExitCode> {
     // the same order, as `cmd_run` and `cmd_build`.
     let cfg = load_config(file)?;
     config_lints(&h, &cfg)?;
+    config_lang(&h, &cfg)?;
     let model = apply_model(&h, &cfg, file)?;
     project::file_view(&h, model.as_ref(), file)?;
     h.install_std()?;
@@ -2913,10 +2926,12 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
     // own modules and gains nothing from it either way.
     let cfg = load_config(file)?;
     config_lints(&h, &cfg)?;
+    config_lang(&h, &cfg)?;
     h.configure_async(async_config(&cfg))?;
     let model = apply_model(&h, &cfg, file)?;
     h.install_test_lib()?;
     h.install_std()?;
+    h.install_task_lib()?;
     if Bundle::is_bundle(&bytes) {
         let b = Bundle::decode(&bytes)?;
         // A bundle's frames are as good as its payload: stripped bytecode has no lines to
@@ -3070,6 +3085,7 @@ fn cmd_build(
     // The rules and levels `htl check` uses: a bundle is judged as a check of its closure
     // would be, and a rule the project turned off is not reported here either.
     let lints = config_lints(&h, &cfg)?;
+    config_lang(&h, &cfg)?;
     let policy = htl::verdict::Policy::resolve(cfg.as_ref().map(|(_, _, c)| c), false);
     let model = apply_model(&h, &cfg, entry)?;
     // The names the host provides are the model's — `#[host_module]`s in the crate around
@@ -3213,6 +3229,7 @@ fn cmd_build_dir(
 ) -> Result<ExitCode> {
     // Judged as the file form is: `htl.toml`'s rules and levels, its `strict`.
     let lints = config_lints(h, cfg)?;
+    config_lang(h, cfg)?;
     let policy = &htl::verdict::Policy::resolve(cfg.as_ref().map(|(_, _, c)| c), false);
     h.add_path(dir)?;
     let files = htl::collect_tl_skipping(&[dir.to_path_buf()], skip)?;

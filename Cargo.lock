@@ -391,6 +391,7 @@ version = "0.9.0"
 dependencies = [
  "anyhow",
  "htl",
+ "tokio",
 ]
 
 [[package]]

@@ -54,17 +54,19 @@ fn host() -> Htl {
 }
 
 /// The `.d.tl` an async method produces is the one the same signature produces without
-/// `async`. Teal has no notion of a coroutine-only call, and the values are the same.
+/// `async`, plus the trailing `---@async` marker: Teal has no notion of a coroutine-only
+/// call and the values are the same, and the marker is what the checker's await rules
+/// read under `[lang] async`.
 #[test]
-fn the_declaration_says_nothing_about_async() {
+fn the_declaration_marks_async_and_says_nothing_else_about_it() {
     let decl = <Api as htl::teal::HostModule>::DECL;
     assert!(
-        decl.contains("seen: function(self: api): integer"),
+        decl.contains("seen: function(self: api): integer\n"),
         "{decl}"
     );
     assert!(
-        decl.contains("fetch: function(self: api, path: string): string"),
-        "the async method reads like the sync one: {decl}"
+        decl.contains("fetch: function(self: api, path: string): string ---@async"),
+        "the async method reads like the sync one, with the marker: {decl}"
     );
     assert!(
         decl.contains("record: function(self: api): integer"),
@@ -74,7 +76,13 @@ fn the_declaration_says_nothing_about_async() {
         decl.contains("parse: function(s: string): integer"),
         "{decl}"
     );
-    assert!(!decl.contains("async"), "nothing leaks into Teal: {decl}");
+    // The word appears as the marker and nowhere else: once per async method, three
+    // here, and not on the sync one.
+    assert_eq!(decl.matches("async").count(), 3, "the marker alone: {decl}");
+    assert!(
+        decl.contains("seen: function(self: api): integer\n"),
+        "no marker on the sync method: {decl}"
+    );
 }
 
 /// Sync and async in one impl block, with no annotation saying which it contains: the
