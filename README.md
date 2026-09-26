@@ -260,6 +260,9 @@ dir = "mods"
 [async]                   # the executor htl run / htl test run a program on
 grace_ms = 1000           # a cancelled program's time to clean up; 0 drops it at once
 # preempt = 1             # yield a task every N cancel checks; off: only at awaits
+
+[lang]
+async = true              # async / await are keywords (see async / await); off, they are names
 ```
 
 [`htl::config`](https://docs.rs/htl/latest/htl/config/index.html) has the full sample
@@ -348,6 +351,44 @@ pass; `[async] grace_ms` in `htl.toml` bounds that cleanup. The module is preloa
 binary that runs the program on the executor, so Lua that `htl gen` wrote from a file
 requiring it runs on such a host and nowhere else. The declaration's header is the
 reference: [`htl::task`](https://docs.rs/htl/latest/htl/task/index.html).
+
+### async / await
+
+With `[lang] async = true` in `htl.toml`, the tasks above have a syntax, and the checker
+reads it. Teal is not forked: the two words are keywords only for a project that says so
+(a Teal language server still reports them as errors), and `htl fmt` leaves them where
+they are.
+
+```lua
+local http = require("http")                    -- a #[host_module] with async fn
+
+local async function pair(a: string, b: string): string, string
+   async local x = http.get(a)                  -- a child task; x: Task<string>
+   local y = await http.get(b)                  -- the marker on a call of an async function
+   return await x, y                            -- the task's value; leaving without it cancels the task
+end
+
+print(await pair("/a", "/b"))                   -- the entry chunk of htl run / htl test is async
+```
+
+| written | meaning | generated Lua, on the same line |
+|---|---|---|
+| `local async function f(..)`, `global async function f`, `async function R.f(..)`, `async function(..)` | `f` may suspend; its type is unchanged | the function without the word |
+| `await f(x)` | the marker on a call of an async function; binds like a prefix (`await f(b) + 1` awaits `f(b)`) | `f(x)` |
+| `async local x = e` | runs `e` as a child task; `x: Task<T>`, `T` the type of `e` | `local x <close> = require("htl.task").spawn(function() return e end)` |
+| `await x`, `x` an `async local` | the task's value; what it raised is re-raised | `x:await()` |
+
+One name per `async local` (a task holds one value), and the expression is what runs as
+the task — a call of an async function, usually, since a plain value has nothing to wait
+for. The checker types `x` from `e` (it reads the declaration as `require("htl.task").of(e)`)
+where the closure the generated Lua spawns would tell it nothing. A task is awaited once;
+`await x` twice is `htl.task: task already awaited` at run time. After `.` or `:` and
+before `:` `=` `,` `)` `.` `(` the words are still names (`t.await`, `x:await()`, a field
+`await:`, `{ await = 1 }`), so a file that used them as names keeps working with the
+setting on. Lua that `htl gen` wrote from such a file requires `htl.task` and runs on a
+host that preloads it (Tasks, above). The checker rules that hold a program to the
+syntax — an async call without `await`, an `await` where nothing can suspend, a task that
+escapes its scope — follow.
 
 ## Fixing (`htl fix`)
 

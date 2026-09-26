@@ -565,9 +565,14 @@ pub fn search_dirs(file: &Path) -> Vec<PathBuf> {
 ///
 /// Only built when something actually has to be checked — a run that replays every module
 /// should not pay the ~13.5 ms this costs.
-pub fn checker(model: Option<&crate::model::Project>, sel: &crate::lint::Selection) -> Result<Htl> {
+pub fn checker(
+    model: Option<&crate::model::Project>,
+    sel: &crate::lint::Selection,
+    lang: &crate::config::LangConfig,
+) -> Result<Htl> {
     let h = Htl::new()?;
     h.select_lints(sel)?;
+    h.set_lang(lang)?;
     if let Some(m) = model {
         h.apply_model(m, crate::model::View::Source)?;
     }
@@ -580,6 +585,13 @@ pub fn checker(model: Option<&crate::model::Project>, sel: &crate::lint::Selecti
     #[cfg(feature = "std")]
     h.install_std()?;
     Ok(h)
+}
+
+/// The `[lang]` of a loaded config, or the default (plain Teal) outside a project.
+pub fn lang_of(cfg: &Config) -> crate::config::LangConfig {
+    cfg.as_ref()
+        .map(|(_, _, c)| c.lang.clone())
+        .unwrap_or_default()
 }
 
 /// Where a file a check pulled in lives, for the `origin` a dependency diagnostic carries.
@@ -1187,7 +1199,7 @@ pub fn check<O: Output>(
     let to_check = hits.iter().filter(|h| h.is_none()).count();
 
     let h = if to_check > 0 {
-        Some(checker(model, lints.selection())?)
+        Some(checker(model, lints.selection(), &lang_of(cfg))?)
     } else {
         None
     };
@@ -1745,6 +1757,7 @@ pub fn test<O: Output>(
             Some((_, _, c)) => c.async_.clone(),
             None => Default::default(),
         },
+        lang: lang_of(cfg),
         ..run
     };
     let mut session = TestSession::new(lint, lib, *filter, run)?;

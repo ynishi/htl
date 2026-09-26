@@ -59,6 +59,11 @@ local record task
    -- `t:await()` as a function (see the header for when the checker prefers the method).
    await: function<T>(t: Task<T>): T
 
+   -- A task that already holds `v`: `await` returns it at once. It is what the checker
+   -- reads `async local x = e` as (`[lang] async`), so that `x: Task<T>` is typed from `e`;
+   -- the Lua that runs spawns `e` as a task instead.
+   of: function<T>(v: T): Task<T>
+
    -- Whether `err` is a cancellation: what a cancel raises inside a task (caught with
    -- `pcall`, or handed to a `__close` handler), or `CANCELLED`. `false` for anything else.
    is_cancelled: function(err: any): boolean

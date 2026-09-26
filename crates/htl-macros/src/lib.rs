@@ -395,6 +395,11 @@ fn checker_for(tag: &str, manifest_dir: &Path, path: &Path) -> Result<Checker, S
         h.configure_lints(&spec)
             .map_err(|e| format!("{tag}: lint spec {spec:?}: {e:#}"))?;
     }
+    // `[lang]` too: a file written with `async` / `await` is read by `include_tl!` as
+    // `htl check` reads it.
+    if let Some(c) = cfg.as_ref() {
+        h.set_lang(&c.lang).map_err(|e| format!("{tag}: {e:#}"))?;
+    }
     // The project's directories and nothing else: Lua's own default path is relative to
     // wherever cargo happens to run the compiler, which is not a directory the source
     // names. What the file may read is the project model's, as `htl check` has it; a file

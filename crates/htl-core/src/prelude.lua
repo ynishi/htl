@@ -1109,10 +1109,345 @@ local function rewrite(site, to)
    site.node.tk = string.format("%q", to)
 end
 
+---------------------------------------------------------------- async / await
+
+-- `[lang] async = true` (`H.set_lang`) makes `async` and `await` keywords of the project's
+-- Teal. Teal itself is not forked: the two words are found by `tl.lex`, taken out of the
+-- token stream, and the AST `tl.parse_program` builds from the rest is rewritten at the
+-- positions they were at. Every other token keeps its line and column, so the checker's
+-- positions and the generated Lua's lines are the source's.
+--
+-- What each spelling becomes:
+--
+--   local async function f(..)  |  the function, marked `htl_async` (the checker rules read it)
+--   global async function f     |  the same
+--   async function R.f(..)      |  the same
+--   async function(..) .. end   |  the same, an anonymous one
+--   async local x = e           |  local x <close> = require("htl.task").of(e)   -- checked:
+--                               |     `of<T>(v: T): Task<T>` types `x` from `e`, where a
+--                               |     closure would not (Teal infers nothing through an
+--                               |     untyped `function() return e end`)
+--                               |  local x <close> = require("htl.task").spawn(function() return e end)
+--                               |     -- generated: the closure is what runs as the task
+--   await x   (x an async local)|  x:await()
+--   await f(..)                 |  f(..), the call marked `htl_awaited`
+--
+-- The checked form and the generated form differ in one place, the `async local`, so the
+-- AST is rewritten once for the check and the `of(e)` call is turned into the `spawn`
+-- call just before `tl.generate` (`H.async_gen_ast`, from `H.gen` / `H.gen_string`). The
+-- module is required inline at each use rather than through a `local` added at the top:
+-- a line added would move every line after it.
+--
+-- Whether a word is the keyword is decided from its neighbours, since both are ordinary
+-- names in Teal and in existing code: `async` is the keyword before `local` or
+-- `function` and a name anywhere else; `await` is a name after `.` or `:` (a field, a
+-- method) and before `:` `=` `,` `)` `.` `(` `]` `}` (a field being declared or set, an
+-- argument, a call of a function so named), and the keyword otherwise.
+H.lang_async = false
+
+function H.set_lang(async_on)
+   H.lang_async = async_on and true or false
+end
+
+local AWAIT_NAME_AFTER = { ["."] = true, [":"] = true }
+local AWAIT_NAME_BEFORE = {
+   [":"] = true, ["="] = true, [","] = true, [")"] = true, ["."] = true, ["("] = true,
+   ["]"] = true, ["}"] = true,
+}
+
+local function is_node(v)
+   return type(v) == "table" and type(v.kind) == "string" and v.y ~= nil
+end
+
+-- Numeric children in order, then named ones in a fixed order, so a walk is deterministic.
+local function each_child(node, f)
+   for i = 1, #node do
+      local c = node[i]
+      if is_node(c) then f(c, i) end
+   end
+   local keys = {}
+   for k, v in pairs(node) do
+      if type(k) == "string" and k ~= "op" and is_node(v) then keys[#keys + 1] = k end
+   end
+   table.sort(keys)
+   for _, k in ipairs(keys) do f(node[k], k) end
+end
+
+-- Every node by (line, column), parents first, and each node's slot in its parent.
+local function index_nodes(ast)
+   local by_pos, parents = {}, {}
+   local function visit(node, parent, key)
+      if parents[node] then return end
+      parents[node] = { parent = parent, key = key }
+      local yl = by_pos[node.y]
+      if not yl then yl = {}; by_pos[node.y] = yl end
+      local xl = yl[node.x]
+      if not xl then xl = {}; yl[node.x] = xl end
+      xl[#xl + 1] = node
+      each_child(node, function(c, k) visit(c, node, k) end)
+   end
+   visit(ast, nil, nil)
+   return by_pos, parents
+end
+
+local raw_parse  -- the vendored `tl.parse`, set where the wrapper is installed
+
+-- The expression of `local _ = <src>`, parsed by the plain parser, every node moved to
+-- (y, x) — `yend` too, or the generator joins the lines after it (a node it emits `end`
+-- for is placed at `yend`). `y_end` for the closure whose body ends on a later line.
+local function template_expr(src, filename, y, x, y_end)
+   local ast = raw_parse("local _ = " .. src, "htl-async-template", "tl")
+   local e = ast[1].exps[1]
+   local function move(node)
+      node.y, node.x = y, x
+      node.yend, node.xend = y_end or y, x
+      node.f = filename
+      each_child(node, move)
+   end
+   move(e)
+   return e
+end
+
+-- Put `with` where the placeholder named `name` is in `root`.
+local function graft(root, name, with)
+   local done = false
+   local function go(node)
+      each_child(node, function(c, k)
+         if done then return end
+         if c.kind == "variable" and c.tk == name then
+            node[k] = with
+            done = true
+         else
+            go(c)
+         end
+      end)
+   end
+   go(root)
+   assert(done, "htl: async template without its placeholder")
+end
+
+-- Which `variable` nodes name an `async local` in scope: those get `x:await()`. A plain
+-- `local`, a function's arguments and a loop's variables shadow the name again.
+local function mark_task_vars(ast)
+   local scopes = { {} }
+   local function top() return scopes[#scopes] end
+   local function lookup(name)
+      for i = #scopes, 1, -1 do
+         local v = scopes[i][name]
+         if v ~= nil then return v end
+      end
+      return false
+   end
+   local function walk(node)
+      if node.kind == "variable" and node.tk and lookup(node.tk) then
+         node.htl_task_var = true
+      end
+      if node.kind == "local_declaration" then
+         if node.exps then walk(node.exps) end
+         for _, v in ipairs(node.vars) do top()[v.tk] = node.htl_async_local and true or false end
+         return
+      elseif node.kind == "local_function" and node.name then
+         top()[node.name.tk] = false
+      end
+      local pushed = false
+      if node.body or node.kind == "statements" then
+         scopes[#scopes + 1] = {}
+         pushed = true
+         if node.args then
+            for _, a in ipairs(node.args) do
+               if a.tk then top()[a.tk] = false end
+            end
+         end
+         if node.kind == "fornum" and node.var then top()[node.var.tk] = false end
+         if node.kind == "forin" and node.vars then
+            for _, v in ipairs(node.vars) do top()[v.tk] = false end
+         end
+      end
+      each_child(node, walk)
+      if pushed then scopes[#scopes] = nil end
+   end
+   walk(ast)
+end
+
+local POSTFIX = { ["@funcall"] = true, ["@index"] = true, ["."] = true, [":"] = true }
+
+-- The AST of a file that used the two keywords: the rewrites above, at the positions the
+-- lexer saw them. Errors go to `errs` in the parser's own shape, so they are reported as
+-- syntax errors at the keyword.
+local function apply_async_marks(ast, marks, errs, filename)
+   local by_pos, parents = index_nodes(ast)
+   local function at(y, x, kind)
+      local l = by_pos[y] and by_pos[y][x]
+      if not l then return nil end
+      for _, n in ipairs(l) do
+         if n.kind == kind then return n end
+      end
+   end
+   local function err(m, msg)
+      table.insert(errs, { filename = filename, y = m.y, x = m.x, msg = msg })
+   end
+   -- The statement begins at the keyword: what the formatter indents a block's first
+   -- statement by (a block is positioned at its first statement), and where a
+   -- diagnostic on the declaration points.
+   local function start_at(node, x)
+      node.x = x
+      local slot = parents[node]
+      if slot and slot.key == 1 and slot.parent and slot.parent.kind == "statements" then
+         slot.parent.x = x
+      end
+   end
+   local gen = {}
+   for _, m in ipairs(marks) do
+      if m.kind == "async_local" then
+         local node = at(m.vy, m.vx, "local_declaration")
+         if not node then
+            err(m, "syntax error: 'async local' needs a local variable declaration after it")
+         elseif #node.vars ~= 1 then
+            err(m, "syntax error: 'async local' declares one name, not " .. #node.vars ..
+               ": a task holds one value; write one 'async local' per task")
+         elseif not node.exps or #node.exps ~= 1 then
+            err(m, "syntax error: 'async local' takes one expression, the task's body")
+         else
+            local e = node.exps[1]
+            node.vars[1].attribute = "close"
+            node.htl_async_local = true
+            local call = template_expr('require("htl.task").of(__E)', filename, m.y, m.x)
+            graft(call, "__E", e)
+            node.exps[1] = call
+            start_at(node, m.x)
+            gen[#gen + 1] = { call = call, e = e }
+         end
+      elseif m.kind == "async_function" then
+         local node = (m.ly and at(m.ly, m.lx, "local_function"))
+            or at(m.fy, m.fx, "global_function")
+            or at(m.fy, m.fx, "record_function")
+            or at(m.fy, m.fx, "function")
+         if node then
+            node.htl_async = true
+            if not m.ly then start_at(node, m.x) end
+         else
+            err(m, "syntax error: 'async' goes before 'local function', 'global function', " ..
+               "'function R.f' or 'function(...)'")
+         end
+      end
+   end
+   mark_task_vars(ast)
+   for _, m in ipairs(marks) do
+      if m.kind == "await" then
+         -- The operand is the postfix chain that starts at the token after `await`: the
+         -- innermost node there (a name, a parenthesis) and every call / index / method
+         -- built on it upward, stopping at a binary operator (`await f(b) + 1` awaits
+         -- `f(b)`). A call node is positioned at its `(`, not at the name, so the chain is
+         -- climbed from the name rather than looked up by position.
+         local target
+         local list = by_pos[m.oy] and by_pos[m.oy][m.ox]
+         for i = #(list or {}), 1, -1 do
+            local n = list[i]
+            if n.kind == "variable" or n.kind == "paren" or n.kind == "string" or
+               n.kind == "table" or n.kind == "number" or n.kind == "identifier" then
+               target = n
+               break
+            end
+         end
+         while target do
+            local slot = parents[target]
+            local p = slot and slot.parent
+            if p and p.kind == "op" and POSTFIX[p.op.op] and p.e1 == target then
+               target = p
+            else
+               break
+            end
+         end
+         if not target then
+            err(m, "syntax error: 'await' needs a call after it: await f(x)")
+         elseif target.kind == "variable" then
+            if target.htl_task_var then
+               local call = template_expr("__X:await()", filename, target.y, target.x)
+               graft(call, "__X", target)
+               call.htl_awaited = true
+               local slot = parents[target]
+               slot.parent[slot.key] = call
+            else
+               err(m, "'await' on '" .. tostring(target.tk) .. "', which is not an async local: " ..
+                  "an async function is awaited at its call (await f(x)), a task at the name " ..
+                  "an 'async local' gave it")
+            end
+         elseif target.kind == "op" and target.op.op == "@funcall" then
+            target.htl_awaited = true
+         elseif target.kind == "paren" then
+            err(m, "syntax error: 'await (..)': put 'await' inside the parentheses, before the call")
+         else
+            err(m, "syntax error: 'await' applies to a call: await f(x)")
+         end
+      end
+   end
+   ast.htl_async_gen = gen
+end
+
+-- The keyword tokens of `input`, by the rule in the header, and the tokens without them.
+local function split_async_tokens(tokens)
+   local marks, kept = {}, {}
+   for i, t in ipairs(tokens) do
+      local prev, nxt = tokens[i - 1], tokens[i + 1]
+      local keep = true
+      if t.kind == "identifier" and t.tk == "async" then
+         if nxt and nxt.tk == "local" then
+            local var = tokens[i + 2]
+            marks[#marks + 1] = { kind = "async_local", y = t.y, x = t.x,
+               vy = var and var.y, vx = var and var.x }
+            keep = false
+         elseif nxt and nxt.tk == "function" then
+            local m = { kind = "async_function", y = t.y, x = t.x, fy = nxt.y, fx = nxt.x }
+            if prev and (prev.tk == "local" or prev.tk == "global") then m.ly, m.lx = prev.y, prev.x end
+            marks[#marks + 1] = m
+            keep = false
+         end
+      elseif t.kind == "identifier" and t.tk == "await" then
+         local named = (prev and AWAIT_NAME_AFTER[prev.tk]) or (nxt and AWAIT_NAME_BEFORE[nxt.tk])
+         if not named then
+            marks[#marks + 1] = { kind = "await", y = t.y, x = t.x, oy = nxt and nxt.y, ox = nxt and nxt.x }
+            keep = false
+         end
+      end
+      if keep then kept[#kept + 1] = t end
+   end
+   return marks, kept
+end
+
+-- `tl.parse` under `[lang] async`: lex, take the keywords out, parse, rewrite.
+local function async_parse(input, filename, parse_lang)
+   local tokens, errs = tl.lex(input, filename)
+   local marks, kept = split_async_tokens(tokens)
+   local ast, required = tl.parse_program(kept, errs, filename, parse_lang)
+   if ast and #marks > 0 then
+      apply_async_marks(ast, marks, errs, filename)
+   end
+   return ast, errs, required
+end
+
+-- Turn the checked form of every `async local` into the generated one (header), once.
+function H.async_gen_ast(ast)
+   for _, g in ipairs(ast and ast.htl_async_gen or {}) do
+      if not g.done then
+         g.done = true
+         g.call.e1.e2.tk = "spawn"
+         local fn = template_expr("function() return __E end", g.call.f, g.call.y, g.call.x, g.e.yend or g.e.y)
+         graft(fn, "__E", g.e)
+         g.call.e2[1] = fn
+      end
+   end
+end
+
 do
    local tl_parse = tl.parse
+   raw_parse = tl_parse
    tl.parse = function(input, filename, parse_lang)
-      local ast, errs, required = tl_parse(input, filename, parse_lang)
+      local ast, errs, required
+      if H.lang_async then
+         ast, errs, required = async_parse(input, filename, parse_lang)
+      else
+         ast, errs, required = tl_parse(input, filename, parse_lang)
+      end
       if ast and filename and H.rewrite_name then
          for _, site in ipairs(require_sites(ast, true)) do
             local to = H.rewrite_name(filename, site.name)
@@ -1776,6 +2111,7 @@ function H.gen(filename, opts)
       return c.result.htl_code, c
    end
    local t0 = os.clock()
+   H.async_gen_ast(c.result.ast)
    local code, gerr = tl.generate(c.result.ast, H.GEN_TARGET)
    prof("generate", filename, t0)
    -- Terminated here, at the producer. `tl.generate` joins one output line per input line
@@ -1807,6 +2143,7 @@ function H.gen_string(src, filename)
    if not c.ok or not result.ast then
       return nil, c
    end
+   H.async_gen_ast(result.ast)
    local code, gerr = tl.generate(result.ast, H.GEN_TARGET)
    if not code then
       c.ok = false

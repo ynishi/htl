@@ -48,6 +48,10 @@
 //! [async]                   # the executor htl run / htl test run a program on
 //! grace_ms = 1000           # how long a cancelled program may keep running its cleanup
 //! # preempt = 1             # yield every N cancel checks, so a sibling task can run
+//!
+//! [lang]
+//! async = true              # async / await are keywords (local async function f, async local
+//!                           # x = e, await x, await f()); off, they are ordinary names
 //! ```
 //!
 //! Found by walking up from a file or directory, like `mlua-pkg.toml`. Command-line
@@ -104,6 +108,10 @@ pub struct HtlConfig {
     /// interrupted for its siblings.
     #[serde(default, rename = "async")]
     pub async_: AsyncConfig,
+    /// `[lang]` — which words of this project's Teal are htl's keywords: `async` and
+    /// `await`, off unless the project says so.
+    #[serde(default)]
+    pub lang: LangConfig,
     /// Static counterpart of `TealResolver::expect_type` / `require_fields`: files
     /// directly under `dir` must return `type`; checked by the `contract` lint.
     #[serde(default)]
@@ -493,6 +501,39 @@ pub struct FixConfig {
     /// Rules whose fix is never applied.
     #[serde(default)]
     pub disable: Vec<String>,
+}
+
+/// `[lang]`: what the project's Teal is written in, beyond Teal. One key today:
+///
+/// ```toml
+/// [lang]
+/// async = true
+/// ```
+///
+/// makes `async` and `await` keywords for the project (`htl check`, `run`, `test`, `gen`,
+/// `fmt`, `fix`, and `include_tl!`, which reads the same file): `local async function f`,
+/// `async local x = e` (a child task, `x: Task<T>`), `await x` (its value), `await f(x)`
+/// (the marker on a call of an async function). Off, the default, both words are the
+/// ordinary names they are in Teal, and a file that uses them as names checks and runs as
+/// it always did. On, they are still names where a name is the only reading — after `.`
+/// or `:`, before `:` `=` `,` `)` `.` `(` — so `t.await`, `x:await()`, `{ await = 1 }` and a
+/// record field `await:` stay what they were.
+///
+/// A project turns it on knowing that a Teal language server does not know the two words
+/// and reports a syntax error on them; the checker is htl's, and it reads them.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LangConfig {
+    /// `async` and `await` are keywords. Absent: no.
+    #[serde(default, rename = "async")]
+    pub async_: Option<bool>,
+}
+
+impl LangConfig {
+    /// Whether `async` / `await` are keywords for this project.
+    pub fn async_on(&self) -> bool {
+        self.async_.unwrap_or(false)
+    }
 }
 
 /// `[async]`: the executor a program runs on (`htl run`, `htl test`, and

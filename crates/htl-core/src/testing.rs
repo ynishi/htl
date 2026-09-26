@@ -154,6 +154,10 @@ pub struct RunOptions {
     /// task is preempted. [`crate::project::test`] fills it from the `htl.toml` it was
     /// given; a caller building a [`TestSession`] by hand sets it, or keeps the default.
     pub async_: crate::config::AsyncConfig,
+    /// The project's `[lang]` ([`crate::config::LangConfig`]): whether `async` / `await` are
+    /// keywords of the files this run checks. Applied to the session's checker when it is
+    /// built; filled by [`crate::project::test`] from the `htl.toml`, as `async_` is.
+    pub lang: crate::config::LangConfig,
 }
 
 /// The seed one file gets, from the run's seed and its path.
@@ -465,6 +469,7 @@ impl TestSession {
         if let Some(spec) = lint_spec {
             checker.configure_lints(spec)?;
         }
+        checker.set_lang(&opts.lang)?;
         Ok(Self {
             checker,
             lib: lib.to_string(),

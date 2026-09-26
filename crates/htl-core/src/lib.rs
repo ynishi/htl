@@ -1617,6 +1617,17 @@ impl Htl {
         Ok((code, read_checkinfo(&t)?))
     }
 
+    /// Apply a project's `[lang]` ([`config::LangConfig`]) to this checker: whether
+    /// `async` and `await` are keywords of the Teal it reads. Every file the checker
+    /// parses from here on — the file checked, the ones its `require`s reach, what `htl
+    /// fmt` and the lints parse — is read under the setting, so it is set once per
+    /// project, where the lint selection is. A checker nobody calls it on reads plain Teal.
+    pub fn set_lang(&self, lang: &config::LangConfig) -> Result<()> {
+        let f: Function = self.h.get("set_lang")?;
+        f.call::<()>(lang.async_on())?;
+        Ok(())
+    }
+
     /// Configure lint rules: `"+no-any,-shadow-local"` on top of the defaults.
     ///
     /// The spec is resolved against [`lint::RULES`], so a name the project layer reports

@@ -72,6 +72,17 @@ end
 function task.await(t)
    return t:await()
 end
+-- A task that already has its value: what `async local x = e` is checked as
+-- (`of<T>(v: T): Task<T>` gives `x` the type of `e`); the generated Lua spawns instead.
+local Done = {
+   join = function(self) return true, self.v end,
+   cancel = function() end,
+   done = function() return true end,
+}
+Done.__index = Done
+function task.of(v)
+   return setmetatable({ h = setmetatable({ v = v }, Done), joined = false }, Task)
+end
 return task
 "#;
 
