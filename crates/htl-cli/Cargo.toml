@@ -20,7 +20,13 @@ categories = ["development-tools", "command-line-utilities"]
 # The CLI needs the engine only, not the proc macros. `std` is what makes `require("std.json")`
 # answer under `htl run` / `test` / `check`: a project with no Rust host of its own has no other
 # way to a native module than the binary that runs it.
-htl = { workspace = true, features = ["pkg", "dts", "std"] }
+# `async` is what lets `htl run` and `htl test` run a program that calls a host's
+# `async fn`: the entry chunk runs as a root on mlua-isle's executor (`Htl::run_async`),
+# whether or not the program awaits anything.
+htl = { workspace = true, features = ["pkg", "dts", "std", "async"] }
+# The executor `htl run` drives (`Htl::run_async` on a current-thread runtime and a
+# `LocalSet`), and the Ctrl-C that cancels its root.
+tokio = { version = "1", features = ["rt", "time", "signal"] }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde = { version = "1", features = ["derive"] }

@@ -67,6 +67,12 @@ indent = 3
 # enforced_by = "mods/_validate.lua"   # ...or name where it is enforced instead,
 #                          # for a Lua-side validator, a sibling crate, generated
 #                          # code. The file has to exist; a missing one is reported.
+
+[async]
+# grace_ms = 1000   # how long a cancelled program (Ctrl-C under htl run) may keep
+#                   # running its cleanup before it is dropped; 0 drops it at once
+# preempt = 1       # yield a task every N cancel checks (1000 instructions each), so a
+#                   # sibling can run while it loops; off, tasks switch only at awaits
 ===== mlua-pkg.toml =====
 [package]
 name = "sample"

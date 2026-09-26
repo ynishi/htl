@@ -924,12 +924,17 @@ fn union_from(en: &ItemEnum, name: &str, variants: &[dts::UnionVariant]) -> Toke
 /// }
 /// ```
 ///
-/// Three things follow from mlua, not from htl: the executor is the caller's (the method
-/// runs under `call_async` or an `AsyncThread` the host drives; a plain `load(..).eval()`
-/// raises rather than blocking); the receiver is borrowed across every await
-/// (`add_async_method` hands over a `UserDataRef<T>` the future holds until it resolves,
-/// so prefer `&self` over `&mut self`); and the future must be `'static`, and `Send` as
-/// well when mlua's `send` feature is on.
+/// The method runs inside a coroutine, and something has to drive it: `htl run` and
+/// `htl test` do (the program is a root on the executor, `Htl::run_async`), a host
+/// awaits `Htl::run_async` on its own runtime or calls `Htl::run_blocking`, or drives the
+/// method itself with mlua's `call_async` / an `AsyncThread`; a plain `load(..).eval()`
+/// raises rather than blocking. Under a root the body is wrapped in mlua-isle's
+/// `cancellable`, so a cancel of the program (Ctrl-C in `htl run`, the host's token)
+/// returns at the await instead of waiting out the grace (`[async]` in `htl.toml`,
+/// `htl::config::AsyncConfig`). Two things follow from mlua: the receiver is borrowed
+/// across every await (`add_async_method` hands over a `UserDataRef<T>` the future holds
+/// until it resolves, so prefer `&self` over `&mut self`), and the future must be
+/// `'static`, and `Send` as well when mlua's `send` feature is on.
 #[proc_macro_attribute]
 pub fn host_module(attr: TokenStream, item: TokenStream) -> TokenStream {
     let metas = match Punctuated::<Meta, Token![,]>::parse_terminated.parse(attr) {
@@ -1027,19 +1032,30 @@ fn expand_host_module(
         // the receiver as a borrow guard (`UserDataRef`) that the future holds across
         // every await, and the future itself must be `'static`. `async move` is what
         // makes it one — the arguments are moved in rather than borrowed from the call.
+        // The future goes through mlua-isle's `cancellable`: under a root the executor
+        // runs (`Htl::run_async`, `htl run`), a cancel of the program returns the cancel
+        // error at this await instead of leaving the future pending until the grace runs
+        // out; outside any root (a host driving the method with `call_async` itself) the
+        // future runs unchanged.
+        let wrap = |fut: proc_macro2::TokenStream| {
+            quote! { ::htl::mlua_isle::runtime::cancellable(#fut) }
+        };
         registrations.push(match (m.receiver, m.is_async) {
             (Some(false), false) => quote! { m.add_method(#fname_s, |_lua, this, #pat| #body); },
             (Some(true), false) => quote! { m.add_method_mut(#fname_s, |_lua, this, #pat| #body); },
             (None, false) => quote! { m.add_function(#fname_s, |_lua, #pat| #body); },
-            (Some(false), true) => quote! {
-                m.add_async_method(#fname_s, |_lua, this, #pat| async move { #body });
-            },
-            (Some(true), true) => quote! {
-                m.add_async_method_mut(#fname_s, |_lua, mut this, #pat| async move { #body });
-            },
-            (None, true) => quote! {
-                m.add_async_function(#fname_s, |_lua, #pat| async move { #body });
-            },
+            (Some(false), true) => {
+                let fut = wrap(quote! { async move { #body } });
+                quote! { m.add_async_method(#fname_s, |_lua, this, #pat| #fut); }
+            }
+            (Some(true), true) => {
+                let fut = wrap(quote! { async move { #body } });
+                quote! { m.add_async_method_mut(#fname_s, |_lua, mut this, #pat| #fut); }
+            }
+            (None, true) => {
+                let fut = wrap(quote! { async move { #body } });
+                quote! { m.add_async_function(#fname_s, |_lua, #pat| #fut); }
+            }
         });
     }
 

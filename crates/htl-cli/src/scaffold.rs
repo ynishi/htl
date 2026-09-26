@@ -6,7 +6,7 @@
 //! ```text
 //! <name>/
 //! ├── mlua-pkg.toml          [package] entry = "src/<mod>"  -> consumers require("<name>")
-//! ├── htl.toml               [fmt], and commented [lint] / [check] / [[contract]] to fill
+//! ├── htl.toml               [fmt], and commented [lint] / [check] / [[contract]] / [async] to fill
 //! │                          in; [build] target with --target. Read by the CLI and the macros
 //! ├── mise.toml              the htl command that wrote it, for mise (release builds only)
 //! ├── .gitignore             .htl/ (the cache and the installed deps) and *.hb; a target
@@ -1088,7 +1088,12 @@ fn t_htl_toml(target: Option<BuildTarget>) -> String {
      # `htl check` reports `contract-unenforced` when that call is not in the Rust sources.\n\
      # enforced_by = \"mods/_validate.lua\"   # ...or name where it is enforced instead,\n\
      #                          # for a Lua-side validator, a sibling crate, generated\n\
-     #                          # code. The file has to exist; a missing one is reported.\n",
+     #                          # code. The file has to exist; a missing one is reported.\n\n\
+     [async]\n\
+     # grace_ms = 1000   # how long a cancelled program (Ctrl-C under htl run) may keep\n\
+     #                   # running its cleanup before it is dropped; 0 drops it at once\n\
+     # preempt = 1       # yield a task every N cancel checks (1000 instructions each), so a\n\
+     #                   # sibling can run while it loops; off, tasks switch only at awaits\n",
     );
     if let Some(t) = target {
         s.push_str(&format!(

@@ -1689,6 +1689,8 @@ fn cmd_test(
             coverage: flags.coverage,
             // Given, or drawn for the run and printed below, so that it can be given back.
             seed: flags.seed,
+            // `project::test` fills it from the config it is handed.
+            async_: Default::default(),
         },
         cache: project::cache_options(
             !flags.no_cache,
@@ -2911,20 +2913,16 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
     // own modules and gains nothing from it either way.
     let cfg = load_config(file)?;
     config_lints(&h, &cfg)?;
+    h.configure_async(async_config(&cfg))?;
     let model = apply_model(&h, &cfg, file)?;
     h.install_test_lib()?;
     h.install_std()?;
     if Bundle::is_bundle(&bytes) {
         let b = Bundle::decode(&bytes)?;
-        return Ok(match h.run_bundle(&b, args) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                // A bundle's frames are as good as its payload: stripped bytecode has no
-                // lines to show, and `htl build --debug` is what keeps them.
-                eprintln!("{}", htl::developer_message(&e));
-                ExitCode::FAILURE
-            }
-        });
+        // A bundle's frames are as good as its payload: stripped bytecode has no lines to
+        // show, and `htl build --debug` is what keeps them.
+        let main = h.load_bundle(&b, args)?;
+        return run_root(&h, Entry::Main(main), args);
     }
     // Check first so lints/warnings are visible before the script runs.
     project::file_view(&h, model.as_ref(), file)?;
@@ -2936,16 +2934,99 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
     let (Some(code), false) = (code, runs_fail(&c)) else {
         return Ok(ExitCode::FAILURE);
     };
-    match h.exec(&code, &format!("@{}", file.display()), args) {
-        Ok(()) => Ok(ExitCode::SUCCESS),
-        Err(e) => {
-            // Innermost cause and the frames that reached it. `htl run` is a development
-            // command, so the frames are the default; `htl::user_message` is what an
-            // embedding host shows people who did not write the Teal.
-            eprintln!("{}", htl::developer_message(&e));
-            Ok(ExitCode::FAILURE)
-        }
+    run_root(
+        &h,
+        Entry::Chunk {
+            code,
+            name: format!("@{}", file.display()),
+        },
+        args,
+    )
+}
+
+/// What `htl run` runs as the program's root: a generated chunk, or a bundle's entry.
+enum Entry {
+    Chunk { code: String, name: String },
+    Main(htl::mlua::Function),
+}
+
+/// The `[async]` of a loaded `htl.toml`, or the default when there is no file.
+fn async_config(cfg: &project::Config) -> &htl::config::AsyncConfig {
+    static DEFAULT: htl::config::AsyncConfig = htl::config::AsyncConfig {
+        grace_ms: None,
+        preempt: None,
+    };
+    match cfg {
+        Some((_, _, c)) => &c.async_,
+        None => &DEFAULT,
     }
+}
+
+/// Run the program as a root coroutine on the executor, with Ctrl-C cancelling it.
+///
+/// The runtime is a current-thread tokio runtime with its time driver (the grace is a
+/// tokio timeout) and a `LocalSet`, built for this run; `Htl::run_async` is awaited to
+/// the end, so when it resolves nothing the program started is alive.
+///
+/// Ctrl-C is watched from a thread of its own rather than a task on this runtime: a
+/// program in a CPU loop never yields to the runtime, so a task here would never get to
+/// run, while the cancel hook reads the token from any thread at its next check. The
+/// first Ctrl-C cancels the root — the program gets its grace to clean up — and a second
+/// one ends the process, for a program that does not.
+///
+/// A cancelled run prints `htl run: interrupted` and exits 130, the shell's own code for
+/// it; a program that raised prints the innermost cause and the frames that reached it
+/// (`htl run` is a development command, so the frames are the default; `htl::user_message`
+/// is what an embedding host shows people who did not write the Teal).
+fn run_root(h: &Htl, entry: Entry, args: &[String]) -> Result<ExitCode> {
+    let token = htl::mlua_isle::runtime::CancelToken::new();
+    {
+        let token = token.clone();
+        std::thread::Builder::new()
+            .name("htl-ctrl-c".into())
+            .spawn(move || {
+                let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    return;
+                };
+                rt.block_on(async {
+                    if tokio::signal::ctrl_c().await.is_ok() {
+                        token.cancel();
+                    }
+                    if tokio::signal::ctrl_c().await.is_ok() {
+                        std::process::exit(130);
+                    }
+                });
+            })
+            .context("starting the Ctrl-C watcher")?;
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("building the executor's runtime")?;
+    let local = tokio::task::LocalSet::new();
+    let out = local.block_on(&rt, async {
+        match entry {
+            Entry::Chunk { code, name } => h.run_async(&code, &name, args, &token).await,
+            Entry::Main(main) => {
+                let va: htl::mlua::Variadic<String> = args.iter().cloned().collect();
+                h.call_async(main, va, &token).await.map(|_| ())
+            }
+        }
+    });
+    Ok(match out {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) if htl::is_cancelled(&e) => {
+            eprintln!("htl run: interrupted");
+            ExitCode::from(130)
+        }
+        Err(e) => {
+            eprintln!("{}", htl::developer_message(&e));
+            ExitCode::FAILURE
+        }
+    })
 }
 
 /// Whether `htl run` / `htl gen` stop at the check `c`: [`htl::verdict::verdict`] under

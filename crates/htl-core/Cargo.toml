@@ -28,9 +28,11 @@ dts = ["dep:syn"]
 # error slot, the panic guard. Off by default so that a host with no C caller keeps the
 # public surface, and the `extern "C"` symbols, it had before.
 ffi = []
-# mlua's async support, for `async fn` in a `#[host_module]` impl. Off by default: it
-# changes how mlua is built, and a host with no async method needs none of it.
-async = ["mlua/async"]
+# mlua's async support, for `async fn` in a `#[host_module]` impl, and the executor that
+# runs a program calling one (`Htl::run_async`, `htl run`, `htl test`): mlua-isle's
+# `tokio` feature, which is `Vm::run`, the `task` library and `cancellable`. Off by
+# default: it changes how mlua is built, and a host with no async method needs none of it.
+async = ["mlua/async", "mlua-isle/tokio", "dep:tokio"]
 # `Htl::install_std`: mlua-batteries' modules as `require("std.json")`, `std.string` and so
 # on, with their declarations in front of the checker. The crate ships them under its own
 # name and leaves `std` for the host to assemble; this is htl assembling it. Its default
@@ -43,9 +45,13 @@ std = ["dep:mlua-batteries"]
 mlua = { workspace = true }
 # The owner of every program state's debug hook (`mlua_isle::runtime::Vm`): `Interrupt`,
 # coverage and a host's own callback register with it instead of each taking the one
-# slot Lua has (#350). Its hook part needs no feature; the executor htl's async work
-# will run on is behind mlua-isle's `tokio`, which nothing here turns on yet.
+# slot Lua has (#350). Its hook part needs no feature; the executor a program that awaits
+# runs on (`Vm::run`) is behind its `tokio`, which htl's `async` feature turns on.
 mlua-isle = { version = "0.8.0", default-features = false }
+# `Htl::run_blocking`: the current-thread runtime and `LocalSet` a `Vm::run` root is
+# driven on when the caller has none of its own (`htl run`, `htl test`). The same crate
+# mlua-isle's `tokio` feature already brings in, so it adds nothing to the graph.
+tokio = { version = "1", features = ["rt", "time"], optional = true }
 mlua-pkg = { workspace = true, optional = true }
 mlua-batteries = { version = "0.7.3", optional = true }
 anyhow = { workspace = true }

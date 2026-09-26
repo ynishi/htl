@@ -1202,9 +1202,11 @@ struct CoverageRun {
 
 /// Make `lua`'s debug hook mlua-isle's, so that everything that wants a callback on the
 /// state registers with it. The first attach captures `xpcall`, which has to happen
-/// before a host sandboxes the globals.
+/// before a host sandboxes the globals. The config it starts with is htl's default
+/// `[async]` ([`config::AsyncConfig`]: a one-second grace, no preemption), so a program
+/// run by a host that never reads an `htl.toml` is cancelled the way `htl run` cancels one.
 fn attach_hook_owner(lua: &Lua) -> Result<mlua_isle::runtime::Vm> {
-    mlua_isle::runtime::Vm::attach(lua, mlua_isle::runtime::Config::default())
+    mlua_isle::runtime::Vm::attach(lua, config::AsyncConfig::default().runtime())
         .context("attaching the debug hook owner to the state")
 }
 
@@ -1377,6 +1379,17 @@ impl Htl {
     /// ```
     pub fn hook_owner(&self) -> Result<mlua_isle::runtime::Vm> {
         vm(&self.lua)
+    }
+
+    /// Apply a project's `[async]` ([`config::AsyncConfig`]) to this state: the grace a
+    /// cancelled program gets and whether a CPU-bound task is preempted. What `htl run`
+    /// and `htl test` do with the `htl.toml` they read; a host that runs a program with
+    /// [`run_async`](Self::run_async) applies the section itself, or keeps the default
+    /// every state is attached with. Read at the start of a run and at each task's start,
+    /// so it does not reach a program already running.
+    pub fn configure_async(&self, cfg: &config::AsyncConfig) -> Result<()> {
+        vm(&self.lua)?.set_config(cfg.runtime());
+        Ok(())
     }
 
     /// Start recording which lines of which chunk run in this state. The line hook slows
@@ -1925,6 +1938,104 @@ end
         Ok(())
     }
 
+    /// Run `f(args)` as a root coroutine on the executor, under `token`: what
+    /// [`run_async`](Self::run_async) does once the chunk is loaded, for a function the
+    /// caller already holds (a bundle's entry from [`load_bundle`](Self::load_bundle), the
+    /// test library's `run`). Resolves to what `f` returned, or to the error it raised,
+    /// or — when `token` was cancelled — to an error [`is_cancelled`] recognises.
+    #[cfg(feature = "async")]
+    pub async fn call_async(
+        &self,
+        f: Function,
+        args: impl mlua::IntoLuaMulti,
+        token: &mlua_isle::runtime::CancelToken,
+    ) -> Result<mlua::MultiValue> {
+        let vm = vm(&self.lua)?;
+        vm.run(token, f, args).await.map_err(isle_error)
+    }
+
+    /// Run `lua_src` (named `chunk_name`, with `...` = `args`) as a root coroutine on
+    /// the executor, under `token`: the program may call a host's `async fn` — the call
+    /// suspends the coroutine and resumes it with the value — where
+    /// [`exec`](Self::exec) would fail with *attempt to yield from outside a coroutine*.
+    /// This is how `htl run` and `htl test` run a program; a host that has a tokio
+    /// runtime of its own awaits this inside its
+    /// [`LocalSet`](https://docs.rs/tokio/latest/tokio/task/struct.LocalSet.html), and one
+    /// that has none calls [`run_blocking`](Self::run_blocking).
+    ///
+    /// Two things the runtime it is awaited on has to be: current-thread or a `LocalSet`
+    /// (the Lua state is not `Send`), and built with a time driver (`enable_all()`, or
+    /// `enable_time()`): the grace a cancelled program gets is a tokio timeout, and a
+    /// runtime without one panics at the first cancel. And one thing the caller does:
+    /// await the future to the end rather than drop it. When it resolves, nothing the
+    /// program started is alive — its tasks have finished or been dropped, on the cancel
+    /// path too; a future dropped early only schedules them for abort.
+    ///
+    /// Cancelling `token` (from a Ctrl-C handler, a timeout, another thread) raises the
+    /// cancel in the program at its next hook check or await; what happens then is the
+    /// grace, [`config::AsyncConfig`]. The future then resolves to an error
+    /// [`is_cancelled`] answers true for, whatever the program did with the cancel.
+    ///
+    /// The error of a program that raises is the same `mlua::Error` shape `exec` returns
+    /// — message and `stack traceback:` block — so [`developer_message`] and
+    /// [`user_message`] print it the same. The frames below the program's own are the
+    /// executor's.
+    #[cfg(feature = "async")]
+    pub async fn run_async(
+        &self,
+        lua_src: &str,
+        chunk_name: &str,
+        args: &[String],
+        token: &mlua_isle::runtime::CancelToken,
+    ) -> Result<()> {
+        let f = self
+            .lua
+            .load(lua_src)
+            .set_name(chunk_name)
+            .into_function()?;
+        let va: Variadic<String> = args.iter().cloned().collect();
+        self.call_async(f, va, token).await?;
+        Ok(())
+    }
+
+    /// [`call_async`](Self::call_async) driven to the end on a runtime of its own: a
+    /// current-thread tokio runtime with its time driver and a `LocalSet`, built for this
+    /// call and dropped after it. For a caller that is not itself async.
+    #[cfg(feature = "async")]
+    pub fn call_blocking(
+        &self,
+        f: Function,
+        args: impl mlua::IntoLuaMulti,
+        token: &mlua_isle::runtime::CancelToken,
+    ) -> Result<mlua::MultiValue> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("building the executor's runtime")?;
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&rt, self.call_async(f, args, token))
+    }
+
+    /// [`run_async`](Self::run_async) driven to the end on a runtime of its own (see
+    /// [`call_blocking`](Self::call_blocking)): what `htl test` does with each file.
+    #[cfg(feature = "async")]
+    pub fn run_blocking(
+        &self,
+        lua_src: &str,
+        chunk_name: &str,
+        args: &[String],
+        token: &mlua_isle::runtime::CancelToken,
+    ) -> Result<()> {
+        let f = self
+            .lua
+            .load(lua_src)
+            .set_name(chunk_name)
+            .into_function()?;
+        let va: Variadic<String> = args.iter().cloned().collect();
+        self.call_blocking(f, va, token)?;
+        Ok(())
+    }
+
     /// Check + gen + run a `.tl` script. If the check fails the script is not run and the
     /// returned `CheckInfo` carries the errors. Runtime errors come back as `Err`.
     pub fn run_file(&self, file: &Path, args: &[String]) -> Result<CheckInfo> {
@@ -2289,6 +2400,18 @@ end
     /// that is not in `package.preload` is refused up front, naming it, rather than found
     /// missing at the first `require` inside the run.
     pub fn run_bundle(&self, b: &bundle::Bundle, args: &[String]) -> Result<()> {
+        let main = self.load_bundle(b, args)?;
+        vm(&self.lua)?;
+        let va: Variadic<String> = args.iter().cloned().collect();
+        main.call::<()>(va)?;
+        Ok(())
+    }
+
+    /// [`run_bundle`](Self::run_bundle) up to the call: install the bundle's modules, set
+    /// `arg`, and hand back the entry as a function the caller runs — synchronously as
+    /// `run_bundle` does, or on the executor with [`call_async`](Self::call_async) /
+    /// [`call_blocking`](Self::call_blocking), which is what `htl run app.hb` does.
+    pub fn load_bundle(&self, b: &bundle::Bundle, args: &[String]) -> Result<Function> {
         let entry = b
             .module(&b.entry)
             .cloned()
@@ -2299,14 +2422,90 @@ end
             .lua
             .load(entry.payload.as_slice())
             .set_name(format!("={}", b.entry));
-        let main: Function = match entry.kind {
+        Ok(match entry.kind {
             bundle::Kind::Bytecode => chunk.set_mode(ChunkMode::Binary).into_function()?,
             bundle::Kind::Source => chunk.set_mode(ChunkMode::Text).into_function()?,
-        };
-        let va: Variadic<String> = args.iter().cloned().collect();
-        main.call::<()>(va)?;
-        Ok(())
+        })
     }
+}
+
+/// What the executor's error becomes on the way out: the shape `exec` returns, so the
+/// two print the same. A Lua error is an `mlua::Error::RuntimeError` of the message and
+/// the `stack traceback:` block mlua-isle took where it was raised (the innermost cause
+/// for an error from Rust, as [`user_message`] would have found it); a cancel is
+/// `mlua::Error::external(Cancelled)`, which [`is_cancelled`] recognises by value; the
+/// rest (a setup failure) is the crate's own text.
+#[cfg(feature = "async")]
+fn isle_error(e: mlua_isle::IsleError) -> anyhow::Error {
+    use mlua_isle::IsleError;
+    match e {
+        IsleError::Cancelled => mlua::Error::external(mlua_isle::Cancelled).into(),
+        IsleError::Lua(f) => {
+            // The runtime hands back the raised value's text, not the value: an
+            // `Interrupt` (a Rust error the hook raised) has to be rebuilt as the type
+            // `ffi::fail` recognises, and its message is htl's own constant.
+            #[cfg(feature = "ffi")]
+            if matches!(
+                f.kind,
+                mlua_isle::LuaErrorKind::External | mlua_isle::LuaErrorKind::Callback
+            ) && f.message == ffi::Interrupted.to_string()
+            {
+                return mlua::Error::CallbackError {
+                    traceback: f
+                        .traceback
+                        .as_deref()
+                        .map(executor_frames_cut)
+                        .unwrap_or_default(),
+                    cause: std::sync::Arc::new(mlua::Error::external(ffi::Interrupted)),
+                }
+                .into();
+            }
+            let text = match &f.traceback {
+                Some(tb) => format!("{}\n{}", f.message, executor_frames_cut(tb)),
+                None => f.message.clone(),
+            };
+            match f.kind {
+                mlua_isle::LuaErrorKind::Syntax => mlua::Error::SyntaxError {
+                    message: text,
+                    incomplete_input: false,
+                }
+                .into(),
+                mlua_isle::LuaErrorKind::Memory => mlua::Error::MemoryError(text).into(),
+                _ => mlua::Error::RuntimeError(text).into(),
+            }
+        }
+        other => anyhow!("{other}"),
+    }
+}
+
+/// A traceback without the two frames every root has under it — the runtime's `xpcall`
+/// and the wrapper that called it — which say nothing about the program and would tell a
+/// reader of `htl run`'s output that something changed underneath it. Only the tail is
+/// cut, and only when it is exactly those two lines.
+#[cfg(feature = "async")]
+fn executor_frames_cut(tb: &str) -> String {
+    let lines: Vec<&str> = tb.trim_end().lines().collect();
+    let n = lines.len();
+    let is_executor = n >= 2
+        && lines[n - 1].trim_start().starts_with("mlua_isle.root:")
+        && lines[n - 2].trim_start() == "[C]: in function 'xpcall'";
+    let keep = if is_executor {
+        &lines[..n - 2]
+    } else {
+        &lines[..]
+    };
+    keep.join("\n")
+}
+
+/// Whether `err` is the cancel of a run: what [`Htl::run_async`] and
+/// [`Htl::call_async`] resolve to when their token was cancelled, however the program
+/// took it — it is recognised by the value the runtime raised, never by its message. What
+/// `htl run` reads to print `interrupted` instead of a traceback.
+#[cfg(feature = "async")]
+pub fn is_cancelled(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<mlua::Error>()
+        .and_then(|e| e.downcast_ref::<mlua_isle::Cancelled>())
+        .is_some()
 }
 
 fn path_str(p: &Path) -> String {

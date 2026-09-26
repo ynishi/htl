@@ -1735,6 +1735,15 @@ pub fn test<O: Output>(
     let started = std::time::Instant::now();
     // One checker for the run; each file still gets a fresh program state. The project's
     // model says what every file may read.
+    // `[async]` is the project's, as the lint levels are: the config the caller loaded
+    // says what every file's state runs under, whatever the run options carried.
+    let run = RunOptions {
+        async_: match cfg {
+            Some((_, _, c)) => c.async_.clone(),
+            None => Default::default(),
+        },
+        ..run
+    };
     let mut session = TestSession::new(lint, lib, *filter, run)?;
     if let Some(m) = &model {
         session = session.for_project((*m).clone());
