@@ -32,6 +32,7 @@
 //! | `HashMap<K, V>` / `BTreeMap<K, V>` | `{K:V}` | a table keyed by `K` |
 //! | `mlua::Value` / `serde_json::Value` | `any` | unchanged: the deliberate escape hatch |
 //! | `mlua::Function` as a `#[host_module]` parameter | `f: function` (`Option<Function>` as any `Option` parameter), and a sync fn's ones named in a trailing `---@noyield(f)`; see the `host_module` macro doc for the rule and the overrides | a Lua function the host calls |
+//! | `#[teal(noyield)] update: Function` as a record field | `update: function ---@noyield` (`Option<Function>` as any field); see the `host_module` macro doc, *A Lua function as a parameter*, for when a field says it | a Lua function the host reads off the table and calls |
 //!
 //! A data-carrying enum is declared nested in the host module (`records = [Shape]`),
 //! where its variant records are reachable as `host.Shape_Circle` for `is`; `uses =
@@ -74,7 +75,9 @@
 //!   the host. What the rule does *not* touch is the union's record names
 //!   (`Shape_InReview` stays): those are Teal identifiers, and `kebab-case` is not one.
 //!   Record fields are declared under their Rust names; renaming those is a separate
-//!   decision nobody has asked for, so `#[teal(..)]` on a field is refused.
+//!   decision nobody has asked for. The one word a field takes is `#[teal(noyield)]`, on a
+//!   `Function` / `Option<Function>` field of a struct, which says how the host calls it
+//!   rather than how it is spelled; anything else in a field's `#[teal(..)]` is refused.
 
 use std::path::{Path, PathBuf};
 use syn::punctuated::Punctuated;
@@ -494,8 +497,13 @@ pub enum RecordKind {
     Record {
         /// Rust field name and the Teal type it maps to. The name is the Rust one:
         /// `rename_all` spells variants, and renaming fields is a decision nobody has
-        /// asked for, so `#[teal(..)]` on a field is refused rather than applied here.
+        /// asked for, so `#[teal(..)]` on a field is refused rather than applied here —
+        /// all but the one word below.
         fields: Vec<(String, String)>,
+        /// The fields marked `#[teal(noyield)]`, in declaration order: each is declared
+        /// with a trailing bare `---@noyield` (the host reads the function off the table
+        /// and calls it from C; the `host_module` macro doc states the rule).
+        noyield: Vec<String>,
     },
     /// `struct N(T)`: `type N = T`, crossing as `T` does.
     Alias {
@@ -578,33 +586,98 @@ impl RecordDecl {
     }
 }
 
+/// `(field, teal type)` in declaration order, and the fields marked `#[teal(noyield)]`.
+type Fields = (Vec<(String, String)>, Vec<String>);
+
+/// The fields of a struct record (`struct_record` = `true`) or of a data variant, and which
+/// of them carry `#[teal(noyield)]` (always none for a variant, whose fields take no word).
 fn record_fields(
     fields: &syn::FieldsNamed,
     self_name: &str,
-) -> Result<Vec<(String, String)>, String> {
+    struct_record: bool,
+) -> Result<Fields, String> {
     let mut out = Vec::new();
+    let mut noyield = Vec::new();
     for f in &fields.named {
         let fi = f.ident.as_ref().unwrap().to_string();
-        // A field carries no `#[teal(..)]`: renaming one is a decision nobody has taken,
-        // and an attribute that is quietly ignored is worse than one that is refused.
-        if f.attrs.iter().any(|a| a.path().is_ident("teal")) {
+        // Renaming a field is a decision nobody has taken, and an attribute that is quietly
+        // ignored is worse than one that is refused; `noyield` is the one word a field takes,
+        // and only a struct's field. A variant's field is refused whatever the word, so the
+        // message does not suggest a word it would accept.
+        if !struct_record && f.attrs.iter().any(|a| a.path().is_ident("teal")) {
             return Err(format!(
-                "TealRecord: {self_name}.{fi}: `#[teal(..)]` on a record field is not supported; \
-                 fields are declared under their Rust names"
+                "TealRecord: {self_name}.{fi}: `#[teal(noyield)]` applies to a field of a struct \
+                 record; a variant's fields take no `#[teal(..)]`"
             ));
+        }
+        if field_noyield(&f.attrs, self_name, &fi)? {
+            if !is_function(&f.ty) {
+                return Err(format!(
+                    "TealRecord: {self_name}.{fi}: `#[teal(noyield)]` on a field that is not a \
+                     `Function`: the word says the host calls the Lua function it reads from the field from C"
+                ));
+            }
+            noyield.push(fi.clone());
         }
         let tt = teal_type(&f.ty, self_name)?;
         out.push((fi, tt));
     }
-    Ok(out)
+    Ok((out, noyield))
+}
+
+/// `#[teal(noyield)]` on field `fname` of `rec`: `true` when the field carries it, `false`
+/// when it carries no `#[teal(..)]`. Any other word, or the attribute with no word, is
+/// refused: a word nobody reads is worse than a refusal.
+fn field_noyield(attrs: &[Attribute], rec: &str, fname: &str) -> Result<bool, String> {
+    let mut found = false;
+    let mut marked = false;
+    for a in attrs.iter().filter(|a| a.path().is_ident("teal")) {
+        found = true;
+        let Meta::List(_) = &a.meta else {
+            return Err(format!(
+                "TealRecord: {rec}.{fname}: `#[teal(..)]` on a record field takes `noyield`"
+            ));
+        };
+        let list = a
+            .parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+            .map_err(|e| format!("TealRecord: {rec}.{fname}: {e}"))?;
+        for meta in list {
+            if meta.path().is_ident("noyield") {
+                if !matches!(meta, Meta::Path(_)) {
+                    return Err(format!(
+                        "TealRecord: {rec}.{fname}: `noyield` takes no value"
+                    ));
+                }
+                marked = true;
+                continue;
+            }
+            let key = meta
+                .path()
+                .segments
+                .iter()
+                .map(|s| s.ident.to_string())
+                .collect::<Vec<_>>()
+                .join("::");
+            return Err(format!(
+                "TealRecord: {rec}.{fname}: `#[teal(..)]` on a record field takes `noyield`, got `{key}`"
+            ));
+        }
+    }
+    if found && !marked {
+        return Err(format!(
+            "TealRecord: {rec}.{fname}: `#[teal(..)]` on a record field takes `noyield`"
+        ));
+    }
+    Ok(marked)
 }
 
 /// The kind a struct lowers to: named fields -> record, one unnamed field -> alias.
 fn struct_kind(st: &ItemStruct, name: &str) -> Result<RecordKind, String> {
     match &st.fields {
-        syn::Fields::Named(fields) => Ok(RecordKind::Record {
-            fields: record_fields(fields, name)?,
-        }),
+        syn::Fields::Named(fields) => {
+            let (fields, noyield) = record_fields(fields, name, true)?;
+            Ok(RecordKind::Record { fields, noyield })
+        }
         syn::Fields::Unnamed(u) if u.unnamed.len() == 1 => Ok(RecordKind::Alias {
             inner: teal_type(&u.unnamed[0].ty, name)?,
         }),
@@ -712,7 +785,7 @@ fn enum_kind(en: &ItemEnum, name: &str, rule: Option<RenameRule>) -> Result<Reco
                         "TealRecord: {name}::{vname}: a field named `kind` collides with the variant tag"
                     ));
                 }
-                VariantShape::Struct(record_fields(fields, name)?)
+                VariantShape::Struct(record_fields(fields, name, false)?.0)
             }
         };
         variants.push(UnionVariant {
@@ -768,10 +841,15 @@ fn kind_decl(name: &str, kind: &RecordKind, indent: &str) -> String {
     let inner = format!("{indent}   ");
     let mut s = String::new();
     match kind {
-        RecordKind::Record { fields } => {
+        RecordKind::Record { fields, noyield } => {
             s.push_str(&format!("{indent}{local}record {name}\n"));
             for (f, t) in fields {
-                s.push_str(&format!("{inner}{f}: {t}\n"));
+                let marker = if noyield.contains(f) {
+                    " ---@noyield"
+                } else {
+                    ""
+                };
+                s.push_str(&format!("{inner}{f}: {t}{marker}\n"));
             }
             s.push_str(&format!("{indent}end\n"));
         }
@@ -1612,7 +1690,93 @@ mod tests {
             "#[derive(TealRecord)] pub struct P { #[teal(name = \"ex\")] pub x: f64 }",
         ))
         .unwrap_err();
-        assert!(e.contains("P.x") && e.contains("not supported"), "{e}");
+        assert_eq!(
+            e,
+            "TealRecord: P.x: `#[teal(..)]` on a record field takes `noyield`, got `name`"
+        );
+    }
+
+    /// `#[teal(noyield)]` on a `Function` / `Option<Function>` field of a struct writes a
+    /// bare `---@noyield` at the end of the field's line, nested (`records = [..]`) as well
+    /// as in a module of its own; an unmarked `Function` field is a plain `function`.
+    #[test]
+    fn a_function_field_marked_noyield_is_declared_with_the_bare_marker() {
+        let src = "#[derive(TealRecord)] pub struct Game {\n\
+                   \x20   #[teal(noyield)] load: Option<Function>,\n\
+                   \x20   #[teal(noyield)] update: mlua::Function,\n\
+                   \x20   #[teal(noyield)] draw: Function,\n\
+                   \x20   later: Function,\n\
+                   \x20   n: i64,\n\
+                   }";
+        let rd = record_decl(&item(src)).unwrap();
+        assert_eq!(
+            rd.decl,
+            "local record Game\n   load: function ---@noyield\n   update: function ---@noyield\n   \
+             draw: function ---@noyield\n   later: function\n   n: integer\nend\n\nreturn Game\n"
+        );
+        let hd = host_impl(&format!(
+            "{src}\npub struct Host;\n#[host_module(name = \"host\", records = [Game])]\n\
+             impl Host {{\n    pub fn run(&self, g: Game) {{}}\n}}\n"
+        ));
+        assert!(
+            hd.decl.contains(
+                "   record Game\n      load: function ---@noyield\n      update: function ---@noyield\n      \
+                 draw: function ---@noyield\n      later: function\n      n: integer\n   end\n"
+            ),
+            "{}",
+            hd.decl
+        );
+    }
+
+    /// A field takes `noyield` and nothing else, on a `Function`, of a struct; the rest is
+    /// refused rather than read as nothing.
+    #[test]
+    fn a_field_attribute_other_than_noyield_on_a_function_is_refused() {
+        for (src, want) in [
+            (
+                "pub struct G { #[teal(yields)] f: Function }",
+                "TealRecord: G.f: `#[teal(..)]` on a record field takes `noyield`, got `yields`",
+            ),
+            (
+                "pub struct G { #[teal(noyield, name = \"g\")] f: Function }",
+                "TealRecord: G.f: `#[teal(..)]` on a record field takes `noyield`, got `name`",
+            ),
+            (
+                "pub struct G { #[teal] f: Function }",
+                "TealRecord: G.f: `#[teal(..)]` on a record field takes `noyield`",
+            ),
+            (
+                "pub struct G { #[teal()] f: Function }",
+                "TealRecord: G.f: `#[teal(..)]` on a record field takes `noyield`",
+            ),
+            (
+                "pub struct G { #[teal(noyield)] n: i64 }",
+                "TealRecord: G.n: `#[teal(noyield)]` on a field that is not a `Function`: the word says the host calls the Lua function it reads from the field from C",
+            ),
+            (
+                "pub struct G { #[teal(noyield)] t: Option<Table> }",
+                "TealRecord: G.t: `#[teal(noyield)]` on a field that is not a `Function`: the word says the host calls the Lua function it reads from the field from C",
+            ),
+            (
+                "pub struct G { #[teal(noyield = true)] f: Function }",
+                "TealRecord: G.f: `noyield` takes no value",
+            ),
+            (
+                "pub struct G { #[teal(noyield(x))] f: Function }",
+                "TealRecord: G.f: `noyield` takes no value",
+            ),
+            (
+                "pub enum G { A, B { #[teal(noyield)] f: Function } }",
+                "TealRecord: G.f: `#[teal(noyield)]` applies to a field of a struct record; a variant's fields take no `#[teal(..)]`",
+            ),
+            (
+                "pub enum G { A, Y { #[teal(name = \"z\")] f: i64 } }",
+                "TealRecord: G.f: `#[teal(noyield)]` applies to a field of a struct record; a variant's fields take no `#[teal(..)]`",
+            ),
+        ] {
+            let e = record_decl(&item(&format!("#[derive(TealRecord)] {src}"))).unwrap_err();
+            assert_eq!(e, want, "{src}");
+        }
     }
 
     #[test]

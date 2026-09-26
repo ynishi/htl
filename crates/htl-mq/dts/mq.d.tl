@@ -85,6 +85,11 @@ local record mq
       "Middle"
       "Right"
    end
+   record Game
+      load: function ---@noyield
+      update: function ---@noyield
+      draw: function ---@noyield
+   end
    screen_width: function(self: mq): number
    screen_height: function(self: mq): number
    frame_time: function(self: mq): number
