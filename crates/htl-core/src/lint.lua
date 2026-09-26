@@ -1603,6 +1603,183 @@ local function lint_sealed_record(ast, report, extra)
    visit(ast, nil)
 end
 
+---------------------------------------------------------------- await-missing / await-outside-async / await-non-async / task-escape
+
+-- The four rules that hold a program to the `async` / `await` syntax (`[lang] async`,
+-- prelude.lua's `async_parse`), on the marks the rewrite leaves on the AST: `htl_async` on
+-- a function that may suspend, `htl_awaited` on an awaited call (`htl_task_await` when the
+-- call is the `x:await()` an `async local` name was turned into, `htl_await_at` the keyword's
+-- position), `htl_async_local` / `htl_async_at` on an `async local`, `htl_task_var` on a
+-- name bound by one and `htl_task_captured` when that name is read inside a function the
+-- declaring one contains. Which callee is async is type information -- `extra.async_at(y, x)`
+-- answers it from the checker's position report, off the declaring line (`---@async` on a
+-- `.d.tl`, the keyword on a Teal `async function`). All four are silent with the setting off:
+-- the words are names then and nothing is marked.
+--
+-- Context: the top level of the file being checked is async -- it is the entry chunk
+-- `htl run` / `htl test` run as a root -- and so is the body of an `async function`; the
+-- body of any other function is not. A module reached through `require` is loaded by a
+-- call that cannot yield (Lua 5.4 §4.5), so its top level is not async either: that is
+-- reported here, on the check of the file that requires it, at the module's own position
+-- (`extra.required`, the modules this check resolved, with their ASTs). A module the check
+-- walks directly is read as a possible entry, so `htl check <dir>` says something about a
+-- module's top-level `await` only when a checked file requires it; every file that does
+-- reports it.
+local FN_KINDS = { local_function = true, global_function = true, record_function = true, ["function"] = true }
+
+-- Every node under `root` in source order with the async context it sits in: `ctx` is
+-- true where an `await` may suspend. `visit(n, ctx)`.
+local function walk_ctx(root, top_async, visit)
+   local seen = {}
+   local function go(n, ctx)
+      if type(n) ~= "table" or seen[n] then return end
+      seen[n] = true
+      if is_node(n) then
+         if FN_KINDS[n.kind] then ctx = n.htl_async and true or false end
+         visit(n, ctx)
+      end
+      for i = 1, #n do
+         if type(n[i]) == "table" then go(n[i], ctx) end
+      end
+      for k, v in pairs(n) do
+         if type(k) ~= "number" and not SKIP_KEYS[k] and type(v) == "table" then go(v, ctx) end
+      end
+   end
+   go(root, top_async)
+end
+
+-- The callee of a call node, positioned where the reader would write `await`: the leftmost
+-- token of the expression before the `(`.
+local function callee_of(call)
+   local c = call.e1
+   if not is_node(c) then return nil end
+   return c
+end
+
+-- The callee as the reader wrote it: `f`, `http.get`, `a:fetch`.
+local function callee_name(c)
+   if is_node(c) and c.kind == "op" and c.op and c.op.op == ":" and is_node(c.e2) and c.e2.tk then
+      local base = subject_key(c.e1)
+      return (base or "?") .. ":" .. c.e2.tk
+   end
+   return subject_key(c)
+end
+
+local function leftmost(n)
+   while is_node(n) and n.kind == "op" and is_node(n.e1) do n = n.e1 end
+   return n
+end
+
+local function lint_await_missing(ast, report, extra)
+   if not (extra and extra.lang_async and extra.async_at) then return end
+   local async_at = extra.async_at
+   walk(ast, function(n)
+      if n.kind ~= "op" or not n.op or n.op.op ~= "@funcall" or n.htl_awaited or n.htl_task_body then return end
+      local callee = callee_of(n)
+      if not callee or not callee.y or not callee.x then return end
+      if not async_at(callee.y, callee.x) then return end
+      local at = leftmost(callee)
+      local name = callee_name(callee)
+      report("await-missing", at.y or n.y, at.x or n.x,
+         "call of an async function without await: " .. (name and (name .. " may suspend") or "the function called here may suspend") ..
+         "; write await " .. (name or "f") .. "(..) so the suspension is visible where it happens")
+   end)
+end
+
+-- The marks at the top level of `root`: its statements and their expressions, not the
+-- bodies of the functions they define (those are the function's own context).
+local function top_level_marks(root, visit)
+   local seen = {}
+   local function go(n)
+      if type(n) ~= "table" or seen[n] then return end
+      seen[n] = true
+      if is_node(n) then
+         if FN_KINDS[n.kind] then return end
+         visit(n)
+      end
+      for i = 1, #n do
+         if type(n[i]) == "table" then go(n[i]) end
+      end
+      for k, v in pairs(n) do
+         if type(k) ~= "number" and not SKIP_KEYS[k] and type(v) == "table" then go(v) end
+      end
+   end
+   go(root)
+end
+
+local function lint_await_outside_async(ast, report, extra)
+   if not (extra and extra.lang_async) then return end
+   walk_ctx(ast, true, function(n, ctx)
+      if ctx then return end
+      if n.htl_awaited and n.htl_await_at then
+         report("await-outside-async", n.htl_await_at.y, n.htl_await_at.x,
+            "await in a function that is not async: nothing can suspend here; declare the " ..
+            "enclosing function 'async function', or move the await into one")
+      elseif n.htl_async_local and n.htl_async_at then
+         report("await-outside-async", n.htl_async_at.y, n.htl_async_at.x,
+            "async local in a function that is not async: the task is awaited where nothing can " ..
+            "suspend; declare the enclosing function 'async function', or move it into one")
+      end
+   end)
+   for _, m in ipairs(extra.required or {}) do
+      top_level_marks(m.ast, function(n)
+         if n.htl_awaited and n.htl_await_at then
+            report("await-outside-async", n.htl_await_at.y, n.htl_await_at.x,
+               "await at the top level of a module: 'require' cannot yield, so this fails at " ..
+               "run time; move it into an async function the requirer awaits", nil, m.filename)
+         elseif n.htl_async_local and n.htl_async_at then
+            report("await-outside-async", n.htl_async_at.y, n.htl_async_at.x,
+               "async local at the top level of a module: 'require' cannot yield, so the task " ..
+               "cannot be awaited there; move it into an async function the requirer awaits",
+               nil, m.filename)
+         end
+      end)
+   end
+end
+
+local function lint_await_non_async(ast, report, extra)
+   if not (extra and extra.lang_async and extra.async_at) then return end
+   local async_at = extra.async_at
+   walk(ast, function(n)
+      if n.kind ~= "op" or not n.op or n.op.op ~= "@funcall" or not n.htl_awaited or n.htl_task_await then return end
+      local callee = callee_of(n)
+      if not callee or not callee.y or not callee.x then return end
+      if async_at(callee.y, callee.x) then return end
+      local name = callee_name(callee)
+      report("await-non-async", n.htl_await_at and n.htl_await_at.y or n.y, n.htl_await_at and n.htl_await_at.x or n.x,
+         "await on a call of a function that is not async" .. (name and (": " .. name .. " cannot suspend") or "") ..
+         "; drop the await, or declare the function 'async function' (a host method: ---@async on its declaration)")
+   end)
+end
+
+local function lint_task_escape(ast, report, extra)
+   if not (extra and extra.lang_async) then return end
+   -- A name read inside a function the declaring one contains.
+   walk(ast, function(n)
+      if n.kind == "variable" and n.htl_task_captured then
+         report("task-escape", n.y, n.x,
+            "task '" .. tostring(n.tk) .. "' is captured by a function: it is cancelled when the scope " ..
+            "that declared it ends, so the capture would read a cancelled task; await it in " ..
+            "that scope and capture the value")
+      end
+   end)
+   -- A name returned bare: the caller gets a task its scope has already cancelled. The
+   -- `x:await()` a returned `await x` became, and any expression over the name, is a
+   -- value, not the task.
+   walk(ast, function(n)
+      if n.kind ~= "return" or not n.exps then return end
+      for i = 1, #n.exps do
+         local e = n.exps[i]
+         while is_node(e) and e.kind == "paren" and is_node(e.e1) do e = e.e1 end
+         if is_node(e) and e.kind == "variable" and e.htl_task_var then
+            report("task-escape", e.y, e.x,
+               "task '" .. tostring(e.tk) .. "' is returned: it is cancelled when the scope that " ..
+               "declared it ends, so the caller would get a cancelled task; return await " .. tostring(e.tk) .. " instead")
+         end
+      end
+   end)
+end
+
 local RULES = {
    { "nil-index", lint_nil_index },
    { "nil-return", lint_nil_return },
@@ -1619,6 +1796,10 @@ local RULES = {
    { "no-any", lint_no_any },
    { "explicit-number", lint_explicit_number },
    { "class-record", lint_class_record },
+   { "await-missing", lint_await_missing },
+   { "await-outside-async", lint_await_outside_async },
+   { "await-non-async", lint_await_non_async },
+   { "task-escape", lint_task_escape },
 }
 
 function L.rule_names()
@@ -1656,9 +1837,11 @@ function L.run(src, filename, cfg, extra)
    -- `fix` (optional) = { applicability = "safe" | "unsafe" | "suggest", edits = { { line,
    -- col, end_line, end_col, text } } }: a mechanical rewrite `htl fix` may apply.
    -- Positions are 1-based line / byte column; an insertion has end == start.
-   local function report(rule, y, x, msg, fix)
-      if allows[y] and allows[y][rule] then return end
-      out[#out + 1] = { rule = rule, y = y or 0, x = x or 0, msg = msg .. " [htl " .. rule .. "]", bare = msg, fix = fix }
+   -- `file` (optional): the finding is on another file -- a module this check reached
+   -- through `require` (`await-outside-async`) -- and is reported with that name.
+   local function report(rule, y, x, msg, fix, file)
+      if not file and allows[y] and allows[y][rule] then return end
+      out[#out + 1] = { rule = rule, y = y or 0, x = x or 0, msg = msg .. " [htl " .. rule .. "]", bare = msg, fix = fix, filename = file }
    end
    local profile = os.getenv("HTL_PROFILE") ~= nil
    for _, r in ipairs(RULES) do

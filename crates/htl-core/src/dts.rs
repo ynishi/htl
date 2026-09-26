@@ -906,9 +906,11 @@ pub struct HostMethod {
     /// and provides nothing of its own — so the method runs under `call_async`, which
     /// creates the coroutine, or an `AsyncThread` the host drives; called from a plain
     /// `load(..).eval()` there is nothing to suspend, and Lua raises rather than blocking.
-    /// The Teal declaration is the same either way — an async function yields internally
-    /// and hands back the same values — so this changes the generated Rust, not the
-    /// `.d.tl`.
+    /// The Teal signature is the same either way — an async function yields internally
+    /// and hands back the same values — so this changes the generated Rust and adds one
+    /// thing to the `.d.tl`: the trailing `---@async` marker on the declaration line,
+    /// which under `[lang] async` is how the checker knows a call of the method may
+    /// suspend (`await-missing`, `await-non-async` in [`crate::lint`]).
     pub is_async: bool,
 }
 
@@ -1060,8 +1062,16 @@ pub fn host_decl(
         } else {
             format!(": {teal_ret}")
         };
+        // `---@async` on the line: the Teal signature is the same either way, and the
+        // marker is how the checker's `await-missing` / `await-non-async` learn that a call
+        // of this method may suspend (read off the declaring line, like `---@nilable`).
+        let async_marker = if f.sig.asyncness.is_some() {
+            " ---@async"
+        } else {
+            ""
+        };
         decl.push_str(&format!(
-            "   {fname}: function({}){ret_suffix}\n",
+            "   {fname}: function({}){ret_suffix}{async_marker}\n",
             teal_params.join(", ")
         ));
         methods.push(HostMethod {

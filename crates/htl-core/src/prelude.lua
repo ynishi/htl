@@ -571,6 +571,64 @@ local function nilable_resolver(result, filename)
    end
 end
 
+-- `---@async` and `async function`: whether the function called at (y, x) may suspend,
+-- for the `await-missing` / `await-non-async` rules. Read off the declaring line the way
+-- `---@nilable` is: the trailing marker on a `.d.tl` declaration (what `htl dts` and
+-- `#[host_module]` write for an `async fn`, and what a hand-written one says), or the
+-- keyword itself on a Teal `async function` -- the checker never saw it as a token
+-- (`async_parse` takes it out), but the source line still shows it. What the position
+-- report hands back for a callee is the function's own type, with the file and line of
+-- its declaration: a `local async function f` reports its own line, a record method
+-- `f: function(..)` the field's line, so an `async function R.f` whose record body
+-- declares `f` is read at the body's line and needs the marker there.
+local function async_at_decl(cache, t)
+   local lines = source_lines(cache, t.file)
+   if not lines then return false end
+   if marker_on(lines, t.y, "async") then return true end
+   local line = lines[t.y]
+   return line ~= nil and line:find("%f[%w_]async%s+function%f[^%w_]") ~= nil
+end
+
+-- Resolver for the await rules: true when the function called at (y, x) is async. The
+-- position is the callee's, as for `nilable_resolver`; a record is refused the same way.
+local function async_resolver(result, filename)
+   local ok, report = pcall(tl.get_types, result)
+   if not ok or type(report) ~= "table" then return nil end
+   local by_pos = report.by_pos and report.by_pos[filename]
+   if not by_pos then return nil end
+   local marked, sources = {}, {}
+   local function deref(id, depth)
+      local t = report.types[id]
+      if t and t.ref and depth < 8 then return deref(t.ref, depth + 1) end
+      return t
+   end
+   return function(y, x)
+      local id = by_pos[y] and by_pos[y][x]
+      if not id then return false end
+      local t = deref(id, 0)
+      if not t or t.fields or not t.file or not t.y then return false end
+      if marked[id] == nil then marked[id] = async_at_decl(sources, t) end
+      return marked[id]
+   end
+end
+
+-- The modules this check reached through `require`, with the AST each was parsed into:
+-- what `await-outside-async` reads for an `await` at a module's top level. The file being
+-- checked is the entry of `htl run` / `htl test` and its top level is async; a module is
+-- loaded by `require`, which cannot yield, so its top level is not.
+local function required_modules(result, env)
+   local out = {}
+   local names = {}
+   for name in pairs(result.dependencies or {}) do names[#names + 1] = name end
+   table.sort(names)
+   for _, name in ipairs(names) do
+      local fname = result.dependencies[name]
+      local r = env and env.loaded and env.loaded[fname]
+      if r and r.ast then out[#out + 1] = { filename = fname, ast = r.ast } end
+   end
+   return out
+end
+
 -- `---@extensible`: records a table may carry keys beyond the ones they declare. Every
 -- Teal record is closed — a table typed as a record may not carry a key the record does
 -- not declare, and that is a checker error rather than a lint, so no allow comment and no
@@ -1228,8 +1286,13 @@ end
 
 -- Which `variable` nodes name an `async local` in scope: those get `x:await()`. A plain
 -- `local`, a function's arguments and a loop's variables shadow the name again.
+local FUNCTION_KINDS = {
+   local_function = true, global_function = true, record_function = true, ["function"] = true,
+}
+
 local function mark_task_vars(ast)
    local scopes = { {} }
+   local depth = 0 -- functions entered; an `async local` remembers the depth it was declared at
    local function top() return scopes[#scopes] end
    local function lookup(name)
       for i = #scopes, 1, -1 do
@@ -1239,17 +1302,29 @@ local function mark_task_vars(ast)
       return false
    end
    local function walk(node)
-      if node.kind == "variable" and node.tk and lookup(node.tk) then
-         node.htl_task_var = true
+      if node.kind == "variable" and node.tk then
+         local v = lookup(node.tk)
+         if v then
+            node.htl_task_var = true
+            -- Read inside a function the declaring one contains: the task is captured,
+            -- which `task-escape` reports.
+            if depth > v.depth then node.htl_task_captured = true end
+         end
       end
       if node.kind == "local_declaration" then
          if node.exps then walk(node.exps) end
-         for _, v in ipairs(node.vars) do top()[v.tk] = node.htl_async_local and true or false end
+         for _, v in ipairs(node.vars) do
+            top()[v.tk] = node.htl_async_local and { depth = depth } or false
+         end
          return
       elseif node.kind == "local_function" and node.name then
          top()[node.name.tk] = false
       end
-      local pushed = false
+      local pushed, entered = false, false
+      if FUNCTION_KINDS[node.kind] then
+         depth = depth + 1
+         entered = true
+      end
       if node.body or node.kind == "statements" then
          scopes[#scopes + 1] = {}
          pushed = true
@@ -1265,6 +1340,7 @@ local function mark_task_vars(ast)
       end
       each_child(node, walk)
       if pushed then scopes[#scopes] = nil end
+      if entered then depth = depth - 1 end
    end
    walk(ast)
 end
@@ -1311,6 +1387,15 @@ local function apply_async_marks(ast, marks, errs, filename)
             local e = node.exps[1]
             node.vars[1].attribute = "close"
             node.htl_async_local = true
+            node.htl_async_at = { y = m.y, x = m.x }
+            -- The expression is the task's body and runs inside it, an async context of
+            -- its own: a call of an async function there needs no `await` (`await-missing`
+            -- skips calls so marked). A function written inside it is a context of its own.
+            local function mark_body(n)
+               if n.kind == "op" and n.op and n.op.op == "@funcall" then n.htl_task_body = true end
+               if not FUNCTION_KINDS[n.kind] then each_child(n, mark_body) end
+            end
+            mark_body(e)
             local call = template_expr('require("htl.task").of(__E)', filename, m.y, m.x)
             graft(call, "__E", e)
             node.exps[1] = call
@@ -1365,6 +1450,8 @@ local function apply_async_marks(ast, marks, errs, filename)
                local call = template_expr("__X:await()", filename, target.y, target.x)
                graft(call, "__X", target)
                call.htl_awaited = true
+               call.htl_task_await = true
+               call.htl_await_at = { y = m.y, x = m.x }
                local slot = parents[target]
                slot.parent[slot.key] = call
             else
@@ -1374,6 +1461,7 @@ local function apply_async_marks(ast, marks, errs, filename)
             end
          elseif target.kind == "op" and target.op.op == "@funcall" then
             target.htl_awaited = true
+            target.htl_await_at = { y = m.y, x = m.x }
          elseif target.kind == "paren" then
             err(m, "syntax error: 'await (..)': put 'await' inside the parentheses, before the call")
          else
@@ -2025,6 +2113,9 @@ function H.check(filename, env, opts)
             struct_at = struct_resolver(result, filename),
             sealed_at = sealed_resolver(result, filename),
             nilable_at = nilable_resolver(result, filename),
+            async_at = H.lang_async and async_resolver(result, filename) or nil,
+            lang_async = H.lang_async,
+            required = H.lang_async and required_modules(result, env) or nil,
             deps = H.deps,
             union_at = union_resolver(result, filename),
             cast_at = cast_at,

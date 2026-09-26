@@ -123,3 +123,90 @@ print(f(3))
     assert!(ok, "{err}");
     assert!(err.contains("0 error(s)"), "{err}");
 }
+
+const HTTP: &str = "\
+local record http
+   get: function(path: string): string ---@async
+   sync: function(path: string): string
+end
+return http
+";
+
+/// One of each rule: line 9 an async call without `await`, line 10 `await` on a sync
+/// call, line 11 the task captured, line 15 `await` in a function that is not async,
+/// line 19 the task returned bare.
+const RULES: &str = "\
+local http = require(\"http\")
+
+local async function work(n: integer): integer
+   return n
+end
+
+local async function pair(a: string, b: string): string, string
+   async local x = http.get(a)
+   local y = http.get(b)
+   local z = await http.sync(b)
+   local f = function(): string return x:await() end
+   return await x, y .. z .. f()
+end
+local function plain(): integer
+   return await work(1)
+end
+local async function leak(): any
+   async local q = work(3)
+   return q
+end
+print(await pair(\"/a\", \"/b\"), plain(), await leak())
+";
+
+/// The four rules print under their names, three of them at `deny`, so the check fails;
+/// the second run, replayed from the cache, prints the same lines; `--list-lints` names
+/// them with their levels.
+#[test]
+fn the_four_rules_are_reported_by_name_and_replayed_from_the_cache() {
+    let root = scratch("rules");
+    write(&root.join("htl.toml"), "[lang]\nasync = true\n");
+    write(&root.join("types/http.d.tl"), HTTP);
+    write(&root.join("src/main.tl"), RULES);
+    let (ok, _, err) = htl(&["check", "src"], &root);
+    assert!(!ok, "three rules are deny: {err}");
+    for want in [
+        "src/main.tl:9:14: call of an async function without await: http.get may suspend; write await http.get(..) so the suspension is visible where it happens [htl await-missing]",
+        "src/main.tl:10:14: await on a call of a function that is not async: http.sync cannot suspend; drop the await, or declare the function 'async function' (a host method: ---@async on its declaration) [htl await-non-async]",
+        "src/main.tl:11:40: task 'x' is captured by a function: it is cancelled when the scope that declared it ends, so the capture would read a cancelled task; await it in that scope and capture the value [htl task-escape]",
+        "src/main.tl:15:11: await in a function that is not async: nothing can suspend here; declare the enclosing function 'async function', or move the await into one [htl await-outside-async]",
+        "src/main.tl:19:11: task 'q' is returned: it is cancelled when the scope that declared it ends, so the caller would get a cancelled task; return await q instead [htl task-escape]",
+    ] {
+        assert!(err.contains(want), "missing {want:?} in {err}");
+    }
+    assert!(err.contains("5 lint(s), 4 at deny"), "{err}");
+    let lines_of = |err: &str| -> Vec<String> {
+        err.lines()
+            .filter(|l| l.starts_with("lint:"))
+            .map(str::to_string)
+            .collect()
+    };
+    let first = lines_of(&err);
+    let (ok2, _, err2) = htl(&["check", "src"], &root);
+    assert!(!ok2, "{err2}");
+    assert!(err2.contains("[cached]"), "the second run replays: {err2}");
+    assert_eq!(
+        lines_of(&err2),
+        first,
+        "the replayed lints are the same lines"
+    );
+    let (ok, out, _) = htl(&["check", "--list-lints"], &root);
+    assert!(ok);
+    for (rule, level) in [
+        ("await-missing", "deny"),
+        ("await-outside-async", "deny"),
+        ("await-non-async", "warn"),
+        ("task-escape", "deny"),
+    ] {
+        let line = out
+            .lines()
+            .find(|l| l.trim_start().starts_with(rule))
+            .unwrap_or_else(|| panic!("{rule} not listed: {out}"));
+        assert!(line.trim_end().ends_with(level), "{line}");
+    }
+}

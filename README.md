@@ -222,9 +222,9 @@ in `HTL_LINTS`; `[lint] strict` / `--strict` make every `warn` count as `deny`; 
 trailing `-- htl: allow(nil-index)` silences one occurrence. `htl check --list-lints`
 prints every rule with its default level, and
 [`htl::lint`](https://docs.rs/htl/latest/htl/lint/index.html) is the reference: what
-each rule catches, Teal's own warnings under `tl:*`, and the four markers
-(`---@struct`, `---@sealed`, `---@extensible`, `---@nilable`) that turn a rule on for
-a record or a function.
+each rule catches, Teal's own warnings under `tl:*`, and the five markers
+(`---@struct`, `---@sealed`, `---@extensible`, `---@nilable`, `---@async`) that turn a
+rule on for a record or a function.
 
 ## Project config (`htl.toml`)
 
@@ -349,7 +349,9 @@ the end of the scope. A cancel reaches a task at its next await as an error that
 `task.is_cancelled` recognises, so a `pcall` or a `<close>` handler can clean up and let it
 pass; `[async] grace_ms` in `htl.toml` bounds that cleanup. The module is preloaded by the
 binary that runs the program on the executor, so Lua that `htl gen` wrote from a file
-requiring it runs on such a host and nowhere else. The declaration's header is the
+requiring it runs on such a host and nowhere else. Under `[lang] async` (next) the closure
+is written `async function(): string return await http.get("/a") end`: a call of an async
+function inside a plain closure is `await-missing` there. The declaration's header is the
 reference: [`htl::task`](https://docs.rs/htl/latest/htl/task/index.html).
 
 ### async / await
@@ -386,9 +388,25 @@ where the closure the generated Lua spawns would tell it nothing. A task is awai
 before `:` `=` `,` `)` `.` `(` the words are still names (`t.await`, `x:await()`, a field
 `await:`, `{ await = 1 }`), so a file that used them as names keeps working with the
 setting on. Lua that `htl gen` wrote from such a file requires `htl.task` and runs on a
-host that preloads it (Tasks, above). The checker rules that hold a program to the
-syntax — an async call without `await`, an `await` where nothing can suspend, a task that
-escapes its scope — follow.
+host that preloads it (Tasks, above).
+
+The checker holds a program to the syntax with four rules, on by default with the setting
+and silent without it (`htl check --list-lints` shows the level of each):
+
+| rule | level | reported |
+|---|---|---|
+| `await-missing` | deny | a call of an async function — a Teal `async function`, or a host method whose declaration line carries `---@async` (what `#[host_module]` and `htl dts` write for an `async fn`) — without `await`, at the call |
+| `await-outside-async` | deny | `await` or `async local` inside a function that is not `async`, at the keyword; and at the top level of a module reached through `require`, which cannot yield |
+| `await-non-async` | warn | `await` on a call of a function that is not async, at the keyword |
+| `task-escape` | deny | an `async local` name captured by a nested function or returned bare: the task is cancelled when its scope ends, so what the capture or the caller reads is a cancelled task |
+
+The top level of the file being checked is the entry chunk of `htl run` / `htl test` and is
+async; a module's top level is not, and that is reported on the check of each file that
+requires the module, at the module's line — so `htl check src` says something about a
+module's top-level `await` once a checked file requires it. The expression of an
+`async local` runs inside the task and needs no `await` of its own. `async-as-sync-callback`
+— an async function handed to `table.sort`, `string.gsub`, `xpcall` — needs the type flow
+and is not a rule yet.
 
 ## Fixing (`htl fix`)
 
