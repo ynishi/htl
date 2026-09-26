@@ -128,6 +128,19 @@ impl Game {
         self.h.lua().load(src).eval()
     }
 
+    /// `run`, but as a root on the executor (`Htl::run_blocking`), the way `htl run`
+    /// runs a program: the interrupt has to reach a program there too, as the type
+    /// `Status::Interrupted` is read from.
+    pub fn run_root(&self, src: &str) -> Result<String, anyhow::Error> {
+        let token = htl::mlua_isle::runtime::CancelToken::new();
+        let f = self.h.lua().load(src).into_function()?;
+        let mut out = self.h.call_blocking(f, (), &token)?;
+        Ok(match out.pop_front() {
+            Some(htl::mlua::Value::String(s)) => s.to_str()?.to_string(),
+            _ => String::new(),
+        })
+    }
+
     /// A Rust panic, which since 1.81 aborts the process if it reaches `extern "C"`.
     pub fn boom(&self) -> String {
         panic!("boom from Rust")
@@ -486,6 +499,57 @@ fn interrupt_stops_a_loop_with_coverage_on_and_a_host_callback_registered() {
     assert_eq!(
         take(unsafe { game_run(h, cstr("return 'ok'").as_ptr()) }),
         "ok"
+    );
+    unsafe { game_close(h) };
+}
+
+/// Acceptance 9 of the async design: the same loop as a root on the executor (what `htl
+/// run` does). The interrupt stops it and comes back as `Status::Interrupted`, not as a
+/// plain Lua error, and the host's callback fired while it ran.
+#[test]
+fn interrupt_stops_a_loop_under_the_executor_beside_a_host_callback() {
+    let h = open("hi");
+    assert_eq!(
+        unsafe { game_count(h) },
+        ffi::Status::Ok.code(),
+        "{}",
+        last_error()
+    );
+    let addr = h as usize;
+    let stopper = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        unsafe { game_interrupt(addr as *mut c_void) }
+    });
+
+    let started = std::time::Instant::now();
+    let src = "local t = os.clock()\nwhile os.clock() - t < 5 do end\nreturn 'finished'";
+    let p = unsafe { game_run_root(h, cstr(src).as_ptr()) };
+    let took = started.elapsed();
+
+    assert_eq!(stopper.join().unwrap(), ffi::Status::Ok.code());
+    assert!(p.is_null(), "the loop ran to the end of its five seconds");
+    assert_eq!(
+        game_last_status(),
+        ffi::Status::Interrupted.code(),
+        "{}",
+        last_error()
+    );
+    assert!(
+        took < std::time::Duration::from_secs(4),
+        "it stopped when it was asked to, after {took:?}"
+    );
+    let mut hits: c_int = 0;
+    assert_eq!(
+        unsafe { game_counted(h, &mut hits) },
+        ffi::Status::Ok.code()
+    );
+    assert!(hits > 0, "the host's callback fired while the loop ran");
+    // The next run on the handle starts clean.
+    assert_eq!(
+        take(unsafe { game_run_root(h, cstr("return 'ok'").as_ptr()) }),
+        "ok",
+        "{}",
+        last_error()
     );
     unsafe { game_close(h) };
 }

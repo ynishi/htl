@@ -44,6 +44,10 @@
 //! [fix]
 //! # unsafe = ["no-global"]  # rules whose fix htl fix applies without --unsafe
 //! # disable = ["contract"]  # rules whose fix is never applied
+//!
+//! [async]                   # the executor htl run / htl test run a program on
+//! grace_ms = 1000           # how long a cancelled program may keep running its cleanup
+//! # preempt = 1             # yield every N cancel checks, so a sibling task can run
 //! ```
 //!
 //! Found by walking up from a file or directory, like `mlua-pkg.toml`. Command-line
@@ -95,6 +99,11 @@ pub struct HtlConfig {
     /// `[cache]` — how `htl check` reuses what it already worked out.
     #[serde(default)]
     pub cache: CacheConfig,
+    /// `[async]` — the executor `htl run` and `htl test` run a program on: how long a
+    /// cancelled program may keep cleaning up, and whether a task in a CPU loop is
+    /// interrupted for its siblings.
+    #[serde(default, rename = "async")]
+    pub async_: AsyncConfig,
     /// Static counterpart of `TealResolver::expect_type` / `require_fields`: files
     /// directly under `dir` must return `type`; checked by the `contract` lint.
     #[serde(default)]
@@ -484,6 +493,61 @@ pub struct FixConfig {
     /// Rules whose fix is never applied.
     #[serde(default)]
     pub disable: Vec<String>,
+}
+
+/// `[async]`: the executor a program runs on (`htl run`, `htl test`, and
+/// [`Htl::run_async`](crate::Htl::run_async) in a host that applies it), which is
+/// mlua-isle's [`Config`](mlua_isle::runtime::Config) with htl's defaults.
+///
+/// A program runs as a root coroutine under a cancel token, and a cancel is a Lua error
+/// raised at the next hook check or at the next await. What happens then is the grace:
+///
+/// - `grace_ms = 0`: the coroutine is dropped at once. Its `__close` handlers run but
+///   cannot await (a Lua 5.4 rule for a close run at drop time), and a host future the
+///   program was awaiting is released at that moment.
+/// - `grace_ms > 0` (the default, one second): the cancel arrives as an error first and
+///   unwinds normally, so a `<close>` handler runs and may await — an unwrapped host
+///   function waits out its work, one the macro wrapped in `cancellable` (every
+///   `#[host_module]` `async fn`) returns the cancel error at once. When the grace ends
+///   the coroutine is dropped as above. The grace is one deadline for the program and
+///   every task under it: cleanup that starts tasks does not extend it.
+///
+/// `preempt` is off by default. On, the running task is yielded every `preempt` cancel
+/// checks (a check is every 1000 Lua instructions), so a sibling task on the same runtime
+/// — one that would cancel it, say — gets to run while it is in a CPU loop. The cost is
+/// that tasks then interleave at points the program did not mark, which is what requiring
+/// an explicit await is meant to rule out; off, a CPU-bound task cannot be cancelled by a
+/// sibling on the same runtime, only from another thread (Ctrl-C in `htl run`, an
+/// `ffi::Interrupt` in a host).
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AsyncConfig {
+    /// How long a cancelled program may keep running its cleanup before it is dropped,
+    /// in milliseconds. Absent: 1000.
+    #[serde(default)]
+    pub grace_ms: Option<u64>,
+    /// Yield the running task every this many cancel checks (a check is every 1000 Lua
+    /// instructions — the unit is checks, not instructions), so that other tasks on the
+    /// same thread get to run while it is in a CPU loop. Absent: never.
+    #[serde(default)]
+    pub preempt: Option<u32>,
+}
+
+/// The grace a state gets when no `[async]` says otherwise: what
+/// [`AsyncConfig::runtime`] applies for an absent `grace_ms`, and what every state is
+/// attached with, so a host that never touches the config gets the same cancel semantics
+/// `htl run` has.
+pub const DEFAULT_GRACE_MS: u64 = 1000;
+
+impl AsyncConfig {
+    /// The section as mlua-isle's [`Config`](mlua_isle::runtime::Config), defaults
+    /// applied.
+    pub fn runtime(&self) -> mlua_isle::runtime::Config {
+        mlua_isle::runtime::Config {
+            grace: std::time::Duration::from_millis(self.grace_ms.unwrap_or(DEFAULT_GRACE_MS)),
+            preempt_every: self.preempt,
+        }
+    }
 }
 
 impl HtlConfig {

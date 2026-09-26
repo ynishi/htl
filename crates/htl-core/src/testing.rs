@@ -149,6 +149,11 @@ pub struct RunOptions {
     /// failing one: the seed of a run that passed is what reproduces it when a failure two
     /// commits later is compared against it. `None` leaves the state's own seeding alone.
     pub seed: Option<u64>,
+    /// The project's `[async]` ([`crate::config::AsyncConfig`]), applied to each file's
+    /// state before it runs: the grace a cancelled program gets and whether a CPU-bound
+    /// task is preempted. [`crate::project::test`] fills it from the `htl.toml` it was
+    /// given; a caller building a [`TestSession`] by hand sets it, or keeps the default.
+    pub async_: crate::config::AsyncConfig,
 }
 
 /// The seed one file gets, from the run's seed and its path.
@@ -595,6 +600,7 @@ fn run_in(h: &Htl, path: &Path, r: RunIn<'_>, out_code: &mut Option<String>) -> 
         *t0 = std::time::Instant::now();
     };
     phase("state", &mut t0);
+    h.configure_async(&opts.async_)?;
     h.install_test_lib()?;
     #[cfg(feature = "std")]
     h.install_std()?;
@@ -653,7 +659,17 @@ fn run_in(h: &Htl, path: &Path, r: RunIn<'_>, out_code: &mut Option<String>) -> 
     // The chunk is named as a report names the file, so a runtime error's position and
     // its traceback read like the check's (`tests/a_test.tl:2:`, not `./tests/...`).
     let chunk = format!("@{}", crate::diagnostic::display_path(path));
-    if let Err(e) = h.exec(&code, &chunk, &[]) {
+    // On the executor: the file's chunk is a root coroutine, so a test that calls a host's
+    // `async fn` suspends and resumes instead of failing to yield. The verdict below runs
+    // the test bodies, so it is a root of its own. Neither root is ever cancelled here:
+    // `htl test` has no timeout, and `--slow` only marks.
+    #[cfg(feature = "async")]
+    let token = crate::mlua_isle::runtime::CancelToken::new();
+    #[cfg(feature = "async")]
+    let ran = h.run_blocking(&code, &chunk, &[], &token);
+    #[cfg(not(feature = "async"))]
+    let ran = h.exec(&code, &chunk, &[]);
+    if let Err(e) = ran {
         // With the frames: a file that raised while loading is a development failure, and
         // the per-test failures beside it have carried a traceback all along.
         rep.error = Some(crate::developer_message(&e));
@@ -689,6 +705,17 @@ fn run_in(h: &Htl, path: &Path, r: RunIn<'_>, out_code: &mut Option<String>) -> 
             let run: Function = t.get("run")?;
             let lua_opts = h.lua().create_table()?;
             lua_opts.set("fail_fast", opts.fail_fast)?;
+            #[cfg(feature = "async")]
+            let report: Table = {
+                let mut out = h.call_blocking(run, (filter, lua_opts), &token)?;
+                match out.pop_front() {
+                    Some(Value::Table(t)) => t,
+                    other => {
+                        anyhow::bail!("the test library's run returned {other:?}, not a table")
+                    }
+                }
+            };
+            #[cfg(not(feature = "async"))]
             let report: Table = run.call((filter, lua_opts))?;
             for (key, into) in [
                 ("snapshots_written", &mut rep.snapshots_written),

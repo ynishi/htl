@@ -66,7 +66,7 @@ htl = "0.8"                    # embedding: engine + proc macros in one import
 |---|---|
 | `htl new <name>` / `htl init [dir]` | scaffold: `mlua-pkg.toml`, `htl.toml`, `src/<mod>/init.tl`, `src/main.tl`, `tests/<mod>_test.tl`, `types/README.md`, `.gitignore`, README — and `mise.toml` when the CLI is a published release (`--lib` for no entry script, which leaves `src/main.tl` out; `--target <name>` for what will run the output, `--embed` being the shorthand for `--target bin`; `--htl <req>` for which htl the project depends on; `--no-x` for no `htlx` dependency) |
 | `htl check [paths] [--strict] [--lint rule=level] [--list-lints] [--format json] [--no-cache] [--cache-mode per-module\|whole-run] [--explain-cache]` | type-check; htl lints as `lint:`, advisory at their default level and fatal at `deny` (`--strict` promotes every `warn` to `deny`; `--list-lints` prints every rule with its default level and exits); a module reached through `require` (an installed dep, a `[check] paths` dir) is checked with the file and its type errors are errors too, once per run, with the file that required it; what has not changed is replayed from `.htl/` (see Caching) |
-| `htl run <file.tl \| app.hb> [args]` | check then execute; `require` of a `.tl` with type errors fails |
+| `htl run <file.tl \| app.hb> [args]` | check then execute; `require` of a `.tl` with type errors fails. The program runs as a root coroutine on the executor, so a call of a host's `async fn` suspends and resumes with the value; Ctrl-C cancels it (`[async] grace_ms` in `htl.toml` says how long its cleanup may run), prints `htl run: interrupted` and exits 130 |
 | `htl test [paths] [--filter s] [--lib mod] [--lint rule=level] [--fail-fast] [-v \| -q] [--slow ms] [--update] [--seed n] [--coverage [--coverage-lines]] [--lcov file] [--junit file] [--format json] [--no-cache] [--explain-cache]` | every `.tl` that loads the test library (`htl.test`, or `--lib`), one isolated state per file; checking is replayed from `.htl/`, the run never is (see Caching; the flags are under Tests) |
 | `htl fix [paths] [--rule a,b] [--unsafe] [--dry-run] [--diff] [--allow-dirty] [--allow-no-vcs] [--exit-non-zero-on-fix] [--format json]` | apply the fixes diagnostics carry: the safe ones by default, `--unsafe` for the ones that may change what the program does (see Fixing) |
 | `htl fmt [paths] [--check] [--indent N]` | whitespace formatter (indentation from the syntax tree, blank lines, trailing space) |
@@ -174,7 +174,12 @@ The reference is [docs.rs/htl](https://docs.rs/htl): its front page walks this e
 and the pages behind it are
 
 - [`host_module`](https://docs.rs/htl/latest/htl/attr.host_module.html) — parameters,
-  `errors = "return"`, `Option`, `UserDataRef`, `uses`, `async fn` (feature `async`);
+  `errors = "return"`, `Option`, `UserDataRef`, `uses`, `async fn` (feature `async`;
+  `htl run` / `htl test` run the program that calls one, a host awaits
+  [`Htl::run_async`](https://docs.rs/htl/latest/htl/struct.Htl.html#method.run_async)
+  or calls `run_blocking`, and a cancel reaches the program the way
+  [`config::AsyncConfig`](https://docs.rs/htl/latest/htl/config/struct.AsyncConfig.html)
+  says);
 - [`dts`](https://docs.rs/htl/latest/htl/dts/index.html) — what each Rust shape becomes
   on the Teal side (`#[derive(TealRecord)]`, `rename_all`, data enums as unions);
 - [`Strict<T>`](https://docs.rs/htl/latest/htl/teal/struct.Strict.html) and
@@ -251,6 +256,10 @@ target = "bin"            # what runs this project's output: hb (default), bin, 
 
 [[contract]]              # where this project accepts modules written outside it
 dir = "mods"
+
+[async]                   # the executor htl run / htl test run a program on
+grace_ms = 1000           # a cancelled program's time to clean up; 0 drops it at once
+# preempt = 1             # yield a task every N cancel checks; off: only at awaits
 ```
 
 [`htl::config`](https://docs.rs/htl/latest/htl/config/index.html) has the full sample
@@ -310,7 +319,8 @@ end)
 ```
 
 A test file is any `.tl` that loads the test library, wherever it is; `htl test` runs
-each in a state of its own. Matchers, snapshots, the seeded `t.rng()`, `--coverage` /
+each in a state of its own, on the executor — a test may call a host's `async fn` as it
+calls any other. Matchers, snapshots, the seeded `t.rng()`, `--coverage` /
 `--lcov` / `--junit`, and the `--lib` contract for another library:
 [`htl::testing`](https://docs.rs/htl/latest/htl/testing/index.html).
 
