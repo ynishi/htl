@@ -943,6 +943,49 @@ fn union_from(en: &ItemEnum, name: &str, variants: &[dts::UnionVariant]) -> Toke
 /// across every await (`add_async_method` hands over a `UserDataRef<T>` the future holds
 /// until it resolves, so prefer `&self` over `&mut self`), and the future must be
 /// `'static`, and `Send` as well when mlua's `send` feature is on.
+///
+/// # A Lua function as a parameter
+///
+/// A `Function` parameter (mlua's; an `Option<Function>` is declared `f?: function` when it
+/// is trailing, as any `Option` parameter) is a
+/// callback, and what matters about it under `[lang] async` is whether a suspension inside
+/// it can reach an executor. That is decided by the body, not the signature: mlua's
+/// `Function::call` runs it from C, where a yield fails with `attempt to yield across a
+/// C-call boundary`, and `Function::call_async` runs it as a coroutine, where it may yield.
+/// The declaration says which parameters are called from C with a trailing
+/// `---@noyield(names)`, which the checker's `async-as-sync-callback` reads to report an
+/// async function passed there (`htl::lint`), and the macro writes it from what the
+/// signature does show:
+///
+/// ```rust,ignore
+/// #[host_module(name = "api")]
+/// impl Api {
+///     pub fn each(&self, f: Function) -> String { /* f.call(..) */ }
+///     pub async fn each_async(&self, f: Function) -> String { /* f.call_async(..).await */ }
+/// }
+/// // each: function(self: api, f: function): string ---@noyield(f)
+/// // each_async: function(self: api, f: function): string ---@async
+/// ```
+///
+/// - **A sync fn marks each of its `Function` parameters**, in parameter order
+///   (`---@noyield(on_ok, on_err)`): it has no `call_async` to reach for, so `call` is the
+///   only way it can run the function.
+/// - **An `async fn` marks none**: its callback is to be called with `call_async`. Calling
+///   it with the sync `call` inside an `async fn` compiles, and fails at run time the first
+///   time the callback suspends; the signature does not show it, so the checker cannot.
+///
+/// The default is wrong in two cases, and an attribute on the parameter says so:
+///
+/// - `#[teal(yields)] f: Function` on a sync fn that stores `f` and calls it later with
+///   `call_async` under an executor the host drives: `f` is left out of the marker.
+/// - `#[teal(noyield)] f: Function` on an `async fn` that calls `f` with the sync `call` on
+///   purpose: `f` is named, beside `---@async` (`... ---@async ---@noyield(f)`).
+///
+/// Either word states the fact, so it may be written where it matches the default as
+/// well. Anything else in a parameter's `#[teal(..)]`, either word on a parameter that is
+/// not a `Function`, or the attribute on a fn that is not `pub` is refused. The attribute
+/// is removed from the impl the macro emits; `htl dts` reads it from the same source and
+/// writes the same line.
 #[proc_macro_attribute]
 pub fn host_module(attr: TokenStream, item: TokenStream) -> TokenStream {
     let metas = match Punctuated::<Meta, Token![,]>::parse_terminated.parse(attr) {
@@ -981,6 +1024,20 @@ fn expand_host_module(
         write_dts(d, &hd.decl)?;
     }
 
+    // `#[teal(yields)]` / `#[teal(noyield)]` on a parameter is read by `host_decl` above and
+    // means nothing to rustc, which knows no `teal` attribute outside `derive(TealRecord)`:
+    // the impl is re-emitted without it. `host_decl` has refused every other use of it.
+    let mut imp = imp.clone();
+    for it in &mut imp.items {
+        if let syn::ImplItem::Fn(f) = it {
+            for a in &mut f.sig.inputs {
+                if let syn::FnArg::Typed(pt) = a {
+                    pt.attrs.retain(|a| !a.path().is_ident("teal"));
+                }
+            }
+        }
+    }
+    let imp = &imp;
     let self_ty = &imp.self_ty;
     let module = &hd.module;
     let decl = &hd.decl;
