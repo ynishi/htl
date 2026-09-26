@@ -612,6 +612,141 @@ local function async_resolver(result, filename)
    end
 end
 
+-- `---@noyield(f, g)`: which parameters of a function its implementation calls from C, for
+-- `async-as-sync-callback`. A host method that takes a Lua function and calls it with mlua's
+-- `Function::call` runs it the way `table.sort` runs its comparator: a suspension inside it
+-- fails with `attempt to yield across a C-call boundary`. Nothing in the type says so -- the
+-- parameter is a bare `function` either way -- so the declaration says it, by name, the way
+-- `---@async` says a function may suspend. Names and not slot numbers: `api:each(cb)` and
+-- `api.each(api, cb)` put `cb` one argument apart, and the declaration's own parameter list
+-- is what turns a name into the argument of either form.
+--
+-- The parameter list of the function type the position report puts at (y, x), names in
+-- order: `f?: T` is `f`, an explicit `self: X` is `self`, `...: T` is `...`, and a Teal
+-- `function R:m(..)` gets the `self` its `:` implies. The search starts at the type's own
+-- column: every function type written on one line reports that line, so `mk: function(f:
+-- function): function(a: string)` holds two, and the second is the one at its `function`
+-- keyword. A list that does not close on its line is read on across the lines that follow
+-- (at most `MAX_PARAM_LINES`), with comments dropped, so a declaration written one parameter
+-- per line reads the same. The list is split at top-level commas only, so `f: function(a:
+-- string, b: string)` is one parameter.
+local MAX_PARAM_LINES = 32
+
+local function declared_params(lines, y, x)
+   local line = lines[y]
+   if not line then return nil end
+   local at = line:find("%f[%w_]function%f[^%w_]", x or 1)
+   if not at then return nil end
+   local text = line:sub(at + #"function"):gsub("%-%-.*$", "")
+   local head, list = text:match("^([^(]*)(%b())")
+   for i = 1, MAX_PARAM_LINES do
+      if list or not lines[y + i] then break end
+      text = text .. "\n" .. lines[y + i]:gsub("%-%-.*$", "")
+      head, list = text:match("^([^(]*)(%b())")
+   end
+   if not list then return nil end
+   local params = {}
+   if head:match("^%s*[%w_.]+:[%w_]+") then params[1] = "self" end
+   local depth, from, body = 0, 1, list:sub(2, -2)
+   local function take(s)
+      local name = s:match("^%s*([%w_]+)") or s:match("^%s*(%.%.%.)")
+      if name then params[#params + 1] = name end
+   end
+   for i = 1, #body do
+      local c = body:sub(i, i)
+      if c == "(" or c == "{" or c == "<" then
+         depth = depth + 1
+      elseif c == ")" or c == "}" or c == ">" then
+         depth = depth - 1
+      elseif c == "," and depth == 0 then
+         take(body:sub(from, i - 1))
+         from = i + 1
+      end
+   end
+   take(body:sub(from))
+   return params
+end
+
+-- What `noyield_at` answers for a declaration that carries the marker with names:
+-- { names = { "f" }, params = { "self", "f" } }, or false.
+local function noyield_at_decl(cache, t)
+   local lines = source_lines(cache, t.file)
+   if not lines then return false end
+   local found, args = marker_on(lines, t.y, "noyield")
+   if not found or not args then return false end
+   local names = {}
+   for name in args:gmatch("[^,%s]+") do names[#names + 1] = name end
+   local params = declared_params(lines, t.y, t.x)
+   if #names == 0 or not params then return false end
+   return { names = names, params = params }
+end
+
+-- Resolver for `async-as-sync-callback`: for the function called at (y, x), the parameters
+-- its declaration marks `---@noyield(..)` and its own parameter list, or nil. The position is
+-- the callee's, the one `async_resolver` is asked at; a record is refused the same way.
+local function noyield_resolver(result, filename)
+   local ok, report = pcall(tl.get_types, result)
+   if not ok or type(report) ~= "table" then return nil end
+   local by_pos = report.by_pos and report.by_pos[filename]
+   if not by_pos then return nil end
+   local marked, sources = {}, {}
+   local function deref(id, depth)
+      local t = report.types[id]
+      if t and t.ref and depth < 8 then return deref(t.ref, depth + 1) end
+      return t
+   end
+   return function(y, x)
+      local id = by_pos[y] and by_pos[y][x]
+      if not id then return nil end
+      local t = deref(id, 0)
+      if not t or t.fields or not t.file or not t.y then return nil end
+      if marked[id] == nil then marked[id] = noyield_at_decl(sources, t) end
+      return marked[id] or nil
+   end
+end
+
+-- `---@noyield` with no argument on a record field: the host reads the field off a table it
+-- was handed and calls it from C -- `htl-mq`'s game table, whose `update` and `draw` run every
+-- frame through `Function::call`. There is no callee in the Teal source to ask; the table
+-- constructor is typed as the record, and the record type in the position report maps each
+-- field to a type that carries the file and line it is declared on
+-- (`TypeReporter:get_typenum`). The field's own type is read without following a nominal
+-- `ref`: `update: Step` names the line `Step` is declared on once dereferenced, and the
+-- marker sits on the field's line.
+--
+-- Resolver: (y, x) is the constructor's position, `key` the field it binds; the answer is
+-- the record as its declaration names it (`api.Game`) when that field's line carries the
+-- bare marker, or nil.
+local function noyield_field_resolver(result, filename)
+   local ok, report = pcall(tl.get_types, result)
+   if not ok or type(report) ~= "table" then return nil end
+   local by_pos = report.by_pos and report.by_pos[filename]
+   if not by_pos then return nil end
+   local sources, names = {}, {}
+   local function deref(id, depth)
+      local t = report.types[id]
+      if t and t.ref and depth < 8 then return deref(t.ref, depth + 1) end
+      return t
+   end
+   return function(y, x, key)
+      local id = by_pos[y] and by_pos[y][x]
+      if not id then return nil end
+      local t = deref(id, 0)
+      if not t or not t.fields or not t.fields[key] then return nil end
+      local f = report.types[t.fields[key]]
+      if not f or not f.file or not f.y then return nil end
+      local lines = source_lines(sources, f.file)
+      if not lines then return nil end
+      local found, args = marker_on(lines, f.y, "noyield")
+      if not found or args then return nil end
+      if names[id] == nil then
+         local rlines = t.file and t.y and source_lines(sources, t.file)
+         names[id] = rlines and qualified_name(rlines, t.y, t.str or "record") or (t.str or "record")
+      end
+      return names[id]
+   end
+end
+
 -- Resolver for lints: the checker's name for the type of the expression at (y, x)
 -- (`"string"`, `"{string}"`, `"http"`, ...), nil when the report stored nothing there. For
 -- `async-as-sync-callback`'s method form: `s:gsub(pat, f)` is `string.gsub` -- and calls `f`
@@ -2138,6 +2273,8 @@ function H.check(filename, env, opts)
             nilable_at = nilable_resolver(result, filename),
             type_at = type_name_resolver(result, filename),
             async_at = H.lang_async and async_resolver(result, filename) or nil,
+            noyield_at = H.lang_async and noyield_resolver(result, filename) or nil,
+            noyield_field_at = H.lang_async and noyield_field_resolver(result, filename) or nil,
             lang_async = H.lang_async,
             required = H.lang_async and required_modules(result, env) or nil,
             deps = H.deps,
