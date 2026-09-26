@@ -65,11 +65,18 @@
 #![deny(missing_docs)]
 
 pub use mlua;
+/// The owner of a state's debug hook (`mlua_isle::runtime::Vm`): `Interrupt`, coverage
+/// and a host's own instruction or line callback register with it rather than each
+/// taking the one hook slot a Lua thread has — see [`Htl::hook_owner`].
+pub use mlua_isle;
 
 use anyhow::{Context, Result, anyhow, bail};
 use mlua::chunk::ChunkMode;
 use mlua::{Function, Lua, Table, Value, Variadic};
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::OnceLock;
 
 pub mod build_target;
@@ -1183,53 +1190,31 @@ function R.reset_path()
    package.path = ""
 end
 
--- Line coverage: which lines of which chunk ran. Lua's line hook is per thread, so
--- code that runs inside a coroutine the test creates is not seen.
-local cov = nil
-function R.coverage_start()
-   cov = {}
-   -- The line event is the hot path. One "S" lookup per function (cached by the
-   -- function object) instead of per line; a call/return-event stack was measured
-   -- slower on a call-heavy suite, since calls are almost as frequent as lines there.
-   local srcs = setmetatable({}, { __mode = "k" })
-   local getinfo = debug.getinfo
-   debug.sethook(function(_, line)
-      local fi = getinfo(2, "f")
-      local func = fi and fi.func
-      if func == nil then return end
-      local t = srcs[func]
-      if t == nil then
-         local si = getinfo(2, "S")
-         local src = si and si.source
-         t = false
-         if src then
-            t = cov[src]
-            if not t then
-               t = {}
-               cov[src] = t
-            end
-         end
-         srcs[func] = t
-      end
-      if t then t[line] = true end
-   end, "l")
-end
-
-function R.coverage_stop()
-   debug.sethook()
-   local out = {}
-   for src, lines in pairs(cov or {}) do
-      local list = {}
-      for l in pairs(lines) do list[#list + 1] = l end
-      table.sort(list)
-      out[#out + 1] = { source = src, lines = list }
-   end
-   cov = nil
-   return out
-end
-
 return R
 "#;
+
+/// A coverage recording in progress, in the state's app data: the callback's id on the
+/// hook owner, and the lines it has seen (shared with the callback).
+struct CoverageRun {
+    id: mlua_isle::runtime::HookId,
+    lines: Rc<RefCell<HashMap<String, HashSet<usize>>>>,
+}
+
+/// Make `lua`'s debug hook mlua-isle's, so that everything that wants a callback on the
+/// state registers with it. The first attach captures `xpcall`, which has to happen
+/// before a host sandboxes the globals.
+fn attach_hook_owner(lua: &Lua) -> Result<mlua_isle::runtime::Vm> {
+    mlua_isle::runtime::Vm::attach(lua, mlua_isle::runtime::Config::default())
+        .context("attaching the debug hook owner to the state")
+}
+
+/// The hook owner of `lua`, attached now if it was not yet (see [`Htl::hook_owner`]).
+pub(crate) fn vm(lua: &Lua) -> Result<mlua_isle::runtime::Vm> {
+    match mlua_isle::runtime::Vm::of(lua) {
+        Some(vm) => Ok(vm),
+        None => attach_hook_owner(lua),
+    }
+}
 
 impl Htl {
     /// New state. Uses `Lua::unsafe_new` so stripped bytecode bundles can be loaded, and
@@ -1263,23 +1248,44 @@ impl Htl {
     ///
     /// This is the constructor for a host that decides what the program state is made of
     /// — which standard libraries it opens (`Lua::unsafe_new_with`), what its allocator
-    /// is bounded to (`Lua::set_memory_limit`), what hook counts its instructions
-    /// (`Lua::set_global_hook`) — while the checker keeps running on a state of its own,
-    /// with whatever it needs. Every such limit is mlua's and is set on `lua` by the
-    /// host; htl adds none of its own and puts nothing in the way of them.
+    /// is bounded to (`Lua::set_memory_limit`), what callback counts its instructions
+    /// (below) — while the checker keeps running on a state of its own, with whatever it
+    /// needs. Every such limit is mlua's and is set on `lua` by the host; htl adds none
+    /// of its own and puts nothing in the way of them.
     ///
-    /// What htl itself needs from `lua`: `package` (the searcher and `preload`) and the
-    /// base library's `load`; `debug`, only for [`coverage_start`](Self::coverage_start).
+    /// What htl itself needs from `lua`: `package` (the searcher and `preload`), the base
+    /// library's `load` and `xpcall`, and mlua's default `LuaOptions::catch_rust_panics`.
     /// A state that will load bundles has to come from `unsafe_new_with`: mlua's safe
     /// `new_with` refuses binary chunks, which is what a bundle is.
     ///
-    /// The limits are mlua's, and so are their edges. An instruction hook fires only while
-    /// Lua is executing Lua, so a host function that blocks is one instruction;
-    /// `set_global_hook` reaches the coroutines a script starts, `set_hook` one thread. A
-    /// thread has one hook, and a script with `debug` can replace it — a state that runs
-    /// Teal the host does not trust leaves `debug` out. A memory limit is checked after
-    /// Lua's emergency collection, and `MemoryError` is what comes back. `htl check`
-    /// settles what a module *is*; what it may *do* is settled here, by the host.
+    /// The state's debug hook is owned: this constructor attaches
+    /// [`mlua_isle`]'s [`Vm`](mlua_isle::runtime::Vm) to `lua`, one global hook that
+    /// dispatches to registered callbacks, each at its own triggers. An
+    /// `ffi::Interrupt` and [`coverage_start`](Self::coverage_start)
+    /// register with it, and so does a host that counts instructions, through
+    /// [`hook_owner`](Self::hook_owner):
+    ///
+    /// ```rust,ignore
+    /// use htl::mlua::{HookTriggers, VmState};
+    ///
+    /// h.hook_owner()?.add_hook(HookTriggers::new().every_nth_instruction(1000), |_, _| {
+    ///     Ok(VmState::Continue)                     // or `Err(..)` to stop the run
+    /// })?;
+    /// ```
+    ///
+    /// Do not call `Lua::set_global_hook` or `Lua::set_hook` on the state: a thread has
+    /// one hook, either replaces the owner's, and every callback registered with it —
+    /// the interrupt, coverage — stops firing. A script with the `debug` library can do
+    /// the same with `debug.sethook`, so a state that runs Teal the host does not trust
+    /// leaves `debug` out. Sandboxing the globals (`Lua::set_globals` with a whitelist,
+    /// removing `xpcall`) is done *after* this constructor: the attach captures `xpcall`
+    /// once, and an `xpcall` that is already gone fails the attach.
+    ///
+    /// The limits are mlua's, and so are their edges. An instruction callback fires only
+    /// while Lua is executing Lua, so a host function that blocks is one instruction. A
+    /// memory limit is checked after Lua's emergency collection, and `MemoryError` is what
+    /// comes back. `htl check` settles what a module *is*; what it may *do* is settled
+    /// here, by the host.
     ///
     /// ```rust,ignore
     /// use htl::Htl;
@@ -1295,6 +1301,7 @@ impl Htl {
     /// let h = Htl::with_checker_lua(&checker, lua)?; // the program runs here; `os` and `io` are nil
     /// ```
     pub fn with_checker_lua(checker: &Htl, lua: Lua) -> Result<Self> {
+        attach_hook_owner(&lua)?;
         let r: Table = lua
             .load(RUNTIME_PRELUDE)
             .set_name("=htl-runtime")
@@ -1344,32 +1351,97 @@ impl Htl {
         Ok(())
     }
 
-    /// Start recording which lines of which chunk run in the program state (a state
-    /// made by [`with_checker`](Self::with_checker)). The hook slows the run. Lua's line
-    /// hook is per thread: code inside coroutines the program creates is not seen.
+    /// The owner of this state's debug hook: [`mlua_isle`]'s
+    /// [`Vm`](mlua_isle::runtime::Vm), one global hook that dispatches to the callbacks
+    /// registered with it (`add_hook`), each at its own triggers. A thread has one hook
+    /// slot, so this is how more than one party gets a callback on the state — an
+    /// `ffi::Interrupt`, [`coverage_start`](Self::coverage_start), and a
+    /// host's own instruction counter — without any of them taking the slot from the
+    /// others.
+    ///
+    /// A program state ([`with_checker`](Self::with_checker)) is attached from
+    /// construction. The shared state ([`new`](Self::new), [`from_lua`](Self::from_lua))
+    /// is attached the first time it is asked for a callback or runs a program
+    /// ([`exec`](Self::exec), [`exec_bytes`](Self::exec_bytes)), and not before: the
+    /// checker does most of its work on that state, and a count hook is a cost on every
+    /// instruction Lua runs, so `htl check` does not pay it. Attaching captures the
+    /// global `xpcall`, so on a state whose globals the host sandboxes this runs before
+    /// the sandboxing.
+    ///
+    /// ```rust,ignore
+    /// use htl::mlua::{HookTriggers, VmState};
+    ///
+    /// h.hook_owner()?.add_hook(HookTriggers::new().every_nth_instruction(1000), |_, _| {
+    ///     Ok(VmState::Continue)                     // or `Err(..)` to stop the run
+    /// })?;
+    /// ```
+    pub fn hook_owner(&self) -> Result<mlua_isle::runtime::Vm> {
+        vm(&self.lua)
+    }
+
+    /// Start recording which lines of which chunk run in this state. The line hook slows
+    /// the run. It is a callback on the state's hook owner ([`mlua_isle`]), so it reaches
+    /// every coroutine the program creates from here on, and it leaves the other callbacks
+    /// on the state — an `ffi::Interrupt`, the host's own — in place.
+    /// Calling it while a recording is running discards that recording and starts over.
     pub fn coverage_start(&self) -> Result<()> {
-        let f: Function = self.runtime()?.get("coverage_start")?;
-        f.call::<()>(())?;
+        if let Some(run) = self.lua.remove_app_data::<CoverageRun>() {
+            vm(&self.lua)?.remove_hook(run.id)?;
+        }
+        let lines: Rc<RefCell<HashMap<String, HashSet<usize>>>> = Rc::default();
+        let recorded = lines.clone();
+        // The line event is the hot path. One "S" lookup per function instead of per line,
+        // keyed by the function's address; the `Function` is kept beside the answer so the
+        // address cannot be handed to another function while the key is in use. A
+        // call/return-event stack was measured slower on a call-heavy suite, since calls
+        // are almost as frequent as lines there.
+        let mut srcs: HashMap<*const std::ffi::c_void, (Function, Option<Rc<str>>)> =
+            HashMap::new();
+        let id =
+            vm(&self.lua)?.add_hook(mlua::HookTriggers::new().every_line(), move |_, debug| {
+                let f = debug.function();
+                let src = &srcs
+                    .entry(f.to_pointer())
+                    .or_insert_with(|| {
+                        let src = debug.source().source.map(|s| Rc::from(s.as_ref()));
+                        (f, src)
+                    })
+                    .1;
+                if let (Some(src), Some(line)) = (src, debug.current_line()) {
+                    let mut recorded = recorded.borrow_mut();
+                    match recorded.get_mut(&**src) {
+                        Some(set) => {
+                            set.insert(line);
+                        }
+                        None => {
+                            recorded.insert(src.to_string(), HashSet::from([line]));
+                        }
+                    }
+                }
+                Ok(mlua::VmState::Continue)
+            })?;
+        self.lua.set_app_data(CoverageRun { id, lines });
         Ok(())
     }
 
-    /// Stop recording; `(chunk source, sorted executed lines)` per chunk. Sources are as
-    /// Lua names them: `@<path>` for files loaded by the searcher and the entry.
+    /// Stop recording; `(chunk source, sorted executed lines)` per chunk, sorted by
+    /// source. Sources are as Lua names them: `@<path>` for files loaded by the searcher
+    /// and the entry. Nothing was being recorded: an empty list.
     pub fn coverage_stop(&self) -> Result<Vec<(String, Vec<usize>)>> {
-        let f: Function = self.runtime()?.get("coverage_stop")?;
-        let t: Table = f.call(())?;
-        let mut out = Vec::new();
-        for e in t.sequence_values::<Table>() {
-            let e = e?;
-            let source: String = e.get("source")?;
-            let lines: Table = e.get("lines")?;
-            out.push((
-                source,
-                lines
-                    .sequence_values::<usize>()
-                    .collect::<mlua::Result<_>>()?,
-            ));
-        }
+        let Some(run) = self.lua.remove_app_data::<CoverageRun>() else {
+            return Ok(Vec::new());
+        };
+        vm(&self.lua)?.remove_hook(run.id)?;
+        let lines = std::mem::take(&mut *run.lines.borrow_mut());
+        let mut out: Vec<(String, Vec<usize>)> = lines
+            .into_iter()
+            .map(|(src, set)| {
+                let mut list: Vec<usize> = set.into_iter().collect();
+                list.sort_unstable();
+                (src, list)
+            })
+            .collect();
+        out.sort();
         Ok(out)
     }
 
@@ -1746,6 +1818,7 @@ impl Htl {
 
     /// Execute stripped bytecode with `...` = args.
     pub fn exec_bytes(&self, bytecode: &[u8], chunk_name: &str, args: &[String]) -> Result<()> {
+        vm(&self.lua)?;
         let f = self
             .lua
             .load(bytecode)
@@ -1841,6 +1914,7 @@ end
     /// test library as `=htl.test`. [`preload`](Self::preload) derives the name from the
     /// module name; [`preload_at`](Self::preload_at) takes one, as this does.
     pub fn exec(&self, lua_src: &str, chunk_name: &str, args: &[String]) -> Result<()> {
+        vm(&self.lua)?;
         let f = self
             .lua
             .load(lua_src)

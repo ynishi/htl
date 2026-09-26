@@ -1581,7 +1581,7 @@ fn print_coverage(cov: &report::CoverageReport, with_lines: bool) {
     }
     if cov.total > 0 {
         eprintln!(
-            "coverage: {:<width$}  {:>5}/{:<5} {:5.1}%  (statements; code run inside coroutines is not seen)",
+            "coverage: {:<width$}  {:>5}/{:<5} {:5.1}%  (statements)",
             "total",
             cov.executed,
             cov.total,

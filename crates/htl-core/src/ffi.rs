@@ -468,13 +468,17 @@ impl Interrupt {
 
     /// Install the hook that turns this flag into a Lua error.
     ///
-    /// Call it from the opener, on the state the handle will run. It is the state's
-    /// *global* hook (`Lua::set_global_hook`), so a coroutine the script starts is
-    /// watched as well as the main thread — a thread hook (`Lua::set_hook`) covers only
-    /// the thread it was set on, and a loop inside `coroutine.wrap` would run past it.
-    /// Replaces any global hook already on the state, and a script with the `debug`
-    /// library can replace it in turn (`debug.sethook`): a host that runs Teal it does
-    /// not trust builds the state without `debug`
+    /// Call it from the opener, on the state the handle will run. It is a callback on
+    /// the state's hook owner ([`Htl::hook_owner`](crate::Htl::hook_owner)), which is
+    /// the state's *global* hook: a coroutine the
+    /// script starts is watched as well as the main thread, where a thread hook
+    /// (`Lua::set_hook`) covers only the thread it was set on and a loop inside
+    /// `coroutine.wrap` would run past it. Registering leaves the other callbacks on
+    /// the state in place — coverage, the host's own — and none of them removes this
+    /// one. Install it once per state: a second install adds a second callback that
+    /// reads the same flag. What does replace it is `Lua::set_global_hook` or a script
+    /// with the `debug` library calling `debug.sethook`, which take the slot from the
+    /// owner: a host that runs Teal it does not trust builds the state without `debug`
     /// ([`Htl::with_checker_lua`](crate::Htl::with_checker_lua)).
     pub fn install(&self, h: &Htl) -> mlua::Result<()> {
         self.install_every(h, HOOK_EVERY)
@@ -484,16 +488,20 @@ impl Interrupt {
     /// has measured its own scripts.
     pub fn install_every(&self, h: &Htl, every: u32) -> mlua::Result<()> {
         let flag = self.0.clone();
-        h.lua().set_global_hook(
-            mlua::HookTriggers::new().every_nth_instruction(every),
-            move |_lua, _debug| {
-                if flag.swap(false, Ordering::SeqCst) {
-                    Err(mlua::Error::external(Interrupted))
-                } else {
-                    Ok(mlua::VmState::Continue)
-                }
-            },
-        )
+        crate::vm(h.lua())
+            .map_err(mlua::Error::external)?
+            .add_hook(
+                mlua::HookTriggers::new().every_nth_instruction(every),
+                move |_lua, _debug| {
+                    if flag.swap(false, Ordering::SeqCst) {
+                        Err(mlua::Error::external(Interrupted))
+                    } else {
+                        Ok(mlua::VmState::Continue)
+                    }
+                },
+            )
+            .map_err(mlua::Error::external)?;
+        Ok(())
     }
 }
 
