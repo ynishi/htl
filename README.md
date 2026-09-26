@@ -259,7 +259,7 @@ grace_ms = 1000
 # preempt = 1
 
 [lang]
-async = true              # async / await are keywords and the four rules are on (see Async)
+async = true              # async / await are keywords and the five rules are on (see Async)
 ```
 
 [`htl::config`](https://docs.rs/htl/latest/htl/config/index.html) has the full sample
@@ -375,7 +375,7 @@ setting on.
 
 ### The rules
 
-Four rules, on by default with the setting and silent without it (`htl check
+Five rules, on by default with the setting and silent without it (`htl check
 --list-lints` shows the level of each; the levels change like any other rule's, Lints):
 
 | rule | level | reported |
@@ -384,14 +384,13 @@ Four rules, on by default with the setting and silent without it (`htl check
 | `await-outside-async` | deny | `await` or `async local` inside a function that is not `async`, at the keyword; and at the top level of a module reached through `require`, which cannot yield |
 | `await-non-async` | warn | `await` on a call of a function that is not async, at the keyword |
 | `task-escape` | deny | an `async local` name captured by a nested function or returned bare: the task is cancelled when its scope ends, so what the capture or the caller reads is a cancelled task |
+| `async-as-sync-callback` | deny | an async function handed to a callee that calls it from C — `table.sort`'s comparator, `string.gsub`'s replacement, `xpcall`'s message handler, a `__tostring` in a table constructor — where a suspension fails (or, in the handler, is lost), at the argument |
 
 The top level of the file being checked is the entry chunk of `htl run` / `htl test` and is
 async; a module's top level is not, and that is reported on the check of each file that
 requires the module, at the module's line — so `htl check src` says something about a
 module's top-level `await` once a checked file requires it. The expression of an
-`async local` runs inside the task and needs no `await` of its own. `async-as-sync-callback`
-— an async function handed to `table.sort`, `string.gsub`, `xpcall` — needs the type flow
-and is not a rule yet.
+`async local` runs inside the task and needs no `await` of its own.
 
 ### Tasks (`htl.task`)
 

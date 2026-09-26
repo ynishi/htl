@@ -69,6 +69,7 @@
 //! | `await-outside-async` | deny | under `[lang] async`: `await` or `async local` inside a function that is not `async`, or at the top level of a module reached through `require` (`require` cannot yield). The top level of the file being checked is the entry of `htl run` / `htl test` and is async; the module case is reported on the check of each file that requires the module, at the module's position |
 //! | `await-non-async` | warn | under `[lang] async`: `await` on a call of a function that is not async. Nothing suspends, so the marker says something false |
 //! | `task-escape` | deny | under `[lang] async`: an `async local` name captured by a nested function, or returned. The task is cancelled when the scope that declared it ends, so what the capture or the caller reads is a cancelled task; await it in the scope and hand over the value |
+//! | `async-as-sync-callback` | deny | under `[lang] async`: an async function — a Teal `async function`, inline or named, or a host method declared `---@async` — handed to a callee that calls it from C: `table.sort`'s comparator, `string.gsub`'s replacement, `xpcall`'s message handler, or a `__tostring` in a table constructor. A suspension there fails with `attempt to yield across a C-call boundary` (in `xpcall`'s handler it is lost instead). Reported at the argument. A Teal function calling its callback is not a boundary, so an async value handed to one is not reported
 //! | `duplicate-declaration` | warn | two `.d.tl` for one module: an order decides which is read ([`crate::config::HtlConfig::search_paths`]) and nothing in either file says so. Names the one read and the one that was not |
 //! | `host-module-shadowed` | warn | for a file in no project: a `require` of a name a `#[host_module]` in the surrounding crate registers that resolved to a Teal file of that name — `package.preload` beats the path searcher at run time, so the file is what is checked and the host is what runs. In a project the same state is an error ([`crate::model`]) |
 //! | `contract` | warn | a module under a `[[contract]]` directory that does not satisfy the contract's type or its `---@required` fields, and a `---@contract` marker that cannot be turned into a contract or published ([`crate::contract`]) |
@@ -377,7 +378,7 @@ impl Rule {
     }
 }
 
-/// Every rule there is. The first thirty-two are the lint surface, in the order
+/// Every rule there is. The first thirty-three are the lint surface, in the order
 /// `htl check --list-lints` prints them: the file-level rules first, in the order
 /// `lint.lua` runs them, then the ones the project layer asks once the files have been
 /// checked, then the warning kinds the vendored Teal compiler reports for itself. The last
@@ -411,15 +412,16 @@ pub const RULES: &[Rule] = &[
     Rule::allow("no-any", Side::Lua),
     Rule::allow("explicit-number", Side::Lua),
     Rule::allow("class-record", Side::Lua),
-    // The `async` / `await` syntax (`[lang] async`). Three are `deny`, the first rules
-    // that are: a suspension the caller cannot see, an `await` where Lua cannot yield and
-    // a task read after its scope cancelled it each fail at run time, at a line that is not
-    // the one that caused it, and the rules exist so that the line named is. All four are
-    // silent for a project without the setting.
+    // The `async` / `await` syntax (`[lang] async`). Four are `deny`, the first rules
+    // that are: a suspension the caller cannot see, an `await` where Lua cannot yield, a
+    // task read after its scope cancelled it and an async function a C callee calls each
+    // fail at run time, at a line that is not the one that caused it, and the rules exist
+    // so that the line named is. All five are silent for a project without the setting.
     Rule::deny("await-missing", Side::Lua),
     Rule::deny("await-outside-async", Side::Lua),
     Rule::warn("await-non-async", Side::Lua),
     Rule::deny("task-escape", Side::Lua),
+    Rule::deny("async-as-sync-callback", Side::Lua),
     // The project layer. All `warn`: each describes a state a project is in by accident
     // rather than on purpose, so it is worth saying, and none of them is worth failing a
     // run over unless the project says so — which is what a level is for.
@@ -791,9 +793,12 @@ mod tests {
                 | "class-record"
                 | "nil-return-unchecked"
                 | "htlx-available" => Level::Allow,
-                // The three async rules: what each catches fails at run time at a line
+                // The four async rules: what each catches fails at run time at a line
                 // other than the one that caused it, whatever the project's opinion.
-                "await-missing" | "await-outside-async" | "task-escape" => Level::Deny,
+                "await-missing"
+                | "await-outside-async"
+                | "task-escape"
+                | "async-as-sync-callback" => Level::Deny,
                 _ => Level::Warn,
             };
             assert_eq!(level, want, "{name}");

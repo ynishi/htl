@@ -280,14 +280,14 @@ fn with_the_setting_off_nothing_is_reported() {
     let main = write(
         &dir,
         "main.tl",
-        "local http = require(\"http\")\nlocal await = 1\nlocal async = 2\nprint(http.get(\"/a\"), await + async)\n",
+        "local http = require(\"http\")\nlocal await = 1\nlocal async = 2\nprint(http.get(\"/a\"), await + async)\nlocal t = { \"b\", \"a\" }\ntable.sort(t, function(a: string, b: string): boolean return a < b end)\nprint(string.gsub(\"a\", \"%w\", http.get))\n",
     );
     let ci = checker(&dir, false, "").check(&main).unwrap();
     assert!(ci.errors.is_empty(), "{:?}", ci.errors);
     assert!(
-        ci.lints
-            .iter()
-            .all(|l| !l.contains("[htl await") && !l.contains("[htl task-escape]")),
+        ci.lints.iter().all(|l| !l.contains("[htl await")
+            && !l.contains("[htl task-escape]")
+            && !l.contains("[htl async-as-sync-callback]")),
         "{:?}",
         ci.lints
     );
@@ -341,5 +341,144 @@ fn the_macro_declares_an_async_fn_with_the_marker() {
         ),
         "{}",
         n[0]
+    );
+}
+
+const ORDER: &str = "\
+local record order
+   less: function(a: string, b: string): boolean ---@async
+end
+return order
+";
+
+/// Lines 35-37 and 40-41: an async function handed to `table.sort` or `string.gsub`, which
+/// call it from C — a local `async function`, a host method declared `---@async`, an inline
+/// `async function(..)`. Line 42: `xpcall`'s handler (its body, also async, is resumed and
+/// may yield). Line 43: an async `__tostring` in the metatable's constructor, for a record
+/// that declares `metamethod __tostring` (line 31). Line 38 is an inline sync comparator;
+/// line 39 is one whose body awaits, which is `await-outside-async` at the `await` and
+/// nothing here — as is the named `awaiting_cmp` at line 17. Line 44: `gsub` on a record
+/// that is not a string (`d`, a `Doc`), a Teal method that may take an async function.
+/// Line 46: `s:gsub` on a string, which is `string.gsub` and is reported like line 40.
+const CALLBACKS: &str = "\
+local http = require(\"http\")
+local order = require(\"order\")
+local Doc = require(\"doc\")
+local async function cmp(a: string, b: string): boolean
+   return a < b
+end
+local d: Doc = nil
+local async function shout(w: string): string
+   return w:upper()
+end
+
+local function sync_cmp(a: string, b: string): boolean
+   return a < b
+end
+
+local function awaiting_cmp(a: string, b: string): boolean
+   local s = await http.get(a)
+   return s < b
+end
+
+local async function body(): string
+   return \"ok\"
+end
+
+local async function handler(e: any): string
+   return tostring(e)
+end
+
+local record R
+   name: string
+   metamethod __tostring: function(R): string
+end
+local async function show(r: R): string return r.name end
+local items: {string} = { \"b\", \"a\" }
+table.sort(items, cmp)
+table.sort(items, order.less)
+table.sort(items, async function(a: string, b: string): boolean return a < b end)
+table.sort(items, function(a: string, b: string): boolean return a < b end)
+table.sort(items, function(a: string, b: string): boolean return (await http.get(a)) < b end)
+print(string.gsub(\"a b\", \"%w+\", shout))
+print(string.gsub(\"a b\", \"%w+\", http.get))
+print(xpcall(body, handler))
+local r: R = setmetatable({ name = \"r\" }, { __tostring = show } as metatable<R>)
+print(r, d:gsub(\"%w+\", shout))
+local s = \"a b\"
+print(s:gsub(\"%w+\", shout))
+";
+
+const DOC: &str = "\
+local record Doc
+   gsub: function(self: Doc, pat: string, f: function(string): string): string
+end
+return Doc
+";
+
+#[test]
+fn an_async_function_handed_to_a_c_callee_is_reported_at_the_argument() {
+    let dir = scratch("callbacks");
+    write(&dir, "types/http.d.tl", HTTP);
+    write(&dir, "types/order.d.tl", ORDER);
+    write(&dir, "types/doc.d.tl", DOC);
+    let main = write(&dir, "main.tl", CALLBACKS);
+    let ci = checker(&dir, true, "").check(&main).unwrap();
+    assert!(ci.errors.is_empty(), "{:?}", ci.errors);
+    let l = &ci.lints;
+    let c = of_rule(l, "async-as-sync-callback");
+    let want = [
+        "main.tl:35:19: async function passed to table.sort",
+        "main.tl:36:19: async function passed to table.sort",
+        "main.tl:37:19: async function passed to table.sort",
+        "main.tl:40:33: async function passed to string.gsub",
+        "main.tl:41:33: async function passed to string.gsub",
+        "main.tl:42:20: async function passed to xpcall",
+        "main.tl:43:58: async function bound to __tostring",
+        "main.tl:46:21: async function passed to string.gsub",
+    ];
+    assert_eq!(c.len(), want.len(), "{c:?}");
+    for (got, w) in c.iter().zip(want) {
+        assert!(got.contains(w), "{got} lacks {w}");
+    }
+    assert!(
+        c[0].contains("attempt to yield across a C-call boundary"),
+        "{}",
+        c[0]
+    );
+    assert!(c[5].contains("error in error handling"), "{}", c[5]);
+    // The sync comparators, `xpcall`'s body and the record's `gsub` say nothing here; the
+    // await inside the sync one is the rule for that.
+    for pos in [":38:", ":39:", ":42:14:", ":44:"] {
+        assert!(!c.iter().any(|s| s.contains(pos)), "{pos} in {c:?}");
+    }
+    let o = of_rule(l, "await-outside-async");
+    assert_eq!(o.len(), 2, "{l:?}");
+    assert!(
+        o[0].contains("main.tl:17:14: await in a function that is not async"),
+        "{}",
+        o[0]
+    );
+    assert!(
+        o[1].contains("main.tl:39:67: await in a function that is not async"),
+        "{}",
+        o[1]
+    );
+    // A spec turns it off like any other rule; the default is deny.
+    let off = checker(&dir, true, "-async-as-sync-callback")
+        .check(&main)
+        .unwrap();
+    assert!(
+        of_rule(&off.lints, "async-as-sync-callback").is_empty(),
+        "{:?}",
+        off.lints
+    );
+    assert_eq!(
+        htl::lint::RULES
+            .iter()
+            .find(|r| r.name == "async-as-sync-callback")
+            .unwrap()
+            .default,
+        htl::lint::Level::Deny
     );
 }
