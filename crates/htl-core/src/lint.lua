@@ -28,7 +28,8 @@
 --                    bound to a `require`d module, which the shadowed scope cannot reach.
 --                    Shadowing an ordinary outer local is `tl:redeclaration`, which says
 --                    more about it (the kind declared, and the origin's line and column).
---   no-global        `global` declarations (prefer locals + module return).
+--   no-global        `global` declarations (prefer locals + module return; a host value
+--                    set as a global is read once, from `_G`, by a module that returns it).
 --   no-any           explicit `any` in annotations or `as any` casts.   [allow: not said
 --                    unless a project asks for it]
 --   explicit-number  `local n = 0` (inferred integer) later assigned a number expression

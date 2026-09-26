@@ -242,7 +242,8 @@ fn an_allow_comment_cannot_be_written_on_a_marker_line() {
 /// absent and `lint.lua`'s twelve were all there was; seventeen once they were registered,
 /// twenty-four once Teal's seven warning kinds were names too, twenty-five with
 /// `nil-return` beside `nil-index`, twenty-six with `nil-return-unchecked` beside
-/// `nil-return`, and twenty-seven with `htlx-available`.
+/// `nil-return`, twenty-seven with `htlx-available`, and twenty-eight with
+/// `global-redeclaration` beside the project layer's five.
 ///
 /// Each line is the name and the level a project that says nothing gets, so the listing
 /// also answers which rules are `allow` — which a reader used to have to turn a rule on to
@@ -297,7 +298,7 @@ fn the_listing_accounts_for_every_rule() {
     ] {
         assert!(listed.iter().any(|l| l == rule), "{rule} not in {listed:?}");
     }
-    assert_eq!(listed.len(), 27, "{listed:?}");
+    assert_eq!(listed.len(), 28, "{listed:?}");
 }
 
 /// The listing and a spec take the same names, and neither takes the two that `htl fix`
