@@ -612,6 +612,29 @@ local function async_resolver(result, filename)
    end
 end
 
+-- Resolver for lints: the checker's name for the type of the expression at (y, x)
+-- (`"string"`, `"{string}"`, `"http"`, ...), nil when the report stored nothing there. For
+-- `async-as-sync-callback`'s method form: `s:gsub(pat, f)` is `string.gsub` -- and calls `f`
+-- from C -- only when `s` is a string; a `gsub` method on a record is a Teal function and may
+-- take an async one.
+local function type_name_resolver(result, filename)
+   local ok, report = pcall(tl.get_types, result)
+   if not ok or type(report) ~= "table" then return nil end
+   local by_pos = report.by_pos and report.by_pos[filename]
+   if not by_pos then return nil end
+   local function deref(id, depth)
+      local t = report.types[id]
+      if t and t.ref and depth < 8 then return deref(t.ref, depth + 1) end
+      return t
+   end
+   return function(y, x)
+      local id = by_pos[y] and by_pos[y][x]
+      if not id then return nil end
+      local t = deref(id, 0)
+      return t and t.str or nil
+   end
+end
+
 -- The modules this check reached through `require`, with the AST each was parsed into:
 -- what `await-outside-async` reads for an `await` at a module's top level. The file being
 -- checked is the entry of `htl run` / `htl test` and its top level is async; a module is
@@ -2113,6 +2136,7 @@ function H.check(filename, env, opts)
             struct_at = struct_resolver(result, filename),
             sealed_at = sealed_resolver(result, filename),
             nilable_at = nilable_resolver(result, filename),
+            type_at = type_name_resolver(result, filename),
             async_at = H.lang_async and async_resolver(result, filename) or nil,
             lang_async = H.lang_async,
             required = H.lang_async and required_modules(result, env) or nil,

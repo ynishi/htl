@@ -1603,9 +1603,9 @@ local function lint_sealed_record(ast, report, extra)
    visit(ast, nil)
 end
 
----------------------------------------------------------------- await-missing / await-outside-async / await-non-async / task-escape
+---------------------------------------------------------------- await-missing / await-outside-async / await-non-async / task-escape / async-as-sync-callback
 
--- The four rules that hold a program to the `async` / `await` syntax (`[lang] async`,
+-- The five rules that hold a program to the `async` / `await` syntax (`[lang] async`,
 -- prelude.lua's `async_parse`), on the marks the rewrite leaves on the AST: `htl_async` on
 -- a function that may suspend, `htl_awaited` on an awaited call (`htl_task_await` when the
 -- call is the `x:await()` an `async local` name was turned into, `htl_await_at` the keyword's
@@ -1613,8 +1613,15 @@ end
 -- name bound by one and `htl_task_captured` when that name is read inside a function the
 -- declaring one contains. Which callee is async is type information -- `extra.async_at(y, x)`
 -- answers it from the checker's position report, off the declaring line (`---@async` on a
--- `.d.tl`, the keyword on a Teal `async function`). All four are silent with the setting off:
+-- `.d.tl`, the keyword on a Teal `async function`). All five are silent with the setting off:
 -- the words are names then and nothing is marked.
+--
+-- The fifth, `async-as-sync-callback`, is about where an async function goes rather than
+-- where it is called: handed to a callee implemented in C, it is called from C, and a
+-- suspension inside it fails with `attempt to yield across a C-call boundary`. Which callees
+-- those are is the fixed table `C_BOUNDARY` below, not a type rule, because a Lua function
+-- calling its callback lets it yield (Lua 5.4.8, measured): "async value into a sync
+-- function type" would be wrong for every plain Teal function that takes one.
 --
 -- Context: the top level of the file being checked is async -- it is the entry chunk
 -- `htl run` / `htl test` run as a root -- and so is the body of an `async function`; the
@@ -1780,6 +1787,93 @@ local function lint_task_escape(ast, report, extra)
    end)
 end
 
+-- The callees that call an argument from C, keyed by the callee as written (`callee_name`),
+-- with the argument slots that cannot yield. Only what Lua 5.4 itself runs from C and a
+-- program hands a function to: `table.sort`'s comparator, `string.gsub`'s replacement,
+-- `xpcall`'s message handler. `xpcall`'s body (slot 1) is not in it: that one is resumed
+-- as a protected call and yields fine; the handler runs while the error unwinds, and a
+-- suspension there is not even an error -- the result is `error in error handling` and the
+-- value is gone. A name bound to one of these (`local sort = table.sort`) is not followed;
+-- stdlib names are written as they are. The method form `s:gsub(pat, f)` is keyed by the
+-- method alone (`:gsub`, the pattern in slot 1) and holds only when the checker types the
+-- subject `string` (`extra.type_at` at the subject's position): a `gsub` method on a record
+-- is an ordinary Teal function, and a Teal function may call an async one.
+local C_BOUNDARY = {
+   ["table.sort"] = { 2 },
+   ["string.gsub"] = { 3 },
+   ["xpcall"] = { 2 },
+   [":gsub"] = { 2, subject = "string", as = "string.gsub" },
+}
+
+-- Whether the expression `e` is a function that may suspend: an inline `async function`
+-- carries the mark itself; a name or a field (`cmp`, `http.get`) is asked of the checker's
+-- position report, at the expression's own position, which is where a callee is asked.
+local function async_value(e, async_at)
+   if not is_node(e) then return false end
+   while e.kind == "paren" and is_node(e.e1) do e = e.e1 end
+   if e.kind == "function" then return e.htl_async and true or false end
+   if not (e.y and e.x) then return false end
+   return async_at(e.y, e.x) and true or false
+end
+
+local function lint_async_as_sync_callback(ast, report, extra)
+   if not (extra and extra.lang_async and extra.async_at) then return end
+   local async_at = extra.async_at
+   local fix_it = "; await what it needs before the call and hand the callee a function that is not async"
+   walk(ast, function(n)
+      if n.kind == "op" and n.op and n.op.op == "@funcall" and type(n.e2) == "table" then
+         local callee = callee_of(n)
+         local name = callee_name(callee)
+         local slots = name and C_BOUNDARY[name]
+         if not slots and callee and callee.kind == "op" and callee.op and callee.op.op == ":"
+            and is_node(callee.e2) and callee.e2.tk then
+            slots = C_BOUNDARY[":" .. callee.e2.tk]
+            if slots then
+               -- The subject, asked at its own position the way a callee is asked.
+               local subj = callee.e1
+               local type_at = extra.type_at
+               if not (type_at and is_node(subj) and subj.y and subj.x
+                  and type_at(subj.y, subj.x) == slots.subject) then return end
+            end
+         end
+         if not slots then return end
+         name = slots.as or name
+         for _, i in ipairs(slots) do
+            local arg = n.e2[i]
+            if async_value(arg, async_at) then
+               local at = leftmost(arg)
+               local why
+               if name == "xpcall" then
+                  why = "xpcall runs its message handler from C while the error unwinds, so a " ..
+                     "suspension in it is lost (the call ends in 'error in error handling')"
+               else
+                  why = name .. " calls it from C, which cannot yield, so a suspension in it fails " ..
+                     "with 'attempt to yield across a C-call boundary'"
+               end
+               report("async-as-sync-callback", at.y or arg.y, at.x or arg.x,
+                  "async function passed to " .. name .. ": " .. why .. fix_it)
+            end
+         end
+      elseif n.kind == "literal_table" then
+         -- `setmetatable(x, { __tostring = f } as metatable<R>)`: how Teal binds a
+         -- metamethod. `tostring` and `print` call it from C.
+         for _, item in ipairs(n) do
+            if type(item) == "table" and is_node(item.key) then
+               local k = item.key
+               local key = (k.kind == "identifier" and k.tk) or (k.kind == "string" and unquote(k.tk or "")) or nil
+               if key == "__tostring" and async_value(item.value, async_at) then
+                  local at = leftmost(item.value)
+                  report("async-as-sync-callback", at.y or item.value.y, at.x or item.value.x,
+                     "async function bound to __tostring: tostring calls it from C, which cannot " ..
+                     "yield, so a suspension in it fails with 'attempt to yield across a C-call boundary'" ..
+                     fix_it)
+               end
+            end
+         end
+      end
+   end)
+end
+
 local RULES = {
    { "nil-index", lint_nil_index },
    { "nil-return", lint_nil_return },
@@ -1800,6 +1894,7 @@ local RULES = {
    { "await-outside-async", lint_await_outside_async },
    { "await-non-async", lint_await_non_async },
    { "task-escape", lint_task_escape },
+   { "async-as-sync-callback", lint_async_as_sync_callback },
 }
 
 function L.rule_names()
