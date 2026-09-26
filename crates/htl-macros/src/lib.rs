@@ -632,7 +632,7 @@ fn expand_record(item: &Item) -> Result<TokenStream, String> {
     }
     let name = rd.name.as_str();
     let (ident, into, from) = match (item, &rd.kind) {
-        (Item::Struct(st), dts::RecordKind::Record { fields }) => {
+        (Item::Struct(st), dts::RecordKind::Record { fields, .. }) => {
             (&st.ident, record_into(st), record_from(st, name, fields))
         }
         (Item::Struct(st), dts::RecordKind::Alias { inner }) => {
@@ -986,6 +986,33 @@ fn union_from(en: &ItemEnum, name: &str, variants: &[dts::UnionVariant]) -> Toke
 /// not a `Function`, or the attribute on a fn that is not `pub` is refused. The attribute
 /// is removed from the impl the macro emits; `htl dts` reads it from the same source and
 /// writes the same line.
+///
+/// A callback can also reach the host as a field of a table: the host is handed a table
+/// (or reads one a module returned) and calls its fields itself, the shape of `htl-mq`'s
+/// game table, whose `update` and `draw` run every frame through `Function::call`. There
+/// the signature has nothing to go by, since the table arrives as a `Table` or a record,
+/// so the declaration says it field by field: `#[teal(noyield)]` on a `Function` /
+/// `Option<Function>` field of a `#[derive(TealRecord)]` struct writes a bare
+/// `---@noyield` at the end of that field's line, and a table constructor the checker
+/// types as the record (`local game: mq.Game = { update = .. }`, not `{ .. } as mq.Game`)
+/// is reported at an async value bound to the field.
+///
+/// ```rust,ignore
+/// #[derive(TealRecord)]
+/// struct Game {
+///     #[teal(noyield)] load: Option<Function>,
+///     #[teal(noyield)] update: Function,
+/// }
+/// // record Game
+/// //    load: function ---@noyield
+/// //    update: function ---@noyield
+/// // end
+/// ```
+///
+/// `noyield` is the only word a field takes, and only on a `Function` / `Option<Function>`
+/// field of a struct (a data variant's fields take none); a field has no default to turn
+/// around, so an unmarked one is simply not a boundary. The derive re-emits nothing, so the
+/// attribute stays on the struct, where rustc reads it as the derive's own.
 #[proc_macro_attribute]
 pub fn host_module(attr: TokenStream, item: TokenStream) -> TokenStream {
     let metas = match Punctuated::<Meta, Token![,]>::parse_terminated.parse(attr) {

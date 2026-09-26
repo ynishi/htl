@@ -3,7 +3,7 @@ local {{mod}} = require("{{mod}}")
 
 local scene = {{mod}}.new_scene(8, 800, 600)
 
-return {
+local game: mq.Game = {
    update = function(dt: number): boolean
       if mq:is_key_pressed("Space") then
          local more = {{mod}}.new_scene(4, mq:screen_width(), mq:screen_height())
@@ -16,3 +16,4 @@ return {
       {{mod}}.render(scene)
    end,
 }
+return game

@@ -221,7 +221,8 @@ prints every rule with its default level, and
 [`htl::lint`](https://docs.rs/htl/latest/htl/lint/index.html) is the reference: what
 each rule catches, Teal's own warnings under `tl:*`, and the six markers
 (`---@struct`, `---@sealed`, `---@extensible`, `---@nilable`, `---@async`, `---@noyield`,
-which `#[host_module]` writes for a sync fn's `Function` parameters) that turn a rule on
+which `#[host_module]` writes for a sync fn's `Function` parameters and
+`#[derive(TealRecord)]` for a field marked `#[teal(noyield)]`) that turn a rule on
 for a record or a function.
 
 ## Project config (`htl.toml`)
