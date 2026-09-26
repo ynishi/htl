@@ -10,6 +10,10 @@
 //!   into a `UserData` impl and writes `scripts/host.d.tl` with those nested inside the
 //!   module record, so Teal sees the Rust API with its real signatures as `host.Point`,
 //!   `host.Mode`, `host.Label`, `host.Shape` and narrows with `is host.Shape_Circle`.
+//! - `--async` runs `scripts/pair.tl` on the executor (`Htl::run_blocking`): `http.get`
+//!   is an `async fn`, and the Teal awaits two of them side by side with `async local` /
+//!   `await` (`[lang] async` in `htl.toml`). A task the Teal leaves behind is cancelled
+//!   when its scope ends, and the host sees its future dropped.
 
 use anyhow::Result;
 use htl::{Htl, TealRecord, host_module, include_tl, include_tl_bytes};
@@ -138,6 +142,31 @@ impl Store {
     }
 }
 
+/// An `async fn` on a host module: from Teal it is a call that suspends the program and
+/// resumes it with the value, so two of them started with `async local` overlap. The
+/// declaration the macro writes marks it `---@async`, which is what `await-missing` reads.
+pub struct Http;
+
+#[host_module(name = "http", dts = "scripts/http.d.tl")]
+impl Http {
+    /// Sleeps 300 ms and returns `path`. A call the program cancels — an `async local`
+    /// it never awaited — has its future dropped mid-sleep: the guard says so.
+    pub async fn get(path: String) -> String {
+        struct Pending(bool);
+        impl Drop for Pending {
+            fn drop(&mut self) {
+                if self.0 {
+                    println!("dropped");
+                }
+            }
+        }
+        let mut pending = Pending(true);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        pending.0 = false;
+        path
+    }
+}
+
 // The `.d.tl` above is written when `#[host_module]` expands, which happens before
 // `include_tl!` below is expanded (same file, source order).
 const MAIN: &str = include_tl!("scripts/main.tl");
@@ -146,6 +175,10 @@ const UTIL: &[u8] = include_tl_bytes!("scripts/util.tl");
 // The same program as one linked bundle: main + util, with `host` and `store` recorded
 // as host-provided (they resolve only to `.d.tl`). Run with `--bundle`.
 const BUNDLE: &[u8] = htl::include_bundle!("scripts/main.tl");
+
+// The async walk, run with `--async` — on the executor, since a plain `exec` has nothing
+// for an `async fn` to suspend to.
+const PAIR: &str = include_tl!("scripts/pair.tl");
 
 // `cargo build -p embed --features bad` -> Teal type error surfaces as a Rust compile error.
 #[cfg(feature = "bad")]
@@ -163,6 +196,15 @@ fn main() -> Result<()> {
     .htl_preload(&h)?;
 
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--async") {
+        Http.htl_preload(&h)?;
+        h.install_task_lib()?;
+        // The token is what Ctrl-C or a timeout would cancel; nothing does here, and the
+        // run resolves when the program and every task it started have ended.
+        let token = htl::mlua_isle::runtime::CancelToken::new();
+        h.run_blocking(PAIR, "@scripts/pair.tl", &[], &token)?;
+        return Ok(());
+    }
     if args.first().is_some_and(|a| a == "--bundle") {
         args.remove(0);
         // Everything but the host modules comes from the bundle; util is not preloaded.
