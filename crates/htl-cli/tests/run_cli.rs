@@ -109,3 +109,47 @@ fn ctrl_c_cancels_the_program_and_exits_130() {
     assert_eq!(stderr.trim_end(), "htl run: interrupted");
     assert_eq!(stdout, "started\n");
 }
+
+/// `htl.task` from a program: two children, each awaited, print their values; the file
+/// checks clean against the bundled declaration.
+#[test]
+fn a_program_that_spawns_tasks_checks_clean_and_prints_what_they_returned() {
+    let root = scratch("tasks");
+    write(
+        &root.join("main.tl"),
+        "local task = require(\"htl.task\")\n\
+         local a = task.spawn(function(n: integer): integer return n * 2 end, 21)\n\
+         local b = task.spawn(function(): string return \"b\" end)\n\
+         print(a:await(), b:await())\n\
+         local c = task.spawn(function(): integer error({ code = 7 }) end)\n\
+         local ok, err = pcall(c.await, c)\n\
+         print(ok, (err as {string:integer}).code)\n",
+    );
+    let (status, out, err) = htl(&["check", "main.tl"], &root);
+    assert!(status.success(), "{err}");
+    assert!(err.contains("0 error(s)"), "{err}");
+    let (status, out2, err) = htl(&["run", "main.tl"], &root);
+    assert!(status.success(), "{err}");
+    assert_eq!(out2, "42\tb\nfalse\t7\n");
+    assert_eq!(out, "");
+}
+
+/// The declaration types the value: `await` of a `Task<string>` assigned to an integer is
+/// refused by `htl check` at the Teal line and column, before anything runs.
+#[test]
+fn awaiting_a_task_of_the_wrong_type_is_a_check_error_at_the_teal_position() {
+    let root = scratch("task-type");
+    write(
+        &root.join("main.tl"),
+        "local task = require(\"htl.task\")\n\
+         local a = task.spawn(function(): string return \"s\" end)\n\
+         local n: integer = a:await()\n\
+         print(n)\n",
+    );
+    let (status, _out, err) = htl(&["check", "main.tl"], &root);
+    assert!(!status.success(), "{err}");
+    assert!(
+        err.contains("main.tl:3:27: in local declaration: n: got string, expected integer"),
+        "{err}"
+    );
+}

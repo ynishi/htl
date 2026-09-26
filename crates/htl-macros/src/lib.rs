@@ -411,6 +411,9 @@ fn checker_for(tag: &str, manifest_dir: &Path, path: &Path) -> Result<Checker, S
     htl_core::project::file_view(&h, model.as_ref(), path).map_err(|e| format!("{tag}: {e:#}"))?;
     h.install_test_lib().map_err(|e| format!("{tag}: {e:#}"))?;
     h.install_std().map_err(|e| format!("{tag}: {e:#}"))?;
+    // `htl.task`'s declaration, so a file that spawns tasks checks here as it does under
+    // `htl check`; whether the host's state can load the module is the host's `async`.
+    h.install_task_lib().map_err(|e| format!("{tag}: {e:#}"))?;
     // The project's root, where its store is — as for every command — and the crate's
     // manifest directory for a crate in no project, which keeps no store.
     let root = model

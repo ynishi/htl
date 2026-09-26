@@ -604,6 +604,9 @@ fn run_in(h: &Htl, path: &Path, r: RunIn<'_>, out_code: &mut Option<String>) -> 
     h.install_test_lib()?;
     #[cfg(feature = "std")]
     h.install_std()?;
+    // A test on the executor may spawn tasks: the library that does, on the same terms.
+    #[cfg(feature = "async")]
+    h.install_task_lib()?;
     // What the file may `require`: the project's directories as a test sees them, from
     // its model. A file that belongs to no project reads its own directory, the one place
     // it names by itself. A build without the model (`pkg` or `dts` off) has no

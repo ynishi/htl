@@ -573,6 +573,9 @@ pub fn checker(model: Option<&crate::model::Project>, sel: &crate::lint::Selecti
     }
     // `*_test.tl` under the checked tree require("htl.test"): make its types visible.
     h.install_test_lib()?;
+    // And a program on the executor may require("htl.task"): the same, for its types.
+    #[cfg(feature = "async")]
+    h.install_task_lib()?;
     // And any file may require("std.json"): the same, for the modules the binary carries.
     #[cfg(feature = "std")]
     h.install_std()?;

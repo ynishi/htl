@@ -14,17 +14,24 @@
 //! with its source, test and declaration roots, and one rule for the name a file answers
 //! to.
 //!
-//! Two libraries ship inside the binary rather than on a project's search path, and both
+//! Three libraries ship inside the binary rather than on a project's search path, and all
 //! are installed the same way — a `package.preload` entry for the run, a `.d.tl` under
 //! [`lib_dir`] for the checker: `htl.test` ([`Htl::install_test_lib`], `describe` / `it` /
-//! `expect`) and, with the `std` feature, `std.*` — mlua-batteries' modules under the
-//! namespace that crate leaves to its host. The method that installs them is named and
-//! linked below when the feature that compiles it is on; a link to an item that is not
-//! compiled is a broken one.
+//! `expect`); with the `std` feature, `std.*` — mlua-batteries' modules under the
+//! namespace that crate leaves to its host; and with the `async` feature, `htl.task` —
+//! tasks a program on the executor spawns and awaits (`spawn` / `await` / `<close>`,
+//! mlua-isle's task library under a declaration; the `task` module says what it promises).
+//! The methods that install the last two are named and linked below when the feature that
+//! compiles them is on; a link to an item that is not compiled is a broken one.
 #![cfg_attr(
     feature = "std",
     doc = "
-//! That method is [`Htl::install_std`]."
+//! `std.*` is installed by [`Htl::install_std`]."
+)]
+#![cfg_attr(
+    feature = "async",
+    doc = "
+//! `htl.task` is installed by [`Htl::install_task_lib`]."
 )]
 //!
 //! A value the host puts into the Lua state reaches `.tl` code with a type in one of
@@ -126,6 +133,8 @@ pub mod resolve;
 // in every path this file writes.
 #[cfg(feature = "std")]
 pub mod batteries;
+#[cfg(feature = "async")]
+pub mod task;
 pub mod teal;
 pub mod testing;
 // The complement of the require closure: what no entry reaches. On the project layer,
@@ -2630,6 +2639,8 @@ fn bundled_declarations() -> Vec<(String, String)> {
     let mut out = testing::declarations();
     #[cfg(feature = "std")]
     out.extend(batteries::declarations());
+    #[cfg(feature = "async")]
+    out.extend(task::declarations());
     out.sort();
     out
 }

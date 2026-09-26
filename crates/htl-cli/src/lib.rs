@@ -2917,6 +2917,7 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
     let model = apply_model(&h, &cfg, file)?;
     h.install_test_lib()?;
     h.install_std()?;
+    h.install_task_lib()?;
     if Bundle::is_bundle(&bytes) {
         let b = Bundle::decode(&bytes)?;
         // A bundle's frames are as good as its payload: stripped bytecode has no lines to

@@ -324,6 +324,31 @@ calls any other. Matchers, snapshots, the seeded `t.rng()`, `--coverage` /
 `--lcov` / `--junit`, and the `--lib` contract for another library:
 [`htl::testing`](https://docs.rs/htl/latest/htl/testing/index.html).
 
+### Tasks (`htl.task`)
+
+A program on the executor (`htl run`, `htl test`, a host's `Htl::run_async` /
+`run_blocking`, feature `async`) can start two things at once:
+
+```lua
+local task = require("htl.task")          -- typed via task.d.tl
+local a = task.spawn(function(): string return http.get("/a") end)
+local b = task.spawn(function(): string return http.get("/b") end)
+print(a:await(), b:await())              -- 300 ms for two 300 ms calls
+```
+
+`spawn` starts the closure as a task beside the caller and returns a `Task<T>`, `T` being
+the closure's declared return type (an untyped closure is a type error; a task holds one
+value). `t:await()` waits for it and hands the value back, or re-raises what the task raised,
+as it was. `h:cancel()` asks a task to stop, `h:done()` says whether it has. Tasks are
+structured: a task the parent did not await is cancelled and waited for when the parent
+returns, raises or is cancelled, and `local h <close> = task.spawn(..)` does the same at
+the end of the scope. A cancel reaches a task at its next await as an error that
+`task.is_cancelled` recognises, so a `pcall` or a `<close>` handler can clean up and let it
+pass; `[async] grace_ms` in `htl.toml` bounds that cleanup. The module is preloaded by the
+binary that runs the program on the executor, so Lua that `htl gen` wrote from a file
+requiring it runs on such a host and nowhere else. The declaration's header is the
+reference: [`htl::task`](https://docs.rs/htl/latest/htl/task/index.html).
+
 ## Fixing (`htl fix`)
 
 Some diagnostics carry a mechanical fix; `htl check` marks them `(fixable: htl fix)` and
