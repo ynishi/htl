@@ -163,6 +163,7 @@ fn a_check_entry_without_code_is_not_a_hit() {
         lints: 0,
         deps: Vec::new(),
         requires: Vec::new(),
+        global_sites: Vec::new(),
         code: None,
         check: None,
     };

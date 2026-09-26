@@ -26,6 +26,37 @@
     doc = "
 //! That method is [`Htl::install_std`]."
 )]
+//!
+//! A value the host puts into the Lua state reaches `.tl` code with a type in one of
+//! three ways, and the first is the one to reach for:
+//!
+//! 1. `#[host_module]` on the Rust side (the `htl-macros` crate): the host registers a
+//!    module in `package.preload` and the macro writes its `.d.tl`, so the `.tl` side
+//!    `require`s it like any module and the checker reads the declaration the build
+//!    keeps current.
+//! 2. When the Rust side stays as it is and sets the value as a global
+//!    (`lua.globals().set("knl", ..)`): one `.tl` module that reads it from `_G` and
+//!    returns it —
+//!    ```teal
+//!    local record Knl
+//!       open: function(): Session
+//!    end
+//!    local knl = (_G as {string:any})["knl"] as Knl
+//!    return knl
+//!    ```
+//!    — so no `global` is declared anywhere, the checker sees an ordinary module, and the
+//!    one line that reads the state is that one. Four files over such a module check
+//!    clean in either order, and `htl run` with the value set finds it.
+//! 3. A `global` declaration in a module, a `.d.tl` or a `.tl`. It is visible in the
+//!    files that require the declaring module, directly or through a chain of requires,
+//!    and nowhere else: the run checks each file in an environment of its own, and the
+//!    checked-module store hands a module's globals to the environments that require
+//!    it. The global namespace is one per project, so a second declaration of the name
+//!    at another site is [`global-redeclaration`](crate::lint#global-redeclaration),
+//!    whether or not the types agree (the checker's own `cannot redeclare global with a
+//!    different type` is raised only where one environment walks both, which depends on
+//!    the walk order; the lint does not). [`no-global`](crate::lint#no-global) is the
+//!    lint that asks for 1 or 2 instead.
 // Every public item here is `htl`'s public API: that crate is `pub use htl_core::*;`, and
 // `missing_docs` fires where an item is defined rather than where it is re-exported — so
 // the ratchet `htl` took in #224 does nothing for the half a reader actually meets unless
@@ -173,6 +204,32 @@ pub struct CheckInfo {
     pub warning_items: Vec<Diagnostic>,
     /// See [`error_items`](Self::error_items).
     pub lint_items: Vec<Diagnostic>,
+    /// Every `global` declaration this check brought into scope, and where it is: the
+    /// file's own, and those of every module in its require closure. Input to
+    /// [`global_redeclarations`].
+    ///
+    /// The closure and not the file alone, for two reasons the lint would otherwise miss
+    /// the case it exists for. A `.d.tl` is never one of the files a directory check
+    /// walks, so a global declared there would appear on no check; and a run whose files
+    /// all replay from the cache builds no checker at all, so what a replayed check
+    /// carries is all the run has. Each site once per check; the lint dedups across
+    /// checks.
+    pub global_sites: Vec<GlobalSite>,
+}
+
+/// One `global` declaration a check saw (see [`CheckInfo::global_sites`]): the name and
+/// the site — file, line and column of the declared name — which is what tells two
+/// declarations of one name apart from one declaration seen through two requires.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalSite {
+    /// The declared name.
+    pub name: String,
+    /// The file declaring it, as the checker found it on the search path.
+    pub file: PathBuf,
+    /// Line of the declared name, counted from 1.
+    pub line: usize,
+    /// Byte-column of the same, counted from 1.
+    pub col: usize,
 }
 
 /// A type error in a module a check reached through `require` (see
@@ -751,6 +808,75 @@ pub fn contract_enforcement_lints(
 
 fn root_of(cfg_path: &Path) -> &Path {
     cfg_path.parent().unwrap_or(Path::new("."))
+}
+
+/// One global name declared at two sites among what a set of checked files brought into
+/// scope, one message per name, anchored at the later site (files sorted, then line and
+/// column) and naming the earlier one. The checker keeps the first declaration it walks
+/// and, when the second has the same type, says nothing (`add_global` in the vendored
+/// compiler returns without a word), so two `.d.tl` that both declare a name were read
+/// as one and nobody was told — the gap `duplicate-declaration` closes for two
+/// declarations of one *module*, closed here for one *global*.
+///
+/// A second declaration of a different type is reported the same way, and on purpose.
+/// The checker has an error for it, `cannot redeclare global with a different type`, but
+/// it raises that only in an environment that walks both declarations; each file is
+/// checked in an environment of its own, handed the globals of what it requires from the
+/// store, so two files that require one declaration each are typed against two ideas of
+/// the name and the checker never sees them meet. Whether the error appears depends on
+/// the order the files were walked in; this does not, which is why it is not suppressed
+/// when the error is there too.
+///
+/// Sites come from [`CheckInfo::global_sites`], each check's require closure, so a
+/// declaration in a `.d.tl` (never a walked file) and a run replayed from the cache
+/// (never a walk) both count; a site seen through several checks is one site.
+pub fn global_redeclarations(infos: &[(PathBuf, CheckInfo)]) -> Vec<Diagnostic> {
+    use std::collections::BTreeMap;
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    // name -> sites, each (canonical file, line, col) once, in the order the key sorts.
+    let mut by_name: BTreeMap<&str, BTreeMap<(PathBuf, usize, usize), &GlobalSite>> =
+        BTreeMap::new();
+    for (_, ci) in infos {
+        for s in &ci.global_sites {
+            by_name
+                .entry(s.name.as_str())
+                .or_default()
+                .entry((canon(&s.file), s.line, s.col))
+                .or_insert(s);
+        }
+    }
+    let mut out = Vec::new();
+    for (name, sites) in by_name {
+        if sites.len() < 2 {
+            continue;
+        }
+        let mut it = sites.values();
+        let first = it.next().unwrap();
+        let second = it.next().unwrap();
+        let more = sites.len() - 2;
+        let also = if more == 0 {
+            String::new()
+        } else {
+            format!(" and at {more} more")
+        };
+        out.push(Diagnostic::new(
+            Severity::Lint,
+            second.file.display().to_string(),
+            second.line,
+            second.col,
+            format!(
+                "global {name} is also declared at {}:{}:{}{also}; the checker keeps the \
+                 first declaration it walks and says nothing about the second, so the two \
+                 have to agree by hand (declare it in one module and require that from \
+                 both)",
+                crate::diagnostic::display_path(&first.file),
+                first.line,
+                first.col
+            ),
+            Some("global-redeclaration"),
+        ));
+    }
+    out
 }
 
 /// Cycles in the require graph of a set of checked files, one message per cycle,
@@ -2308,6 +2434,21 @@ fn read_checkinfo(t: &Table) -> Result<CheckInfo> {
         Err(_) => Vec::new(),
     };
     let warnings = seq("warnings")?;
+    let global_sites = match t.get::<Table>("global_sites") {
+        Ok(list) => list
+            .sequence_values::<Table>()
+            .map(|s| {
+                let s = s?;
+                Ok(GlobalSite {
+                    name: s.get("name")?,
+                    file: PathBuf::from(s.get::<String>("file")?),
+                    line: s.get("y")?,
+                    col: s.get("x")?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        Err(_) => Vec::new(),
+    };
     let error_items = read_items(t, "error_items", Severity::Error, &error_fixes)?;
     let warning_items = read_items(t, "warning_items", Severity::Warning, &[])?;
     let lint_items = read_items(t, "lint_items", Severity::Lint, &lint_fixes)?;
@@ -2324,6 +2465,7 @@ fn read_checkinfo(t: &Table) -> Result<CheckInfo> {
         error_items,
         warning_items,
         lint_items,
+        global_sites,
     })
 }
 

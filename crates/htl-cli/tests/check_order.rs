@@ -690,3 +690,73 @@ fn a_global_reaches_the_end_of_a_require_chain_and_nowhere_else() {
     let loose_alone = diagnostics(&["--strict", "loose.tl"], &root);
     assert_eq!(loose_alone, vec![loose.to_string()], "loose alone");
 }
+
+/// Two `.d.tl` declaring one global, each required by one module: `global-redeclaration`
+/// is one line naming both sites, and it is the same line when every file replays from
+/// the cache — the sites ride on the check, so a run that builds no checker still has
+/// them.
+fn global_redeclared_project() -> PathBuf {
+    let root = scratch("global-redecl");
+    write(
+        &root.join("htl.toml"),
+        "[layout]\nsource = \".\"\n[lint.rules]\nno-global = \"allow\"\n",
+    );
+    write(&root.join("a.d.tl"), "global VERSION: string\n");
+    write(&root.join("b.d.tl"), "global VERSION: string\n");
+    for (m, d) in [("ma", "a"), ("mb", "b")] {
+        write(
+            &root.join(format!("{m}.tl")),
+            &format!("require(\"{d}\")\nprint(VERSION)\n"),
+        );
+    }
+    root
+}
+
+/// Text output of `htl check`, the summary line dropped, machine paths left as they are.
+fn check_text(args: &[&str], cwd: &Path) -> Vec<String> {
+    let out = Command::new(common::htl_bin())
+        .arg("check")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .chain(String::from_utf8_lossy(&out.stderr).lines())
+        .filter(|l| !l.starts_with("htl check:"))
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn one_global_declared_twice_is_one_line_cold_and_warm() {
+    let root = global_redeclared_project();
+    let cold = check_text(&["--strict", "--no-cache", "."], &root);
+    assert_eq!(cold.len(), 1, "{cold:?}");
+    assert!(
+        cold[0].contains("[htl global-redeclaration]"),
+        "{}",
+        cold[0]
+    );
+    assert!(cold[0].contains("VERSION"), "{}", cold[0]);
+    let first = check_text(&["--strict", "."], &root);
+    let warm = check_text(&["--strict", "."], &root);
+    assert_eq!(first, cold, "the first cached run");
+    assert_eq!(warm, cold, "every file replayed from the cache");
+}
+
+#[test]
+fn the_listing_names_global_redeclaration_at_warn() {
+    let root = global_redeclared_project();
+    let out = Command::new(common::htl_bin())
+        .args(["check", "--list-lints"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("global-redeclaration"))
+        .unwrap_or_else(|| panic!("no global-redeclaration in {text}"));
+    assert!(line.contains("warn"), "{line}");
+}

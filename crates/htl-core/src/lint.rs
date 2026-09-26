@@ -61,7 +61,7 @@
 //! | `enum-table` | warn | a table constructor whose declared type maps an enum (`{string: E}`, `{E: T}`) and that leaves a value of the enum out, or lists a word that is not one. An array of the enum (`{E}`) is a selection, not a mapping, and is not reported. `htl fix enum-table` fills a `{string: E}` one in |
 //! | `union-exhaustive` | warn | `if x is A ... elseif x is B ... end` over a union with a variant never tested and no `else`. The variants come from the checker, so a chain that predates a variant is reported once the union gains it |
 //! | `shadow-local` | warn | a local / loop var / parameter reusing the name an enclosing scope bound to a `require`d module: the message names the module, where it was required, and that the module is unreachable for the rest of that scope. Shadowing an *ordinary* outer local is `tl:redeclaration`, which reports the same line and column and says more about it |
-//! | `no-global` | warn | `global` declarations |
+//! | `no-global` | warn | a `global` declaration. Write a local and return it from the module; for a value the host set as a global, one module that reads it from `_G` and returns it. A `global` is visible only in the files that require the declaring module, and a second site declaring the name is `global-redeclaration` — the three ways a host value gets a type are on the [crate front page](crate) |
 //! | `no-any` | allow | explicit `any` annotations and `as any` casts |
 //! | `explicit-number` | allow | `local n = 0` (inferred `integer`) that is later assigned a number expression (`n = n * 1.5`, `n = a / b`): names the declaration and the assignment; write `local n: number = 0`. Plain integer counters are not reported |
 //! | `class-record` | allow | a record declaring metamethods (`metamethod __index: Actor` = a class): its metatable is attached by `setmetatable` at run time and is not part of the value, so serialization and the Rust boundary drop it; keep such records out of saved data and host signatures |
@@ -70,6 +70,7 @@
 //! | `contract` | warn | a module under a `[[contract]]` directory that does not satisfy the contract's type or its `---@required` fields, and a `---@contract` marker that cannot be turned into a contract or published ([`crate::contract`]) |
 //! | `contract-unenforced` | warn | a contract the host never builds resolvers for, so it is documentation rather than a run-time guarantee. Say where the enforcement lives with `[[contract]] enforced_by` when the scan cannot see it |
 //! | `require-cycle` | warn | a loop in the require graph of the files `htl check <dir>` just checked, e.g. `a.tl -> b.tl -> a.tl`. Teal types the back edge as an opaque circular require, so without this the symptom is "cannot index" somewhere else |
+//! | `global-redeclaration` | warn | one global name declared at two sites — a site being the file, line and column of the declared name — among everything the run's files brought into scope through their requires. Two `.d.tl` each declaring `global VERSION: string` is the case: the checker keeps the first it walks and says nothing about the second when the types agree, and nothing else did. Reported once per name, at the later site, naming the earlier, whether or not the types agree: the checker's own `cannot redeclare global with a different type` is raised only where one environment walks both declarations, which depends on the walk order, and this does not. The sites ride on each check ([`crate::CheckInfo::global_sites`]), so a declaration file, which the walk never visits, and a run replayed from the cache both count |
 //!
 //! Teal's own warnings are reported under their kind's name in the `tl:` namespace — as
 //! `warning: src/a.tl:5:10: unused variable n: integer [htl tl:unused]`, and as `"rule":
@@ -361,7 +362,7 @@ impl Rule {
     }
 }
 
-/// Every rule there is. The first twenty-seven are the lint surface, in the order
+/// Every rule there is. The first twenty-eight are the lint surface, in the order
 /// `htl check --list-lints` prints them: the file-level rules first, in the order
 /// `lint.lua` runs them, then the ones the project layer asks once the files have been
 /// checked, then the warning kinds the vendored Teal compiler reports for itself. The last
@@ -403,6 +404,7 @@ pub const RULES: &[Rule] = &[
     Rule::warn("contract", Side::Rust),
     Rule::warn("contract-unenforced", Side::Rust),
     Rule::warn("require-cycle", Side::Rust),
+    Rule::warn("global-redeclaration", Side::Rust),
     // Teal's warning kinds, kept in the compiler's own vocabulary behind a `tl:` prefix.
     // The prefix is not decoration. `unused` already means something else here — `htl
     // unused` reports modules nothing requires, not locals nothing reads — and these seven

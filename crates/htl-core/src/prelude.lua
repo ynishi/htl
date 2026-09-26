@@ -67,6 +67,41 @@ local function globals_below(e, visited)
    return out
 end
 
+-- Where every global a `require` of the entry's module brings into scope was declared:
+-- `{ name, file, y, x }` per declaration, the entry's own (`sites`) and those of everything
+-- below it, each site once. The same walk as `globals_below`, kept apart because it
+-- answers a different question -- not "which var table is this name" but "who else
+-- declared it": the `global-redeclaration` lint reads the sites off every check of a run
+-- and reports a name with two. Sites rather than the walked files' own declarations
+-- because a `.d.tl` is never a walked file of a directory check, and a run whose files all
+-- replay from the cache walks nothing at all; the closure on the check is what survives
+-- both. Memoised as `globals_below`'s closure is, for the same reason it is never stale.
+local function sites_below(e, visited, out, seen)
+   if e.closure_sites and not out then return e.closure_sites end
+   local top = out == nil
+   visited = visited or {}
+   out = out or {}
+   seen = seen or {}
+   visited[e.filename] = true
+   for _, s in ipairs(e.sites or {}) do
+      local key = s.file .. ":" .. s.y .. ":" .. s.x
+      if not seen[key] then
+         seen[key] = true
+         out[#out + 1] = s
+      end
+   end
+   local deps = e.result.dependencies or {}
+   local names = {}
+   for name in pairs(deps) do names[#names + 1] = name end
+   table.sort(names)
+   for _, name in ipairs(names) do
+      local d = by_file[deps[name]]
+      if d and not visited[d.filename] then sites_below(d, visited, out, seen) end
+   end
+   if top then e.closure_sites = out end
+   return out
+end
+
 -- Hand an env the globals of a module it is requiring and will not walk. The store seeds
 -- such a module's checked result into `env.loaded` (`seed_env`), so `tl.check_file` will
 -- return that result without reading the file — and a result replayed is not a walk, so
@@ -1447,17 +1482,20 @@ end
 -- contributes to the env's globals.
 local function declared_globals(result)
    local names
+   local function add(name_node, node)
+      names = names or {}
+      -- The name's own position where the parser kept one (an identifier node), else
+      -- the statement's: what `global-redeclaration` points at.
+      names[#names + 1] = { name = name_node.tk, y = name_node.y or node.y, x = name_node.x or node.x }
+   end
    for _, node in ipairs(result.ast or {}) do
       local k = node.kind
       if k == "global_type" then
-         names = names or {}
-         names[#names + 1] = node.var.tk
+         add(node.var, node)
       elseif k == "global_function" then
-         names = names or {}
-         names[#names + 1] = node.name.tk
+         add(node.name, node)
       elseif k == "global_declaration" then
-         names = names or {}
-         for _, var in ipairs(node.vars) do names[#names + 1] = var.tk end
+         for _, var in ipairs(node.vars) do add(var, node) end
       end
    end
    return names
@@ -1490,7 +1528,7 @@ end
 -- the globals of everything below it too (`globals_below`), and every module with a
 -- global anywhere below it is seeded the way a declaring module is (`seed_env`), so that
 -- its require reaches the point of delivery.
-local store = {} -- module name -> { filename, type, result, globals, closure }
+local store = {} -- module name -> { filename, type, result, globals, sites, closure, closure_sites }
 
 local function store_from(env)
    for name, ty in pairs(env.modules) do
@@ -1510,7 +1548,12 @@ local function store_from(env)
                e.globals = old.globals
             else
                e.globals = {}
-               for _, n in ipairs(names) do e.globals[n] = env.globals[n] end
+               for _, n in ipairs(names) do e.globals[n.name] = env.globals[n.name] end
+            end
+            -- Where each was declared, for `global-redeclaration` (`sites_below`).
+            e.sites = {}
+            for _, n in ipairs(names) do
+               e.sites[#e.sites + 1] = { name = n.name, file = fname, y = n.y, x = n.x }
             end
          end
          by_file[fname] = e
@@ -1667,9 +1710,33 @@ function H.check(filename, env, opts)
    -- Errors in what this file required. `ok` stays the file's own answer: `H.gen` still
    -- generates it, and the searcher refuses the dependency itself on its first `require`.
    local dep_errors = dependency_errors(filename, result, env)
+   -- Every `global` declaration this check brought into scope, and where: the file's own,
+   -- then those of its require closure through the store (`sites_below`). The file itself
+   -- is in the store only once something required it, so its own are read off the result.
+   local global_sites, seen = {}, {}
+   for _, n in ipairs(declared_globals(result) or {}) do
+      global_sites[#global_sites + 1] = { name = n.name, file = filename, y = n.y, x = n.x }
+      seen[filename .. ":" .. n.y .. ":" .. n.x] = true
+   end
+   local dep_names = {}
+   for name in pairs(result.dependencies or {}) do dep_names[#dep_names + 1] = name end
+   table.sort(dep_names)
+   for _, name in ipairs(dep_names) do
+      local d = by_file[result.dependencies[name]]
+      if d then
+         for _, s in ipairs(sites_below(d)) do
+            local key = s.file .. ":" .. s.y .. ":" .. s.x
+            if not seen[key] then
+               seen[key] = true
+               global_sites[#global_sites + 1] = s
+            end
+         end
+      end
+   end
    return { ok = #errors == 0, errors = errors, error_fixes = error_fixes, warnings = warnings, deps = deps,
       lints = lints, lint_fixes = lint_fixes, requires = requires, dependency_errors = dep_errors,
       error_items = error_items, warning_items = warning_items, lint_items = lint_items,
+      global_sites = global_sites,
       syntax_errors = #(result.syntax_errors or {}), result = result }
 end
 

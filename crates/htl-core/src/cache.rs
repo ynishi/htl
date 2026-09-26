@@ -362,6 +362,13 @@ pub struct Module {
     /// deduplicated half of. Kept whole because the cycle lint reports a call site, and a
     /// path cannot say which line asked for it.
     pub requires: Vec<RequireJson>,
+    /// Every `global` declaration the check brought into scope and where
+    /// ([`CheckInfo::global_sites`]), kept for the same reason `requires` is: the
+    /// `global-redeclaration` lint runs over every file of the walk, replayed ones
+    /// included, and a declaration file is never a walked file, so a replayed module has
+    /// to carry the sites it saw. Absent in entries written before the field existed.
+    #[serde(default)]
+    pub global_sites: Vec<GlobalSiteJson>,
     /// The Lua this module generates, for entries under [`gen_key`]. `htl check` never needs
     /// it and stores `None`; `htl test` stores it so a replay can go straight to running.
     /// Absent when checking produced errors, since there is nothing to run then.
@@ -420,6 +427,24 @@ pub struct CheckInfoJson {
     /// its check, and a file the parser rejected generates nothing.
     #[serde(default)]
     pub syntax_errors: usize,
+    /// [`CheckInfo::global_sites`], so a run replayed from the cache still feeds the
+    /// `global-redeclaration` lint. Absent in entries written before the field existed;
+    /// those are a format behind (the stamp) and not read.
+    #[serde(default)]
+    pub global_sites: Vec<GlobalSiteJson>,
+}
+
+/// One [`crate::GlobalSite`] as an entry stores it.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GlobalSiteJson {
+    /// The declared name.
+    pub name: String,
+    /// The declaring file, as the checker found it.
+    pub file: String,
+    /// Line of the declared name.
+    pub line: usize,
+    /// Column of the same.
+    pub col: usize,
 }
 
 /// A [`crate::Diagnostic`]'s parts as an entry stores them: the position, the rule and the
@@ -504,6 +529,7 @@ impl CheckInfoJson {
                     item: ItemJson::from_diagnostic(&e.diagnostic),
                 })
                 .collect(),
+            global_sites: global_sites_json(c),
         }
     }
 
@@ -548,6 +574,7 @@ impl CheckInfoJson {
                     diagnostic: e.item.to_diagnostic(crate::Severity::Error, None),
                 })
                 .collect(),
+            global_sites: global_sites_from_json(&self.global_sites),
         }
     }
 }
@@ -580,6 +607,31 @@ pub fn requires_json(c: &CheckInfo) -> Vec<RequireJson> {
         .collect()
 }
 
+/// [`CheckInfo::global_sites`] in the shape an entry stores.
+pub fn global_sites_json(c: &CheckInfo) -> Vec<GlobalSiteJson> {
+    c.global_sites
+        .iter()
+        .map(|s| GlobalSiteJson {
+            name: s.name.clone(),
+            file: s.file.display().to_string(),
+            line: s.line,
+            col: s.col,
+        })
+        .collect()
+}
+
+fn global_sites_from_json(sites: &[GlobalSiteJson]) -> Vec<crate::GlobalSite> {
+    sites
+        .iter()
+        .map(|s| crate::GlobalSite {
+            name: s.name.clone(),
+            file: PathBuf::from(&s.file),
+            line: s.line,
+            col: s.col,
+        })
+        .collect()
+}
+
 fn requires_from_json(requires: &[RequireJson]) -> Vec<RequireSite> {
     requires
         .iter()
@@ -597,12 +649,21 @@ impl Module {
     ///
     /// `require_cycles` runs over every file in the walk, replayed ones included — a cycle
     /// that closes through a module nobody edited is still a cycle — so a replayed module
-    /// has to produce something that lint can read. Its diagnostics are already printed by
-    /// then, and nothing downstream looks at the other fields.
+    /// has to produce something that lint can read. `global_redeclarations` reads the
+    /// sites the same way, and the error texts, for the one error of the checker's it
+    /// defers to; the recorded diagnostics give those back. Everything is already printed
+    /// by then, and nothing downstream looks at the other fields.
     pub fn requires_only(&self) -> CheckInfo {
         CheckInfo {
             deps: self.deps.iter().map(PathBuf::from).collect(),
             requires: requires_from_json(&self.requires),
+            global_sites: global_sites_from_json(&self.global_sites),
+            errors: self
+                .diagnostics
+                .iter()
+                .filter(|r| r.severity == crate::Severity::Error.as_str())
+                .map(|r| r.item.message.clone())
+                .collect(),
             ..Default::default()
         }
     }
@@ -617,6 +678,7 @@ impl Module {
             lints: c.lints.len(),
             deps: c.deps.iter().map(|p| normal(p)).collect(),
             requires: requires_json(c),
+            global_sites: global_sites_json(c),
             code: Some(code),
             check: Some(CheckInfoJson::from_check(c)),
         }
@@ -1631,6 +1693,7 @@ mod tests {
             lints: 0,
             deps: Vec::new(),
             requires: Vec::new(),
+            global_sites: Vec::new(),
             code: Some("return {}".into()),
             check: Some(CheckInfoJson::default()),
         };

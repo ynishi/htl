@@ -790,6 +790,7 @@ pub fn check_one<O: Output>(
         lints: lints_said,
         deps: c.deps.iter().map(|p| cache::normal(p)).collect(),
         requires: cache::requires_json(&c),
+        global_sites: cache::global_sites_json(&c),
         // `htl check` has no use for generated Lua, nor for reading a `CheckInfo` back —
         // it replays the diagnostics above straight into the sink. `htl test` fills both in.
         code: None,
@@ -1307,6 +1308,15 @@ pub fn project_findings<O: Output>(
     if w.lints.on("require-cycle") {
         for cyc in w.lints.keep(crate::require_cycles(infos)) {
             sink.diagnostic(&cyc);
+            out.lints += 1;
+        }
+    }
+    // One global name declared at two sites, read off the checks' require closures — so
+    // a `.d.tl`, which the walk never visits, and a run replayed from the cache both
+    // count.
+    if w.lints.on("global-redeclaration") {
+        for d in w.lints.keep(crate::global_redeclarations(infos)) {
+            sink.diagnostic(&d);
             out.lints += 1;
         }
     }
