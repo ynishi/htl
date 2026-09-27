@@ -114,7 +114,10 @@ fn a_game_table_without_update_is_refused_before_a_window_opens() -> anyhow::Res
     let msg = run_with(h, t, conf("headless", 64, 64), Hooks::NONE)
         .unwrap_err()
         .to_string();
-    assert!(msg.contains("update"), "{msg}");
+    assert!(
+        msg.contains("Game.update: expected function, got nil"),
+        "{msg}"
+    );
     Ok(())
 }
 
@@ -128,8 +131,27 @@ fn a_game_table_without_draw_is_refused_before_a_window_opens() -> anyhow::Resul
     let msg = run_with(h, t, conf("headless", 64, 64), Hooks::NONE)
         .unwrap_err()
         .to_string();
-    assert!(msg.contains("draw"), "{msg}");
+    assert!(
+        msg.contains("Game.draw: expected function, got nil"),
+        "{msg}"
+    );
     Ok(())
+}
+
+/// The game table [`run_with`] drives is declared as `mq.Game`, and every field ends in a
+/// bare `---@noyield`: the frame loop calls each one with `Function::call`, so an async
+/// function bound to one is what `async-as-sync-callback` reports. A Teal record field is
+/// nilable already, so `load`, which may be absent, is declared like the other two.
+#[test]
+fn the_declaration_says_the_game_table_s_functions_are_called_from_c() {
+    let dts = include_str!("../dts/mq.d.tl");
+    assert!(
+        dts.contains(
+            "   record Game\n      load: function ---@noyield\n      update: function ---@noyield\n      draw: function ---@noyield\n   end\n"
+        ),
+        "{dts}"
+    );
+    assert_eq!(dts, <Mq as htl::teal::HostModule>::DECL);
 }
 
 #[test]

@@ -1294,7 +1294,7 @@ fn window_readme_prose(ctx: &Ctx<'_>) -> String {
          `src/lib.rs` holds `fx` — the project's own `#[host_module]`, for what wants the GPU —\n\
          embeds the Teal engine, and registers both (plus htl-mq's `mq`) in `preload(&Htl)`.\n\
          `src/main.rs` opens the window and hands `htl_mq::run` the game table, and `src/main.tl`\n\
-         is that table: `update(dt)` says whether to go on, `draw()` draws.\n\n\
+         is that table, typed `mq.Game`: `update(dt)` says whether to go on, `draw()` draws.\n\n\
          `src/{m}/init.tl` is the engine, and it is where the game goes. It takes its world as\n\
          arguments and never opens anything, so `htl test` runs it with no display: `require(\"mq\")`\n\
          resolves to the declaration, which declares and does nothing. `render` is the one function\n\

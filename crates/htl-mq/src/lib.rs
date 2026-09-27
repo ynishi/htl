@@ -8,7 +8,10 @@
 //!
 //! [`Mq`] is a [`#[host_module]`](htl::host_module) that re-exports macroquad's drawing
 //! and input to Teal as `require("mq")`. [`run`] drives a Teal game table (with
-//! `load`, `update(dt): boolean`, and `draw` methods) through the frame loop.
+//! `load`, `update(dt): boolean`, and `draw` methods) through the frame loop; the
+//! declaration names its shape `mq.Game`, each field ending in `---@noyield`, because the
+//! loop calls them with `Function::call` and a suspension inside one cannot reach an
+//! executor.
 //! [`Hooks`] provides the two environment hooks a run without a person at the window
 //! needs. The declaration file `dts/mq.d.tl` is written by the `#[host_module]` macro
 //! at build time and shipped through `[package.metadata.htl] dts`. [`macroquad`] is
@@ -46,13 +49,15 @@
 //! }
 //! ```
 //!
-//! The entry script returns the game table:
+//! The entry script returns the game table, bound to `mq.Game` so that `htl check` knows
+//! what it is (under `[lang] async`, an `async function` given to `update` is reported by
+//! `async-as-sync-callback`; `{ .. } as mq.Game` is a cast the rule does not see through):
 //!
 //! ```lua
 //! local mq = require("mq")
 //! local x = 40.0
 //!
-//! return {
+//! local game: mq.Game = {
 //!    update = function(dt: number): boolean
 //!       x = x + 120 * dt
 //!       return not mq:is_key_pressed("Escape")
@@ -63,9 +68,10 @@
 //!       mq:draw_text("fps " .. mq:fps(), 16, 32, 28, {r = 1, g = 1, b = 1, a = 1})
 //!    end,
 //! }
+//! return game
 //! ```
 
-use htl::mlua::{Function, Table};
+use htl::mlua::{FromLua, Function, Table, Value};
 use htl::{Htl, TealRecord, host_module};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -299,7 +305,11 @@ impl From<MouseButton> for macroquad::input::MouseButton {
 /// the other reason to keep the loop out of the engine.
 pub struct Mq;
 
-#[host_module(name = "mq", dts = "dts/mq.d.tl", records = [Color, Vec2, Key, MouseButton])]
+#[host_module(
+    name = "mq",
+    dts = "dts/mq.d.tl",
+    records = [Color, Vec2, Key, MouseButton, Game]
+)]
 impl Mq {
     /// Returns the current screen width.
     pub fn screen_width(&self) -> f32 {
@@ -463,22 +473,21 @@ pub fn conf(title: &str, width: i32, height: i32) -> macroquad::conf::Conf {
     }
 }
 
-/// The functions a game table provides. `load` may be absent; the other two may not.
+/// The functions a game table provides, declared to Teal as `mq.Game`. `load` may be
+/// absent; the other two may not, and a table without one is refused by the derived
+/// `FromLua` before a window opens (`Game.update: expected function, got nil`). [`frames`]
+/// calls every one of them with the sync `Function::call`, so each field is
+/// `#[teal(noyield)]`: the declaration says so, and an async function bound to one is
+/// reported by `htl check` rather than failing on the first frame with `attempt to yield
+/// across a C-call boundary`.
+#[derive(TealRecord)]
 struct Game {
+    #[teal(noyield)]
     load: Option<Function>,
+    #[teal(noyield)]
     update: Function,
+    #[teal(noyield)]
     draw: Function,
-}
-
-fn game_of(table: &Table) -> anyhow::Result<Game> {
-    let load = table.get::<Option<Function>>("load")?;
-    let update = table
-        .get::<Option<Function>>("update")?
-        .ok_or_else(|| anyhow::anyhow!("the game table has no `update` function"))?;
-    let draw = table
-        .get::<Option<Function>>("draw")?
-        .ok_or_else(|| anyhow::anyhow!("the game table has no `draw` function"))?;
-    Ok(Game { load, update, draw })
 }
 
 /// Open the window described by `conf` and drive `game` until `update` returns false,
@@ -496,7 +505,7 @@ pub fn run_with(
     conf: macroquad::conf::Conf,
     hooks: Hooks,
 ) -> anyhow::Result<()> {
-    let game = game_of(&game)?;
+    let game = Game::from_lua(Value::Table(game), h.lua())?;
     let failed: Rc<RefCell<Option<anyhow::Error>>> = Rc::new(RefCell::new(None));
     macroquad::Window::from_config(conf, {
         let failed = Rc::clone(&failed);

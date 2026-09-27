@@ -58,7 +58,7 @@ package through mlua-pkg: they get it as `require("sample")`. This project is a 
 `src/lib.rs` holds `fx` — the project's own `#[host_module]`, for what wants the GPU —
 embeds the Teal engine, and registers both (plus htl-mq's `mq`) in `preload(&Htl)`.
 `src/main.rs` opens the window and hands `htl_mq::run` the game table, and `src/main.tl`
-is that table: `update(dt)` says whether to go on, `draw()` draws.
+is that table, typed `mq.Game`: `update(dt)` says whether to go on, `draw()` draws.
 
 `src/sample/init.tl` is the engine, and it is where the game goes. It takes its world as
 arguments and never opens anything, so `htl test` runs it with no display: `require("mq")`
@@ -239,7 +239,7 @@ local sample = require("sample")
 
 local scene = sample.new_scene(8, 800, 600)
 
-return {
+local game: mq.Game = {
    update = function(dt: number): boolean
       if mq:is_key_pressed("Space") then
          local more = sample.new_scene(4, mq:screen_width(), mq:screen_height())
@@ -252,6 +252,7 @@ return {
       sample.render(scene)
    end,
 }
+return game
 ===== src/sample/init.tl =====
 --- The engine: balls in a box. Pure data and rules, so `htl test` runs it with no window;
 --- only `render` talks to `mq` and `fx`, and nothing here calls it.

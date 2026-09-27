@@ -418,6 +418,76 @@ api:split(cb, cb)
     assert_eq!(ci.lints.len(), want.len(), "{:?}", ci.lints);
 }
 
+/// A host module with a record it reads callbacks off; at file scope because `records =
+/// [..]` finds the item in the file the macro expands in, not inside a fn body.
+mod game_record {
+    use htl::mlua::Function;
+
+    #[derive(htl::TealRecord)]
+    #[allow(dead_code)]
+    pub struct Game {
+        #[teal(noyield)]
+        load: Option<Function>,
+        #[teal(noyield)]
+        update: Function,
+        #[teal(noyield)]
+        draw: Function,
+        later: Option<Function>,
+    }
+
+    pub struct Api;
+
+    #[htl::host_module(name = "api", records = [Game])]
+    impl Api {
+        pub async fn fetch(&self, path: String) -> String {
+            path
+        }
+    }
+}
+
+/// `#[teal(noyield)]` on a `#[derive(TealRecord)]` struct's `Function` fields writes a bare
+/// `---@noyield` on each field line, so a record the host reads callbacks off (htl-mq's game
+/// table) drives `async-as-sync-callback` from a derive the way a hand-written `.d.tl` does.
+/// Line 3: an async `update` in a constructor typed `api.Game` is reported at the value.
+/// Line 9: a sync one is not; line 12: `later`, a `Function` field without the word, is not.
+#[test]
+fn the_derive_declares_a_record_field_noyield() {
+    let decl = <game_record::Api as htl::teal::HostModule>::DECL;
+    assert!(
+        decl.contains(
+            "   record Game\n      load: function ---@noyield\n      update: function ---@noyield\n      draw: function ---@noyield\n      later: function\n   end\n"
+        ),
+        "{decl}"
+    );
+    let dir = scratch("derive-noyield");
+    write(&dir, "types/api.d.tl", decl);
+    let main = write(
+        &dir,
+        "main.tl",
+        "local api = require(\"api\")
+local game: api.Game = {
+   update = async function(dt: number): boolean
+      return (await api:fetch(\"/a\")) ~= \"\" and dt > 0
+   end,
+   draw = function() end,
+}
+local calm: api.Game = {
+   update = function(dt: number): boolean return dt > 0 end,
+   draw = function() end,
+}
+local later: api.Game = { update = calm.update, draw = calm.draw, later = async function() end }
+print(game, later)
+",
+    );
+    let ci = checker(&dir, true, "").check(&main).unwrap();
+    assert!(ci.errors.is_empty(), "{:?}", ci.errors);
+    let c = of_rule(&ci.lints, "async-as-sync-callback");
+    let want = "main.tl:3:13: async function bound to update of api.Game: the record's declaration says the field is called from C (---@noyield)";
+    assert_eq!(c.len(), 1, "{:?}", ci.lints);
+    assert!(c[0].contains(want), "{} lacks {want}", c[0]);
+    assert_eq!(ci.lints.len(), 1, "{:?}", ci.lints);
+}
+
 const ORDER: &str = "\
 local record order
    less: function(a: string, b: string): boolean ---@async
