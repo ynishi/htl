@@ -96,3 +96,51 @@ fn three_file_cycle_names_the_loop() {
         cycles[0]
     );
 }
+
+/// Two files importing each other's records with `local type`, for annotations alone: the
+/// generator erases both requires, so nothing that runs loops. Not a cycle.
+#[test]
+fn a_loop_of_erased_type_only_requires_is_not_a_cycle() {
+    let dir = scratch("types-only");
+    write(
+        &dir.join("a.tl"),
+        "local type b = require(\"b\")\nlocal record a\n   record A\n      other: b.B\n   end\nend\nreturn a\n",
+    );
+    write(
+        &dir.join("b.tl"),
+        "local type a = require(\"a\")\nlocal record b\n   record B\n      other: a.A\n   end\nend\nreturn b\n",
+    );
+    let infos = check_all(&dir, &["a.tl", "b.tl"]);
+    assert!(
+        infos
+            .iter()
+            .flat_map(|(_, ci)| &ci.requires)
+            .all(|r| r.erased),
+        "both sites are erased"
+    );
+    let cycles: Vec<String> = require_cycles(&infos)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(cycles, Vec::<String>::new());
+}
+
+/// One live edge and one erased back edge: still no loop in what runs.
+#[test]
+fn a_loop_closed_only_by_an_erased_require_is_not_a_cycle() {
+    let dir = scratch("half-erased");
+    write(
+        &dir.join("a.tl"),
+        "local b = require(\"b\")\nlocal record a\n   record A\n      n: integer\n   end\nend\nprint(b)\nreturn a\n",
+    );
+    write(
+        &dir.join("b.tl"),
+        "local type a = require(\"a\")\nlocal record b\n   record B\n      other: a.A\n   end\nend\nreturn b\n",
+    );
+    let infos = check_all(&dir, &["a.tl", "b.tl"]);
+    let cycles: Vec<String> = require_cycles(&infos)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(cycles, Vec::<String>::new());
+}
