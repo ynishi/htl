@@ -908,6 +908,12 @@ pub fn global_redeclarations(infos: &[(PathBuf, CheckInfo)]) -> Vec<Diagnostic> 
 /// anchored at the first edge's call site. Teal types a circular require as an opaque
 /// `circular_require`, so a cycle shows up elsewhere as "cannot index" errors; naming
 /// the loop is the useful part. Files outside `infos` are treated as leaves.
+///
+/// The graph is the one that runs. A `require` the generator erases — the value of a
+/// `local type` used only as a type ([`RequireSite::erased`]) — leaves no `require` in the
+/// output, so two files importing each other's records for annotations alone do not loop at
+/// run time, and are not a cycle here; nor is a loop whose back edge is erased. The site
+/// stays in the census for the readers that want the check's dependencies (`htl unused`).
 pub fn require_cycles(infos: &[(PathBuf, CheckInfo)]) -> Vec<Diagnostic> {
     use std::collections::{HashMap, HashSet};
     let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
@@ -918,6 +924,9 @@ pub fn require_cycles(infos: &[(PathBuf, CheckInfo)]) -> Vec<Diagnostic> {
         display.insert(from.clone(), file.clone());
         let list = edges.entry(from).or_default();
         for r in &ci.requires {
+            if r.erased {
+                continue;
+            }
             if let Some(p) = &r.path {
                 list.push((canon(p), r));
             }
