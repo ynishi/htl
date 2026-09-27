@@ -340,6 +340,13 @@ pub struct RequireSite {
     pub line: usize,
     /// Byte-column of the call, counted from 1.
     pub col: usize,
+    /// The call is the value of a `local type` declaration the generator erases, so no
+    /// `require` of the name is in the generated Lua: a dependency of the check — the
+    /// declaration is read, and `htl unused` counts it reached — and of nothing that runs,
+    /// so the linker bundles nothing for it and asks the host for nothing. The flag is the
+    /// generator's own (`elide_type`, set by the checker from how the alias is used): a
+    /// `local type` alias also read as a value keeps its `require`, and is not erased.
+    pub erased: bool,
 }
 
 /// A named function of a `.tl` file, for coverage (see [`Htl::coverage_spans`]).
@@ -2865,6 +2872,7 @@ fn read_requires(list: &Table) -> Result<Vec<RequireSite>> {
             path: r.get::<Option<String>>("path")?.map(PathBuf::from),
             line: r.get::<Option<usize>>("y")?.unwrap_or(0),
             col: r.get::<Option<usize>>("x")?.unwrap_or(0),
+            erased: r.get::<Option<bool>>("erased")?.unwrap_or(false),
         });
     }
     Ok(requires)

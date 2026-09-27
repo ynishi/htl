@@ -235,3 +235,27 @@ fn a_nested_entry_is_named_by_its_path_under_the_source_root() {
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(v["entry"], "app.main");
 }
+
+/// A declaration imported with `local type` is erased by the generator: the bundle
+/// records no host module for it.
+#[test]
+fn a_type_only_import_leaves_no_host_row() {
+    let root = scratch("types-only");
+    write(
+        &root.join("src/main.tl"),
+        "local type shape = require(\"shape\")\nlocal p: shape.Point = { x = 1, y = 2 }\nprint(p.x + p.y)\n",
+    );
+    write(
+        &root.join("src/shape.d.tl"),
+        "local record shape\n   record Point\n      x: number\n      y: number\n   end\nend\nreturn shape\n",
+    );
+    let (ok, _, stderr) = htl(&["build", "src/main.tl", "-o", "app.hb"], &root);
+    assert!(ok, "build: {stderr}");
+    assert!(!stderr.contains("host must provide"), "{stderr}");
+    let (ok, stdout, stderr) = htl(&["bundle", "info", "app.hb"], &root);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("  host:     (none)\n"), "{stdout}");
+    let (ok, stdout, stderr) = htl(&["run", "app.hb"], &root);
+    assert!(ok, "the bundle runs with nothing registered: {stderr}");
+    assert_eq!(stdout, "3\n");
+}

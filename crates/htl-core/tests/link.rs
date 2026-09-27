@@ -643,3 +643,78 @@ fn version_1_bundles_still_decode() {
     assert_eq!(b.modules.len(), 1);
     assert!(b.host_modules.is_empty() && b.fingerprint.is_empty());
 }
+
+/// A record of types imported with `local type`: the generator erases the statement, so
+/// the name is never required at run time and the bundle needs nothing from the host.
+fn types_only_project(name: &str, main: &str) -> PathBuf {
+    let root = scratch(name);
+    write(&root.join("src/main.tl"), main);
+    write(
+        &root.join("src/shape.d.tl"),
+        "local record shape\n   record Point\n      x: number\n      y: number\n   end\n   new: function(x: number, y: number): Point\nend\nreturn shape\n",
+    );
+    root
+}
+
+#[test]
+fn a_type_only_require_the_generator_erases_is_not_a_host_module() {
+    let root = types_only_project(
+        "erased",
+        "local type shape = require(\"shape\")\nlocal p: shape.Point = { x = 1, y = 2 }\nreturn p.x + p.y\n",
+    );
+    let h = checker(&root);
+    // What the generator emits is the fact the census has to agree with.
+    let (code, _) = h.gen_lua(&root.join("src/main.tl")).unwrap();
+    assert!(!code.unwrap().contains("require"), "the import is erased");
+
+    let linked = link(&h, &root.join("src/main.tl"), &LinkOptions::default()).unwrap();
+    assert!(linked.ok(), "{:?}", linked.errors);
+    assert_eq!(linked.host_modules, Vec::<String>::new());
+    let b = Bundle::decode(&linked.bundle().unwrap().encode()).unwrap();
+    assert_eq!(b.host_modules, Vec::<String>::new());
+    // Nothing registered, and it runs.
+    let r = Htl::new().unwrap();
+    r.install_bundle(&b).unwrap();
+    let v: f64 = r.lua().load("return require('main')").eval().unwrap();
+    assert_eq!(v, 3.0);
+}
+
+/// The same statement, with the alias also used as a value: the generator keeps the
+/// require (`local shape = require("shape")`), so the name is the host's to provide. The
+/// fact is the checker's, not the statement's shape.
+#[test]
+fn a_local_type_used_as_a_value_keeps_its_require_and_is_a_host_module() {
+    let root = types_only_project(
+        "kept",
+        "local type shape = require(\"shape\")\nlocal p = shape.new(1, 2)\nreturn p.x\n",
+    );
+    let h = checker(&root);
+    let (code, _) = h.gen_lua(&root.join("src/main.tl")).unwrap();
+    assert!(
+        code.unwrap().contains("require(\"shape\")"),
+        "the require survives"
+    );
+
+    let linked = link(&h, &root.join("src/main.tl"), &LinkOptions::default()).unwrap();
+    assert!(linked.ok(), "{:?}", linked.errors);
+    assert_eq!(linked.host_modules, vec!["shape".to_string()]);
+}
+
+/// `global type` is emitted (`shape = require("shape")`), so it is counted.
+#[test]
+fn a_global_type_require_is_emitted_and_counted() {
+    let root = types_only_project(
+        "global",
+        "global type shape = require(\"shape\")\nlocal p: shape.Point = { x = 1, y = 2 }\nreturn p.x\n",
+    );
+    let h = checker(&root);
+    let (code, _) = h.gen_lua(&root.join("src/main.tl")).unwrap();
+    assert!(
+        code.unwrap().contains("require(\"shape\")"),
+        "the require survives"
+    );
+
+    let linked = link(&h, &root.join("src/main.tl"), &LinkOptions::default()).unwrap();
+    assert!(linked.ok(), "{:?}", linked.errors);
+    assert_eq!(linked.host_modules, vec!["shape".to_string()]);
+}

@@ -394,3 +394,26 @@ fn an_mlua_pkg_project_is_walked_from_its_root_whatever_the_paths() {
         Vec::<String>::new()
     );
 }
+
+/// A declaration imported for its types alone is reached: the edge stays in the census
+/// even though the generator erases the require, so `htl unused` does not report it.
+#[test]
+fn a_declaration_imported_with_local_type_is_reached() {
+    let root = scratch("local-type");
+    write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
+    write(
+        &root.join("src/main.tl"),
+        "local type shape = require(\"shape\")\nlocal p: shape.Point = { x = 1, y = 2 }\nprint(p.x)\n",
+    );
+    write(
+        &root.join("src/shape.d.tl"),
+        "local record shape\n   record Point\n      x: number\n      y: number\n   end\nend\nreturn shape\n",
+    );
+    let (ok, _, err) = htl(&["unused"], &root);
+    assert!(ok, "{err}");
+    assert!(!err.contains("shape"), "the declaration is reached: {err}");
+    assert!(
+        err.contains("htl unused: 0 modules, 0 dependencies"),
+        "{err}"
+    );
+}
