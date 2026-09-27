@@ -747,7 +747,7 @@ impl Project {
     ///
     /// let mut reg = mlua_pkg::Registry::new();
     /// reg.add(NativeResolver::new().add("host", |lua| { /* Rust table */ }));   // before the Teal resolver
-    /// reg.add(htl::pkg::TealResolver::from_project(&project)?); // .tl -> check + gen; .d.tl -> type-only table
+    /// reg.add(htl::pkg::TealResolver::from_project(&project)?); // .tl -> check + gen; .d.tl -> steps aside
     /// reg.add(mlua_pkg::resolvers::FsResolver::new(root.join("scripts"))?);
     /// reg.install(h.lua())?;
     /// ```

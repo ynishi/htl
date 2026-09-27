@@ -126,7 +126,11 @@ fn a_crates_declaration_is_the_name_the_crate_wrote_it_under_on_both_sides() {
     let h = host(&project);
 
     assert_eq!(check(&h, &root.join("scripts/a.tl")), Vec::<String>::new());
-    assert_eq!(loads(&h, "mq"), Ok(()));
+    // A declaration is not a module, so the run side steps aside for it and, with nothing
+    // implementing `mq`, the require fails — naming the file it found under that name.
+    let run = loads(&h, "mq").unwrap_err();
+    assert!(run.contains("types/htl-mq/mq.d.tl"), "{run}");
+    assert!(run.contains("nothing implements it"), "{run}");
 
     let errors = check(&h, &root.join("scripts/b.tl"));
     assert!(
@@ -135,8 +139,10 @@ fn a_crates_declaration_is_the_name_the_crate_wrote_it_under_on_both_sides() {
             .any(|e| e.contains("module not found: 'htl-mq.mq'")),
         "{errors:?}"
     );
+    // Under the other spelling there is no declaration to name: nothing was found at all.
     let run = loads(&h, "htl-mq.mq").unwrap_err();
     assert!(run.contains("not found"), "{run}");
+    assert!(!run.contains("mq.d.tl"), "{run}");
 }
 
 #[test]

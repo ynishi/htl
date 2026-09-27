@@ -78,10 +78,10 @@ require('broken') ->	false
 ```
 
 `resolver-example` is `host.name`, from the table `NativeResolver` builds in Rust; `2 3` came
-back through `util.tl`, typed by a `shape.d.tl` that `TealResolver` answers at run time with
-an empty table, because a declaration has nothing to run. `legacy.lua` is `FsResolver`:
-`legacy.d.tl` declares that module for the checker, and `TealResolver` sees the sibling
-`.lua` and steps aside. The last line is the one worth reading twice — `broken.tl` has a type
+back through `util.tl`, typed by a `shape.d.tl` that nothing runs: the scripts import it with
+`local type shape = require("shape")`, which the generator erases, so the name is never asked
+for at run time. `legacy.lua` is `FsResolver`: `legacy.d.tl` declares that module for the
+checker, and `TealResolver` steps aside for a declaration, so the `.lua` behind it is served. The last line is the one worth reading twice — `broken.tl` has a type
 error, and the `require` fails on it rather than falling through to the next resolver. The
 checker's message, with the file and the column, is what the script prints after it.
 
