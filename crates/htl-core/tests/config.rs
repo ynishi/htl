@@ -1077,14 +1077,16 @@ fn declaration_steps_aside_for_a_preloaded_host_module() {
     reg.add(htl_core::pkg::TealResolver::new(root.join("mods")).unwrap());
     reg.install(h.lua()).unwrap();
 
-    // Without an implementation the declaration answers, and says so on first use.
+    // Without an implementation the declaration steps aside, and with nothing behind it
+    // the require fails, naming the declaration.
     let err = h
         .lua()
         .load("return require('use')")
         .eval::<i64>()
         .unwrap_err()
         .to_string();
-    assert!(err.contains("declaration-only"), "{err}");
+    assert!(err.contains("host.d.tl"), "{err}");
+    assert!(err.contains("nothing implements it"), "{err}");
 
     // With the host's implementation in package.preload the declaration steps aside.
     let h = Htl::new().unwrap();

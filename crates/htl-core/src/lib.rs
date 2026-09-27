@@ -371,9 +371,11 @@ pub type CoverageSpans = (Vec<(usize, usize)>, Vec<FunctionSpan>);
 pub enum ModuleKind {
     /// A `.tl` the checker compiles and the program runs — the only kind that is both.
     Source,
-    /// A `.d.tl`: types with no implementation. Requiring one at run time gets an empty
-    /// table, which is why a module that resolves to a declaration and nothing else
-    /// type-checks and then fails.
+    /// A `.d.tl`: types with no implementation. Requiring one at run time through
+    /// [`Htl::install_searcher`] gets an empty table, which is why a module that resolves
+    /// to a declaration and nothing else type-checks and then fails on first use; through
+    /// a `pkg::TealResolver` in a `Registry` the declaration steps aside and the
+    /// `require` fails outright if nothing else implements the name.
     Declaration,
     /// A plain `.lua`, which the checker has nothing to say about. What is left when
     /// neither of the other two is reachable.

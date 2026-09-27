@@ -1,4 +1,4 @@
-local shape = require("shape")
+local type shape = require("shape")
 
 local record util
 end

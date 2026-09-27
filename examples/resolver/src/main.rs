@@ -2,7 +2,7 @@
 //!
 //! Chain (first match wins):
 //!   NativeResolver  "host"           Rust-built table
-//!   TealResolver    scripts/*.tl     check + gen on require; `*.d.tl` -> type-only table
+//!   TealResolver    scripts/*.tl     check + gen on require; `*.d.tl` -> steps aside
 //!   FsResolver      scripts/*.lua    plain Lua, untouched
 //!
 //! Nothing is embedded: edit a `.tl` and re-run. A type error in any required `.tl`

@@ -1,7 +1,7 @@
 local host = require("host")
 local util = require("util")
 local legacy = require("legacy")
-local shape = require("shape")
+local type shape = require("shape")
 
 local p: shape.Point = util.origin()
 p = util.shift(p, 2, 3)

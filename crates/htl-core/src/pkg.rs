@@ -7,16 +7,34 @@
 //!   Registry
 //!    ├─ NativeResolver   host_module userdata / Rust tables
 //!    ├─ TealResolver     name -> name.tl | name/init.tl  (check + gen + load)
-//!    │                   name -> name.d.tl              (type-only: empty table)
+//!    │                   name -> name.d.tl              (a declaration: steps aside)
 //!    │                   (the naming rule's spellings: crate::naming)
 //!    ├─ VendoredResolver mlua-pkg.toml git deps
 //!    └─ FsResolver       plain .lua
+//!   package.preload, Lua's own searchers, ...
+//!   trailing searcher: "no module 'x': 'x.d.tl' declares it and nothing implements it"
 //! ```
 //!
 //! The resolver must run on a `Lua` that an [`Htl`](crate::Htl) was attached to
 //! (`Htl::new` / `Htl::from_lua`); it finds the compiler through the Lua registry.
 //! Type errors are returned as `Some(Err)` so, per mlua-pkg's contract, a broken
 //! `.tl` never silently falls through to a later resolver.
+//!
+//! A `.d.tl` is the other way round: a declaration is not a module, so the resolver
+//! returns `None` for it and the chain goes on to whatever implements the name — a later
+//! resolver over another directory, a `MemoryResolver` of embedded modules, a
+//! `NativeResolver`, `package.preload`, the host's own searcher, in any order. Only when
+//! every searcher has declined does a trailing `package.searchers` entry, installed in the
+//! `Lua` the `Registry` is installed in, fail the `require` naming the declaration and
+//! the two ways out: register the implementation, or import the types alone with
+//! `local type x = require("x")`, which the generator erases. This is the line upstream
+//! Teal draws too (`tl`'s loader searches without `.d.tl`), and the one the project model
+//! states ([`Provider::Declared`](crate::model::Provider::Declared): a name with a
+//! declaration and nothing else is provided by the environment). `htl run` / `htl test`
+//! resolve through [`Htl::install_searcher`](crate::Htl::install_searcher) instead, where a
+//! declaration with nothing behind it on `package.path` still answers with a table that
+//! explains itself when indexed — right for a command running a program whose host is not
+//! present.
 
 use crate::PRELUDE_REGISTRY_KEY;
 use anyhow::Context;
@@ -1147,13 +1165,11 @@ impl MluaProject {
         }
     }
 
-    /// Registry with the project's deps: Teal first, then plain Lua. Add your
-    /// `NativeResolver`s *before* calling `install` if Teal code declares them in `.d.tl`:
-    /// the Teal resolver answers a `.d.tl` with a type-only table unless a resolver ahead
-    /// of it, or `package.preload`, already holds the module (it steps aside for a plain
-    /// `.lua` a later resolver serves, and for a name the host preloaded, but not for a
-    /// resolver after it). The same holds for a [`TealResolver::from_project`] added by
-    /// hand: native modules go in first, and a `.d.tl` types them for the checker.
+    /// Registry with the project's deps: Teal first, then plain Lua. A `NativeResolver`
+    /// for a module Teal code declares in a `.d.tl` may go before or after: the Teal
+    /// resolver steps aside for a declaration, so whatever implements the name is reached
+    /// wherever it sits in the chain (module doc). The same holds for a
+    /// [`TealResolver::from_project`] added by hand.
     pub fn registry(&self) -> anyhow::Result<mlua_pkg::Registry> {
         let mut reg = mlua_pkg::Registry::new();
         reg.add(self.teal_resolver()?);
@@ -2006,11 +2022,65 @@ impl std::fmt::Display for TealResolveError {
 
 impl std::error::Error for TealResolveError {}
 
-/// Is `name` registered in `package.preload` (host-provided implementation)?
-fn preloaded(lua: &Lua, name: &str) -> mlua::Result<bool> {
+/// Names whose declaration a [`TealResolver`] found and stepped aside for, to the file it
+/// found, in the registry of the `Lua` the `Registry` is installed in.
+const DECLARED_ONLY_KEY: &str = "htl.declared_only";
+/// Set once that `Lua`'s `package.searchers` has the trailing entry below.
+const DECLARED_ONLY_SEARCHER_KEY: &str = "htl.declared_only.searcher";
+
+/// Record that `name` was typed by `decl` and served by nobody so far, and make sure the
+/// `Lua` has the searcher that says so if every other searcher declines too.
+///
+/// Both halves live in `lua` — the program state, the one the `Registry` is installed in —
+/// and the searcher is a Rust closure, so neither prelude is consulted and no value crosses
+/// between a split state's two `Lua`s (#299: the stub built from the checker's `H` was a
+/// foreign table in the program state, and mlua panicked instead of erroring).
+fn note_declaration_only(lua: &Lua, name: &str, decl: &Path) -> mlua::Result<()> {
+    let declared = match lua.named_registry_value::<Table>(DECLARED_ONLY_KEY) {
+        Ok(t) => t,
+        Err(_) => {
+            let t = lua.create_table()?;
+            lua.set_named_registry_value(DECLARED_ONLY_KEY, &t)?;
+            t
+        }
+    };
+    // Last writer wins: two resolvers may each hold a declaration for one name, and the
+    // message only has to name a file the reader can open to see the contract.
+    declared.set(name, decl.to_string_lossy().as_ref())?;
+
+    if lua
+        .named_registry_value::<bool>(DECLARED_ONLY_SEARCHER_KEY)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let table = declared.clone();
+    let searcher = lua.create_function(move |_, module: String| {
+        let Some(decl) = table.get::<Option<String>>(module.as_str())? else {
+            return Ok(None);
+        };
+        // A searcher that returns a string has not found the module; `require` concatenates
+        // it into its "module 'x' not found" error. Two remedies, because a reader who gets
+        // here has made one of exactly two mistakes: they meant to supply the module and
+        // did not, or they wanted the types and wrote the import that loads a module rather
+        // than the one that does not.
+        Ok(Some(format!(
+            "\n\tno module '{module}': '{decl}' declares it and nothing implements it. \
+             If the host provides it, register it before the require (preload / \
+             preload_value / htl_preload, or a resolver that serves it); if you only want \
+             its types, write `local type {module} = require(\"{module}\")`, which the \
+             generator erases."
+        )))
+    })?;
     let package: Table = lua.globals().get("package")?;
-    let preload: Table = package.get("preload")?;
-    Ok(!matches!(preload.get::<Value>(name)?, Value::Nil))
+    let searchers: Table = package.get("searchers")?;
+    // Appended, never inserted: this is the answer only when every other searcher has
+    // declined — the `Registry`'s hook at 1, `package.preload`, htl's own strict searcher,
+    // and Lua's file and C searchers. `require` reads the table as it walks it, so an
+    // append during the walk that put this here is still reached by the same `require`.
+    searchers.raw_set(searchers.raw_len() + 1, searcher)?;
+    lua.set_named_registry_value(DECLARED_ONLY_SEARCHER_KEY, true)?;
+    Ok(())
 }
 
 /// One directory a [`TealResolver`] serves: the sandbox it is read through, the mount its
@@ -2334,32 +2404,30 @@ impl Resolver for TealResolver {
             }
         }
         let file = declaration?;
-        // A `.d.tl` may describe a plain `.lua` served by a later resolver (FsResolver /
-        // VendoredResolver): step aside if one is present. Native modules must be
-        // registered *before* this resolver.
-        let lua_beside = if self.served.len() > 1 {
-            !others.is_empty()
-        } else {
-            !luas().is_empty()
-        };
-        if lua_beside {
-            return None;
+        // A declaration is not a module: it typed the name, and what answers the name is
+        // somewhere else — a later `TealResolver` over another tier, an `FsResolver`
+        // holding the `.lua` (beside the declaration or not), a `MemoryResolver` of
+        // embedded modules, a `NativeResolver`, `package.preload`, the host's own
+        // searcher. Step aside unconditionally so the rest of the chain is asked. A
+        // resolver cannot see the chain (mlua-pkg hands `resolve` only the state and the
+        // name), so any test of "is somebody else going to serve this" could only ever
+        // look in this resolver's own directories, which is what the two hatches here used
+        // to do — a `.lua` beside the declaration, a name in `package.preload` — and why a
+        // declaration in one tier cost a host the implementation in the next (#295). This
+        // is where upstream Teal draws the line too: `tl`'s own loader searches without
+        // `.d.tl` and lets `require` go on, as a `.d.ts` is invisible to Node.
+        //
+        // What the declaration is still good for is the failure. Record it, so that the
+        // trailing searcher can name it if every other searcher declines too — recorded
+        // whether or not one will, because this side cannot know, and an entry for a name
+        // the chain goes on to serve is never read, since that searcher runs last. Nothing
+        // is built here for `require` to receive: the old stub came from the checker's
+        // prelude, which in a split state is another `Lua`, and mlua panics on a value
+        // from another state rather than erroring (#299).
+        if let Err(e) = note_declaration_only(lua, name, &file.resolved_path) {
+            return Some(Err(e));
         }
-        // ... or that the host registered in `package.preload` (a Rust `#[host_module]`,
-        // `Htl::preload_value`). The Registry's searcher runs *before* Lua's preload
-        // searcher, so this is the only chance.
-        match preloaded(lua, name) {
-            Ok(true) => return None,
-            Ok(false) => {}
-            Err(e) => return Some(Err(e)),
-        }
-        // Declaration-only module: nothing to run. Hand require a table whose lookups
-        // explain that the implementation lives elsewhere.
-        Some(
-            h.get::<Function>("type_only_module").and_then(|f| {
-                f.call::<Value>((name, file.resolved_path.to_string_lossy().as_ref()))
-            }),
-        )
+        None
     }
 }
 

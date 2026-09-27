@@ -658,7 +658,9 @@ fn expand_record(item: &Item) -> Result<TokenStream, String> {
     } else {
         quote! {
             impl #ident {
-                /// Make `require("NAME")` resolve at runtime (type-only module -> empty table).
+                /// Make `require("NAME")` resolve at runtime: the record is types only, and a
+                /// declaration with nothing behind it fails the require, so put an empty table
+                /// under the name in `package.preload`.
                 pub fn htl_preload(h: &::htl::Htl) -> ::htl::mlua::Result<()> {
                     let t = h.lua().create_table()?;
                     h.preload_value(#name, t).map_err(::htl::mlua::Error::external)
