@@ -46,3 +46,23 @@ changelog_path = "./CHANGELOG.md"
 # crate that exists, so a new crate's first version is `cargo publish` by hand with
 # `publish = false` here until then (htl-mq 0.8.0 went out that way).
 changelog_include = ["htl-core", "htl-macros", "htl", "htl-mq"]
+
+# Changelog grouping. `commit_parsers` replaces release-plz's defaults rather than
+# extending them, so adding one rule means restating the seven it ships with (read from
+# `release_plz_core/src/changelog.rs`; the docs list six and omit `^removed`). The added
+# rule, first so it wins, skips merge commits: a pull request lands as a merge commit
+# (CONTRIBUTING), whose subject is `Merge pull request #N …` and says nothing the branch's
+# own commits do not, so it has no line here. It only ever appeared when main had moved in
+# a crate's directory while the branch was open. The next version is not read from these
+# rules — it comes from every commit's message — so a skipped commit still counts there.
+[changelog]
+commit_parsers = [
+  { message = "^Merge pull request", skip = true },
+  { message = "^feat", group = "added" },
+  { message = "^changed", group = "changed" },
+  { message = "^deprecated", group = "deprecated" },
+  { message = "^removed", group = "removed" },
+  { message = "^fix", group = "fixed" },
+  { message = "^security", group = "security" },
+  { message = "^.*", group = "other" },
+]
