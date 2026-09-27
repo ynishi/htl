@@ -1278,9 +1278,19 @@ end
 
 -- Every literal `require("<name>")` in `ast`, with where it resolves on the current path
 -- unless `names_only` says the names are all that is wanted.
+--
+-- A site is `erased` when it is the value of a `local type` declaration the generator
+-- drops: the statement leaves no `require` in the output, so the name is a dependency of
+-- the check and of nothing that runs. The generator's test is `node.var.elide_type`
+-- (`vendor/tl.lua`, `local_type` in the Lua emitter), a flag the checker sets from how
+-- the alias is used — only ever as a type, or an abstract type — and clears when the alias
+-- is also read as a value, in which case `local x = require(..)` is emitted and the site is
+-- not erased. Read from the same flag here so the census and the emitter cannot disagree;
+-- an AST that was only parsed carries no flag, and every site is then a live one. A
+-- `global type` is emitted (`x = require(..)`), so it is never erased.
 local function require_sites(ast, names_only, requirer)
    local out, seen = {}, {}
-   local function go(n)
+   local function go(n, erased)
       if type(n) ~= "table" or seen[n] then return end
       seen[n] = true
       if type(n.kind) == "string" and n.kind == "op" and n.op and n.op.op == "@funcall"
@@ -1297,14 +1307,17 @@ local function require_sites(ast, names_only, requirer)
             H.asking = before
             if fd then fd:close() end
          end
-         out[#out + 1] = { name = name, y = n.y, x = n.x, path = found, node = n.e2[1] }
+         out[#out + 1] = { name = name, y = n.y, x = n.x, path = found, node = n.e2[1], erased = erased or false }
+      end
+      if n.kind == "local_type" and type(n.var) == "table" and n.var.elide_type == true then
+         erased = true
       end
       for k, v in pairs(n) do
          if k ~= "if_parent" and k ~= "type" and k ~= "newtype" and k ~= "decltuple" and k ~= "expected"
-            and type(v) == "table" then go(v) end
+            and type(v) == "table" then go(v, erased) end
       end
    end
-   go(ast)
+   go(ast, false)
    return out
 end
 

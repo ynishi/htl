@@ -34,6 +34,14 @@
 //! there is no model to ask. The outcome is the same either way; what changed is which of
 //! the two says so.
 //!
+//! A `require` the generator erased is not a dependency of anything that runs. Teal's
+//! `local type x = require("x")` is a type declaration when the alias is only ever used as
+//! a type, and the generator drops the whole statement; the checked file's census marks
+//! such a site ([`RequireSite::erased`], from the generator's own flag) and the linker
+//! skips it — not bundled, not the host's, not missing — so a bundle that imports a
+//! record of types from a `.d.tl` asks the host for nothing. The same alias read as a
+//! value keeps its `require`, and is counted like any other; so is a `global type`.
+//!
 //! # The store
 //!
 //! Generating a module is the expensive part of linking — the Teal check behind it costs
@@ -390,6 +398,14 @@ pub fn link_with(
             (Some(src), reqs)
         };
         for r in &requires {
+            // The value of a `local type` the generator erased: no `require` of the name is
+            // in the code just generated, so nothing runs it — not bundled, not the
+            // host's, not missing. The census keeps the site for the readers that want the
+            // check's dependencies (`htl unused`, the cycle lint); only the closure of what
+            // runs leaves it out.
+            if r.erased {
+                continue;
+            }
             if queued.contains(&r.module) {
                 continue;
             }

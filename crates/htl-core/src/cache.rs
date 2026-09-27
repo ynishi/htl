@@ -86,7 +86,7 @@ use crate::{CheckInfo, DependencyError, Fix, RequireSite};
 /// emits different text is a different checker and every warm entry misses on its own.
 /// What this number is for is a change to the shape of what is stored — a field, a key, a
 /// meaning — which the hash cannot see.
-const FORMAT: u32 = 9;
+const FORMAT: u32 = 10;
 
 /// Where the store lives under the project root. Generated, and `htl init` puts `.htl/` in
 /// `.gitignore` — one line for the cache and the installed deps beside it, both
@@ -338,6 +338,13 @@ pub struct RequireJson {
     pub line: usize,
     /// Column of the same.
     pub col: usize,
+    /// [`RequireSite::erased`]: the value of a `local type` the generator drops. Stored so a
+    /// replayed module's requires say what the fresh check's would; absent in entries
+    /// written before the field existed, which is why the format was bumped rather than
+    /// defaulted — an old entry for an unchanged file would otherwise keep counting the
+    /// erased require as the host's.
+    #[serde(default)]
+    pub erased: bool,
 }
 
 /// What checking one module reported.
@@ -603,6 +610,7 @@ pub fn requires_json(c: &CheckInfo) -> Vec<RequireJson> {
             path: r.path.as_ref().map(|p| p.to_string_lossy().into_owned()),
             line: r.line,
             col: r.col,
+            erased: r.erased,
         })
         .collect()
 }
@@ -640,6 +648,7 @@ fn requires_from_json(requires: &[RequireJson]) -> Vec<RequireSite> {
             path: r.path.as_ref().map(PathBuf::from),
             line: r.line,
             col: r.col,
+            erased: r.erased,
         })
         .collect()
 }
