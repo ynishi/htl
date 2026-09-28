@@ -193,12 +193,15 @@ fn a_source_payload_is_terminated_lua_counted_to_the_byte() {
         &root,
     );
     assert!(ok, "{stderr}");
-    assert!(
-        stderr.contains("1 module(s) -> b.hb (72 bytes)"),
-        "one byte per module more than the 71 an unterminated payload made: {stderr}"
-    );
-
+    // The count the report prints is the file's. Not a fixed number: the header carries
+    // the version of the htl that built the bundle, so the size moves with the length of
+    // the version string (`0.9.0` to `0.10.0` is one byte), and a fixed 72 failed the
+    // release PR for 0.10.0. What this test is about is the payload, below.
     let bytes = std::fs::read(root.join("b.hb")).unwrap();
+    assert!(
+        stderr.contains(&format!("1 module(s) -> b.hb ({} bytes)", bytes.len())),
+        "the report counts the bytes the file has: {stderr}"
+    );
     let b = htl::bundle::Bundle::decode(&bytes).unwrap();
     let m = b.module("mod1").unwrap();
     assert_eq!(m.kind, htl::bundle::Kind::Source);
