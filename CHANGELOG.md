@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/ynishi/htl/compare/v0.9.0...v0.10.0) - 2026-09-28
+
+### Added
+
+- a require the generator erases is marked in the census and left out of the link, so a bundle that imports a record of types asks the host for nothing
+- htl-mq declares its game table as record Game with ---@noyield fields, #[teal(noyield)] on a TealRecord field writes the marker, and the window scaffold binds the table to mq.Game
+- #[host_module] and htl dts write ---@noyield for a sync fn's Function parameters, and #[teal(yields)] / #[teal(noyield)] on a parameter override it
+- async-as-sync-callback reads ---@noyield on a host's declaration, the parameters and record fields a host calls from C, so a host's own boundary is reported like table.sort's
+- async-as-sync-callback, the fifth async rule: an async function handed to table.sort, string.gsub, xpcall's handler or a __tostring, where a C call cannot yield
+- the four async lints (await-missing, await-outside-async, await-non-async, task-escape), and ---@async on a host async fn's declaration
+- async / await syntax under [lang] async: local async function, await on a call, async local as a child task, on Teal's own lines
+- htl.task, the task library a program on the executor spawns and awaits with, preloaded and declared like htl.test
+- htl run and htl test run the program as a root on mlua-isle's executor, so a host's async fn is callable from Teal and Ctrl-C cancels with a grace
+- one owner for a state's debug hook, so Interrupt, coverage and a host callback register instead of replacing each other
+- global-redeclaration reports one global name declared at two sites, and the crate doc says the three ways a host value gets a type
+- a declaration is never served, so the chain reaches the module behind it, and nothing is built in the checker's state for a program state to receive
+
+### Fixed
+
+- bundle_info counts the bytes the file has, not 72, so the test does not fail with the length of the version string
+- a global travels the require chain, so a module served from the store hands its requirer what its own requires would have declared
+- a module that declares a global is walked once per run, and its globals are handed to each env that requires it
+- require-cycle reads the graph that runs, so a loop of type-only requires the generator erases is not reported
+
+### Other
+
+- the README's Async section in one place, and the embed example runs the issue's pair through a host's async fn
+
 ## [0.9.0](https://github.com/ynishi/htl/compare/v0.8.0...v0.9.0) - 2026-09-25
 
 ### Added
