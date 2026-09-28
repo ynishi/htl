@@ -990,24 +990,13 @@ local function is_test(exp)
    return subject.tk, name, subject
 end
 
--- An `is` chain over a union that leaves a variant untested and has no `else`. The
--- sibling of `enum-exhaustive`, and it exists for the same reason: adding a variant
--- otherwise leaves every chain that predates it compiling, with the new one falling
--- wherever the last branch happened to lead.
---
--- The union's members come from the checker (`extra.union_at`), not from the tests: a
--- chain that names two variants tells you nothing about how many there are. The
--- exemptions are `enum-exhaustive`'s: a chain with an `else`, a single `is` (a guard, not
--- a dispatch), and a chain where every branch returns and code follows, which is the
--- `else` written differently.
---
--- When a union is worth its records at all: only when the variants carry different data.
--- A `where` clause uses `self` once, so one record answers to one tag value, and a type
--- with seven tags that carry the same fields is seven structurally identical records to
--- gain nothing an enum field on one record does not already give -- `enum-exhaustive`
--- guards those branches just the same. The question is not "does this have a tag" but
--- "do the variants hold different things". (The rule's message could carry this the way
--- clippy links a lint to its explanation; that surface does not exist yet.)
+-- An `is` chain over a union that leaves a variant untested and has no `else`. Why the
+-- rule exists, the exemptions it shares with `enum-exhaustive`, and the judgment call —
+-- whether the union should have been an enum field on one record — are the rule's
+-- explanation (`lint::explain::UNION_EXHAUSTIVE`, what `htl check --explain
+-- union-exhaustive` prints), not restated here. What is here is the mechanics: the
+-- union's members come from the checker (`extra.union_at`), not from the tests, so a
+-- chain that names two variants tells nothing about how many there are.
 local function lint_union_exhaustive(ast, report, extra)
    extra = extra or {}
    local union_at = extra.union_at
@@ -1382,32 +1371,12 @@ local function field_placeholder(ty)
 end
 
 -- A record marked `---@struct` is built whole: every field it declares is present at
--- every construction site, except the ones marked `---@optional`. Teal has no `?` for
--- record fields, so without this a record the program builds itself reads as if any field
--- might be absent, and every use site pays for that with a nil check.
---
--- Adding an unmarked field makes the construction sites that predate it report, which is
--- the point: the default for a new field is mandatory, and `---@optional` is the
--- exception written on purpose. Growing a record that already has sites is that report
--- arriving at all of them at once, so the way through is two steps: add the field with
--- `---@optional` on it (a marker that says "not yet"), fill the sites at whatever pace
--- the work allows, then delete the marker line — every site still short is reported, and
--- a clean check says the last one is done. `htl fix --diff` spells the missing field into
--- each site as a suggestion it never writes (see `field_placeholder`): a checklist and a
--- line to paste from, not the migration done for you.
---
--- This is a lint, not a type: the markers are comments, so the file stays valid Teal and
--- other tooling ignores them, and use sites still see a nilable field. What it removes is
--- the reason to guard, and the doubt about whether a field was ever set. Data arriving
--- from outside the program — a mod's return value, a save file, a host — is a different
--- question, and a record marked `---@contract` with `---@required` on its mandatory
--- fields is what checks that (contract.rs).
---
--- The marker is also what makes a test suite feel the cost all at once: a dozen tests that
--- each spell every field are a dozen reports when a field is added. A factory in a helper
--- beside the tests -- defaults in one place, an overlay record naming only what a test
--- varies -- turns them into one; the overlay is its own record, since typed as the target
--- it would be one more construction site. No lint asks for it.
+-- every construction site, except the ones marked `---@optional`. Why (Teal has no `?`
+-- for record fields), the two-step migration through `---@optional`, why nothing fills a
+-- missing field in, the factory beside a test suite, and that this is a lint and not a
+-- type, are the rule's explanation (`lint::explain::STRUCT_FIELDS`, what `htl check
+-- --explain struct-fields` prints), not restated here. `htl fix --diff` spells the
+-- missing field into each site as a suggestion it never writes (see `field_placeholder`).
 --
 -- Which record a bare `{ ... }` is being built as is type information, and this rule is
 -- run over a syntax-only parse (see L.run). `extra.struct_at(y, x)` answers it from the
@@ -1502,38 +1471,22 @@ end
 
 ---------------------------------------------------------------- sealed-record
 
--- A record marked `---@sealed` is built where it is declared and nowhere else. Some
--- records mean "this went through the check" -- a `Judged` only `gate.judge` is supposed
--- to produce, a state only a transition may mint -- and Teal has no private field and no
--- sealed constructor to say it with: `{ ... }` with the right keys builds one anywhere,
--- and `as` gets past even a mismatch because it is erased. The marker says it and this
--- rule holds the boundary.
+-- A record marked `---@sealed` is built where it is declared and nowhere else — outside
+-- the functions the marker names, when it names any. Why (a record that means "this went
+-- through the check", and Teal's lack of a sealed constructor), the test that compares a
+-- whole sealed value and its two ways through, and that this is a lint and not a type,
+-- are the rule's explanation (`lint::explain::SEALED_RECORD`, what `htl check --explain
+-- sealed-record` prints), not restated here.
 --
 -- Which record a `{ ... }` is built as, and which one an `as` lands on, is type
 -- information; `extra.sealed_at(y, x)` answers both from the checker's position report
 -- (see prelude.lua). What this rule adds is the site: the file it is in, and the function.
---
 -- `---@sealed(gate.judge)` narrows the boundary from the file to those functions, inside
 -- the declaring file. A function matches on the name as written (`gate.judge`) or on its
 -- last segment (`judge`), because the local the site spells the module with need not be
 -- the name the marker uses. A function that is assigned rather than declared
 -- (`gate.judge = function() ... end`) has no name of its own here, and the site counts as
 -- being in the enclosing function -- as a callback written inside `gate.judge` does.
---
--- A test that compares a whole sealed value builds one, and is reported like anywhere
--- else: `t.expect(gate.judge("yes")):to_equal({ verdict = "yes", at = 1 })` writes a
--- literal typed as `gate.Judged` in a file that is not `gate.tl`, which is the rule
--- working rather than misfiring. Both ways through are ordinary: the assertion carries
--- `-- htl: allow(sealed-record)`, which says this literal exists to be compared and never
--- leaves the test, or the test asserts the fields it is about
--- (`t.expect(j.verdict):to_equal("yes")`), which builds nothing and says which field
--- differed when it fails.
---
--- Like `---@struct`, this is a lint and not a type: the file stays valid Teal, other
--- tooling ignores the comment, and what it adds is the one thing a run-time check cannot
--- -- that no other code minted the value. It pairs with `---@struct` on the same record,
--- which says every field is set where this says who may set them; both report at the
--- same site with their own message.
 local FUNCTION_KINDS = {
    ["function"] = true, ["local_function"] = true, ["global_function"] = true,
    ["record_function"] = true, ["macroexp"] = true, ["local_macroexp"] = true,

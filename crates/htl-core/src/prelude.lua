@@ -818,12 +818,10 @@ end
 -- `---@required` are answered elsewhere and are untouched by this, so a record can be
 -- open at one end (keys nobody declared) and closed at the other (fields it does).
 --
--- What it costs is one case: a misspelled *optional* field becomes silence. `colour` is
--- no longer an unknown field, and `struct-fields` has nothing to say because nothing is
--- missing -- the required case is still caught, the optional case is not. That is the
--- price of the marker rather than an oversight: a near-miss heuristic here would fire on
--- the very keys the marker exists to allow, and a warning that is wrong whenever the
--- marker is doing its job is worse than the silence.
+-- What it costs — a misspelled *optional* field becomes silence, and why that is the
+-- price of the marker rather than an oversight — is in `struct-fields`' explanation
+-- (`lint::explain::STRUCT_FIELDS`, what `htl check --explain struct-fields` prints), the
+-- rule a reader meets when a field is missing and the one this marker leaves quiet.
 local function extensible_declared(cache, t)
    local lines = source_lines(cache, t.file)
    if not lines then return nil end

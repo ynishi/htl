@@ -41,6 +41,10 @@ pub use htl::Diagnostic;
 pub struct Out {
     pub json: bool,
     diagnostics: Vec<Diagnostic>,
+    /// The rules the findings said so far were under, each once, in name order: what
+    /// `htl check` names `--explain` for after the findings. Kept whether or not the run
+    /// prints text, since recording is cheap and the caller decides what to do with it.
+    rules: std::collections::BTreeSet<String>,
 }
 
 impl Out {
@@ -48,16 +52,25 @@ impl Out {
         Self {
             json,
             diagnostics: Vec::new(),
+            rules: Default::default(),
         }
     }
 
     pub fn take(&mut self) -> Vec<Diagnostic> {
         std::mem::take(&mut self.diagnostics)
     }
+
+    /// The rules the findings said so far were under, each once, in name order.
+    pub fn rules_said(&self) -> impl Iterator<Item = &str> {
+        self.rules.iter().map(String::as_str)
+    }
 }
 
 impl htl::project::Output for Out {
     fn diagnostic(&mut self, d: &Diagnostic) {
+        if let Some(rule) = &d.rule {
+            self.rules.insert(rule.clone());
+        }
         let severity = d.severity;
         if self.json {
             self.diagnostics.push(d.clone());
