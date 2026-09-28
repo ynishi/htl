@@ -97,9 +97,10 @@ thick rather than thin: the design is in there, not only the signatures.
 
 `cargo doc` is where a reader is sent, the way godoc and docs.rs are: the
 reference *is* the doc comments, and there is no second one. A new flag is done
-when its clap doc says what it does, a new lint when its entry in `lint::RULES`
-and the `htl::lint` module doc do, a new config key when its field in `config.rs`
-does; nothing has to be repeated anywhere for the change to count. When a comment
+when its clap doc says what it does, a new lint when its entry in `lint::RULES` —
+its explanation included, the text `htl check --explain <rule>` prints — and the
+`htl::lint` module doc do, a new config key when its field in `config.rs` does;
+nothing has to be repeated anywhere for the change to count. When a comment
 and an issue or a chat disagree, the code wins, then the comment.
 
 README.md is the front door, not a reference: what htl is, how to install it, one

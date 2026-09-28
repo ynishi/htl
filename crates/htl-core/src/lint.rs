@@ -77,6 +77,11 @@
 //! | `require-cycle` | warn | a loop in the require graph of the files `htl check <dir>` just checked, e.g. `a.tl -> b.tl -> a.tl`. Teal types the back edge as an opaque circular require, so without this the symptom is "cannot index" somewhere else. The graph is the one that runs: a `local type x = require("x")` the generator erases is no edge, so two files importing each other's records for annotations alone are not a loop |
 //! | `global-redeclaration` | warn | one global name declared at two sites — a site being the file, line and column of the declared name — among everything the run's files brought into scope through their requires. Two `.d.tl` each declaring `global VERSION: string` is the case: the checker keeps the first it walks and says nothing about the second when the types agree, and nothing else did. Reported once per name, at the later site, naming the earlier, whether or not the types agree: the checker's own `cannot redeclare global with a different type` is raised only where one environment walks both declarations, which depends on the walk order, and this does not. The sites ride on each check ([`crate::CheckInfo::global_sites`]), so a declaration file, which the walk never visits, and a run replayed from the cache both count |
 //!
+//! The table says what each rule catches. Why it exists, what the fix is and the judgment
+//! call where there is one is the rule's explanation ([`Rule::explain`], the text in
+//! [`explain`]), which `htl check --explain <rule>` prints; a finding names the rule in its
+//! `[htl <rule>]` suffix, and that is the name to hand the flag.
+//!
 //! Teal's own warnings are reported under their kind's name in the `tl:` namespace — as
 //! `warning: src/a.tl:5:10: unused variable n: integer [htl tl:unused]`, and as `"rule":
 //! "tl:unused"` in `--format json`:
@@ -326,13 +331,21 @@ pub struct Rule {
     pub side: Side,
     /// Which of the two name surfaces may contain it. See [`Surfaces`].
     pub surfaces: Surfaces,
+    /// What `htl check --explain <name>` prints: what the rule catches, why it exists, what
+    /// the fix is, and the judgment call where there is one — the part of a rule that a
+    /// finding's message has no room for and that a reader who has just been shown
+    /// `[htl <name>]` wants. Kept here, beside the level, so that a rule without one is a
+    /// test failure the way a rule without a level would be; the text itself is in
+    /// [`explain`]. Empty for a fix class, which no check reports under.
+    pub explain: &'static str,
 }
 
 impl Rule {
     /// Reported, and advisory until a project says `deny` or the run says `strict`.
-    const fn warn(name: &'static str, side: Side) -> Self {
+    const fn warn(name: &'static str, side: Side, explain: &'static str) -> Self {
         Self {
             name,
+            explain,
             default: Level::Warn,
             side,
             surfaces: Surfaces::LintAndFix,
@@ -341,9 +354,10 @@ impl Rule {
 
     /// Not reported until a project asks for it. An opinion htl has, rather than a state
     /// a project is in by accident.
-    const fn allow(name: &'static str, side: Side) -> Self {
+    const fn allow(name: &'static str, side: Side, explain: &'static str) -> Self {
         Self {
             name,
+            explain,
             default: Level::Allow,
             side,
             surfaces: Surfaces::LintAndFix,
@@ -352,9 +366,10 @@ impl Rule {
 
     /// Reported, and the run fails: what the rule catches fails at run time whatever the
     /// project thinks of it, so a level a project has to raise would only delay the news.
-    const fn deny(name: &'static str, side: Side) -> Self {
+    const fn deny(name: &'static str, side: Side, explain: &'static str) -> Self {
         Self {
             name,
+            explain,
             default: Level::Deny,
             side,
             surfaces: Surfaces::LintAndFix,
@@ -366,6 +381,7 @@ impl Rule {
     const fn fix_class(name: &'static str, side: Side) -> Self {
         Self {
             name,
+            explain: "",
             default: Level::Allow,
             side,
             surfaces: Surfaces::FixOnly,
@@ -384,8 +400,8 @@ impl Rule {
 /// checked, then the warning kinds the vendored Teal compiler reports for itself. The last
 /// two are `htl fix`'s error classes, which the listing does not print — see [`Surfaces`].
 pub const RULES: &[Rule] = &[
-    Rule::warn("nil-index", Side::Lua),
-    Rule::warn("nil-return", Side::Lua),
+    Rule::warn("nil-index", Side::Lua, explain::NIL_INDEX),
+    Rule::warn("nil-return", Side::Lua, explain::NIL_RETURN),
     // `allow`, unlike its half above, and that is the point. Indexing a call's result
     // directly is wrong whatever an analysis says; holding the local it was bound to to a
     // guard is a flow question, and the three shapes lua-language-server has had open on
@@ -393,44 +409,72 @@ pub const RULES: &[Rule] = &[
     // error(...)`) are what a project would be arguing with. A rule that is wrong while it
     // is doing its job does not belong in every project by default; one that wants it says
     // so by name.
-    Rule::allow("nil-return-unchecked", Side::Lua),
+    Rule::allow(
+        "nil-return-unchecked",
+        Side::Lua,
+        explain::NIL_RETURN_UNCHECKED,
+    ),
     // `allow`, and for a third reason again. The two above are about code that may be
     // wrong; this one is about code that is right and that a library the project already
     // depends on says in one call. It is silent unless `htlx` is installed — advice to use
     // what a project has, never to take on what it does not — and it holds a loop to three
     // conditions before reading it as a call, so it is rarely wrong. Rarely is still not a
     // reason to argue with every project about working code, so a project asks for it.
-    Rule::allow("htlx-available", Side::Lua),
-    Rule::warn("struct-fields", Side::Lua),
-    Rule::warn("sealed-record", Side::Lua),
-    Rule::warn("enum-exhaustive", Side::Lua),
-    Rule::warn("enum-cast", Side::Lua),
-    Rule::warn("enum-table", Side::Lua),
-    Rule::warn("union-exhaustive", Side::Lua),
-    Rule::warn("shadow-local", Side::Lua),
-    Rule::warn("no-global", Side::Lua),
-    Rule::allow("no-any", Side::Lua),
-    Rule::allow("explicit-number", Side::Lua),
-    Rule::allow("class-record", Side::Lua),
+    Rule::allow("htlx-available", Side::Lua, explain::HTLX_AVAILABLE),
+    Rule::warn("struct-fields", Side::Lua, explain::STRUCT_FIELDS),
+    Rule::warn("sealed-record", Side::Lua, explain::SEALED_RECORD),
+    Rule::warn("enum-exhaustive", Side::Lua, explain::ENUM_EXHAUSTIVE),
+    Rule::warn("enum-cast", Side::Lua, explain::ENUM_CAST),
+    Rule::warn("enum-table", Side::Lua, explain::ENUM_TABLE),
+    Rule::warn("union-exhaustive", Side::Lua, explain::UNION_EXHAUSTIVE),
+    Rule::warn("shadow-local", Side::Lua, explain::SHADOW_LOCAL),
+    Rule::warn("no-global", Side::Lua, explain::NO_GLOBAL),
+    Rule::allow("no-any", Side::Lua, explain::NO_ANY),
+    Rule::allow("explicit-number", Side::Lua, explain::EXPLICIT_NUMBER),
+    Rule::allow("class-record", Side::Lua, explain::CLASS_RECORD),
     // The `async` / `await` syntax (`[lang] async`). Four are `deny`, the first rules
     // that are: a suspension the caller cannot see, an `await` where Lua cannot yield, a
     // task read after its scope cancelled it and an async function a C callee calls each
     // fail at run time, at a line that is not the one that caused it, and the rules exist
     // so that the line named is. All five are silent for a project without the setting.
-    Rule::deny("await-missing", Side::Lua),
-    Rule::deny("await-outside-async", Side::Lua),
-    Rule::warn("await-non-async", Side::Lua),
-    Rule::deny("task-escape", Side::Lua),
-    Rule::deny("async-as-sync-callback", Side::Lua),
+    Rule::deny("await-missing", Side::Lua, explain::AWAIT_MISSING),
+    Rule::deny(
+        "await-outside-async",
+        Side::Lua,
+        explain::AWAIT_OUTSIDE_ASYNC,
+    ),
+    Rule::warn("await-non-async", Side::Lua, explain::AWAIT_NON_ASYNC),
+    Rule::deny("task-escape", Side::Lua, explain::TASK_ESCAPE),
+    Rule::deny(
+        "async-as-sync-callback",
+        Side::Lua,
+        explain::ASYNC_AS_SYNC_CALLBACK,
+    ),
     // The project layer. All `warn`: each describes a state a project is in by accident
     // rather than on purpose, so it is worth saying, and none of them is worth failing a
     // run over unless the project says so — which is what a level is for.
-    Rule::warn("duplicate-declaration", Side::Rust),
-    Rule::warn("host-module-shadowed", Side::Rust),
-    Rule::warn("contract", Side::Rust),
-    Rule::warn("contract-unenforced", Side::Rust),
-    Rule::warn("require-cycle", Side::Rust),
-    Rule::warn("global-redeclaration", Side::Rust),
+    Rule::warn(
+        "duplicate-declaration",
+        Side::Rust,
+        explain::DUPLICATE_DECLARATION,
+    ),
+    Rule::warn(
+        "host-module-shadowed",
+        Side::Rust,
+        explain::HOST_MODULE_SHADOWED,
+    ),
+    Rule::warn("contract", Side::Rust, explain::CONTRACT),
+    Rule::warn(
+        "contract-unenforced",
+        Side::Rust,
+        explain::CONTRACT_UNENFORCED,
+    ),
+    Rule::warn("require-cycle", Side::Rust, explain::REQUIRE_CYCLE),
+    Rule::warn(
+        "global-redeclaration",
+        Side::Rust,
+        explain::GLOBAL_REDECLARATION,
+    ),
     // Teal's warning kinds, kept in the compiler's own vocabulary behind a `tl:` prefix.
     // The prefix is not decoration. `unused` already means something else here — `htl
     // unused` reports modules nothing requires, not locals nothing reads — and these seven
@@ -441,13 +485,13 @@ pub const RULES: &[Rule] = &[
     // warnings and htl forwarded them as warnings long before it could name them. There is
     // one severity to inherit, so the level says the same thing with nothing added — see
     // the withdrawn fourth level in the umbrella issue.
-    Rule::warn("tl:unknown", Side::Tl),
-    Rule::warn("tl:unused", Side::Tl),
-    Rule::warn("tl:unread", Side::Tl),
-    Rule::warn("tl:redeclaration", Side::Tl),
-    Rule::warn("tl:branch", Side::Tl),
-    Rule::warn("tl:hint", Side::Tl),
-    Rule::warn("tl:debug", Side::Tl),
+    Rule::warn("tl:unknown", Side::Tl, explain::TL_UNKNOWN),
+    Rule::warn("tl:unused", Side::Tl, explain::TL_UNUSED),
+    Rule::warn("tl:unread", Side::Tl, explain::TL_UNREAD),
+    Rule::warn("tl:redeclaration", Side::Tl, explain::TL_REDECLARATION),
+    Rule::warn("tl:branch", Side::Tl, explain::TL_BRANCH),
+    Rule::warn("tl:hint", Side::Tl, explain::TL_HINT),
+    Rule::warn("tl:debug", Side::Tl, explain::TL_DEBUG),
     // The classes `htl fix` files an error's fix under. A Teal error carries no rule of
     // its own — the compiler does not name its errors the way it names its warning kinds —
     // so `--rule` and `[fix] disable` would have nothing to say about one. These two are
@@ -486,6 +530,12 @@ fn index_of(name: &str) -> Option<usize> {
 /// The name of every rule of the lint surface, in [`RULES`] order.
 pub fn rule_names() -> Vec<&'static str> {
     lint_rules().map(|(_, r)| r.name).collect()
+}
+
+/// The rule of the lint surface named `name`, for `htl check --explain`: `None` for a name
+/// no check reports under, a fix class included.
+pub fn explained(name: &str) -> Option<&'static Rule> {
+    lint_rules().map(|(_, r)| r).find(|r| r.name == name)
 }
 
 /// Every rule of the lint surface with the level a project that says nothing gets, in
@@ -750,6 +800,384 @@ fn collect_allows(src: &str) -> AllowedLines {
         }
     }
     out
+}
+
+/// The explanations `htl check --explain <rule>` prints, one per rule of the lint surface,
+/// in [`RULES`] order. Each says what the rule catches, why it exists, what the fix is, and
+/// the judgment call where there is one; the module doc's table carries the first of those
+/// in one line, and the comment above a rule's implementation in `lint.lua` or
+/// `prelude.lua` points here rather than restating it. A rule's explanation is where the
+/// design of the rule is written for the person who has just been shown its name.
+pub mod explain {
+    /// `nil-index`.
+    pub const NIL_INDEX: &str = r#"Indexing a map or array (`t[k]`) and then indexing, calling or indexing again what
+came back: `t[k].x`, `t[k]:m()`, `t[k]()`, `t[k][j]`.
+
+Teal types `t[k]` as `V`, the map's value type, and not as `V | nil`, so the checker
+accepts the chain and the program raises `attempt to index a nil value` when the key is
+absent — the one runtime error Teal's types were supposed to remove. Bind the lookup to a
+local and test it (`local v = t[k]  if v then v.x end`), or use a form that says what an
+absent key means (`t[k] or default`).
+
+Not reported: a chain over a record field (`r.f.x`), which Teal does type, and a lookup
+that is tested before it is chained."#;
+
+    /// `nil-return`.
+    pub const NIL_RETURN: &str = r#"The same chain as `nil-index`, over a call of a function whose declaration carries
+`---@nilable`: `f(x).field`, `f(x):method()`, `f(x)()`.
+
+The marker says the first return value may be nil; Teal types the call as `T` regardless,
+so the checker accepts the chain and the program can raise at the call site. Bind the
+result and test it before using it. Where the marker sits (the declaration, in a `.tl`
+or a `.d.tl`) is where the rule reads it, so a host method a `#[host_module]` declared
+`---@nilable` counts as much as a Teal function."#;
+
+    /// `nil-return-unchecked`.
+    pub const NIL_RETURN_UNCHECKED: &str = r#"The other half of `nil-return`: the local a `---@nilable` call was bound to, used as the
+base of a chain (`local d = f(x)` then `d:upper()`) before any statement looks at it.
+One report per local, at the first such use.
+
+Off by default (`allow`), on purpose. Whether a local was checked is a flow question, and
+the three shapes this rule gets wrong are the ones where something did check: a test
+inside a helper the local was passed to, a test on a second local derived from it, and
+`local d = f(x) or error(...)`. A rule that is wrong while it is doing its job does not
+belong in every project; one that wants the report says `nil-return-unchecked = "warn"`
+and adds `-- htl: allow(nil-return-unchecked)` where it knows better."#;
+
+    /// `htlx-available`.
+    pub const HTLX_AVAILABLE: &str = r#"A `for i = 1, #t do` loop whose whole body is a function htl-x already has — `list.map`,
+`list.to_set`, `list.filter` — in a project that depends on htl-x. Silent in a project that
+does not: the rule is advice to use what the project has, never to take on a dependency.
+
+Off by default (`allow`). The loop it reports is right, and so is the call it names; the
+choice between them is style, and a lint should not argue style with every project. A
+project that has decided says `htlx-available = "warn"`. The loop is read as a call only
+when three conditions hold (the body is one statement, the index is used only as `t[i]`,
+the result goes to one table), so a loop that does anything else is left alone."#;
+
+    /// `struct-fields`.
+    pub const STRUCT_FIELDS: &str = r#"A table built for a record marked `---@struct` that leaves out a field the record
+declares and `---@optional` does not exempt. Silent until a record carries the marker.
+
+Teal has no `?` for record fields, so without the marker a record the program builds
+itself reads as if any field might be absent, and every use site pays for that with a
+nil check. The marker says the record is built whole: every field is present at every
+construction site, and the default for a new field is mandatory. `---@optional` is the
+exception written on purpose.
+
+Growing a record that already has sites is this report arriving at all of them at once,
+which is the point, and the way through is two steps: add the field with `---@optional`
+(a marker that says "not yet"), fill the sites at whatever pace the work allows, then
+delete the marker line — every site still short is reported, and a clean check says the
+last one is done. `htl fix --diff` spells the missing fields into each site as a
+suggestion it never writes: a checklist and a line to paste from, not the migration done
+for you. Nothing fills a missing field in, because the value it should hold is the
+program's to decide.
+
+This is a lint and not a type: the markers are comments, the file stays valid Teal, other
+tooling ignores them, and use sites still see a nilable field. What it removes is the
+reason to guard. Data arriving from outside the program — a mod's return value, a save
+file, a host — is a different question, and a record marked `---@contract` with
+`---@required` on its mandatory fields is what checks that. A test suite feels the cost
+all at once: a dozen tests that each spell every field are a dozen reports when a field
+is added. A factory beside the tests — defaults in one place, an overlay record naming
+only what a test varies — turns them into one; the overlay is its own record, since typed
+as the target it would be one more construction site."#;
+
+    /// `sealed-record`.
+    pub const SEALED_RECORD: &str = r#"A table built for a record marked `---@sealed`, or an `as` cast to one, outside the file
+that declares it — outside the functions the marker names, when it names any
+(`---@sealed(gate.judge)`). Silent until a record carries the marker.
+
+Some records mean "this went through the check": a `Judged` only `gate.judge` is supposed
+to produce, a state only a transition may mint. Teal has no private field and no sealed
+constructor to say it with — `{ ... }` with the right keys builds one anywhere, and `as`
+gets past even a mismatch because it is erased. The marker says it and this rule holds
+the boundary. A function matches the marker's list on the name as written (`gate.judge`)
+or on its last segment (`judge`); a function assigned rather than declared has no name of
+its own, and a site inside it counts as being in the enclosing function.
+
+A test that compares a whole sealed value builds one, and is reported like anywhere else:
+`t.expect(gate.judge("yes")):to_equal({ verdict = "yes", at = 1 })` writes a literal typed
+as `gate.Judged` in a file that is not `gate.tl`. That is the rule working. Both ways
+through are ordinary: the assertion carries `-- htl: allow(sealed-record)`, which says the
+literal exists to be compared and never leaves the test, or the test asserts the fields
+it is about (`t.expect(j.verdict):to_equal("yes")`), which builds nothing and says which
+field differed when it fails. Like `---@struct`, this is a lint and not a type; the two
+pair on one record — every field is set, and only these functions set them."#;
+
+    /// `enum-exhaustive`.
+    pub const ENUM_EXHAUSTIVE: &str = r#"`if e == "a" then ... elseif e == "b" then ... end` over a value of a declared enum, with
+a value of the enum left unhandled and no `else`. Enums nested in records and enums from
+required modules count.
+
+Adding a value to an enum otherwise leaves every chain that predates it compiling, with
+the new value falling wherever the last branch happened to lead. Handle the value, or
+write the `else` that says the rest is meant to fall through. Not reported: a chain with
+an `else`, a single test (a guard, not a dispatch), and a chain where every branch returns
+and code follows, which is the `else` written differently."#;
+
+    /// `enum-cast`.
+    pub const ENUM_CAST: &str = r#"`e as E` where `E` is an enum and the checker types `e` as `string`.
+
+`as` is erased, so the word enters the enum with nothing checking it, and every
+`enum-exhaustive` chain downstream trusts a value that may be none of the enum's. Check
+the string against the enum's values and hand on the result, or take the value typed as
+the enum from where it came. Not reported: a string literal (`"open" as E`, which the
+checker verifies), and a value already typed as the enum."#;
+
+    /// `enum-table`.
+    pub const ENUM_TABLE: &str = r#"A table constructor whose declared type maps an enum — `{string: E}` or `{E: T}` — and
+that leaves a value of the enum out, or lists a word that is not one.
+
+A mapping over an enum is a dispatch table, and a value with no entry is the same hole
+`enum-exhaustive` reports in an `if` chain: the program compiles and the lookup returns
+nil. An array of the enum (`{E}`) is a selection, not a mapping, and is not reported.
+`htl fix enum-table` fills a `{string: E}` table in with the missing values."#;
+
+    /// `union-exhaustive`.
+    pub const UNION_EXHAUSTIVE: &str = r#"`if x is A then ... elseif x is B then ... end` over a union, with a variant never tested
+and no `else`. The sibling of `enum-exhaustive`, for the same reason: adding a variant
+otherwise leaves every chain that predates it compiling, with the new one falling
+wherever the last branch led. The variants come from the checker, not from the tests
+in the chain, so a chain that predates a variant is reported once the union gains it.
+The exemptions are `enum-exhaustive`'s: an `else`, a single `is` (a guard), and a chain
+where every branch returns and code follows.
+
+The judgment call is whether the union should exist. A union is worth its records only
+when the variants carry different data. A `where` clause uses `self` once, so one record
+answers to one tag value, and a type with seven tags that carry the same fields is seven
+structurally identical records to gain nothing an enum field on one record does not
+already give — `enum-exhaustive` guards those branches just the same, and the seven
+records are gone. The question is not "does this have a tag" but "do the variants hold
+different things". When they do not, the fix for this report is not a branch but a
+smaller type."#;
+
+    /// `shadow-local`.
+    pub const SHADOW_LOCAL: &str = r#"A local, loop variable or parameter reusing the name an enclosing scope bound to a
+`require`d module. The message names the module, where it was required, and that the
+module is unreachable for the rest of the scope.
+
+The one thing about shadowing the compiler cannot say: that the shadowed name was a
+module, so `util.f()` in that scope now calls a method of whatever the local holds.
+Rename the local. Shadowing an ordinary outer local is `tl:redeclaration`, which reports
+the same line and column and says more about it (the kind declared, and the origin's line
+and column); a local over a required module is both, and silencing it wants both names
+in the `-- htl: allow(...)` comment."#;
+
+    /// `no-global`.
+    pub const NO_GLOBAL: &str = r#"A `global` declaration.
+
+A `global` is visible only in the files that require the declaring module, and the
+checker has no whole-program view of who set what, so a second site declaring the name
+is `global-redeclaration` and a reader cannot tell from a use where the value came from.
+Write a local and return it from the module. For a value the host set as a global, write
+one module that reads it from `_G` and returns it, so the type and the origin are written
+once. The three ways a host value gets a type are on the `htl` crate's front page."#;
+
+    /// `no-any`.
+    pub const NO_ANY: &str = r#"An explicit `any` in an annotation, or an `as any` cast.
+
+Off by default (`allow`): `any` is a legitimate escape hatch at a boundary the types
+cannot describe, and how much of it a project tolerates is the project's decision, not
+htl's. A project that wants every use visible says `no-any = "warn"`, and marks the ones
+it means with `-- htl: allow(no-any)`."#;
+
+    /// `explicit-number`.
+    pub const EXPLICIT_NUMBER: &str = r#"`local n = 0` (inferred `integer`) later assigned a number expression — `n = n * 1.5`,
+`n = a / b`. Names the declaration and the assignment; write `local n: number = 0`.
+
+Teal infers `integer` from the literal and accepts the later assignment, so the
+declaration says one thing and the variable holds another. Plain integer counters are not
+reported. Off by default (`allow`): the mismatch is a matter of how a reader is told the
+type, not of behaviour."#;
+
+    /// `class-record`.
+    pub const CLASS_RECORD: &str = r#"A record declaring metamethods (`metamethod __index: Actor` — a class).
+
+Its metatable is attached by `setmetatable` at run time and is not part of the value, so
+serialization and the Rust boundary drop it: a value that crosses either arrives as a
+plain table, and its methods are gone. Keep such records out of saved data and host
+signatures; a class is fine inside the program. Off by default (`allow`): a project that
+never crosses those boundaries has nothing to hear."#;
+
+    /// `await-missing`.
+    pub const AWAIT_MISSING: &str = r#"Under `[lang] async`: a call of an async function — a Teal `async function`, or a host
+method whose `.d.tl` line carries `---@async` (what `htl dts` and `#[host_module]` write
+for an `async fn`) — without `await`. Reported at the call.
+
+The suspension has to be visible where it happens. Without `await` the call returns a
+task the caller never reads, and the work either never runs or runs after the caller has
+moved on, with the failure surfacing at a line that did not cause it. `deny` by default,
+the first rules that are: what this catches fails at run time whatever the project thinks
+of it, so a level a project has to raise would only delay the news. Write `await f()`,
+or `async local t = f()` to run it as a child task and `await t` later."#;
+
+    /// `await-outside-async`.
+    pub const AWAIT_OUTSIDE_ASYNC: &str = r#"Under `[lang] async`: `await` or `async local` inside a function that is not `async`, or
+at the top level of a module reached through `require`.
+
+Lua cannot yield from there. The top level of the file being checked is the entry that
+`htl run` / `htl test` run as a root, and is async; the body of an `async function` is
+async; the body of any other function is not, and `require` loads a module with a call
+that cannot yield (Lua 5.4 §4.5), so a module's top level is not either. Mark the
+enclosing function `async` and await it in turn, or move the top-level `await` into a
+function the entry calls. The module case is reported on the check of each file that
+requires the module, at the module's own position. `deny` by default: the failure is
+`attempt to yield from outside a coroutine`, at run time."#;
+
+    /// `await-non-async`.
+    pub const AWAIT_NON_ASYNC: &str = r#"Under `[lang] async`: `await` on a call of a function that is not async.
+
+Nothing suspends, so the marker says something false, and a reader looking for the
+program's suspension points is misled. Drop the `await`, or make the callee `async` if it
+is meant to suspend. `warn`, not `deny`: the program runs as written."#;
+
+    /// `task-escape`.
+    pub const TASK_ESCAPE: &str = r#"Under `[lang] async`: an `async local` name captured by a nested function, or returned.
+
+The task is cancelled when the scope that declared it ends, so what the capture or the
+caller reads is a cancelled task. Await it in the scope that declared it and hand over the
+value, not the task. `deny` by default: the read fails at run time, at a line that is not
+the declaration."#;
+
+    /// `async-as-sync-callback`.
+    pub const ASYNC_AS_SYNC_CALLBACK: &str = r#"Under `[lang] async`: an async function — a Teal `async function`, inline or named, or a
+host method declared `---@async` — handed to a callee that calls it from C. Reported at
+the argument.
+
+Lua's own such callees are `table.sort`'s comparator, `string.gsub`'s replacement,
+`xpcall`'s message handler and a `__tostring` in a table constructor. Called from C, a
+suspension inside the callback fails with `attempt to yield across a C-call boundary`
+(in `xpcall`'s handler it is lost instead). Await what the callback needs before the
+call, and hand the callee a function that is not async.
+
+A host declares its own boundaries on its `.d.tl`, hand-written or generated:
+`---@noyield(f, g)` at the end of a function's declaration line names the parameters its
+implementation calls from C (`#[host_module]` and `htl dts` write it for a sync fn's
+`Function` parameters; the macro's doc says how a parameter overrides it), matched by name
+against that line's parameters, so `a:each(cb)` and `a.each(a, cb)` report the same
+argument. A bare `---@noyield` on a record field says the host calls that field of a table
+it is handed (`#[derive(TealRecord)]` writes it for `#[teal(noyield)]`), and a constructor
+the checker types as the record is reported at the field's value; `{ ... } as R` is not
+seen, because the cast sits on the `as` node.
+
+The mark is on the callee's parameter and not on the function type because whether a
+callback may suspend is decided by what the callee's body does with it — mlua's
+`Function::call` cannot yield through, `call_async` can — and a plain Teal function
+calling its callback lets it yield. So an async value handed to a Teal function is not
+reported, nor is one handed to a callee whose declaration carries no marker: a callee
+nobody has described is unknown, and says nothing. `deny` by default."#;
+
+    /// `duplicate-declaration`.
+    pub const DUPLICATE_DECLARATION: &str = r#"Two `.d.tl` for one module name on the search path.
+
+An order decides which one the checker reads, and nothing in either file says so; a
+project that edits the one not read sees no effect and no error. The message names the
+one read and the one that was not. Remove one, or move the declarations the project
+wants into the one the order picks."#;
+
+    /// `host-module-shadowed`.
+    pub const HOST_MODULE_SHADOWED: &str = r#"For a file in no project: a `require` of a name a `#[host_module]` in the surrounding
+crate registers, that resolved to a Teal file of that name.
+
+`package.preload` beats the path searcher at run time, so the file is what is checked and
+the host's module is what runs, and the two can disagree in any way. Rename the file, or
+stop registering the name. In a project the same state is an error rather than a lint:
+the project model knows which names the host provides and refuses a file under one."#;
+
+    /// `contract`.
+    pub const CONTRACT: &str = r#"A module under a `[[contract]]` directory that does not satisfy the contract's type or
+its `---@required` fields, or a `---@contract` marker that cannot be turned into a
+contract or published.
+
+A contract is the shape a directory of modules written outside the project has to have —
+mods, plugins, saved data — and this is where a module that breaks it is named at check
+time rather than at the host's first read. The message names the field or the type. The
+host enforces the same contract at run time through `htl::pkg::contract_resolvers`;
+`contract-unenforced` says when it does not."#;
+
+    /// `contract-unenforced`.
+    pub const CONTRACT_UNENFORCED: &str = r#"A contract the host never builds resolvers for, so it is documentation rather than a
+run-time guarantee: a module the check never saw can still be loaded unchecked.
+
+Call `htl::pkg::contract_resolvers(root, &config)` in the host, or say where the
+enforcement lives with `[[contract]] enforced_by` when the scan cannot see it — a
+Lua-side validator, a sibling crate, generated code. The named file has to exist; a
+missing one is reported."#;
+
+    /// `require-cycle`.
+    pub const REQUIRE_CYCLE: &str = r#"A loop in the require graph of the files `htl check <dir>` just checked, e.g.
+`a.tl -> b.tl -> a.tl`, reported once per loop at the first edge's call site.
+
+Teal types the back edge of a cycle as an opaque circular require, so without this the
+symptom is `cannot index` somewhere else, in a file that did nothing wrong. Break the
+loop by moving the shared types into a module both sides require. The graph is the one
+that runs: a `local type x = require("x")` the generator erases is no edge, so two files
+importing each other's records for type annotations alone are not a loop."#;
+
+    /// `global-redeclaration`.
+    pub const GLOBAL_REDECLARATION: &str = r#"One global name declared at two sites — a site being the file, line and column of the
+declared name — among everything the run's files brought into scope through their
+requires. Reported once per name, at the later site, naming the earlier, whether or not
+the types agree.
+
+Two `.d.tl` each declaring `global VERSION: string` is the case: the checker keeps the
+first it walks and says nothing about the second when the types agree, and its own
+`cannot redeclare global with a different type` is raised only where one environment
+walks both declarations, which depends on the walk order. This does not depend on it:
+the sites ride on each check, so a declaration file, which the walk never visits, and a
+run replayed from the cache both count. Declare the name once, in the module that owns
+it, and require that module."#;
+
+    /// `tl:unknown`.
+    pub const TL_UNKNOWN: &str = r#"Teal's own warning: a variable the checker cannot resolve.
+
+A misspelled name, or a global set by a host that nothing declares. Declare it — for a
+host value, one module that reads it from `_G` and returns it typed (`no-global` says
+why) — or fix the spelling. Settable and silenceable like any rule."#;
+
+    /// `tl:unused`.
+    pub const TL_UNUSED: &str = r#"Teal's own warning: a local, parameter, label or loop variable nothing uses.
+
+Reported under the compiler's kind name in the `tl:` namespace, so that the level can be
+set like any rule's (`--lint -tl:unused`) and a `-- htl: allow(tl:unused)` silences one
+occurrence. Delete the declaration, or name it `_` if the position is needed."#;
+
+    /// `tl:unread`.
+    pub const TL_UNREAD: &str = r#"Teal's own warning: a variable written and never read after.
+
+The write is dead, and the value it computed with it. Remove the assignment, or read the
+variable where the value was meant to go. Settable and silenceable like any rule."#;
+
+    /// `tl:redeclaration`.
+    pub const TL_REDECLARATION: &str = r#"Teal's own warning: a declaration over a name already declared, naming the kind declared
+and the line and column of the one it shadows. It also sees two declarations in the same
+scope.
+
+This is where shadowing is reported. `shadow-local` was narrowed to the one thing the
+compiler cannot say — that the shadowed name was a required module — so a local over an
+ordinary outer local is this and only this. Rename one of the two."#;
+
+    /// `tl:branch`.
+    pub const TL_BRANCH: &str = r#"Teal's own warning: a test that can never hold, e.g. `x is B` where `x` has already been
+narrowed out of `B`.
+
+The branch is dead; either the earlier test is wrong or this one is. Settable and
+silenceable like any rule."#;
+
+    /// `tl:hint`.
+    pub const TL_HINT: &str = r#"Teal's own suggestions: `.` where `:` was meant, `pairs` over an array, a
+`string.format` pattern that does not match its arguments, and more.
+
+Each says what the compiler would have expected. Settable and silenceable like any rule;
+`--lint -tl:hint` turns the whole kind off for a run."#;
+
+    /// `tl:debug`.
+    pub const TL_DEBUG: &str = r#"Teal's own report of an ambiguity in what it inferred.
+
+Rare, and usually a sign that an annotation would help the reader as much as the
+checker. Settable and silenceable like any rule."#;
 }
 
 #[cfg(test)]

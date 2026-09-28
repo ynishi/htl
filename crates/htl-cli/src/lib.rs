@@ -204,6 +204,8 @@ Examples:
                                  one rule fails the run, another is advice
   htl check src --lint -tl:hint  a warning kind of the Teal compiler silenced
   htl check --list-lints         every rule with its default level, then exit
+  htl check --explain union-exhaustive
+                                 why the rule exists and how to decide its cases
 
 The store is .htl/cache at the project root, the nearest htl.toml or mlua-pkg.toml above
 the paths; --no-cache skips it, --explain-cache says why a lookup missed.
@@ -224,6 +226,10 @@ Caching: https://github.com/ynishi/htl#caching
         /// List every lint rule with its default level and exit
         #[arg(long)]
         list_lints: bool,
+        /// Print a rule's explanation — what it catches, why, the fix, the judgment call —
+        /// and exit; the name is the one a finding prints in `[htl <rule>]`
+        #[arg(long, value_name = "RULE")]
+        explain: Option<String>,
         /// Output format
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
@@ -629,6 +635,7 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
             strict,
             lint,
             list_lints,
+            explain,
             format,
             no_cache,
             cache_mode,
@@ -639,6 +646,7 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
             CheckFlags {
                 strict,
                 list_lints,
+                explain_rule: explain,
                 json: format == Format::Json,
                 use_cache: !no_cache,
                 cache_mode: cache_mode.map(Into::into),
@@ -1522,6 +1530,8 @@ struct UnusedFlags {
 struct CheckFlags {
     strict: bool,
     list_lints: bool,
+    /// `--explain <rule>`: print the rule's explanation and exit.
+    explain_rule: Option<String>,
     json: bool,
     use_cache: bool,
     cache_mode: Option<cache::Mode>,
@@ -2380,6 +2390,18 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
     // and now not even a Lua state: the registry is Rust (`htl_core::lint::RULES`), which
     // is what lets the rules the project layer reports under be listed beside the ones
     // `lint.lua` implements.
+    // `--explain <rule>`: the rule's explanation, and nothing else. The name is the one a
+    // finding prints in its `[htl <rule>]` suffix, so a reader hands the flag what they
+    // were shown; a name no check reports under — a typo, or a fix class — is refused the
+    // way `--lint` refuses it, on stderr, with the exit code an unusable argument gets.
+    if let Some(rule) = flags.explain_rule.as_deref() {
+        let Some(r) = htl::lint::explained(rule) else {
+            eprintln!("unknown lint rule: {rule}");
+            return Ok(ExitCode::from(2));
+        };
+        println!("{}  (default: {})\n\n{}", r.name, r.default, r.explain);
+        return Ok(ExitCode::SUCCESS);
+    }
     if list_lints {
         // The name and the level a project that says nothing gets. Two columns rather than
         // one because the default is a level now, and the five rules at `allow` are
@@ -2393,6 +2415,9 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
         for (name, level) in htl::lint::rule_defaults() {
             println!("{name:width$}  {level}");
         }
+        // No pointer to `--explain` here: every rule listed has an explanation (the
+        // registry's test holds it to that), and the listing is name-level pairs that
+        // tests and greps read line by line. `--help` and a finding's own hint carry it.
         return Ok(ExitCode::SUCCESS);
     }
     // htl.toml first, then --lint, so the flag wins; `strict` from the file unless flagged.

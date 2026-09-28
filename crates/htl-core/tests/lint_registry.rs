@@ -176,3 +176,32 @@ fn a_teal_warning_carries_its_kind_into_the_check_result() {
     // The name is split off, so the message still reads as a sentence.
     assert!(!named.message.contains("[htl"), "{}", named.message);
 }
+
+/// Every rule of the lint surface carries an explanation, and a fix class carries none: a
+/// rule added without one is a failure here, the way one without a level would be, and
+/// `htl check --explain <rule>` answers for exactly the names a finding can print.
+#[test]
+fn every_lint_rule_has_an_explanation_and_the_fix_classes_have_none() {
+    for r in RULES {
+        if r.is_lint() {
+            assert!(
+                r.explain.trim().len() >= 80,
+                "{}: the explanation is what --explain prints; a line is not one",
+                r.name
+            );
+            assert!(
+                htl_core::lint::explained(r.name).is_some(),
+                "{}: explained() must find a lint rule",
+                r.name
+            );
+        } else {
+            assert!(
+                r.explain.is_empty(),
+                "{}: a fix class is not explained",
+                r.name
+            );
+            assert!(htl_core::lint::explained(r.name).is_none(), "{}", r.name);
+        }
+    }
+    assert!(htl_core::lint::explained("no-such-rule").is_none());
+}
