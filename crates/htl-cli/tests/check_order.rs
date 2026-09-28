@@ -723,7 +723,8 @@ fn check_text(args: &[&str], cwd: &Path) -> Vec<String> {
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .chain(String::from_utf8_lossy(&out.stderr).lines())
-        .filter(|l| !l.starts_with("htl check:"))
+        // The summary and the `--explain` pointers are not findings.
+        .filter(|l| !l.starts_with("htl check:") && !l.starts_with("htl check --explain "))
         .map(str::to_string)
         .collect()
 }

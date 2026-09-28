@@ -72,3 +72,70 @@ fn every_rule_the_listing_names_is_explained() {
     }
     assert_eq!(n, 33, "the listing names the whole lint surface");
 }
+
+fn write(path: &Path, text: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+/// A run with findings names the flag once per rule, after the findings and before the
+/// summary; a clean run and a json run do not.
+#[test]
+fn a_run_with_findings_names_the_flag_once_per_rule_before_the_summary() {
+    let root = common::scratch("htl-explain", "hint");
+    write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
+    // Two rules: a lint (`no-global`) and one of the compiler's kinds (`tl:unused`), the
+    // global twice so that "once per rule" is tested rather than "once per finding".
+    write(
+        &root.join("src/main.tl"),
+        "global g1 = 1\nglobal g2 = 2\nlocal unused = 3\nprint(g1 + g2)\n",
+    );
+    let (ok, _, _, stderr) = htl(&["check", "."], &root);
+    assert!(ok, "warn is not a failure: {stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    let hints: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|l| l.starts_with("htl check --explain "))
+        .collect();
+    assert_eq!(
+        hints,
+        [
+            "htl check --explain no-global",
+            "htl check --explain tl:unused"
+        ],
+        "{stderr}"
+    );
+    let first_hint = lines
+        .iter()
+        .position(|l| l.starts_with("htl check --explain "))
+        .unwrap();
+    let last_finding = lines
+        .iter()
+        .rposition(|l| l.starts_with("lint: ") || l.starts_with("warning: "))
+        .unwrap();
+    let summary = lines
+        .iter()
+        .position(|l| l.starts_with("htl check: "))
+        .unwrap();
+    assert!(
+        last_finding < first_hint && first_hint < summary,
+        "{stderr}"
+    );
+    assert_eq!(
+        summary,
+        lines.len() - 1,
+        "the summary is the last line: {stderr}"
+    );
+
+    // The same project through `--format json`: no hint, the document is the output.
+    let (_, _, stdout, stderr) = htl(&["check", ".", "--format", "json"], &root);
+    assert!(!stderr.contains("--explain"), "{stderr}");
+    assert!(stdout.starts_with("{"), "{stdout}");
+
+    // A clean run names nothing.
+    write(&root.join("src/main.tl"), "print(1)\n");
+    let (ok, _, _, stderr) = htl(&["check", "."], &root);
+    assert!(ok, "{stderr}");
+    assert!(!stderr.contains("--explain"), "{stderr}");
+}

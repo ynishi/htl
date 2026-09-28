@@ -2904,6 +2904,15 @@ fn report_check(
             0 => format!("{files} file(s)"),
             n => format!("{} file(s) + {n} in patched dependencies", files - n),
         };
+        // Where the why is, once per rule this run said something under, after the
+        // findings and before the summary — the way cargo names `cargo fix` once rather
+        // than on every line. A finding's message names the site; the explanation names
+        // the rule. Only rules that have one (every lint does; an error has no rule).
+        for rule in out.rules_said() {
+            if htl::lint::explained(rule).is_some() {
+                eprintln!("htl check --explain {rule}");
+            }
+        }
         eprintln!(
             "htl check: {counted}, {errors} error(s), {warnings} warning(s), {lints} lint(s){denied}{}{cached}",
             if strict { " [strict]" } else { "" }

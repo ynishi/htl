@@ -98,7 +98,7 @@ fn text_output_differs_only_in_saying_it_was_cached() {
     // The summary is the one line that is allowed to differ.
     let diagnostics = |s: &str| {
         s.lines()
-            .filter(|l| !l.starts_with("htl check:"))
+            .filter(|l| !l.starts_with("htl check:") && !l.starts_with("htl check --explain "))
             .collect::<Vec<_>>()
             .join("\n")
     };

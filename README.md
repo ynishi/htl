@@ -217,7 +217,9 @@ no-any = "warn"           # allow by default; see it while you migrate, without 
 The same names go on the command line (`--lint nil-index=deny,no-any=warn,-tl:hint`) and
 in `HTL_LINTS`; `[lint] strict` / `--strict` make every `warn` count as `deny`; a
 trailing `-- htl: allow(nil-index)` silences one occurrence. `htl check --list-lints`
-prints every rule with its default level, and
+prints every rule with its default level, `htl check --explain <rule>` prints why a rule
+exists, what the fix is and the judgment call where there is one (a run with findings
+names the flag once per rule, before its summary), and
 [`htl::lint`](https://docs.rs/htl/latest/htl/lint/index.html) is the reference: what
 each rule catches, Teal's own warnings under `tl:*`, and the six markers
 (`---@struct`, `---@sealed`, `---@extensible`, `---@nilable`, `---@async`, `---@noyield`,

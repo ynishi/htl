@@ -882,7 +882,16 @@ file, a host — is a different question, and a record marked `---@contract` wit
 all at once: a dozen tests that each spell every field are a dozen reports when a field
 is added. A factory beside the tests — defaults in one place, an overlay record naming
 only what a test varies — turns them into one; the overlay is its own record, since typed
-as the target it would be one more construction site."#;
+as the target it would be one more construction site.
+
+The other marker at a data boundary, `---@extensible`, says a record may carry keys nobody
+declared — a mod written against a newer SDK, a save file from a later version — and
+what it costs is one case: a misspelled *optional* field becomes silence. `colour` is no
+longer an unknown field, and this rule has nothing to say because nothing is missing; the
+required case is still caught, the optional case is not. That is the price of the marker
+rather than an oversight: a near-miss heuristic would fire on the very keys the marker
+exists to allow, and a warning that is wrong whenever the marker is doing its job is worse
+than the silence."#;
 
     /// `sealed-record`.
     pub const SEALED_RECORD: &str = r#"A table built for a record marked `---@sealed`, or an `as` cast to one, outside the file
