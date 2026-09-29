@@ -195,3 +195,42 @@ fn no_cache_neither_reads_nor_writes() {
         "--no-cache must not read entries that are sitting there"
     );
 }
+
+/// A module implemented in Lua and typed by a `.d.tl` beside it: the declaration is what the
+/// checker resolves the `require` to, and the `.lua` is what runs. A replay must not preload
+/// the declaration's generated Lua (an empty record table) under the module's name — the
+/// second run has to reach `shape.lua` exactly as the first did.
+#[test]
+fn a_declaration_beside_a_lua_module_is_not_preloaded_over_it() {
+    let root = scratch("decl-lua");
+    write(&root.join("htl.toml"), "[check]\n");
+    write(
+        &root.join("src/shape.d.tl"),
+        "local record shape\n   area: function(w: number, h: number): number\nend\nreturn shape\n",
+    );
+    write(
+        &root.join("src/shape.lua"),
+        "local M = {}\nfunction M.area(w, h) return w * h end\nreturn M\n",
+    );
+    write(
+        &root.join("tests/shape_test.tl"),
+        "local t = require(\"htl.test\")\nlocal shape = require(\"shape\")\n\
+         t.it(\"area\", function() t.expect(shape.area(2, 3)):to_equal(6) end)\n",
+    );
+    let first = test_run(&root, &[]);
+    assert_eq!(passed(&first), 1, "{first}");
+    assert_eq!(first["summary"]["files_with_errors"], 0, "{first}");
+
+    let second = test_run(&root, &[]);
+    assert_eq!(
+        replayed(&second),
+        1,
+        "the check came from the store: {second}"
+    );
+    assert_eq!(
+        passed(&second),
+        1,
+        "and the test still reached shape.lua: {second}"
+    );
+    assert_eq!(second["summary"]["files_with_errors"], 0, "{second}");
+}
