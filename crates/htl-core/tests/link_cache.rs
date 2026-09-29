@@ -118,16 +118,18 @@ fn an_edit_costs_the_module_and_what_read_it() {
     );
     let after_top = link_cached(&root);
     assert_eq!(after_top.cached, 2, "{:?}", after_top.modules);
-    // The leaf: it and the module that requires it are re-generated. `main` did not
-    // require `c` itself and replays — an entry's inputs are the module and what it
-    // required, the rule `htl check` has always used (README, "Caching"); `b`'s
-    // declared interface is what `main` was checked against, and `b.tl` did not move.
+    // The leaf: everything above it is re-generated, `main` included, though `main` never
+    // requires `c` itself. An entry's inputs are the module's require closure (the
+    // `htl_core::cache` module doc, "What makes an entry"): a check of `main` walks `b`,
+    // whose `require("c")` walks `c`, and what `main` reports can depend on `c` — a global
+    // `c` declares, a record `b` re-exports from it. That `b.tl` did not move is not enough
+    // to replay `main`.
     write(
         &root.join("src/c.tl"),
         "local record c\nend\nfunction c.one(): integer\n   return 2\nend\nreturn c\n",
     );
     let after_leaf = link_cached(&root);
-    assert_eq!(after_leaf.cached, 1, "{:?}", after_leaf.modules);
+    assert_eq!(after_leaf.cached, 0, "{:?}", after_leaf.modules);
     // And the store holds the new versions: back to replaying everything.
     assert_eq!(link_cached(&root).cached, 3);
 }
@@ -164,6 +166,7 @@ fn a_check_entry_without_code_is_not_a_hit() {
         deps: Vec::new(),
         requires: Vec::new(),
         global_sites: Vec::new(),
+        closure_requires: Vec::new(),
         code: None,
         check: None,
     };

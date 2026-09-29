@@ -193,8 +193,32 @@ pub struct CheckInfo {
     pub syntax_errors: usize,
     /// `file:line:col: message` for warnings (non-fatal).
     pub warnings: Vec<String>,
-    /// Files pulled in via `require` during checking (`.tl` / `.d.tl` / `.lua`).
+    /// Every file this check read through `require` (`.tl` / `.d.tl` / `.lua`): the
+    /// file's require closure, not only what it names itself. Sorted; the file itself is
+    /// not in it, even when a cycle leads back to it.
+    ///
+    /// The closure, because that is what the answer depends on. A check of `top.tl` that
+    /// requires `mid.tl` walks `mid.tl`, whose `require("host")` walks `host.d.tl`: the
+    /// globals `host.d.tl` declares are in scope in `top.tl`, and a record `mid.tl`
+    /// re-exports from it (`type Std = h.Std`) is `host.d.tl`'s record when `top.tl` reads
+    /// a field of it. Change `host.d.tl` and `top.tl` can report something else, though
+    /// `top.tl` never names it. Every reader of this list wants that answer — the cache
+    /// hashes it to decide whether a module's recorded result still holds (the direct
+    /// requires alone replayed `top.tl`'s old result over an edit to `host.d.tl`, #400),
+    /// [`link::Linked::inputs`] hands it to cargo as the files to watch, and `include_tl!`
+    /// tracks it for the same reason.
     pub deps: Vec<PathBuf>,
+    /// For every member of [`deps`](Self::deps), the names that member required, as
+    /// `(member, name)`: the edges below the file, sorted by member, then name. The file's
+    /// own requires are [`requires`](Self::requires), with their call sites.
+    ///
+    /// What the cache probes besides the hashes of `deps`. A hash says a file that was read
+    /// is unchanged; it cannot say that a name a member required still means that file. A
+    /// `mid.tl` appearing where `mid`'s own `require("host")` now finds it instead of
+    /// `host.d.tl` changes what `top.tl` sees exactly as an edit to `host.d.tl` does, and
+    /// every file the old entry hashed still matches. So an entry asks each of these names
+    /// again, from the member that asked it.
+    pub closure_requires: Vec<(PathBuf, String)>,
     /// htl lint findings (`nil-index`, `enum-exhaustive`). Advisory unless the caller
     /// promotes them (`htl check --strict`, `include_tl!`).
     pub lints: Vec<String>,
@@ -2762,6 +2786,19 @@ fn read_checkinfo(t: &Table) -> Result<CheckInfo> {
             .collect::<Result<Vec<_>>>()?,
         Err(_) => Vec::new(),
     };
+    let closure_requires = match t.get::<Table>("closure_requires") {
+        Ok(list) => list
+            .sequence_values::<Table>()
+            .map(|e| {
+                let e = e?;
+                Ok((
+                    PathBuf::from(e.get::<String>("from")?),
+                    e.get::<String>("name")?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?,
+        Err(_) => Vec::new(),
+    };
     let error_items = read_items(t, "error_items", Severity::Error, &error_fixes)?;
     let warning_items = read_items(t, "warning_items", Severity::Warning, &[])?;
     let lint_items = read_items(t, "lint_items", Severity::Lint, &lint_fixes)?;
@@ -2779,6 +2816,7 @@ fn read_checkinfo(t: &Table) -> Result<CheckInfo> {
         warning_items,
         lint_items,
         global_sites,
+        closure_requires,
     })
 }
 
