@@ -2313,8 +2313,10 @@ function H.check(filename, env, opts)
    local warnings, warning_items = warnings_of(filename, result)
    local deps, closure_requires = require_closure(filename, result, env)
    local lints, lint_fixes, lint_items = {}, {}, {}
+   -- The text the lints read, kept on the result so `H.gen` reuses it for comment lines
+   -- instead of reading the file a second time.
+   local src
    if opts.lints ~= false and result.ast and #(result.syntax_errors or {}) == 0 then
-      local src
       local fd = io.open(filename, "rb")
       if fd then src = fd:read("a"); fd:close() end
       if src then
@@ -2385,7 +2387,7 @@ function H.check(filename, env, opts)
       lints = lints, lint_fixes = lint_fixes, requires = requires, dependency_errors = dep_errors,
       error_items = error_items, warning_items = warning_items, lint_items = lint_items,
       global_sites = global_sites, closure_requires = closure_requires,
-      syntax_errors = #(result.syntax_errors or {}), result = result }
+      syntax_errors = #(result.syntax_errors or {}), result = result, src = src }
 end
 
 -- `H.check` of what is on disk right now: a fresh env, nothing seeded, nothing stored --
@@ -2408,6 +2410,44 @@ local function generate_failed(c, filename, gerr)
    c.error_items = { { file = filename, line = 1, col = 1, message = msg } }
 end
 
+-- Comment-only lines of `src`, copied into `code` at their own line. `tl.generate` writes
+-- from the AST, which holds no comments, so every comment line of a `.tl` comes out as an
+-- empty line at the same number. In this repository the `---` lines above a module record
+-- and its functions are the doc (CONTRIBUTING.md, Documentation), and the generated Lua is
+-- what a host may hand its consumers, so without this the copy they read says nothing about
+-- what it is for.
+--
+-- The rule, per source line: a line comment (`^%s*%-%-`) that does not open a long bracket
+-- (`--[[`, `--[=[`, ...) is copied when its output line is empty or blank. Nothing is
+-- inserted or removed, so every line keeps its number and a run-time error still maps
+-- straight back to the `.tl`. A trailing comment shares its line with code and stays
+-- dropped; a block comment spans lines the rule cannot pair with the AST and stays dropped.
+--
+-- Why the "output line is empty" guard is enough for long strings: a `--` line inside a
+-- multi-line `[[ ... ]]` string is not a comment, but the generator writes the string's
+-- lines verbatim, so its output line is never empty and nothing is copied over it.
+-- What the rule does not see, on purpose (it reads lines, not tokens): a `--` line inside a
+-- multi-line block comment is copied as a line comment (still a comment in the output), and
+-- comment lines after the last line of code have no output line to land on (the generator
+-- writes nothing after the last) and are not appended.
+local function keep_comment_lines(code, src)
+   if not src or not src:find("%-%-") then return code end
+   local out = {}
+   for line in (code .. "\n"):gmatch("(.-)\n") do out[#out + 1] = line end
+   local n, changed = 0, false
+   for line in (src:sub(-1) == "\n" and src or src .. "\n"):gmatch("(.-)\n") do
+      n = n + 1
+      if n > #out then break end
+      line = line:gsub("\r$", "")
+      if line:match("^%s*%-%-") and not line:match("^%s*%-%-%[=*%[")
+         and out[n]:match("^%s*$") then
+         out[n] = line
+         changed = true
+      end
+   end
+   return changed and table.concat(out, "\n") or code
+end
+
 -- Type-check + generate Lua source. Returns code, checkinfo (code is nil on failure).
 -- Type-check + generate Lua for one program. Uses the shared env on purpose: a module
 -- already checked while checking its requirer (or an earlier `require`) is served from
@@ -2426,6 +2466,14 @@ function H.gen(filename, opts)
    local t0 = os.clock()
    H.async_gen_ast(c.result.ast)
    local code, gerr = tl.generate(c.result.ast, H.GEN_TARGET)
+   if code then
+      local src = c.src
+      if not src then
+         local fd = io.open(filename, "rb")
+         if fd then src = fd:read("a"); fd:close() end
+      end
+      code = keep_comment_lines(code, src)
+   end
    prof("generate", filename, t0)
    -- Terminated here, at the producer. `tl.generate` joins one output line per input line
    -- and writes nothing after the last, and five consumers read what it returns (`htl gen`,
@@ -2444,7 +2492,8 @@ function H.gen(filename, opts)
 end
 
 -- Type-check + generate from source text (used by the mlua-pkg resolver, where the
--- sandbox already read the file). Same return shape as H.gen.
+-- sandbox already read the file). Same return shape as H.gen, and the same comment lines
+-- (`keep_comment_lines`).
 function H.gen_string(src, filename)
    local result = tl.check_string(src, H.env, filename)
    local errors, error_fixes, error_items = collect_errors(filename, result, src)
@@ -2458,6 +2507,7 @@ function H.gen_string(src, filename)
    end
    H.async_gen_ast(result.ast)
    local code, gerr = tl.generate(result.ast, H.GEN_TARGET)
+   if code then code = keep_comment_lines(code, src) end
    if not code then
       c.ok = false
       generate_failed(c, filename, gerr)

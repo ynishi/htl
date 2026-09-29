@@ -1653,6 +1653,14 @@ impl Htl {
     /// caller here — `htl gen`, `include_tl!`, a `--source` bundle payload, the run cache —
     /// hands the string on as a Lua file, so it is terminated once at the generator rather
     /// than by whichever of them remembered to.
+    ///
+    /// Every line keeps its number: line *n* of the code is what line *n* of the `.tl`
+    /// became, so a run-time error names the `.tl` line. A comment-only line (`--` or `---`
+    /// after nothing but indentation, and not the opening of a `--[[` block) survives
+    /// verbatim at its line, so the `---` doc above a record or a function is in the Lua a
+    /// host hands on. A trailing comment (after code on the same line) and a block comment
+    /// (`--[[ ... ]]`) do not: the generator writes from the AST, which keeps no comments,
+    /// and only a whole-line comment can be put back at its line without one.
     pub fn gen_lua(&self, file: &Path) -> Result<(Option<String>, CheckInfo)> {
         let f: Function = self.h.get("gen")?;
         let (code, t): (Option<String>, Table) = f.call(path_str(file))?;
