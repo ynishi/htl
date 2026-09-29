@@ -1014,6 +1014,10 @@ fn t_types_readme() -> String {
      a `.tl` source anywhere on the path beats a declaration, so nothing here can shadow\n\
      an implementation, and a second declaration of the same module is reported\n\
      (`duplicate-declaration`) rather than silently losing to one of them.\n\n\
+     A declaration types Teal only. Under `htl run` / `htl test`, a `require` from a `.tl`\n\
+     of a name declared here and implemented nowhere gets a stand-in that fails on first\n\
+     use; a `.lua` sees no declaration — its `require` fails, and `pcall(require, name)`\n\
+     is `false`, as it is in a host that does not provide the module.\n\n\
      Files htl writes here are the ones the project *publishes*: the module a\n\
      `---@contract` type is declared in, for the authors of the modules that contract\n\
      holds. Declarations generated from this crate's own Rust (`#[host_module]`) are\n\
@@ -1297,7 +1301,8 @@ fn window_readme_prose(ctx: &Ctx<'_>) -> String {
          is that table, typed `mq.Game`: `update(dt)` says whether to go on, `draw()` draws.\n\n\
          `src/{m}/init.tl` is the engine, and it is where the game goes. It takes its world as\n\
          arguments and never opens anything, so `htl test` runs it with no display: `require(\"mq\")`\n\
-         resolves to the declaration, which declares and does nothing. `render` is the one function\n\
+         in a `.tl` resolves to the declaration, which declares and does nothing (a plain `.lua`\n\
+         sees no declaration, and its `require` fails). `render` is the one function\n\
          that draws, and nothing in the engine calls it — the loop does.\n\n\
          Effects go into `fx`, beside `mq` rather than inside the engine: `mq` is macroquad's\n\
          drawing and input as htl-mq ships it, and `fx` is this project's, drawing with the same\n\

@@ -402,11 +402,21 @@ pub type CoverageSpans = (Vec<(usize, usize)>, Vec<FunctionSpan>);
 pub enum ModuleKind {
     /// A `.tl` the checker compiles and the program runs — the only kind that is both.
     Source,
-    /// A `.d.tl`: types with no implementation. Requiring one at run time through
-    /// [`Htl::install_searcher`] gets an empty table, which is why a module that resolves
-    /// to a declaration and nothing else type-checks and then fails on first use; through
-    /// a `pkg::TealResolver` in a `Registry` the declaration steps aside and the
-    /// `require` fails outright if nothing else implements the name.
+    /// A `.d.tl`: types with no implementation. What a `require` of one gets at run time
+    /// when nothing implements the name depends on the resolver, and under
+    /// [`Htl::install_searcher`] on the caller:
+    ///
+    /// - [`Htl::install_searcher`], a `require` written in Teal (the calling chunk's
+    ///   source ends in `.tl`): an empty table that explains itself when indexed, which is
+    ///   why a checked module that resolves to a declaration and nothing else loads and
+    ///   then fails on first use. The checker typed it against the declaration; a module
+    ///   that calls its host in one function runs, and is tested, without the host.
+    /// - [`Htl::install_searcher`], a `require` from plain Lua (any other chunk, through
+    ///   `pcall` or not): the `require` fails naming the declaration, so
+    ///   `pcall(require, name)` is `false`. A `.lua` sees no declaration.
+    /// - a `pkg::TealResolver` in a `Registry`, any caller: the declaration steps aside and
+    ///   the `require` fails outright, with the same text, if nothing else implements the
+    ///   name.
     Declaration,
     /// A plain `.lua`, which the checker has nothing to say about. What is left when
     /// neither of the other two is reachable.
@@ -1151,12 +1161,34 @@ pub struct Replaced {
     pub added: Vec<String>,
 }
 
+/// Why a `require` of `module` failed when `decl` declares it and nothing implements it,
+/// as a searcher says it: a searcher that returns a string has not found the module, and
+/// `require` concatenates the string into its "module 'x' not found" error.
+///
+/// One text for every place that declines a declaration: the `Registry`'s trailing
+/// searcher (`pkg`), and [`Htl::install_searcher`]'s searcher when the `require` came from
+/// plain Lua (both preludes, which are handed this as a function). Two remedies, because a
+/// reader who gets here has made one of exactly two mistakes: they meant to supply the
+/// module and did not, or they wanted the types and wrote the import that loads a module
+/// rather than the one that does not.
+pub(crate) fn declaration_only_message(module: &str, decl: &str) -> String {
+    format!(
+        "\n\tno module '{module}': '{decl}' declares it and nothing implements it. \
+         If the host provides it, register it before the require (preload / \
+         preload_value / htl_preload, or a resolver that serves it); if you only want \
+         its types, write `local type {module} = require(\"{module}\")`, which the \
+         generator erases."
+    )
+}
+
 /// The part of the prelude a runtime state needs when its checker lives elsewhere:
 /// the strict searcher (asking the checker through `gen`), the declaration-only
 /// module, and `package.path` bookkeeping.
 const RUNTIME_PRELUDE: &str = r#"
 local R = {}
 
+-- Handed to a Teal `require` of a declaration-only module; plain Lua is declined instead
+-- (`required_from_teal`). The checker prelude's `H.type_only_module` says why.
 function R.type_only_module(module_name, decl_path)
    return setmetatable({}, {
       __index = function(_, key)
@@ -1169,8 +1201,28 @@ function R.type_only_module(module_name, decl_path)
    })
 end
 
+-- Whether the `require` that reached the searcher was written in Teal: the first frame
+-- above it that is neither C (`require`, `pcall`) nor this prelude's own has a source
+-- ending in `.tl`. The checker prelude's `required_from_teal` is the same function and
+-- says why; a state without `debug` keeps the table (`true`).
+local function required_from_teal()
+   local getinfo = type(debug) == "table" and debug.getinfo
+   if type(getinfo) ~= "function" then return true end
+   local own = getinfo(1, "S").source
+   local level = 2
+   while true do
+      local info = getinfo(level, "S")
+      if not info then return false end
+      if info.what ~= "C" and info.source ~= own then
+         return type(info.source) == "string" and info.source:sub(-3) == ".tl"
+      end
+      level = level + 1
+   end
+end
+
 -- gen(name) -> kind, a, b  (see resolve_for_require in the checker prelude)
-function R.install_searcher(gen)
+-- decline(name, decl) -> the text a plain-Lua `require` of a declaration fails with
+function R.install_searcher(gen, decline)
    table.insert(package.searchers, 2, function(module_name)
       local kind, a, b = gen(module_name)
       if kind == "code" then
@@ -1180,7 +1232,10 @@ function R.install_searcher(gen)
          end
          return function(modname) return chunk(modname, b) end, b
       elseif kind == "type_only" then
-         return function() return R.type_only_module(module_name, a) end, a
+         if not decline or required_from_teal() then
+            return function() return R.type_only_module(module_name, a) end, a
+         end
+         return decline(module_name, a)
       end
       return a
    end)
@@ -1822,7 +1877,22 @@ impl Htl {
     }
 
     /// Install the strict `.tl` searcher: `require` of a `.tl` with type errors fails.
+    ///
+    /// A name only a `.d.tl` declares, with no `.lua` behind it on `package.path`, is
+    /// answered by the language of the chunk that asked ([`ModuleKind::Declaration`]): a
+    /// `require` from a `.tl` gets a table that explains itself when indexed, and one from
+    /// plain Lua fails naming the declaration, as through a `pkg` `Registry`. The caller is
+    /// found with `debug.getinfo`; a state without the `debug` library gets the table for
+    /// every caller.
     pub fn install_searcher(&self) -> Result<()> {
+        // What the searcher answers a plain-Lua `require` of a declaration with: made in
+        // the program state, where the searcher runs, from the one text the `Registry`'s
+        // trailing searcher uses too.
+        let decline = self
+            .lua
+            .create_function(|_, (module, decl): (String, String)| {
+                Ok(declaration_only_message(&module, &decl))
+            })?;
         if self.split {
             // The searcher runs in the program state and asks the checker for code.
             //
@@ -1837,11 +1907,11 @@ impl Htl {
                 Ok((kind, a, b))
             })?;
             let f: Function = self.runtime()?.get("install_searcher")?;
-            f.call::<()>(bridge)?;
+            f.call::<()>((bridge, decline))?;
             return Ok(());
         }
         let f: Function = self.h.get("install_searcher")?;
-        f.call::<()>(())?;
+        f.call::<()>(decline)?;
         Ok(())
     }
 
