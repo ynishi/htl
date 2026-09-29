@@ -30,11 +30,23 @@
 //! `local type x = require("x")`, which the generator erases. This is the line upstream
 //! Teal draws too (`tl`'s loader searches without `.d.tl`), and the one the project model
 //! states ([`Provider::Declared`](crate::model::Provider::Declared): a name with a
-//! declaration and nothing else is provided by the environment). `htl run` / `htl test`
-//! resolve through [`Htl::install_searcher`](crate::Htl::install_searcher) instead, where a
-//! declaration with nothing behind it on `package.path` still answers with a table that
-//! explains itself when indexed — right for a command running a program whose host is not
-//! present.
+//! declaration and nothing else is provided by the environment).
+//!
+//! `htl run` / `htl test` resolve through
+//! [`Htl::install_searcher`](crate::Htl::install_searcher) instead, and there the answer
+//! for a declaration with nothing behind it on `package.path` depends on who asked. A
+//! `require` written in Teal — the chunk that called it is named `@<path>.tl`, as every
+//! chunk those commands make from a `.tl` is — gets a table that explains itself when
+//! indexed: the checker typed that file against the declaration, the program is running
+//! without its host, and a module that touches the host in one function (the window
+//! scaffold's engine, which `htl test` exercises headless) has to load for the rest of it
+//! to run. A `require` from anything else — a plain `.lua`, which the checker never read
+//! and to which a declaration is as invisible as a `.d.ts` is to Node — gets this
+//! module's answer: the searcher declines with the trailing searcher's text, the `require`
+//! fails naming the declaration, and `pcall(require, name)`, Lua's one way to ask whether
+//! a module is there, is `false` in both places. The caller is the first frame above
+//! `require` that is not C, so a `pcall` in between does not change it; a state without
+//! the `debug` library cannot see it and keeps the table.
 
 use crate::PRELUDE_REGISTRY_KEY;
 use anyhow::Context;
@@ -2059,18 +2071,9 @@ fn note_declaration_only(lua: &Lua, name: &str, decl: &Path) -> mlua::Result<()>
         let Some(decl) = table.get::<Option<String>>(module.as_str())? else {
             return Ok(None);
         };
-        // A searcher that returns a string has not found the module; `require` concatenates
-        // it into its "module 'x' not found" error. Two remedies, because a reader who gets
-        // here has made one of exactly two mistakes: they meant to supply the module and
-        // did not, or they wanted the types and wrote the import that loads a module rather
-        // than the one that does not.
-        Ok(Some(format!(
-            "\n\tno module '{module}': '{decl}' declares it and nothing implements it. \
-             If the host provides it, register it before the require (preload / \
-             preload_value / htl_preload, or a resolver that serves it); if you only want \
-             its types, write `local type {module} = require(\"{module}\")`, which the \
-             generator erases."
-        )))
+        // The text is shared with `Htl::install_searcher`'s answer to a plain-Lua
+        // `require` of a declaration, so a Lua module hears one thing through either.
+        Ok(Some(crate::declaration_only_message(&module, &decl)))
     })?;
     let package: Table = lua.globals().get("package")?;
     let searchers: Table = package.get("searchers")?;

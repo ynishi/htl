@@ -2469,9 +2469,16 @@ function H.gen_string(src, filename)
    return code, c
 end
 
--- Value handed to `require` for a declaration-only module (`name.d.tl` with no
+-- Value handed to a Teal `require` for a declaration-only module (`name.d.tl` with no
 -- implementation on the path). Indexing it explains what is missing instead of the
 -- bare "attempt to call a nil value" that would surface otherwise.
+--
+-- Only Teal is handed it (`strict_searcher`, `required_from_teal`). A checked `.tl` was
+-- typed against the declaration, so a table that stands for the module until something
+-- touches it is the declaration's promise kept as far as this run can keep it: an engine
+-- that calls its host in one function loads, and is tested, without the host. A plain
+-- `.lua` was never checked and sees no declaration — to it the name is not a module, and
+-- `pcall(require, name)`, Lua's one way to ask, has to say so.
 function H.type_only_module(module_name, decl_path)
    return setmetatable({}, {
       __index = function(_, key)
@@ -2920,6 +2927,43 @@ end
 
 H.gen_for_require = resolve_for_require
 
+-- Whether the `require` that reached a searcher was written in Teal: the source name of
+-- the chunk that called it ends in `.tl`. Every chunk `htl run` / `htl test` make from a
+-- `.tl` is named so — `strict_searcher` below, `R.preload_generated`, the test runner and
+-- the entry (`@<path>.tl`) — while Lua's own searcher names a `.lua` `@<path>.lua`.
+--
+-- The caller is the first frame above the searcher that is neither C nor this prelude's
+-- own: `require` itself is C, and a C frame past it is `pcall` / `xpcall` or the like
+-- passing the call through, not the chunk that wrote it. So `pcall(require, x)`
+-- in a `.lua` is Lua's, and the same line in a `.tl` is Teal's: the split is by the
+-- language of the chunk, not by how it called. A Lua helper requiring on a Teal caller's
+-- behalf is the first Lua frame and is Lua, which is what it is. A chunk under any other
+-- name (a host's own label, a stripped payload's `?`) or no Lua frame at all counts as
+-- Lua: the conservative side, an error naming the declaration rather than a table that
+-- says the module is there.
+--
+-- A state without the `debug` library (a host that sandboxed it) cannot see who asked
+-- and answers `true`, keeping the table every caller got before this rule.
+local function required_from_teal()
+   local getinfo = type(debug) == "table" and debug.getinfo
+   if type(getinfo) ~= "function" then return true end
+   local own = getinfo(1, "S").source
+   local level = 2
+   while true do
+      local info = getinfo(level, "S")
+      if not info then return false end
+      if info.what ~= "C" and info.source ~= own then
+         return type(info.source) == "string" and info.source:sub(-3) == ".tl"
+      end
+      level = level + 1
+   end
+end
+
+-- `decline(name, decl)`: the text a `require` from plain Lua fails with when `name` has
+-- only a declaration — the `Registry`'s trailing searcher's text, handed in from Rust by
+-- `Htl::install_searcher` so the two say one thing.
+local decline
+
 -- Strict searcher for a state that hosts its own checker.
 local function strict_searcher(module_name)
    local kind, a, b = resolve_for_require(module_name)
@@ -2932,12 +2976,19 @@ local function strict_searcher(module_name)
          return chunk(modname, b)
       end, b
    elseif kind == "type_only" then
-      return function() return H.type_only_module(module_name, a) end, a
+      -- Teal gets the table (see `H.type_only_module`); plain Lua gets Lua's answer: a
+      -- searcher that returns a string has not found the module, so `require` fails with
+      -- the text and `pcall(require, …)` is `false`, as through a `Registry`.
+      if not decline or required_from_teal() then
+         return function() return H.type_only_module(module_name, a) end, a
+      end
+      return decline(module_name, a)
    end
    return a
 end
 
-function H.install_searcher()
+function H.install_searcher(decline_fn)
+   decline = decline_fn
    table.insert(package.searchers, 2, strict_searcher)
 end
 

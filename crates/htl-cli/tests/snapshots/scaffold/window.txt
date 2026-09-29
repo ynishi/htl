@@ -62,7 +62,8 @@ is that table, typed `mq.Game`: `update(dt)` says whether to go on, `draw()` dra
 
 `src/sample/init.tl` is the engine, and it is where the game goes. It takes its world as
 arguments and never opens anything, so `htl test` runs it with no display: `require("mq")`
-resolves to the declaration, which declares and does nothing. `render` is the one function
+in a `.tl` resolves to the declaration, which declares and does nothing (a plain `.lua`
+sees no declaration, and its `require` fails). `render` is the one function
 that draws, and nothing in the engine calls it — the loop does.
 
 Effects go into `fx`, beside `mq` rather than inside the engine: `mq` is macroquad's
@@ -338,6 +339,11 @@ SDK): `xlib.d.tl` here makes `require("xlib")` typed in `htl check`, `htl test` 
 a `.tl` source anywhere on the path beats a declaration, so nothing here can shadow
 an implementation, and a second declaration of the same module is reported
 (`duplicate-declaration`) rather than silently losing to one of them.
+
+A declaration types Teal only. Under `htl run` / `htl test`, a `require` from a `.tl`
+of a name declared here and implemented nowhere gets a stand-in that fails on first
+use; a `.lua` sees no declaration — its `require` fails, and `pcall(require, name)`
+is `false`, as it is in a host that does not provide the module.
 
 Files htl writes here are the ones the project *publishes*: the module a
 `---@contract` type is declared in, for the authors of the modules that contract

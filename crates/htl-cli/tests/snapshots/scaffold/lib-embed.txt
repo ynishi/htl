@@ -228,6 +228,11 @@ a `.tl` source anywhere on the path beats a declaration, so nothing here can sha
 an implementation, and a second declaration of the same module is reported
 (`duplicate-declaration`) rather than silently losing to one of them.
 
+A declaration types Teal only. Under `htl run` / `htl test`, a `require` from a `.tl`
+of a name declared here and implemented nowhere gets a stand-in that fails on first
+use; a `.lua` sees no declaration — its `require` fails, and `pcall(require, name)`
+is `false`, as it is in a host that does not provide the module.
+
 Files htl writes here are the ones the project *publishes*: the module a
 `---@contract` type is declared in, for the authors of the modules that contract
 holds. Declarations generated from this crate's own Rust (`#[host_module]`) are
