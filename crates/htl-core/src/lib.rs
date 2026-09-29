@@ -209,8 +209,10 @@ pub struct CheckInfo {
     /// tracks it for the same reason.
     pub deps: Vec<PathBuf>,
     /// For every member of [`deps`](Self::deps), the names that member required, as
-    /// `(member, name)`: the edges below the file, sorted by member, then name. The file's
-    /// own requires are [`requires`](Self::requires), with their call sites.
+    /// `(member, name)`: the edges below the file, sorted by member, then name. A member's
+    /// names are its require sites — every `require("<literal>")` in it, resolved or not —
+    /// each once; a member whose result carries no AST gives the names that resolved. The
+    /// file's own requires are [`requires`](Self::requires), with their call sites.
     ///
     /// What the cache probes besides the hashes of `deps`. A hash says a file that was read
     /// is unchanged; it cannot say that a name a member required still means that file. A
@@ -218,6 +220,13 @@ pub struct CheckInfo {
     /// `host.d.tl` changes what `top.tl` sees exactly as an edit to `host.d.tl` does, and
     /// every file the old entry hashed still matches. So an entry asks each of these names
     /// again, from the member that asked it.
+    ///
+    /// The sites and not only the resolved names, because a name that resolved nowhere is a
+    /// question too. `mid.tl`'s `require("gone")` with no `gone.tl` leaves `mid`'s types
+    /// unknown in `top.tl`; write `gone.tl` and `mid.tl` misses on its own requires, but
+    /// `top.tl` hashes an unchanged `mid.tl`, and had the edge been left out it would replay
+    /// the errors it recorded while `gone` was missing (#410). A name that later resolves, or
+    /// resolves elsewhere, changes the answer to a question the entry asks.
     pub closure_requires: Vec<(PathBuf, String)>,
     /// htl lint findings (`nil-index`, `enum-exhaustive`). Advisory unless the caller
     /// promotes them (`htl check --strict`, `include_tl!`).
