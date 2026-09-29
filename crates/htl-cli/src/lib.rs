@@ -472,9 +472,11 @@ Layout of a project: https://github.com/ynishi/htl#layout-of-a-project-htl-new
     ///
     /// Line n of the output is line n of the .tl, so a run-time error names the .tl line.
     /// A comment-only line (`--` or `---` after indentation, not a `--[[` opener) survives
-    /// verbatim at its line, `---` doc included. A trailing comment (after code) and a block
-    /// comment (`--[[ ... ]]`) do not survive: the trailing one is dropped from its line, and
-    /// the block's lines come out empty.
+    /// verbatim at its line, `---` doc included, and so do the comment lines after the last
+    /// line of code (the `---` after a module's `return`): the output ends with the last of
+    /// them. A trailing comment (after code) and a block comment (`--[[ ... ]]`) do not
+    /// survive: the trailing one is dropped from its line, and every line of the block comes
+    /// out empty, a `--` line inside it included.
     Gen {
         file: PathBuf,
         #[arg(short, long)]

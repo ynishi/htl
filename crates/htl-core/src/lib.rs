@@ -1713,9 +1713,14 @@ impl Htl {
     /// became, so a run-time error names the `.tl` line. A comment-only line (`--` or `---`
     /// after nothing but indentation, and not the opening of a `--[[` block) survives
     /// verbatim at its line, so the `---` doc above a record or a function is in the Lua a
-    /// host hands on. A trailing comment (after code on the same line) and a block comment
-    /// (`--[[ ... ]]`) do not: the generator writes from the AST, which keeps no comments,
-    /// and only a whole-line comment can be put back at its line without one.
+    /// host hands on. That holds after the last line of code too: the comment lines there,
+    /// the `---` after a module's `return` among them, are appended at their own numbers
+    /// (the lines between them empty), and the code ends with the last of them. A trailing
+    /// comment (after code on the same line) and a block comment (`--[[ ... ]]`) do not: the
+    /// generator writes from the AST, which keeps no comments, and only a whole-line comment
+    /// can be put back at its line without one. Every line of a block comment stays empty,
+    /// a `--` line inside it included; a `--` line inside a multi-line long string is the
+    /// string's and comes out as the string wrote it.
     pub fn gen_lua(&self, file: &Path) -> Result<(Option<String>, CheckInfo)> {
         let f: Function = self.h.get("gen")?;
         let (code, t): (Option<String>, Table) = f.call(path_str(file))?;

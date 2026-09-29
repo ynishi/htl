@@ -2410,6 +2410,52 @@ local function generate_failed(c, filename, gerr)
    c.error_items = { { file = filename, line = 1, col = 1, message = msg } }
 end
 
+-- The long-bracket scanner `keep_comment_lines` carries from one line to the next. `level`
+-- is the `=` count of the long bracket (`[[`, `[=[`, ...) the line starts inside, or nil when
+-- it starts in code; the result is the same for the next line. Whether the bracket was opened
+-- as a comment (`--[[`) or a string (`[[`) is not kept: either way a line that starts inside
+-- it is not a line comment, and that is the one question the state answers.
+--
+-- Within a line, in code: `--[=*[` opens a long comment, `[=*[` a long string, any other `--`
+-- makes the rest of the line a comment, and a short string ('...' or "...", escapes skipped)
+-- is stepped over so a bracket or dashes inside it open nothing. Inside a bracket only the
+-- matching `]=*]` counts; after it the line is code again, so an opener and its closer on one
+-- line, and a closer followed by another opener, leave the right state. What it does not
+-- model: a short string continued onto the next line (`\` or `\z` at the end of a line) —
+-- its next line is read as code.
+local function scan_long_brackets(line, level)
+   local i = 1
+   while true do
+      if level then
+         local _, e = line:find("]" .. ("="):rep(level) .. "]", i, true)
+         if not e then return level end
+         i, level = e + 1, nil
+      else
+         local s = line:find("[%-%[\"']", i)
+         if not s then return nil end
+         local ch = line:sub(s, s)
+         if ch == "-" then
+            if line:sub(s + 1, s + 1) ~= "-" then
+               i = s + 1
+            else
+               local eqs = line:match("^%[(=*)%[", s + 2)
+               if not eqs then return nil end -- a line comment: nothing after it counts
+               level, i = #eqs, s + 4 + #eqs
+            end
+         elseif ch == "[" then
+            local eqs = line:match("^%[(=*)%[", s)
+            if eqs then level, i = #eqs, s + 2 + #eqs else i = s + 1 end
+         else
+            local j = s + 1
+            while j <= #line and line:sub(j, j) ~= ch do
+               j = j + (line:sub(j, j) == "\\" and 2 or 1)
+            end
+            i = j + 1
+         end
+      end
+   end
+end
+
 -- Comment-only lines of `src`, copied into `code` at their own line. `tl.generate` writes
 -- from the AST, which holds no comments, so every comment line of a `.tl` comes out as an
 -- empty line at the same number. In this repository the `---` lines above a module record
@@ -2418,33 +2464,44 @@ end
 -- what it is for.
 --
 -- The rule, per source line: a line comment (`^%s*%-%-`) that does not open a long bracket
--- (`--[[`, `--[=[`, ...) is copied when its output line is empty or blank. Nothing is
--- inserted or removed, so every line keeps its number and a run-time error still maps
--- straight back to the `.tl`. A trailing comment shares its line with code and stays
--- dropped; a block comment spans lines the rule cannot pair with the AST and stays dropped.
+-- (`--[[`, `--[=[`, ...) and does not start inside one is copied when its output line is
+-- empty or blank. Whether a line starts inside a long bracket is the one piece of state the
+-- walk carries (`scan_long_brackets`), so a `--` line inside a multi-line block comment is
+-- not taken for a line comment: a block comment's lines, all of them, stay empty. A trailing
+-- comment shares its line with code and stays dropped.
+--
+-- The generator writes nothing after the last line of code, so the source lines after it
+-- have no output line to land on: they are appended, a line comment as itself and anything
+-- else as an empty line, and the empty lines at the end are then dropped. Nothing is inserted
+-- or removed before that point and every appended line is at its own number, so every line
+-- keeps its number and a run-time error still maps straight back to the `.tl`; the `---`
+-- lines after a module's `return` reach the Lua, and a file whose tail is doc ends with it.
 --
 -- Why the "output line is empty" guard is enough for long strings: a `--` line inside a
 -- multi-line `[[ ... ]]` string is not a comment, but the generator writes the string's
--- lines verbatim, so its output line is never empty and nothing is copied over it.
--- What the rule does not see, on purpose (it reads lines, not tokens): a `--` line inside a
--- multi-line block comment is copied as a line comment (still a comment in the output), and
--- comment lines after the last line of code have no output line to land on (the generator
--- writes nothing after the last) and are not appended.
+-- lines verbatim, so its output line is never empty and nothing is copied over it (the
+-- scanner does not copy it either: the line starts inside the string's bracket).
 local function keep_comment_lines(code, src)
    if not src or not src:find("%-%-") then return code end
    local out = {}
    for line in (code .. "\n"):gmatch("(.-)\n") do out[#out + 1] = line end
-   local n, changed = 0, false
+   local last = #out
+   local n, changed, level = 0, false, nil
    for line in (src:sub(-1) == "\n" and src or src .. "\n"):gmatch("(.-)\n") do
       n = n + 1
-      if n > #out then break end
       line = line:gsub("\r$", "")
-      if line:match("^%s*%-%-") and not line:match("^%s*%-%-%[=*%[")
-         and out[n]:match("^%s*$") then
+      local comment = not level and line:match("^%s*%-%-") ~= nil
+         and not line:match("^%s*%-%-%[=*%[")
+      level = scan_long_brackets(line, level)
+      if n > last then
+         out[n] = comment and line or ""
+         changed = changed or comment
+      elseif comment and out[n]:match("^%s*$") then
          out[n] = line
          changed = true
       end
    end
+   while #out > last and out[#out] == "" do out[#out] = nil end
    return changed and table.concat(out, "\n") or code
 end
 

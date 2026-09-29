@@ -1783,6 +1783,61 @@ return M
         );
     }
 
+    /// The same for a file whose block comment holds a `--` line and whose last line is
+    /// doc after `return`: the line inside the block stays empty and the doc is appended at
+    /// line 10, in both.
+    #[test]
+    fn include_tl_embeds_the_block_comment_and_trailing_doc_lines_htl_gen_prints() {
+        const DOC: &str = "\
+local record M
+end
+--[[ block comment line 1
+-- a dash line inside the block
+last block line ]]
+function M.f(): integer
+   return 1
+end
+return M
+--- doc after return, last line of the file
+";
+        // The ten lines `crates/htl-cli/tests/gen_comment_lines.rs` asserts `htl gen`
+        // prints.
+        const DOC_LUA: &str = "\
+local M = {}
+
+
+
+
+function M.f()
+   return 1
+end
+return M
+--- doc after return, last line of the file
+";
+        let root = scratch("comment-lines-tail");
+        write(&root.join("src/doc5.tl"), DOC);
+        let embedded = || match resolve_include(&root, "src/doc5.tl", false)
+            .expect("the module checks")
+            .payload
+        {
+            Payload::Source(code) => code,
+            Payload::Bytes(_) => panic!("expected source"),
+        };
+        let first = embedded();
+        let second = embedded();
+        let (by_gen, _) = htl_core::Htl::new()
+            .unwrap()
+            .gen_lua(&root.join("src/doc5.tl"))
+            .unwrap();
+        assert_eq!(first, DOC_LUA, "include_tl!");
+        assert_eq!(second, DOC_LUA, "include_tl!, expanded again");
+        assert_eq!(
+            by_gen.as_deref(),
+            Some(DOC_LUA),
+            "Htl::gen_lua, as htl gen calls it"
+        );
+    }
+
     /// `target_dir` deps (physically vendored under the manifest) resolve too.
     #[test]
     fn include_resolves_target_dir_dep() {
