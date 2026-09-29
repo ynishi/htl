@@ -47,6 +47,25 @@
 //! a module is there, is `false` in both places. The caller is the first frame above
 //! `require` that is not C, so a `pcall` in between does not change it; a state without
 //! the `debug` library cannot see it and keeps the table.
+//!
+//! The table is not in `package.loaded`. `require` answers every `require` of a name from
+//! `package.loaded` before any searcher runs, so a table stored there for the first Teal
+//! caller would be the answer a `.lua` got after it, and whether `pcall(require, name)`
+//! is `false` would depend on which file happened to ask first.
+//! [`Htl::install_searcher`](crate::Htl::install_searcher) therefore sets a metatable on
+//! `package.loaded`: the stand-in `require` stores goes to a side table keyed by name, and
+//! a read of the name hands it back only when it came from a `.tl` (the same caller walk)
+//! and nothing in `package.preload` answers the name. A second Teal `require` gets the
+//! same table, a `.lua`'s `require` goes on to the searchers and is declined, a `.lua`
+//! reading `package.loaded[name]` sees `nil`, and `rawget(package.loaded, name)` is `nil`.
+//! Anything else stored under a name — a real module, a host's assignment, the value of a
+//! `preload_value` loader a later `require` runs — is stored raw and drops the side entry,
+//! so it answers every caller from then on.
+//!
+//! One case keeps the old answer: a `package.loaded` that already carries a metatable when
+//! the searcher is installed is the host's, and htl leaves it alone. In that state the
+//! stand-in is stored as `require` stores anything, and the first caller's answer is every
+//! later caller's: after a Teal `require`, `pcall(require, name)` from a `.lua` is `true`.
 
 use crate::PRELUDE_REGISTRY_KEY;
 use anyhow::Context;

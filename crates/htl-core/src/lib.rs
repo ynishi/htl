@@ -414,6 +414,17 @@ pub enum ModuleKind {
     /// - [`Htl::install_searcher`], a `require` from plain Lua (any other chunk, through
     ///   `pcall` or not): the `require` fails naming the declaration, so
     ///   `pcall(require, name)` is `false`. A `.lua` sees no declaration.
+    ///
+    ///   The table is never stored in `package.loaded`, where `require` would answer every
+    ///   later caller with it and a `.lua` asking after a `.tl` would find the module there.
+    ///   A metatable on `package.loaded` keeps it in a side table instead, keyed by name,
+    ///   and hands it back only to a read from Teal: a second Teal `require` gets the same
+    ///   table, a later `.lua` is still declined, and `rawget(package.loaded, name)` is
+    ///   `nil`. A real module stored under the name afterwards (a `preload_value` a Teal
+    ///   `require` then loads, a host's own assignment) replaces it for every caller. A
+    ///   `package.loaded` that already carries a metatable when the searcher is installed is
+    ///   the host's and is left alone; there the first caller's answer is every later
+    ///   caller's, as before this rule (the `pkg` module doc).
     /// - a `pkg::TealResolver` in a `Registry`, any caller: the declaration steps aside and
     ///   the `require` fails outright, with the same text, if nothing else implements the
     ///   name.
@@ -1188,9 +1199,11 @@ const RUNTIME_PRELUDE: &str = r#"
 local R = {}
 
 -- Handed to a Teal `require` of a declaration-only module; plain Lua is declined instead
--- (`required_from_teal`). The checker prelude's `H.type_only_module` says why.
+-- (`required_from_teal`). The checker prelude's `H.type_only_module` says why, and why the
+-- metatable is tagged `htl_declaration` (`guard_loaded`).
 function R.type_only_module(module_name, decl_path)
    return setmetatable({}, {
+      htl_declaration = true,
       __index = function(_, key)
          error(string.format(
             "module '%s' is declaration-only here (%s): '%s' has no implementation on this path. " ..
@@ -1220,6 +1233,35 @@ local function required_from_teal()
    end
 end
 
+-- Keep the stand-in out of `package.loaded`, handing it back from a side table to Teal
+-- only; a `package.loaded` that already has a metatable is the host's and is left alone.
+-- The checker prelude's `guard_loaded` is the same function and says why.
+local function guard_loaded()
+   local pkg = package
+   local loaded = type(pkg) == "table" and pkg.loaded
+   if type(loaded) ~= "table" or getmetatable(loaded) ~= nil then return end
+   local side = {}
+   setmetatable(loaded, {
+      __newindex = function(t, k, v)
+         local mt = type(v) == "table" and getmetatable(v)
+         if type(mt) == "table" and rawget(mt, "htl_declaration") == true then
+            side[k] = v
+         else
+            side[k] = nil
+            rawset(t, k, v)
+         end
+      end,
+      __index = function(_, k)
+         local v = side[k]
+         if v == nil then return nil end
+         local preload = rawget(pkg, "preload")
+         if type(preload) == "table" and preload[k] ~= nil then return nil end
+         if required_from_teal() then return v end
+         return nil
+      end,
+   })
+end
+
 -- gen(name) -> kind, a, b  (see resolve_for_require in the checker prelude)
 -- decline(name, decl) -> the text a plain-Lua `require` of a declaration fails with
 function R.install_searcher(gen, decline)
@@ -1239,6 +1281,7 @@ function R.install_searcher(gen, decline)
       end
       return a
    end)
+   guard_loaded()
 end
 
 -- Put already-generated Lua in front of the searcher for one module name.

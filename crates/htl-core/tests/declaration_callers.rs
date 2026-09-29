@@ -46,8 +46,8 @@ fn a_state_with_its_own_checker_splits_a_declarations_require_by_the_callers_lan
     let h = Htl::new().unwrap();
     h.add_path(&dir).unwrap();
     h.install_searcher().unwrap();
-    // Lua first: a declined `require` caches nothing, while the stand-in a Teal `require`
-    // gets is in `package.loaded` from then on, for every later caller.
+    // Lua first: a declined `require` caches nothing. (Teal first is
+    // `a_teal_require_first_leaves_the_stand_in_out_of_package_loaded_in_a_split_state`.)
     h.exec(PROBE_LUA, "@caller.lua", &[]).unwrap();
     // A chunk under a label of its own is not known to be Teal, and is answered as Lua.
     h.exec(PROBE_LUA, "=host-label", &[]).unwrap();
@@ -80,4 +80,122 @@ fn a_program_state_without_debug_keeps_the_stand_in_for_every_caller() {
         .exec("assert(debug == nil, 'debug is open')", "=probe", &[])
         .unwrap();
     program.exec(PROBE_TEAL, "@caller.lua", &[]).unwrap();
+}
+
+/// Teal first, then the checks #408 asks for: the Teal chunk gets the same stand-in on
+/// both of its `require`s, and none of it is in `package.loaded` raw.
+const TEAL_FIRST: &str = r#"
+    local k = require("knl")
+    assert(type(k) == "table", "a Teal require did not get the stand-in: " .. type(k))
+    assert(rawequal(require("knl"), k), "a second Teal require got another value")
+    assert(rawget(package.loaded, "knl") == nil, "the stand-in is in package.loaded raw")
+    first_standin = k
+"#;
+
+/// After a Teal `require`, plain Lua still sees nothing: its `require` is declined and a
+/// direct read of `package.loaded` is `nil`.
+const LUA_AFTER: &str = r#"
+    local ok, err = pcall(require, "knl")
+    assert(not ok, "a Lua require after a Teal one got a module")
+    assert(tostring(err):find("knl.d.tl' declares it and nothing implements it", 1, true),
+       tostring(err))
+    assert(package.loaded.knl == nil, "a Lua read of package.loaded found the stand-in")
+"#;
+
+/// Asked from Teal again, the stand-in is the one the first `require` got.
+const TEAL_AGAIN: &str = r#"
+    assert(rawequal(require("knl"), first_standin), "Teal got another value the third time")
+"#;
+
+#[test]
+fn a_teal_require_first_leaves_the_stand_in_out_of_package_loaded_in_a_split_state() {
+    let dir = declared_only("split-teal-first");
+    let checker = Htl::new().unwrap();
+    // `debug` opened: without it the caller cannot be seen and every caller gets the table
+    // (`a_program_state_without_debug_keeps_the_stand_in_for_every_caller`).
+    // SAFETY: the state is ours and loads nothing but the Lua below.
+    let lua =
+        unsafe { Lua::unsafe_new_with(StdLib::ALL_SAFE | StdLib::DEBUG, LuaOptions::default()) };
+    let program = Htl::with_checker_lua(&checker, lua).unwrap();
+    program.add_path(&dir).unwrap();
+    program.install_searcher().unwrap();
+    program.exec(TEAL_FIRST, "@caller.tl", &[]).unwrap();
+    program.exec(LUA_AFTER, "@caller.lua", &[]).unwrap();
+    program.exec(TEAL_AGAIN, "@caller.tl", &[]).unwrap();
+
+    // A module the host registers afterwards replaces the stand-in for every caller.
+    let real = program.lua().create_table().unwrap();
+    real.set("id", "real").unwrap();
+    program.preload_value("knl", real).unwrap();
+    program
+        .exec(
+            r#"
+            local m = require("knl")
+            assert(not rawequal(m, first_standin), "Teal still got the stand-in")
+            assert(m.id == "real", "Teal got " .. tostring(m.id))
+            assert(rawget(package.loaded, "knl") == m, "the real module is not stored raw")
+            "#,
+            "@caller.tl",
+            &[],
+        )
+        .unwrap();
+    program
+        .exec(
+            r#"
+            local ok, m = pcall(require, "knl")
+            assert(ok and m.id == "real", "Lua did not get the real module")
+            "#,
+            "@caller.lua",
+            &[],
+        )
+        .unwrap();
+}
+
+#[test]
+fn a_teal_require_first_leaves_the_stand_in_out_of_package_loaded_in_a_state_with_its_own_checker()
+{
+    let dir = declared_only("own-teal-first");
+    let h = Htl::new().unwrap();
+    h.add_path(&dir).unwrap();
+    h.install_searcher().unwrap();
+    h.exec(TEAL_FIRST, "@caller.tl", &[]).unwrap();
+    h.exec(LUA_AFTER, "@caller.lua", &[]).unwrap();
+    h.exec(TEAL_AGAIN, "@caller.tl", &[]).unwrap();
+}
+
+/// A `package.loaded` the host gave a metatable before the searcher was installed is left
+/// alone, and the run keeps the answer #402 gave: the stand-in a Teal `require` stored is
+/// what a later `.lua` gets.
+#[test]
+fn a_host_metatable_on_package_loaded_keeps_the_first_callers_answer() {
+    let dir = declared_only("host-mt");
+    let checker = Htl::new().unwrap();
+    let program = Htl::with_checker(&checker).unwrap();
+    program
+        .exec(
+            "host_mt = {}; setmetatable(package.loaded, host_mt)",
+            "=host",
+            &[],
+        )
+        .unwrap();
+    program.add_path(&dir).unwrap();
+    program.install_searcher().unwrap();
+    program
+        .exec(
+            "assert(rawequal(getmetatable(package.loaded), host_mt), 'the host metatable was replaced')",
+            "=host",
+            &[],
+        )
+        .unwrap();
+    program.exec(PROBE_TEAL, "@caller.tl", &[]).unwrap();
+    program
+        .exec(
+            r#"
+            local ok, m = pcall(require, "knl")
+            assert(ok and type(m) == "table", "a Lua require after a Teal one was declined")
+            "#,
+            "@caller.lua",
+            &[],
+        )
+        .unwrap();
 }

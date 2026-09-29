@@ -2529,8 +2529,13 @@ end
 -- that calls its host in one function loads, and is tested, without the host. A plain
 -- `.lua` was never checked and sees no declaration — to it the name is not a module, and
 -- `pcall(require, name)`, Lua's one way to ask, has to say so.
+--
+-- The metatable carries `htl_declaration = true` so the stand-in is known by construction:
+-- `H.install_searcher`'s `package.loaded` metatable keeps it out of `package.loaded` and
+-- hands it back to Teal only (`guard_loaded`).
 function H.type_only_module(module_name, decl_path)
    return setmetatable({}, {
+      htl_declaration = true,
       __index = function(_, key)
          error(string.format(
             "module '%s' is declaration-only here (%s): '%s' has no implementation on this path. " ..
@@ -3037,9 +3042,57 @@ local function strict_searcher(module_name)
    return a
 end
 
+-- Keep the stand-in out of `package.loaded`. `require` stores what a loader returned in
+-- `package.loaded` and answers every later `require` of the name from there, before any
+-- searcher runs, so a stand-in a Teal `require` received would be handed to a plain-Lua
+-- `require` after it: `pcall(require, name)` in a `.lua` would say `true` or `false` by
+-- which file happened to ask first. A metatable on `package.loaded` moves the stand-in
+-- aside instead. `require` reads and writes `package.loaded` through metamethods, and a
+-- stand-in is never there raw, so both go through these two:
+--
+-- - `__newindex` stores a stand-in (`htl_declaration` on its metatable) in `side`, keyed by
+--   name, and anything else raw, dropping the name's side entry: a real module stored later
+--   (a `package.preload` loader's value, a host's own assignment, a `nil` that unloads it)
+--   answers every caller from then on.
+-- - `__index` hands the side entry back only when the read came from Teal
+--   (`required_from_teal`, walking up from this function's frame as it walks up from the
+--   searcher's) and nothing in `package.preload` answers the name, which a loader
+--   registered after the stand-in (`preload_value`) does; otherwise `nil`, so a `.lua`'s
+--   `require` goes on to the searchers and is declined, and a `.lua` reading
+--   `package.loaded[name]` sees nothing.
+--
+-- A `package.loaded` that already has a metatable is the host's, and is left alone: that
+-- run keeps the first caller's answer for every later one.
+local function guard_loaded()
+   local pkg = package
+   local loaded = type(pkg) == "table" and pkg.loaded
+   if type(loaded) ~= "table" or getmetatable(loaded) ~= nil then return end
+   local side = {}
+   setmetatable(loaded, {
+      __newindex = function(t, k, v)
+         local mt = type(v) == "table" and getmetatable(v)
+         if type(mt) == "table" and rawget(mt, "htl_declaration") == true then
+            side[k] = v
+         else
+            side[k] = nil
+            rawset(t, k, v)
+         end
+      end,
+      __index = function(_, k)
+         local v = side[k]
+         if v == nil then return nil end
+         local preload = rawget(pkg, "preload")
+         if type(preload) == "table" and preload[k] ~= nil then return nil end
+         if required_from_teal() then return v end
+         return nil
+      end,
+   })
+end
+
 function H.install_searcher(decline_fn)
    decline = decline_fn
    table.insert(package.searchers, 2, strict_searcher)
+   guard_loaded()
 end
 
 function H.get_path()
