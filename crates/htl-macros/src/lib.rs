@@ -1716,6 +1716,73 @@ mod tests {
         }
     }
 
+    /// `include_tl!` embeds the Lua `htl gen` prints, comment-only lines included, byte
+    /// for byte. Both go through `Htl::gen_lua`; the macro through the run cache's `gen`
+    /// entry as well, so it is expanded twice and the second may be a replay.
+    #[test]
+    fn include_tl_embeds_the_comment_lines_htl_gen_prints() {
+        const DOC: &str = "\
+--- Module header doc, line 1
+--- line 2 of the header
+local record M
+end
+
+--- adds one
+--- @param x the number
+function M.inc(x: number): number
+   -- a comment inside the body
+   local y = x + 1 -- trailing comment
+   return y
+end
+
+--[[ a block
+comment ]]
+return M
+";
+        // The same sixteen lines `crates/htl-cli/tests/gen_comment_lines.rs` asserts
+        // `htl gen` prints.
+        const DOC_LUA: &str = "\
+--- Module header doc, line 1
+--- line 2 of the header
+local M = {}
+
+
+--- adds one
+--- @param x the number
+function M.inc(x)
+   -- a comment inside the body
+   local y = x + 1
+   return y
+end
+
+
+
+return M
+";
+        let root = scratch("comment-lines");
+        write(&root.join("src/doc2.tl"), DOC);
+        let embedded = || match resolve_include(&root, "src/doc2.tl", false)
+            .expect("the module checks")
+            .payload
+        {
+            Payload::Source(code) => code,
+            Payload::Bytes(_) => panic!("expected source"),
+        };
+        let first = embedded();
+        let second = embedded();
+        let (by_gen, _) = htl_core::Htl::new()
+            .unwrap()
+            .gen_lua(&root.join("src/doc2.tl"))
+            .unwrap();
+        assert_eq!(first, DOC_LUA, "include_tl!");
+        assert_eq!(second, DOC_LUA, "include_tl!, expanded again");
+        assert_eq!(
+            by_gen.as_deref(),
+            Some(DOC_LUA),
+            "Htl::gen_lua, as htl gen calls it"
+        );
+    }
+
     /// `target_dir` deps (physically vendored under the manifest) resolve too.
     #[test]
     fn include_resolves_target_dir_dep() {
