@@ -953,6 +953,16 @@ pub fn harvest_modules(h: &Harvest<'_>, check: &CheckInfo, test_file: &Path) {
     let mut queue = resolved_requires(&cache::requires_json(check));
     let (mut stored, mut skipped) = (0usize, 0usize);
     while let Some((_, path)) = queue.pop() {
+        // A declaration is not a module. The checker resolves a `require` to the `.d.tl`
+        // when one is on its path, and the generator will happily turn the declaration
+        // into Lua — its records as empty tables — but nothing runs that: at run time the
+        // searcher yields to the `.lua` the declaration types, or the host provides the
+        // name. Stored and replayed as a module, the empty tables would be preloaded over
+        // the real one (a project's `lshape.d.tl` beside `lshape/init.lua` failed every
+        // run after the first that way). Nothing to generate, and nothing behind it to walk.
+        if crate::is_declaration(&path) {
+            continue;
+        }
         // `done` spans the whole run, not this file. Test files share their modules — on a
         // 27-file suite the closures overlapped enough to generate and store 171 times for
         // 55 distinct modules — and generating one twice writes the same entry twice.
@@ -1019,6 +1029,13 @@ pub fn preloads_for(
     let mut absent = 0usize;
     while let Some((name, path)) = queue.pop() {
         if !seen.insert(path.clone()) {
+            continue;
+        }
+        // A declaration is never preloaded, whatever the store holds for it: an entry
+        // written before `harvest_modules` learned to skip one would otherwise serve the
+        // declaration's empty tables in front of the `.lua` it types. The searcher knows
+        // the rule; the census must not hand it a declaration.
+        if crate::is_declaration(&path) {
             continue;
         }
         let Some(m) = store.lookup(&cache::module_gen_key(&path, lint)) else {
