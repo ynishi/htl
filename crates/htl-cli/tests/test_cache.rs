@@ -234,3 +234,53 @@ fn a_declaration_beside_a_lua_module_is_not_preloaded_over_it() {
     );
     assert_eq!(second["summary"]["files_with_errors"], 0, "{second}");
 }
+
+/// `htl test` reads the same entries `htl check` does, and the same closure decides them: a
+/// test file requiring `top`, which requires `mid`, which requires the declaration `host`,
+/// is checked again when `host` changes. Before, the test file's check replayed and the
+/// run printed only what the run-time `require` of `mid` happened to regenerate — `mid`'s
+/// error, not `top`'s two.
+#[test]
+fn editing_a_declaration_two_requires_below_a_test_rechecks_the_test() {
+    let root = scratch("closure");
+    let host = "local record host\n   record Std\n      version: string\n   end\nend\nglobal std: host.Std\nreturn host\n";
+    write(&root.join("htl.toml"), "[check]\n");
+    write(&root.join("types/host.d.tl"), host);
+    write(
+        &root.join("src/mid.tl"),
+        "local h = require(\"host\")\nlocal record M\n   type Std = h.Std\n   ver: function(): string\nend\nfunction M.ver(): string return std.version end\nreturn M\n",
+    );
+    write(
+        &root.join("src/top.tl"),
+        "local mid = require(\"mid\")\nlocal M = {}\nfunction M.viaGlobal(): string return std.version end\nfunction M.viaType(s: mid.Std): string return s.version end\nreturn M\n",
+    );
+    write(
+        &root.join("tests/top_test.tl"),
+        "local t = require(\"htl.test\")\nlocal top = require(\"top\")\n\
+         t.it(\"loads\", function() t.expect(top ~= nil):to_equal(true) end)\n",
+    );
+
+    let warm = test_run(&root, &[]);
+    assert_eq!(passed(&warm), 1, "{warm}");
+
+    write(
+        &root.join("types/host.d.tl"),
+        &host.replace("version: string", "version: number"),
+    );
+    let error_of =
+        |v: &serde_json::Value| v["files"][0]["error"].as_str().unwrap_or("").to_string();
+    let after = test_run(&root, &[]);
+    assert_eq!(replayed(&after), 0, "{after}");
+    let fresh = test_run(&root, &["--no-cache"]);
+    for v in [&after, &fresh] {
+        let e = error_of(v);
+        assert!(
+            e.contains("top.tl:3:42: in return value: got number, expected string"),
+            "{e}"
+        );
+        assert!(
+            e.contains("top.tl:4:48: in return value: got number, expected string"),
+            "{e}"
+        );
+    }
+}

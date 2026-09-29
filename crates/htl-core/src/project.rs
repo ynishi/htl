@@ -806,6 +806,7 @@ pub fn check_one<O: Output>(
         deps: c.deps.iter().map(|p| cache::normal(p)).collect(),
         requires: cache::requires_json(&c),
         global_sites: cache::global_sites_json(&c),
+        closure_requires: cache::closure_requires_json(&c),
         // `htl check` has no use for generated Lua, nor for reading a `CheckInfo` back —
         // it replays the diagnostics above straight into the sink. `htl test` fills both in.
         code: None,

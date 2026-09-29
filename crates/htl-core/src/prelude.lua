@@ -2231,6 +2231,58 @@ local function dependency_errors(filename, result, env)
    return out
 end
 
+-- Every file a check of `filename` read through `require`, transitively: its require
+-- closure, sorted, the file itself left out. And, for every member of that closure, the
+-- names the member required, as `{ from = file, name = name }`, sorted by file then name.
+--
+-- The direct requires (`result.dependencies`) are not what a check read. A walk of `top`
+-- walks `mid`, and `mid`'s `require("host")` walks `host`: the globals `host` declares are
+-- in scope in `top` (`globals_below`), and a record type `mid` re-exports from `host`
+-- (`type Std = h.Std`) is `host`'s record when `top` indexes it. So what `top` reports
+-- depends on `host.d.tl` although `top` never names it, and a cache entry that hashed only
+-- `mid.tl` replayed `top`'s old answer over an edit to `host.d.tl` (the hole #400 closed).
+-- The Rust side hashes the closure (`CheckInfo::deps`) and probes the edges
+-- (`CheckInfo::closure_requires`): a file appearing under a name `mid` requires changes
+-- what `top` sees exactly as an edit to `host.d.tl` does, and no hash of a file that was
+-- read can see that.
+--
+-- The same walk as `sites_below`, over results rather than entries: a member is looked up
+-- in this env first (`env.loaded`, everything this check walked or was seeded with, which
+-- is right even for a check that stores nothing), then in the store (`by_file`), which
+-- `store_from` has just filled from this env when the check stores. A member found in
+-- neither -- a plain `.lua`, which the checker reads for a type of `any` and walks no
+-- further -- is still a member; there is nothing below it to follow. A cycle is cut at the
+-- file already visited, and the checked file itself is never a member of its own closure.
+local function require_closure(filename, result, env)
+   local visited = { [filename] = true }
+   local files, edges = {}, {}
+   local function walk(r, from)
+      local names = {}
+      for name in pairs(r.dependencies or {}) do names[#names + 1] = name end
+      table.sort(names)
+      for _, name in ipairs(names) do
+         local f = r.dependencies[name]
+         if from then edges[#edges + 1] = { from = from, name = name } end
+         if not visited[f] then
+            visited[f] = true
+            files[#files + 1] = f
+            local below = env.loaded[f]
+            if type(below) ~= "table" or below.dependencies == nil then
+               below = by_file[f] and by_file[f].result
+            end
+            if below then walk(below, f) end
+         end
+      end
+   end
+   walk(result, nil)
+   table.sort(files)
+   table.sort(edges, function(a, b)
+      if a.from ~= b.from then return a.from < b.from end
+      return a.name < b.name
+   end)
+   return files, edges
+end
+
 -- opts.lints = false skips the lint pass (runtime `require` of an already type-checked
 -- module: nobody reads lints there, and the pass costs more than the check itself).
 -- opts.seed = false checks with a cold env (no store): what is on disk right now, rather
@@ -2259,9 +2311,7 @@ function H.check(filename, env, opts)
    t0 = os.clock()
    local errors, error_fixes, error_items = collect_errors(filename, result)
    local warnings, warning_items = warnings_of(filename, result)
-   local deps = {}
-   for _, fname in pairs(result.dependencies or {}) do deps[#deps + 1] = fname end
-   table.sort(deps)
+   local deps, closure_requires = require_closure(filename, result, env)
    local lints, lint_fixes, lint_items = {}, {}, {}
    if opts.lints ~= false and result.ast and #(result.syntax_errors or {}) == 0 then
       local src
@@ -2334,7 +2384,7 @@ function H.check(filename, env, opts)
    return { ok = #errors == 0, errors = errors, error_fixes = error_fixes, warnings = warnings, deps = deps,
       lints = lints, lint_fixes = lint_fixes, requires = requires, dependency_errors = dep_errors,
       error_items = error_items, warning_items = warning_items, lint_items = lint_items,
-      global_sites = global_sites,
+      global_sites = global_sites, closure_requires = closure_requires,
       syntax_errors = #(result.syntax_errors or {}), result = result }
 end
 

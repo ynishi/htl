@@ -24,14 +24,31 @@
 //! which rules run — moving one rule between `warn` and `deny` changes no diagnostic, and
 //! re-checks anyway.
 //!
-//! The **inputs** are the module and everything reading it required, by content hash. The
-//! **probes** say what each name the module required resolves to — a new `.tl` appearing
-//! somewhere changes that while every recorded hash still matches, and nothing else would
-//! catch it. This is the hole ccache documents in its direct mode. With the project's model
-//! ([`Cache::with_answers`]) a probe is the model's answer for every such name, asked from
-//! the module: one hash, and the question it hashes is the one that matters. Without one
-//! (a file outside any project) a probe is a directory the search path consults, by the
-//! set of those names it offers.
+//! The **inputs** are the module and its require closure, by content hash: every file the
+//! check read through `require`, however many requires away ([`CheckInfo::deps`]). The
+//! closure and not the direct requires, because a check reads further than the module's
+//! own `require` calls. A `global` reaches a file through the whole chain (#370), and a
+//! record a required module re-exports (`type Std = h.Std`) is the record of the file it
+//! came from: `top.tl` requiring `mid.tl` requiring `host.d.tl` is typed by `host.d.tl`
+//! without ever naming it. An entry that hashed only `mid.tl` replayed `top.tl`'s old
+//! answer over an edit to `host.d.tl` — no error where the edit put two, and a
+//! `global-redeclaration` lint from the line numbers `top.tl` had seen before the edit
+//! beside the ones `mid.tl` saw after (#400). The cost is that an edit to a leaf re-checks
+//! everything above it, which is the right answer: the leaf's types reach all of it.
+//! Hashing is microseconds and memoised per run, so a project whose every module sits on
+//! one `.d.tl` hashes that file once.
+//!
+//! The **probes** say what each name the closure required resolves to — the module's own
+//! requires, asked from the module, and every member's, asked from that member
+//! ([`CheckInfo::closure_requires`]). A new `.tl` appearing somewhere changes that while
+//! every recorded hash still matches, and nothing else would catch it. This is the hole
+//! ccache documents in its direct mode, and it is as deep as the closure: a file appearing
+//! under a name `mid.tl` requires changes what `top.tl` sees exactly as an edit does. With
+//! the project's model ([`Cache::with_answers`]) a probe is the model's answer for every
+//! such question, each asked from the file that asked it: one hash, and the questions it
+//! hashes are the ones that matter. Without one (a file outside any project) a probe is a
+//! directory the search path consults — the module's own, and each member's that asked
+//! something — by the set of those names it offers.
 //!
 //! # No mtimes anywhere
 //!
@@ -81,12 +98,18 @@ use crate::{CheckInfo, DependencyError, Fix, RequireSite};
 /// does not change when htl does — still miss on a checker that no longer exists, and
 /// the CLI and the macros read each other's module entries.
 ///
+/// 11: an entry's inputs are the module's require closure, and a [`Module`] carries the
+/// names each member of the closure required ([`Module::closure_requires`]), which the
+/// probe asks again (#400). An entry of 10 hashed only the direct requires and would hit
+/// over an edit two requires away — exactly the entries this change exists to stop
+/// replaying — so they are a miss rather than a default.
+///
 /// A change to the Lua a `module` entry carries needs no bump: the stamp's `checker` is a
 /// hash of `prelude.lua` among the rest ([`crate::checker_identity`]), so a generator that
 /// emits different text is a different checker and every warm entry misses on its own.
 /// What this number is for is a change to the shape of what is stored — a field, a key, a
 /// meaning — which the hash cannot see.
-const FORMAT: u32 = 10;
+const FORMAT: u32 = 11;
 
 /// Where the store lives under the project root. Generated, and `htl init` puts `.htl/` in
 /// `.gitignore` — one line for the cache and the installed deps beside it, both
@@ -188,12 +211,18 @@ struct Input {
 #[derive(Serialize, Deserialize, Debug)]
 struct Probe {
     dir: String,
-    /// Hash of `(name, whether it resolves here)` over the module's own requires, in the
-    /// order they are stored. Changing which directory a name resolves in changes this for
-    /// both directories involved, which is how a shadowing file is caught. For the
-    /// [`MODEL_PROBE`], the hash of the model's answer for each of those names.
+    /// Hash of `(name, whether it resolves here)` over the names the module and the
+    /// members of its require closure required, sorted. Changing which directory a name
+    /// resolves in changes this for both directories involved, which is how a shadowing
+    /// file is caught. For the [`MODEL_PROBE`], the hash of the model's answer to each
+    /// question — a name, asked from the file that required it ([`Cache::questions`]).
     names: String,
 }
+
+/// One question a probe asks again: a name, and the file that required it (`None` for the
+/// requires of a whole-run entry's modules, asked from nowhere in particular, as before
+/// the closure was probed).
+type Question = (Option<String>, String);
 
 /// The `dir` of the one probe a store with the project model records: not a directory,
 /// the model's answers ([`Cache::with_answers`]).
@@ -362,8 +391,10 @@ pub struct Module {
     pub warnings: usize,
     /// Lints, as `errors`.
     pub lints: usize,
-    /// What the checker resolved this module's requires to. The next run keys on these,
-    /// which is how a dependency's edit invalidates its dependents.
+    /// Every file the check read through `require`: the module's require closure
+    /// ([`CheckInfo::deps`]), not only its own requires. The next run keys on these, which
+    /// is how a dependency's edit invalidates its dependents — every one above it, however
+    /// many requires away.
     pub deps: Vec<String>,
     /// Every `require` in the source and where it went, which `deps` is the resolved,
     /// deduplicated half of. Kept whole because the cycle lint reports a call site, and a
@@ -376,6 +407,13 @@ pub struct Module {
     /// to carry the sites it saw. Absent in entries written before the field existed.
     #[serde(default)]
     pub global_sites: Vec<GlobalSiteJson>,
+    /// The names each member of the require closure required
+    /// ([`CheckInfo::closure_requires`]): the questions below the module that the probe asks
+    /// again, each from the member that asked it. `deps` says the files read are unchanged;
+    /// this is what says each name still means the file it meant. Entries written before the
+    /// field existed are a format behind (the stamp) and not read.
+    #[serde(default)]
+    pub closure_requires: Vec<ClosureRequireJson>,
     /// The Lua this module generates, for entries under [`gen_key`]. `htl check` never needs
     /// it and stores `None`; `htl test` stores it so a replay can go straight to running.
     /// Absent when checking produced errors, since there is nothing to run then.
@@ -439,6 +477,20 @@ pub struct CheckInfoJson {
     /// those are a format behind (the stamp) and not read.
     #[serde(default)]
     pub global_sites: Vec<GlobalSiteJson>,
+    /// [`CheckInfo::closure_requires`], so the check a replayed module hands back is the
+    /// whole of what the fresh one said.
+    #[serde(default)]
+    pub closure_requires: Vec<ClosureRequireJson>,
+}
+
+/// One edge below a module ([`CheckInfo::closure_requires`]) as an entry stores it: a member
+/// of the require closure and one name it required.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ClosureRequireJson {
+    /// The member that required the name, as the checker found it.
+    pub from: String,
+    /// The name as that member's `require` spelt it.
+    pub module: String,
 }
 
 /// One [`crate::GlobalSite`] as an entry stores it.
@@ -537,6 +589,7 @@ impl CheckInfoJson {
                 })
                 .collect(),
             global_sites: global_sites_json(c),
+            closure_requires: closure_requires_json(c),
         }
     }
 
@@ -582,6 +635,7 @@ impl CheckInfoJson {
                 })
                 .collect(),
             global_sites: global_sites_from_json(&self.global_sites),
+            closure_requires: closure_requires_from_json(&self.closure_requires),
         }
     }
 }
@@ -628,6 +682,24 @@ pub fn global_sites_json(c: &CheckInfo) -> Vec<GlobalSiteJson> {
         .collect()
 }
 
+/// [`CheckInfo::closure_requires`] in the shape an entry stores.
+pub fn closure_requires_json(c: &CheckInfo) -> Vec<ClosureRequireJson> {
+    c.closure_requires
+        .iter()
+        .map(|(from, module)| ClosureRequireJson {
+            from: normal(from),
+            module: module.clone(),
+        })
+        .collect()
+}
+
+fn closure_requires_from_json(edges: &[ClosureRequireJson]) -> Vec<(PathBuf, String)> {
+    edges
+        .iter()
+        .map(|e| (PathBuf::from(&e.from), e.module.clone()))
+        .collect()
+}
+
 fn global_sites_from_json(sites: &[GlobalSiteJson]) -> Vec<crate::GlobalSite> {
     sites
         .iter()
@@ -667,6 +739,7 @@ impl Module {
             deps: self.deps.iter().map(PathBuf::from).collect(),
             requires: requires_from_json(&self.requires),
             global_sites: global_sites_from_json(&self.global_sites),
+            closure_requires: closure_requires_from_json(&self.closure_requires),
             errors: self
                 .diagnostics
                 .iter()
@@ -688,6 +761,7 @@ impl Module {
             deps: c.deps.iter().map(|p| normal(p)).collect(),
             requires: requires_json(c),
             global_sites: global_sites_json(c),
+            closure_requires: closure_requires_json(c),
             code: Some(code),
             check: Some(CheckInfoJson::from_check(c)),
         }
@@ -1212,13 +1286,18 @@ impl Cache {
         self
     }
 
-    /// The model's answers for `names`, asked from `subject`, hashed.
-    fn model_hash(&self, answers: &Answers, subject: Option<&str>, names: &[String]) -> String {
+    /// The model's answer to each question — a name, asked from the file that required it
+    /// (`None`: from nowhere in particular, the whole-run entry's own requires) — hashed.
+    /// The asker is hashed beside the name: the same name asked from two files is two
+    /// questions, and the model can answer them differently.
+    fn model_hash(&self, answers: &Answers, questions: &[Question]) -> String {
         let mut h = blake3::Hasher::new();
-        for n in names {
+        for (asker, n) in questions {
+            h.update(asker.as_deref().unwrap_or("").as_bytes());
+            h.update(b"\0");
             h.update(n.as_bytes());
             h.update(b"\0");
-            h.update(answers(subject.map(Path::new), n).as_bytes());
+            h.update(answers(asker.as_deref().map(Path::new), n).as_bytes());
             h.update(b"\x01");
         }
         h.finalize().to_hex().to_string()
@@ -1296,15 +1375,37 @@ impl Cache {
         }
     }
 
-    /// The module names an entry's modules asked for, sorted and deduplicated.
+    /// Every question an entry's probe asks again: each name its modules required, asked
+    /// from `subject` (the module the entry is about; `None` for a whole-run entry), and
+    /// each name a member of their require closures required, asked from that member
+    /// ([`Module::closure_requires`]). Sorted and deduplicated.
     ///
     /// Both sides of a probe comparison have to derive this the same way, which is why it is
     /// one function rather than two loops.
-    fn required_names(modules: &[Module]) -> Vec<String> {
-        let mut names: Vec<String> = modules
+    fn questions(modules: &[Module], subject: Option<&str>) -> Vec<Question> {
+        let mut qs: Vec<Question> = modules
             .iter()
-            .flat_map(|m| m.requires.iter().map(|r| r.module.clone()))
+            .flat_map(|m| {
+                let own = m
+                    .requires
+                    .iter()
+                    .map(|r| (subject.map(str::to_string), r.module.clone()));
+                let below = m
+                    .closure_requires
+                    .iter()
+                    .map(|e| (Some(e.from.clone()), e.module.clone()));
+                own.chain(below)
+            })
             .collect();
+        qs.sort();
+        qs.dedup();
+        qs
+    }
+
+    /// The names the questions ask, whoever asks them, sorted and deduplicated: what a
+    /// directory probe hashes, since a directory offers a name or does not whoever asks.
+    fn names_of(questions: &[Question]) -> Vec<String> {
+        let mut names: Vec<String> = questions.iter().map(|(_, n)| n.clone()).collect();
         names.sort();
         names.dedup();
         names
@@ -1319,8 +1420,7 @@ impl Cache {
         stamp: &Stamp,
         inputs: &[Input],
         probes: &[Probe],
-        names: &[String],
-        subject: Option<&str>,
+        questions: &[Question],
     ) -> bool {
         let Some(current) = Stamp::for_kind(kind) else {
             return false;
@@ -1348,8 +1448,10 @@ impl Cache {
                     self.miss("recorded against a project model this run does not have");
                     return false;
                 };
-                if self.model_hash(answers, subject, names) != p.names {
-                    self.miss("what a name this module requires resolves to changed");
+                if self.model_hash(answers, questions) != p.names {
+                    self.miss(
+                        "what a name this module or its require closure requires resolves to changed",
+                    );
                     return false;
                 }
                 continue;
@@ -1358,7 +1460,7 @@ impl Cache {
                 self.miss("recorded without the project model this run has");
                 return false;
             }
-            if self.probe_hash(&p.dir, names) != p.names {
+            if self.probe_hash(&p.dir, &Self::names_of(questions)) != p.names {
                 self.miss(&format!(
                     "what {} offers for this module's requires changed",
                     p.dir
@@ -1388,14 +1490,13 @@ impl Cache {
     pub fn lookup(&self, key: &Key) -> Option<Module> {
         let raw = std::fs::read_to_string(self.entry_path(key)).ok()?;
         let entry: Entry = self.parse(&raw)?;
-        let names = Self::required_names(std::slice::from_ref(&entry.module));
+        let questions = Self::questions(std::slice::from_ref(&entry.module), Some(&entry.subject));
         if !self.still_valid(
             &entry.kind,
             &entry.stamp,
             &entry.inputs,
             &entry.probes,
-            &names,
-            Some(&entry.subject),
+            &questions,
         ) {
             return None;
         }
@@ -1427,15 +1528,8 @@ impl Cache {
             self.miss("the walk visits a different number of files");
             return None;
         }
-        let names = Self::required_names(&entry.modules);
-        if !self.still_valid(
-            RUN,
-            &entry.stamp,
-            &entry.inputs,
-            &entry.probes,
-            &names,
-            None,
-        ) {
+        let questions = Self::questions(&entry.modules, None);
+        if !self.still_valid(RUN, &entry.stamp, &entry.inputs, &entry.probes, &questions) {
             return None;
         }
         self.touch(key);
@@ -1459,19 +1553,33 @@ impl Cache {
         Some(inputs)
     }
 
-    fn probes_for(&self, dirs: &[PathBuf], names: &[String], subject: Option<&str>) -> Vec<Probe> {
+    /// The probes an entry records for `questions`: the model's answers, when this store has
+    /// the model; otherwise one per directory — `dirs`, the caller's for the module, and the
+    /// directory of every member of the closure that asked something, which is where a file
+    /// outside any project resolves its own `require`s ([`search_dirs`]).
+    fn probes_for(&self, dirs: &[PathBuf], questions: &[Question]) -> Vec<Probe> {
         if let Some(answers) = &self.answers {
             return vec![Probe {
                 dir: MODEL_PROBE.to_string(),
-                names: self.model_hash(answers, subject, names),
+                names: self.model_hash(answers, questions),
             }];
         }
-        let mut dirs: Vec<String> = dirs.iter().map(|p| normal(p)).collect();
+        let askers = questions
+            .iter()
+            .filter_map(|(asker, _)| asker.as_deref())
+            .flat_map(|a| search_dirs(Path::new(a)));
+        let mut dirs: Vec<String> = dirs
+            .iter()
+            .cloned()
+            .chain(askers)
+            .map(|p| normal(&p))
+            .collect();
         dirs.sort();
         dirs.dedup();
+        let names = Self::names_of(questions);
         dirs.into_iter()
             .map(|d| {
-                let h = self.probe_hash(&d, names);
+                let h = self.probe_hash(&d, &names);
                 Probe { dir: d, names: h }
             })
             .collect()
@@ -1496,13 +1604,14 @@ impl Cache {
         let Some(inputs) = self.inputs_for(paths) else {
             return;
         };
-        let names = Self::required_names(std::slice::from_ref(module));
+        let subject = normal(file);
+        let questions = Self::questions(std::slice::from_ref(module), Some(&subject));
         let entry = Entry {
             stamp,
-            subject: normal(file),
+            subject: subject.clone(),
             kind: key.kind.to_string(),
             inputs,
-            probes: self.probes_for(dirs, &names, Some(&normal(file))),
+            probes: self.probes_for(dirs, &questions),
             module: module.clone(),
         };
         match self.write(key, &entry) {
@@ -1533,13 +1642,13 @@ impl Cache {
         let Some(inputs) = self.inputs_for(paths) else {
             return;
         };
-        let names = Self::required_names(modules);
+        let questions = Self::questions(modules, None);
         let entry = RunEntry {
             stamp,
             subjects: files.iter().map(|f| normal(f)).collect(),
             kind: key.kind.to_string(),
             inputs,
-            probes: self.probes_for(dirs, &names, None),
+            probes: self.probes_for(dirs, &questions),
             modules: modules.to_vec(),
         };
         match self.write(key, &entry) {
@@ -1703,6 +1812,7 @@ mod tests {
             deps: Vec::new(),
             requires: Vec::new(),
             global_sites: Vec::new(),
+            closure_requires: Vec::new(),
             code: Some("return {}".into()),
             check: Some(CheckInfoJson::default()),
         };

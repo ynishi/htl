@@ -629,3 +629,148 @@ fn diagnostics_come_out_in_file_order_whatever_was_cached() {
     );
     assert_eq!(files(&cold), files(&mixed), "and so does a mixed one");
 }
+
+const HOST_DTL: &str = "local record host\n   record Std\n      version: string\n   end\nend\nglobal std: host.Std\nreturn host\n";
+const MID_TL: &str = "local h = require(\"host\")\nlocal record M\n   type Std = h.Std\n   ver: function(): string\nend\nfunction M.ver(): string return std.version end\nreturn M\n";
+const TOP_TL: &str = "local mid = require(\"mid\")\nlocal M = {}\nfunction M.viaGlobal(): string return std.version end\nfunction M.viaType(s: mid.Std): string return s.version end\nreturn M\n";
+
+/// A module typed by a file two requires away: `top` requires `mid`, `mid` requires the
+/// declaration `host`, and `top` reads both `host`'s global and the record `mid`
+/// re-exports from it, without ever naming `host`. `dtl` is where the declaration goes
+/// (`types/host.d.tl` beside `src/`, or `host.d.tl` in a flat tree).
+fn two_requires_away(root: &Path, dtl: &str, src: &str) {
+    write(&root.join(dtl), HOST_DTL);
+    write(&root.join(src).join("mid.tl"), MID_TL);
+    write(&root.join(src).join("top.tl"), TOP_TL);
+}
+
+/// `(file name, line, col, message)` of every error a JSON report carries, in its order.
+fn errors_of(v: &serde_json::Value) -> Vec<(String, u64, u64, String)> {
+    v["diagnostics"]
+        .as_array()
+        .expect("diagnostics")
+        .iter()
+        .filter(|d| d["severity"] == "error")
+        .map(|d| {
+            let file = d["file"].as_str().unwrap_or("");
+            (
+                file.rsplit('/').next().unwrap_or(file).to_string(),
+                d["line"].as_u64().unwrap_or(0),
+                d["col"].as_u64().unwrap_or(0),
+                d["message"].as_str().unwrap_or("").to_string(),
+            )
+        })
+        .collect()
+}
+
+/// An edit to a file the module never names, but reads through a require of a require,
+/// misses: the entry's inputs are the require closure, not the direct requires. Before,
+/// `top.tl` hit on its old entry — `mid.tl` unchanged — and the two errors the edit put
+/// into it stayed hidden until `--no-cache`.
+#[test]
+fn editing_a_declaration_two_requires_away_rechecks_the_module_that_reads_it() {
+    let root = scratch("closure");
+    write(&root.join("htl.toml"), "[check]\n");
+    two_requires_away(&root, "types/host.d.tl", "src");
+
+    let first = check(&root);
+    assert!(errors_of(&first).is_empty(), "{first}");
+
+    write(
+        &root.join("types/host.d.tl"),
+        &HOST_DTL.replace("version: string", "version: number"),
+    );
+    let msg = "in return value: got number, expected string";
+    let want = vec![
+        ("mid.tl".to_string(), 6, 36, msg.to_string()),
+        ("top.tl".to_string(), 3, 42, msg.to_string()),
+        ("top.tl".to_string(), 4, 48, msg.to_string()),
+    ];
+    let fresh = check_with(&root, &["--no-cache"]);
+    assert_eq!(
+        errors_of(&fresh),
+        want,
+        "the fixture's answer without the store"
+    );
+
+    let second = check(&root);
+    assert_eq!(
+        replayed(&second),
+        0,
+        "both modules read the declaration, so neither replays"
+    );
+    assert_eq!(errors_of(&second), want);
+
+    let third = check(&root);
+    assert_eq!(
+        replayed(&third),
+        2,
+        "and the answer is then stored for both"
+    );
+    assert_eq!(errors_of(&third), want);
+}
+
+/// The same hole as a false lint: moving the declaration down three lines left `top.tl`
+/// replaying the site it had seen (line 6) beside the one `mid.tl` saw after the edit
+/// (line 9), and `global-redeclaration` read the two as two declarations.
+#[test]
+fn shifting_a_declaration_two_requires_away_reports_no_redeclaration() {
+    let root = scratch("closure-lines");
+    write(&root.join("htl.toml"), "[layout]\nsource = \".\"\n");
+    two_requires_away(&root, "host.d.tl", ".");
+
+    let (ok, _, warm) = htl(&["check", "."], &root);
+    assert!(ok, "{warm}");
+    write(
+        &root.join("host.d.tl"),
+        &format!("-- one\n-- two\n-- three\n{HOST_DTL}"),
+    );
+
+    // Both modules read the declaration now, so neither replays: the run says what a run
+    // without the store says, line for line.
+    let (ok, _, after) = htl(&["check", "."], &root);
+    assert!(ok, "{after}");
+    assert!(!after.contains("global-redeclaration"), "{after}");
+    let (_, _, fresh) = htl(&["check", "--no-cache", "."], &root);
+    assert_eq!(
+        after, "htl check: 2 file(s), 0 error(s), 0 warning(s), 0 lint(s)\n",
+        "the run after the edit"
+    );
+    assert_eq!(after, fresh, "and the run without the store");
+}
+
+/// The probe is as deep as the inputs. A file appearing under a name `mid` requires changes
+/// what `top` reads through `mid` just as an edit would, while every file either entry
+/// hashed is unchanged — so `top`, which never names `leaf`, is checked again too, as `mid`
+/// is by its own probe. The rest of `a_module_appearing_under_a_required_name_misses`
+/// applies: the checker still picks `src/leaf.tl`, but whether it does is no longer the
+/// same question.
+#[test]
+fn a_module_appearing_under_a_name_a_required_module_requires_misses() {
+    let root = scratch("closure-appear");
+    write(&root.join("htl.toml"), "[check]\n");
+    write(
+        &root.join("src/leaf.tl"),
+        "local record leaf\nend\nfunction leaf.f(): integer\n   return 1\nend\nreturn leaf\n",
+    );
+    write(
+        &root.join("src/mid.tl"),
+        "local leaf = require(\"leaf\")\nlocal record mid\nend\nfunction mid.g(): integer\n   return leaf.f()\nend\nreturn mid\n",
+    );
+    write(
+        &root.join("src/top.tl"),
+        "local mid = require(\"mid\")\nlocal x: integer = mid.g()\nprint(x)\n",
+    );
+    assert_eq!(replayed(&check(&root)), 0);
+    assert_eq!(replayed(&check(&root)), 3);
+
+    write(
+        &root.join("types/leaf.d.tl"),
+        "local record leaf\n   f: function(): integer\nend\nreturn leaf\n",
+    );
+    assert_eq!(
+        replayed(&check(&root)),
+        1,
+        "only the leaf replays: nothing it read or asked about moved"
+    );
+}
