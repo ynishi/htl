@@ -268,6 +268,15 @@ Examples:
         /// Stop at the first failure (within a file, and across files)
         #[arg(long)]
         fail_fast: bool,
+        /// Pass when no test file is found (the summary still says 0 files)
+        ///
+        /// Without it, finding nothing exits 1: a test file is found by what it loads, not
+        /// by its name, so a wrong `--lib` or a wrong directory finds nothing and would
+        /// otherwise pass silently. For a project whose gate runs `htl test` before its
+        /// first test exists; remove the flag when that test arrives. With test files
+        /// present it changes nothing.
+        #[arg(long)]
+        allow_empty: bool,
         /// Print every test with its time (default: only failures and files)
         #[arg(short, long)]
         verbose: bool,
@@ -664,6 +673,7 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
             lib,
             lint,
             fail_fast,
+            allow_empty,
             verbose,
             quiet,
             slow,
@@ -683,6 +693,7 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
             lint.as_deref(),
             TestFlags {
                 fail_fast,
+                allow_empty,
                 verbose,
                 quiet,
                 slow,
@@ -1540,6 +1551,8 @@ struct CheckFlags {
 
 struct TestFlags {
     fail_fast: bool,
+    /// Finding no test file is a pass rather than a failure.
+    allow_empty: bool,
     verbose: bool,
     quiet: bool,
     slow: Option<f64>,
@@ -1689,9 +1702,12 @@ fn cmd_test(
     // A test at the root of a project laid out flat without saying so would only fail on
     // its first `require`; say what is wrong instead, as `check` does.
     project::refuse_flat_root(model.as_ref(), &paths, &files)?;
-    if files.is_empty() {
+    // Finding nothing goes through the same report as any run: under `--allow-empty` its
+    // summary line, and under `--format json` its document whether allowed or not, so a
+    // reader of stdout always gets one.
+    let empty = files.is_empty();
+    if empty {
         eprintln!("htl test: no test files found (looked for .tl files that require(\"{lib}\"))");
-        return Ok(ExitCode::FAILURE);
     }
     let opts = project::TestOptions {
         config: &cfg,
@@ -1723,74 +1739,90 @@ fn cmd_test(
     // What is left of the run here: how a file reads on a terminal, and what the document
     // says about it. Which files run, in what isolation, from what store — and what they
     // draw — is `project::test`'s.
-    let rep = project::test(&mut sink, &files, &opts, &mut |rep, sink| {
-        if flags.json {
-            json_files.push(report::TestFile::from_report(rep, sink.out().take()));
+    let rep = if empty {
+        // Nothing to run, so no session to open and no store to touch: the run's report
+        // with every count at zero, and no file having drawn from the seed.
+        project::TestReport {
+            files: Vec::new(),
+            ran: 0,
+            passed: 0,
+            failed: 0,
+            files_with_errors: 0,
+            replayed: 0,
+            seed: flags.seed.unwrap_or(0),
+            duration_ms: 0.0,
+            coverage: None,
         }
-        if flags.junit.is_some() {
-            junit_suites.push(junit_suite(rep));
-        }
-        // Spelled as `htl check` spells the same file, whatever path the walk was handed.
-        let f = htl::diagnostic::display_path(&rep.path);
-        let tag = if rep.ok() { "ok  " } else { "FAIL" };
-        let detail = if !rep.check.ok() {
-            "type check failed".to_string()
-        } else if let Some(e) = &rep.error {
-            // The cause on the file's own line, its frames under it: a traceback inside
-            // the parenthesised summary would push `12 ms` past a screen of stack.
-            format!("error: {}", e.lines().next().unwrap_or_default())
-        } else if rep.file_level {
-            "ran to completion (no test library used)".to_string()
-        } else {
-            format!("{} passed, {} failed", rep.passed, rep.failed)
-        };
-        // Quiet: a passing file is silence; failures, errors and slow tests still show.
-        // JSON: nothing on stderr, the document carries it all.
-        let show_file = !flags.json && (!flags.quiet || !rep.ok());
-        if show_file {
-            eprintln!("{tag} {f}  ({detail}, {:.0} ms)", rep.duration_ms);
-            if let Some(e) = &rep.error {
-                for line in e.lines().skip(1) {
-                    eprintln!("      {line}");
+    } else {
+        project::test(&mut sink, &files, &opts, &mut |rep, sink| {
+            if flags.json {
+                json_files.push(report::TestFile::from_report(rep, sink.out().take()));
+            }
+            if flags.junit.is_some() {
+                junit_suites.push(junit_suite(rep));
+            }
+            // Spelled as `htl check` spells the same file, whatever path the walk was handed.
+            let f = htl::diagnostic::display_path(&rep.path);
+            let tag = if rep.ok() { "ok  " } else { "FAIL" };
+            let detail = if !rep.check.ok() {
+                "type check failed".to_string()
+            } else if let Some(e) = &rep.error {
+                // The cause on the file's own line, its frames under it: a traceback inside
+                // the parenthesised summary would push `12 ms` past a screen of stack.
+                format!("error: {}", e.lines().next().unwrap_or_default())
+            } else if rep.file_level {
+                "ran to completion (no test library used)".to_string()
+            } else {
+                format!("{} passed, {} failed", rep.passed, rep.failed)
+            };
+            // Quiet: a passing file is silence; failures, errors and slow tests still show.
+            // JSON: nothing on stderr, the document carries it all.
+            let show_file = !flags.json && (!flags.quiet || !rep.ok());
+            if show_file {
+                eprintln!("{tag} {f}  ({detail}, {:.0} ms)", rep.duration_ms);
+                if let Some(e) = &rep.error {
+                    for line in e.lines().skip(1) {
+                        eprintln!("      {line}");
+                    }
                 }
             }
-        }
-        for tr in &rep.tests {
-            let slow = flags.slow.is_some_and(|ms| tr.ms >= ms);
-            if !flags.json && (flags.verbose || slow) {
-                if flags.quiet && !show_file {
-                    // The file line was skipped: name the file with the slow test.
-                    eprintln!("slow {f}  {}  ({:.1} ms)", tr.name, tr.ms);
-                    continue;
+            for tr in &rep.tests {
+                let slow = flags.slow.is_some_and(|ms| tr.ms >= ms);
+                if !flags.json && (flags.verbose || slow) {
+                    if flags.quiet && !show_file {
+                        // The file line was skipped: name the file with the slow test.
+                        eprintln!("slow {f}  {}  ({:.1} ms)", tr.name, tr.ms);
+                        continue;
+                    }
+                    let mark = if tr.ok { "ok  " } else { "FAIL" };
+                    let note = if slow && !flags.verbose {
+                        "  [slow]"
+                    } else {
+                        ""
+                    };
+                    eprintln!("      {mark} {}  ({:.1} ms){note}", tr.name, tr.ms);
                 }
-                let mark = if tr.ok { "ok  " } else { "FAIL" };
-                let note = if slow && !flags.verbose {
-                    "  [slow]"
-                } else {
-                    ""
-                };
-                eprintln!("      {mark} {}  ({:.1} ms){note}", tr.name, tr.ms);
             }
-        }
-        if !flags.json {
-            for m in &rep.failures {
-                eprintln!("      - {m}");
+            if !flags.json {
+                for m in &rep.failures {
+                    eprintln!("      - {m}");
+                }
+                // A snapshot written or rewritten is a change on disk: always say so, even in -q.
+                for p in &rep.snapshots_written {
+                    eprintln!(
+                        "snapshot written: {}",
+                        htl::diagnostic::display_path(Path::new(p))
+                    );
+                }
+                for p in &rep.snapshots_updated {
+                    eprintln!(
+                        "snapshot updated: {}",
+                        htl::diagnostic::display_path(Path::new(p))
+                    );
+                }
             }
-            // A snapshot written or rewritten is a change on disk: always say so, even in -q.
-            for p in &rep.snapshots_written {
-                eprintln!(
-                    "snapshot written: {}",
-                    htl::diagnostic::display_path(Path::new(p))
-                );
-            }
-            for p in &rep.snapshots_updated {
-                eprintln!(
-                    "snapshot updated: {}",
-                    htl::diagnostic::display_path(Path::new(p))
-                );
-            }
-        }
-    })?;
+        })?
+    };
 
     if let Some(out) = &flags.junit {
         // The run's own total, not the sum of the files: it is the number the summary
@@ -1809,7 +1841,9 @@ fn cmd_test(
         std::fs::write(out, cov.lcov(&root))
             .with_context(|| format!("writing {}", out.display()))?;
     }
-    let ok = rep.ok();
+    // An empty run is a pass only when asked for; the document's `ok` says what the exit
+    // code says, so a reader of either sees the same refusal.
+    let ok = rep.ok() && (!empty || flags.allow_empty);
     if flags.json {
         let summary = report::TestSummary {
             files: rep.files.len(),
@@ -1827,7 +1861,8 @@ fn cmd_test(
             summary,
             coverage: rep.coverage,
         })?;
-    } else {
+    } else if !empty || flags.allow_empty {
+        // A refused empty run says so with the notice alone, as it always has.
         if let Some(cov) = &rep.coverage {
             print_coverage(cov, flags.coverage_lines);
             if let Some(out) = &flags.lcov {
@@ -1855,10 +1890,13 @@ fn cmd_test(
         );
         // Always, not only on failure: the seed of a run that passed is what reproduces
         // the run that passes, and a failure two commits later is compared against it.
-        eprintln!(
-            "htl test: seed {} (repeat with --seed {})",
-            rep.seed, rep.seed
-        );
+        // A run of no files drew nothing, so there is nothing to repeat.
+        if !empty {
+            eprintln!(
+                "htl test: seed {} (repeat with --seed {})",
+                rep.seed, rep.seed
+            );
+        }
     }
     Ok(if ok {
         ExitCode::SUCCESS
