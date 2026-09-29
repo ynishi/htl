@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/ynishi/htl/compare/v0.10.0...v0.11.0) - 2026-09-29
+
+### Added
+
+- a check with findings names htl check --explain <rule> once per rule before its summary, and the design prose above four rules points at the registry instead of restating it
+- htl check --explain <rule> prints why a rule exists and how to decide its cases, from an explanation every rule of the registry carries
+
+### Fixed
+
+- htl test's store never records or preloads a .d.tl as a module, so a Lua module typed by a declaration beside it survives the second run
+
 ## [0.10.0](https://github.com/ynishi/htl/compare/v0.9.0...v0.10.0) - 2026-09-28
 
 ### Added
