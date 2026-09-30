@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0](https://github.com/ynishi/htl/compare/v0.11.0...v0.12.0) - 2026-09-30
+
+### Added
+
+- htl test --allow-empty passes a run that found no test file, and --format json prints its document whether or not the flag is given
+- a cache entry hashes and probes the module's require closure, so an edit two requires away is not replayed over
+- a comment-only line of a .tl survives generation at its own line, so the --- doc reaches the Lua htl gen and include_tl! write
+
+### Fixed
+
+- the stand-in a Teal require of a declared-only name gets stays out of package.loaded, so a plain Lua pcall(require) after it is still false
+- a -- line inside a block comment stays empty under generation, and the comment lines after a .tl's last line of code reach the Lua at their own numbers
+
+### Other
+
+- the htl-cli tests patch a scaffolded project the way e2e does, so the window test checks under the packaged gate when the pinned release is not on crates.io yet
+
 ## [0.11.0](https://github.com/ynishi/htl/compare/v0.10.0...v0.11.0) - 2026-09-29
 
 ### Added
