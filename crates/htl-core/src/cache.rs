@@ -407,9 +407,9 @@ pub struct Module {
     /// to carry the sites it saw. Absent in entries written before the field existed.
     #[serde(default)]
     pub global_sites: Vec<GlobalSiteJson>,
-    /// The names each member of the require closure required
-    /// ([`CheckInfo::closure_requires`]): the questions below the module that the probe asks
-    /// again, each from the member that asked it. `deps` says the files read are unchanged;
+    /// The names each member of the require closure required — its require sites, resolved
+    /// or not ([`CheckInfo::closure_requires`]): the questions below the module that the
+    /// probe asks again, each from the member that asked it. `deps` says the files read are unchanged;
     /// this is what says each name still means the file it meant. Entries written before the
     /// field existed are a format behind (the stamp) and not read.
     #[serde(default)]

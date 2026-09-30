@@ -774,3 +774,99 @@ fn a_module_appearing_under_a_name_a_required_module_requires_misses() {
         "only the leaf replays: nothing it read or asked about moved"
     );
 }
+
+/// `mid` requires `gone` and re-exports its record; `top` reads a field of it through `mid`
+/// and never names `gone`. The fixture of #410.
+const GONE_MID_TL: &str = "local g = require(\"gone\")\nlocal record M\n   type G = g.G\n   make: function(): g.G\nend\nfunction M.make(): g.G return { n = 1 } end\nreturn M\n";
+const GONE_TOP_TL: &str = "local mid = require(\"mid\")\nlocal M = {}\nfunction M.n(): integer return mid.make().n end\nreturn M\n";
+
+fn gone_tl(field: &str) -> String {
+    format!("local record gone\n   record G\n      n: {field}\n   end\nend\nreturn gone\n")
+}
+
+fn check_flat(root: &Path, args: &[&str]) -> serde_json::Value {
+    let mut a = vec!["check", ".", "--format", "json"];
+    a.extend_from_slice(args);
+    let (_, stdout, _) = htl(&a, root);
+    serde_json::from_str(&stdout).expect("stdout is one JSON document")
+}
+
+/// A name a required module required that resolved nowhere is a question the entry above it
+/// asks again. Before, `top`'s entry had edges only for the names below it that resolved,
+/// so writing `gone.tl` re-checked `mid` (its own require of `gone`) while `top` hashed an
+/// unchanged `mid` and replayed the errors it recorded while `gone` was missing — on a tree
+/// `--no-cache` passes, and, after `gone` changed, instead of the error that tree has.
+#[test]
+fn a_module_appearing_under_a_name_a_required_module_could_not_resolve_misses() {
+    let root = scratch("closure-unresolved");
+    write(&root.join("htl.toml"), "[layout]\nsource = \".\"\n");
+    write(&root.join("mid.tl"), GONE_MID_TL);
+    write(&root.join("top.tl"), GONE_TOP_TL);
+
+    let first = check_flat(&root, &[]);
+    let unknown = "unknown type g.G".to_string();
+    assert_eq!(
+        errors_of(&first),
+        vec![
+            (
+                "mid.tl".to_string(),
+                1,
+                18,
+                "module not found: 'gone'".to_string()
+            ),
+            ("mid.tl".to_string(), 3, 13, unknown.clone()),
+            ("mid.tl".to_string(), 4, 22, unknown.clone()),
+            ("mid.tl".to_string(), 6, 20, unknown.clone()),
+            (
+                "top.tl".to_string(),
+                3,
+                43,
+                "cannot index key 'n' in type g.G".to_string()
+            ),
+            ("mid.tl".to_string(), 4, 22, unknown.clone()),
+        ],
+        "{first}"
+    );
+
+    write(&root.join("gone.tl"), &gone_tl("integer"));
+    let second = check_flat(&root, &[]);
+    assert_eq!(
+        replayed(&second),
+        0,
+        "`top` asks about `gone` from `mid`, so it does not replay"
+    );
+    assert!(errors_of(&second).is_empty(), "{second}");
+
+    write(&root.join("gone.tl"), &gone_tl("string"));
+    let want = vec![
+        (
+            "mid.tl".to_string(),
+            6,
+            37,
+            "in record field: n: got integer, expected string".to_string(),
+        ),
+        (
+            "top.tl".to_string(),
+            3,
+            42,
+            "in return value: got string, expected integer".to_string(),
+        ),
+    ];
+    let fresh = check_flat(&root, &["--no-cache"]);
+    assert_eq!(
+        errors_of(&fresh),
+        want,
+        "the fixture's answer without the store"
+    );
+    let third = check_flat(&root, &[]);
+    assert_eq!(replayed(&third), 0, "every module read `gone.tl`");
+    assert_eq!(errors_of(&third), want);
+
+    let fourth = check_flat(&root, &[]);
+    assert_eq!(
+        replayed(&fourth),
+        3,
+        "and the answer is then stored for all three"
+    );
+    assert_eq!(errors_of(&fourth), want);
+}

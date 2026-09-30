@@ -2253,16 +2253,40 @@ end
 -- neither -- a plain `.lua`, which the checker reads for a type of `any` and walks no
 -- further -- is still a member; there is nothing below it to follow. A cycle is cut at the
 -- file already visited, and the checked file itself is never a member of its own closure.
+--
+-- A member's edges are its require sites -- every `require("<literal>")` in its AST
+-- (`require_sites`), resolved or not -- and not its resolved requires. `r.dependencies`
+-- holds only the names that found a file, so a name `mid` required that resolved nowhere
+-- would be no question at all: when a file appears under it, `mid`'s own entry misses (its
+-- own requires are its sites), but `top` hashes `mid` as unchanged, asks nothing about the
+-- name, and replays the errors it saw while the name was missing (#410). As an edge, a name
+-- that later resolves, or resolves elsewhere, changes the answer to a question the entry
+-- asks, and the entry misses. A member with no AST (a declaration or `.lua` read without
+-- one) contributes the names `r.dependencies` holds. The walk itself follows
+-- `r.dependencies`: only a resolved name has a file to walk into.
 local function require_closure(filename, result, env)
    local visited = { [filename] = true }
-   local files, edges = {}, {}
+   local files, edges, edge_seen = {}, {}, {}
+   local function edge(from, name)
+      local key = from .. "\0" .. name
+      if not edge_seen[key] then
+         edge_seen[key] = true
+         edges[#edges + 1] = { from = from, name = name }
+      end
+   end
    local function walk(r, from)
       local names = {}
       for name in pairs(r.dependencies or {}) do names[#names + 1] = name end
       table.sort(names)
+      if from then
+         if r.ast then
+            for _, site in ipairs(require_sites(r.ast, true)) do edge(from, site.name) end
+         else
+            for _, name in ipairs(names) do edge(from, name) end
+         end
+      end
       for _, name in ipairs(names) do
          local f = r.dependencies[name]
-         if from then edges[#edges + 1] = { from = from, name = name } end
          if not visited[f] then
             visited[f] = true
             files[#files + 1] = f
