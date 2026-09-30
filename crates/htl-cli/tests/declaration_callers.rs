@@ -34,14 +34,17 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
-/// `htl new <name> <flags>` in a fresh scratch directory; the project's root.
+/// `htl new <name> <flags>` in a fresh scratch directory; the project's root, with the
+/// `[patch]` the packaged gate asks for ([`common::write_patch_config`]) when it asks.
 fn new_project(test: &str, name: &str, flags: &[&str]) -> PathBuf {
     let root = common::scratch("htl-cli-decl-callers", test);
     let mut args = vec!["new", name];
     args.extend_from_slice(flags);
     let (ok, text) = run(&args, &root);
     assert!(ok, "htl new {flags:?}:\n{text}");
-    root.join(name)
+    let project = root.join(name);
+    common::write_patch_config(&project);
+    project
 }
 
 /// A library project with the Problem's layout from #402: `knl_types` declared in
