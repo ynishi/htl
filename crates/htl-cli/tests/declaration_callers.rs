@@ -158,6 +158,37 @@ fn a_pcall_require_from_teal_still_gets_the_stand_in() {
     assert!(text.contains("1 passed, 0 failed"), "{text}");
 }
 
+/// The order of two files does not change what the `.lua` sees (#408): a Teal test that
+/// requires the declared name as a value first, and only then the Lua module that probes it,
+/// still leaves the probe `false`. The Teal file gets the same stand-in on both of its
+/// `require`s, and the stand-in is not in `package.loaded` raw, where `require` would have
+/// answered the `.lua` with it.
+#[test]
+fn a_pcall_require_from_plain_lua_after_a_teal_require_still_does_not_find_the_module() {
+    let p = lua_callers("teal-first");
+    write(
+        &p.join("tests/order_test.tl"),
+        "local t = require(\"htl.test\")\n\
+         local k = require(\"knl_types\")\n\
+         local opt = require(\"opt\")\n\
+         t.describe(\"a Teal value require, then plain Lua\", function()\n\
+         \x20  t.it(\"leaves the Lua probe false\", function()\n\
+         \x20     t.expect(opt.present):to_equal(false)\n\
+         \x20  end)\n\
+         \x20  t.it(\"gives Teal the same table twice\", function()\n\
+         \x20     t.expect(type(k)):to_equal(\"table\")\n\
+         \x20     t.expect(rawequal(require(\"knl_types\"), k)):to_equal(true)\n\
+         \x20  end)\n\
+         \x20  t.it(\"keeps the stand-in out of package.loaded\", function()\n\
+         \x20     t.expect(rawget(package.loaded as {string:any}, \"knl_types\") == nil):to_equal(true)\n\
+         \x20  end)\n\
+         end)\n",
+    );
+    let (ok, text) = run(&["test", "tests/order_test.tl"], &p);
+    assert!(ok, "htl test:\n{text}");
+    assert!(text.contains("3 passed, 0 failed"), "{text}");
+}
+
 /// The window scaffold's engine requires `mq` as a value and never calls it outside
 /// `render`, and its test runs under `htl test` with no window: that `require` is Teal's,
 /// so it still resolves to the declaration.
