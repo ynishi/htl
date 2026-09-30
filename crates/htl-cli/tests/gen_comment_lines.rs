@@ -1,12 +1,14 @@
-//! A comment-only line of a `.tl` survives `htl gen` at its own line; a trailing comment
-//! and a block comment do not.
+//! A comment-only line of a `.tl` survives `htl gen` at its own line, after the last line
+//! of code too; a trailing comment and a block comment do not.
 //!
 //! The generator writes from the AST, which keeps no comments, so every comment used to
 //! come out as an empty line — the `---` doc above a record and its functions included,
 //! which in this repository *is* the doc. The producer now copies each line comment back
-//! into the empty line the generator left for it. Nothing is inserted or removed, so the
-//! line numbers a run-time error reports are the `.tl`'s, and a module whose comments now
-//! reach the Lua runs and tests as it did.
+//! into the empty line the generator left for it, and appends the comment lines after the
+//! generator's last line at their own numbers. A line that starts inside a long bracket
+//! (`--[[`, `[==[`, ...) is not a line comment, whatever it begins with. Nothing before the
+//! last line of code is inserted or removed, so the line numbers a run-time error reports
+//! are the `.tl`'s, and a module whose comments now reach the Lua runs and tests as it did.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -129,4 +131,120 @@ fn an_error_below_comment_lines_is_reported_at_its_own_line() {
     let (ok, out, err) = htl(&["run", "boom.tl"], &root);
     assert!(!ok, "the script raises:\n{out}{err}");
     assert!(err.contains("boom.tl:5: here"), "reported at line 5: {err}");
+}
+
+/// Ten lines: a three-line block comment with a `--` line inside it, and a `---` doc line
+/// after the module's `return`, the file's last.
+const BLOCK_AND_TAIL: &str = "\
+local record M
+end
+--[[ block comment line 1
+-- a dash line inside the block
+last block line ]]
+function M.f(): integer
+   return 1
+end
+return M
+--- doc after return, last line of the file
+";
+
+/// What `BLOCK_AND_TAIL` generates, whole: ten lines, the block comment's three empty (the
+/// `--` line inside it included), the doc after `return M` at line 10.
+const BLOCK_AND_TAIL_LUA: &str = "\
+local M = {}
+
+
+
+
+function M.f()
+   return 1
+end
+return M
+--- doc after return, last line of the file
+";
+
+#[test]
+fn a_dash_dash_line_inside_a_block_comment_stays_empty_and_the_doc_after_return_is_the_last_line() {
+    let root = scratch("block-and-tail");
+    write(&root.join("doc5.tl"), BLOCK_AND_TAIL);
+    let (ok, out, err) = htl(&["gen", "doc5.tl"], &root);
+    assert!(ok, "gen emits a module that checks:\n{out}{err}");
+    assert_eq!(out, BLOCK_AND_TAIL_LUA);
+    assert_eq!(out.lines().count(), 10, "every line keeps its number");
+}
+
+/// The empty line between `return M` and the doc is kept, so the doc is at its own line;
+/// nothing follows the doc.
+#[test]
+fn a_file_whose_tail_is_doc_after_an_empty_line_ends_with_that_doc() {
+    let root = scratch("tail");
+    let src =
+        "local record M\nend\nfunction M.f(): integer\n   return 1\nend\nreturn M\n\n--- tail\n";
+    write(&root.join("m.tl"), src);
+    let (ok, out, err) = htl(&["gen", "m.tl"], &root);
+    assert!(ok, "gen emits a module that checks:\n{out}{err}");
+    assert_eq!(
+        out,
+        "local M = {}\n\nfunction M.f()\n   return 1\nend\nreturn M\n\n--- tail\n"
+    );
+}
+
+/// Empty lines after the last comment line of the file are not appended: the output ends
+/// with the doc, not with the empty lines the source had after it.
+#[test]
+fn empty_lines_after_the_last_trailing_comment_are_dropped() {
+    let root = scratch("tail-blank");
+    let src = "local x = 1\nprint(x)\n\n-- tail\n\n\n";
+    write(&root.join("t.tl"), src);
+    let (ok, out, err) = htl(&["gen", "t.tl"], &root);
+    assert!(ok, "gen emits a module that checks:\n{out}{err}");
+    assert_eq!(out, "local x = 1\nprint(x)\n\n-- tail\n");
+}
+
+/// A levelled long comment closes only at `]==]`: a `]]` inside it closes nothing, and the
+/// `--` line inside it stays empty like every other line of the block.
+#[test]
+fn a_dash_dash_line_inside_a_levelled_long_comment_stays_empty() {
+    let root = scratch("levelled");
+    let src =
+        "--[==[ levelled\n-- x\n]] still inside\n-- y\n]==]\n-- after\nlocal x = 1\nprint(x)\n";
+    write(&root.join("l.tl"), src);
+    let (ok, out, err) = htl(&["gen", "l.tl"], &root);
+    assert!(ok, "gen emits a module that checks:\n{out}{err}");
+    assert_eq!(out, "\n\n\n\n\n-- after\nlocal x = 1\nprint(x)\n");
+}
+
+/// A block comment opened and closed on one line leaves the next line a line comment, and
+/// a bracket inside a short string opens nothing.
+#[test]
+fn a_block_comment_closed_on_its_own_line_and_a_bracket_in_a_short_string_open_nothing() {
+    let root = scratch("same-line");
+    let src = "local s = \"--[[\" --[[ closed ]] .. \"[[\"\n-- kept\nprint(s)\n";
+    write(&root.join("o.tl"), src);
+    let (ok, out, err) = htl(&["gen", "o.tl"], &root);
+    assert!(ok, "gen emits a module that checks:\n{out}{err}");
+    assert_eq!(out.lines().nth(1), Some("-- kept"), "{out}");
+}
+
+/// The comment lines after the last line of code are appended at their own numbers, and
+/// the lines before are untouched: an `error` on line 12, below doc lines 10–11 and above a
+/// trailing doc line, is reported at line 12.
+#[test]
+fn an_error_between_doc_lines_and_trailing_doc_is_reported_at_its_own_line() {
+    let root = scratch("run-tail");
+    write(
+        &root.join("boom.tl"),
+        "--- a script\nlocal function boom(): nil\n   -- comment\n   print(\"--[[\")\nend\n\n\n\n\
+         boom()\n--- doc line 10\n--- doc line 11\nerror(\"here\")\n--- trailing 13\n",
+    );
+    let (ok, out, err) = htl(&["run", "boom.tl"], &root);
+    assert!(!ok, "the script raises:\n{out}{err}");
+    assert!(
+        err.contains("boom.tl:12: here"),
+        "reported at line 12: {err}"
+    );
+    let (ok, out, err) = htl(&["gen", "boom.tl"], &root);
+    assert!(ok, "{out}{err}");
+    assert_eq!(out.lines().count(), 13, "{out}");
+    assert_eq!(out.lines().last(), Some("--- trailing 13"), "{out}");
 }
