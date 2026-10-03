@@ -60,6 +60,7 @@
 //! | `enum-cast` | warn | `e as E` where `E` is an enum and the checker types `e` as `string`: `as` is erased, so the word enters the enum with nothing checking it. A string literal (`"open" as E`) and a value already typed as the enum are not reported |
 //! | `enum-table` | warn | a table constructor whose declared type maps an enum (`{string: E}`, `{E: T}`) and that leaves a value of the enum out, or lists a word that is not one. An array of the enum (`{E}`) is a selection, not a mapping, and is not reported. `htl fix enum-table` fills a `{string: E}` one in |
 //! | `union-exhaustive` | warn | `if x is A ... elseif x is B ... end` over a union with a variant never tested and no `else`. The variants come from the checker, so a chain that predates a variant is reported once the union gains it |
+//! | `type-guard` | warn | `type(v) == "<tag>"` (or `~=`) where the checker types the variable `v` as `any`, or as a union with exactly one member the tag selects. Teal narrows nothing from a `type()` call; `v is T` narrows and compiles to the same call. `htl fix` writes `v is T` and drops the casts `(v as T)` the guard made redundant (safe). A guard on a field (`type(ev.data) == "table"`) is not reported: `is` takes a variable only |
 //! | `shadow-local` | warn | a local / loop var / parameter reusing the name an enclosing scope bound to a `require`d module: the message names the module, where it was required, and that the module is unreachable for the rest of that scope. Shadowing an *ordinary* outer local is `tl:redeclaration`, which reports the same line and column and says more about it |
 //! | `no-global` | warn | a `global` declaration. Write a local and return it from the module; for a value the host set as a global, one module that reads it from `_G` and returns it. A `global` is visible only in the files that require the declaring module, and a second site declaring the name is `global-redeclaration` — the three ways a host value gets a type are on the [crate front page](crate) |
 //! | `no-any` | allow | explicit `any` annotations and `as any` casts |
@@ -394,7 +395,7 @@ impl Rule {
     }
 }
 
-/// Every rule there is. The first thirty-three are the lint surface, in the order
+/// Every rule there is. The first thirty-four are the lint surface, in the order
 /// `htl check --list-lints` prints them: the file-level rules first, in the order
 /// `lint.lua` runs them, then the ones the project layer asks once the files have been
 /// checked, then the warning kinds the vendored Teal compiler reports for itself. The last
@@ -427,6 +428,7 @@ pub const RULES: &[Rule] = &[
     Rule::warn("enum-cast", Side::Lua, explain::ENUM_CAST),
     Rule::warn("enum-table", Side::Lua, explain::ENUM_TABLE),
     Rule::warn("union-exhaustive", Side::Lua, explain::UNION_EXHAUSTIVE),
+    Rule::warn("type-guard", Side::Lua, explain::TYPE_GUARD),
     Rule::warn("shadow-local", Side::Lua, explain::SHADOW_LOCAL),
     Rule::warn("no-global", Side::Lua, explain::NO_GLOBAL),
     Rule::allow("no-any", Side::Lua, explain::NO_ANY),
@@ -961,6 +963,56 @@ already give — `enum-exhaustive` guards those branches just the same, and the 
 records are gone. The question is not "does this have a tag" but "do the variants hold
 different things". When they do not, the fix for this report is not a branch but a
 smaller type."#;
+
+    /// `type-guard`.
+    pub const TYPE_GUARD: &str = r#"`type(v) == "<tag>"` (or `~=`, either side of the operator) where the checker types the
+variable `v` as `any`, or as a union with exactly one member the tag selects.
+
+Teal builds no narrowing from a `type()` call, on `any` or on a union. After
+`if type(meta) == "table" then`, `meta` is still `any` in the branch and `meta.beat` is
+`cannot index`; the form that compiles is `(meta as {string:any}).beat`, which states the
+fact twice and keeps compiling after the guard is removed. That last part is the hazard
+the rule names: a cast is a claim nothing checks, and this one outlives the check that
+made it true. Teal's `is` does narrow, `any` included, and in every flow shape (`if`,
+`if not ... then return end`, `and`), and `htl gen` writes `v is {string:any}` as
+`type(v) == "table"` -- the same Lua as the guard. The narrowing exists under another
+spelling; the rule points from one to the other.
+
+What the guard becomes:
+  - `"table"` on `any`: `v is {string:any}`, the type the existing casts already name;
+    when a cast of `v` in the guarded branch names another map, array or tuple type,
+    that one.
+  - `"table"` on a union: its one table member, a record included (`x: R | string`
+    gives `x is R`).
+  - `"string"`, `"number"`, `"boolean"`: `v is string`, `v is number` (not `integer`),
+    `v is boolean`.
+  - `~=`: `not (v is T)`.
+  - `"function"`, `"userdata"`, `"thread"`, `"nil"`: not reported -- no type `is` could
+    name compiles to that call.
+
+`any` never gets a record. `x is R` on `any` compiles to `type(x) == "table"` and checks
+no field, so narrowing `any` to a record is unsound in Teal today, and a fix should not
+manufacture that. A union member is different: the union already said what the table is.
+A union member `is` would not compile to a bare `type()` call -- `integer` (`math.type`),
+an enum (a value test), a record with a `where` clause (its predicate) -- is not
+reported, and neither is a union with two members the tag selects, which `type()` tells
+apart no better than nothing.
+
+`htl fix` writes `v is T` and removes the casts `(v as T)` of the same variable to the
+same type that the guard made redundant: in the operands after it in an `and` chain and
+in the body of the `if` / `elseif` it is the condition of, not inside a nested function,
+and not at all when that region assigns or redeclares `v`. The fix is safe: `is`
+compiles to the same `type()` call and a cast compiles to nothing, so what the program
+does is unchanged (`not (v is T)` for `~=` is the same test negated). A guard nested in
+one the fix rewrites (`if type(b) == "string"` on `local b = meta.beat`) is typed `any`
+only once the outer guard narrows, so it is reported, and fixed, by the next run.
+
+Not covered: a guard on a field, `type(ev.data) == "table"`. `is` takes a variable only
+("can only use 'is' on variables"), and a narrowing built from `type()` inside the
+checker would be keyed on variables as well, so nothing here would cover it either.
+Bind the field to a local and guard the local. The rule changes no language behaviour:
+code htl accepts stays code `tl` accepts, which is why it is a lint and not a patch to
+the vendored checker."#;
 
     /// `shadow-local`.
     pub const SHADOW_LOCAL: &str = r#"A local, loop variable or parameter reusing the name an enclosing scope bound to a
