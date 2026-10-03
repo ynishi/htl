@@ -24,6 +24,9 @@
 --   enum-table       a table constructor whose declared type maps an enum (`{string: E}`,
 --                    `{E: T}`) and that leaves a variant out (or lists a word that is not
 --                    one).
+--   type-guard       `type(v) == "<tag>"` where the checker types `v` as `any`, or as a
+--                    union with one member the tag selects: Teal narrows nothing from it,
+--                    `v is T` narrows and compiles to the same call; the fix writes it.
 --   shadow-local     a local (or loop / parameter name) reuses the name an enclosing scope
 --                    bound to a `require`d module, which the shadowed scope cannot reach.
 --                    Shadowing an ordinary outer local is `tl:redeclaration`, which says
@@ -50,7 +53,7 @@ local L = {}
 -- Which rules are on is not decided here. The registry — every rule name there is, its
 -- default level, and which half of htl implements it — is `lint::RULES` in lint.rs, because
 -- the project layer reports under those names too and could not read a list kept in Lua.
--- What this file owns is the fifteen implementations below (`RULES`), and `L.run` is handed
+-- What this file owns is the twenty-one implementations below (`RULES`), and `L.run` is handed
 -- the selection to run them under: a rule / on table, not a rule / level one. How much a
 -- finding matters is read where the run is judged, so a rule moving between `warn` and
 -- `deny` changes nothing about the work done here. `struct-fields` and `sealed-record` are on and still say
@@ -1886,6 +1889,267 @@ local function lint_async_as_sync_callback(ast, report, extra)
    end)
 end
 
+---------------------------------------------------------------- type-guard
+
+-- Teal builds no narrowing from `type(v) == "table"`: a value typed `any` stays `any` in
+-- the branch, cannot be indexed there, and is cast to say what the condition already
+-- established -- a cast that keeps compiling after the guard is gone. `v is T` narrows
+-- (on `any` too), and `htl gen` writes it as the same `type(v) == "<tag>"` call, so the
+-- rule names the spelling Teal does narrow under and the fix writes it. What the guard
+-- is rewritten to, and why `any` never gets a record, is `explain::TYPE_GUARD`.
+
+-- The `type()` tags a guard is rewritten for, with what `any` is narrowed to under each.
+-- `"table"` on `any` is a map: `is R` on `any` would check no field, so a record is never
+-- written for it. `"function"`, `"userdata"`, `"thread"` and `"nil"` have no type `is`
+-- could name that compiles to the same call, and are not looked at.
+local GUARD_ANY = { table = "{string:any}", string = "string", number = "number", boolean = "boolean" }
+
+-- `type(v)`: the variable `v` of a one-argument call of `type`, or nil.
+local function type_call_subject(n)
+   if not (is_node(n) and n.kind == "op" and n.op and n.op.op == "@funcall") then return nil end
+   if not (is_node(n.e1) and n.e1.kind == "variable" and n.e1.tk == "type") then return nil end
+   local args = n.e2
+   if type(args) ~= "table" or #args ~= 1 then return nil end
+   local v = args[1]
+   if is_node(v) and v.kind == "variable" and v.y and v.x then return v end
+   return nil
+end
+
+-- A guard `type(v) == "<tag>"` (either side, `==` or `~=`): { call, v, tag, lit, negated },
+-- or nil.
+local function type_guard_of(n)
+   if not (n.kind == "op" and n.op and (n.op.op == "==" or n.op.op == "~=")) then return nil end
+   local call, lit = n.e1, n.e2
+   local v = type_call_subject(call)
+   if not v then
+      call, lit = n.e2, n.e1
+      v = type_call_subject(call)
+   end
+   if not v or not (is_node(lit) and lit.kind == "string") then return nil end
+   local tag = unquote(lit.tk)
+   if not tag then return nil end
+   return { call = call, v = v, tag = tag, lit = lit, negated = n.op.op == "~=" }
+end
+
+-- The operands of an `and` chain, parentheses and nested `and`s flattened, in order.
+local function and_operands(e, out)
+   out = out or {}
+   while is_node(e) and e.kind == "paren" do e = e.e1 end
+   if is_node(e) and e.kind == "op" and e.op and e.op.op == "and" then
+      and_operands(e.e1, out)
+      and_operands(e.e2, out)
+   else
+      out[#out + 1] = e
+   end
+   return out
+end
+
+-- The nodes a guard narrows: the operands after it in its `and` chain, and the body of the
+-- `if` / `elseif` whose condition that chain is. A nested function is left out (what
+-- reaches a closure is not what this lint claims), and so is anything after a statement
+-- that rebinds or redeclares the variable -- the whole region is dropped in that case,
+-- since the narrowing does not reach past it.
+local function guarded_regions(ast)
+   local regions = {}
+   local function add(g, node)
+      regions[g] = regions[g] or {}
+      local r = regions[g]
+      r[#r + 1] = node
+   end
+   walk(ast, function(n)
+      if n.kind == "op" and n.op and n.op.op == "and" then
+         local ops = and_operands(n)
+         for i = 1, #ops - 1 do
+            for j = i + 1, #ops do add(ops[i], ops[j]) end
+         end
+      elseif n.kind == "if" and n.if_blocks then
+         for _, blk in ipairs(n.if_blocks) do
+            if is_node(blk) and blk.exp and blk.body then
+               for _, op in ipairs(and_operands(blk.exp)) do add(op, blk.body) end
+            end
+         end
+      end
+   end)
+   return regions
+end
+
+-- Every node under `root`, nested functions excluded.
+local FUNCTION_NODES = { ["function"] = true, local_function = true, global_function = true, record_function = true }
+local function each_below(root, visit)
+   local seen = {}
+   local function go(n)
+      if type(n) ~= "table" or seen[n] then return end
+      seen[n] = true
+      if is_node(n) then
+         if FUNCTION_NODES[n.kind] then return end
+         visit(n)
+      end
+      for i = 1, #n do go(n[i]) end
+      for k, v in pairs(n) do
+         if type(k) ~= "number" and not SKIP_KEYS[k] and type(v) == "table" then go(v) end
+      end
+   end
+   go(root)
+end
+
+-- Whether `node` rebinds or redeclares `name`: an assignment to it, or a local, loop
+-- variable or parameter of that name.
+local function rebinds(node, name)
+   local found = false
+   each_below(node, function(n)
+      if found then return end
+      if n.kind == "assignment" and type(n.vars) == "table" then
+         for _, t in ipairs(n.vars) do
+            if is_node(t) and t.kind == "variable" and t.tk == name then found = true end
+         end
+      elseif (n.kind == "identifier" or n.kind == "argument") and n.tk == name then
+         found = true
+      end
+   end)
+   return found
+end
+
+-- The column of the `)` closing the `(` at (y, x), skipping strings; nil if none.
+local function closing_paren(lines, y, x)
+   local depth, q = 0, nil
+   local ly, lx = y, x
+   while lines[ly] do
+      local line = lines[ly]
+      while lx <= #line do
+         local c = line:sub(lx, lx)
+         if q then
+            if c == "\\" then lx = lx + 1 elseif c == q then q = nil end
+         elseif c == '"' or c == "'" then
+            q = c
+         elseif c == "(" then
+            depth = depth + 1
+         elseif c == ")" then
+            depth = depth - 1
+            if depth == 0 then return ly, lx end
+         end
+         lx = lx + 1
+      end
+      ly, lx = ly + 1, 1
+   end
+   return nil
+end
+
+-- The casts `(v as T)` of the variable `v` inside the region nodes: { paren, v, text }
+-- each, `text` the cast type as written (whitespace kept), and `table` set when it is a
+-- map, an array or a tuple -- the table types a guard on `any` may narrow to.
+local function casts_of(region, name, lines)
+   local out = {}
+   for _, root in ipairs(region) do
+      each_below(root, function(n)
+         if n.kind ~= "paren" or not (n.y and n.x) then return end
+         local c = n.e1
+         if not (is_node(c) and c.kind == "op" and c.op and c.op.op == "as") then return end
+         local v = c.e1
+         if not (is_node(v) and v.kind == "variable" and v.tk == name and v.y and v.x) then return end
+         local line = lines[n.y]
+         if not line or line:sub(n.x, n.x) ~= "(" then return end
+         local cy, cx = closing_paren(lines, n.y, n.x)
+         if not cy or cy ~= v.y then return end
+         local after = lines[v.y]:sub(v.x + #v.tk, cx - 1)
+         local text = after:match("^%s*as%s+(.-)%s*$")
+         if not text then return end
+         local ct = is_node(c.e2) and c.e2.casttype
+         local tn = type(ct) == "table" and ct.typename
+         out[#out + 1] = {
+            paren = n, v = v, close_x = cx, text = text,
+            table = tn == "map" or tn == "array" or tn == "tupletable",
+         }
+      end)
+   end
+   return out
+end
+
+local function squash(s) return (s:gsub("%s+", "")) end
+
+local function lint_type_guard(ast, report, extra)
+   local guard_at = extra and extra.guard_at
+   local lines = extra and extra.lines
+   if not (guard_at and lines) then return end
+   local regions
+   walk(ast, function(n)
+      local g = type_guard_of(n)
+      if not g then return end
+      local v = g.v
+      local at = guard_at(v.y, v.x)
+      if not at then return end
+      local target, from_any
+      if at.any then
+         target = GUARD_ANY[g.tag]
+         from_any = true
+      elseif at.members then
+         local hit
+         for _, m in ipairs(at.members) do
+            if m.tag == g.tag then
+               if hit then return end -- two members answer to the tag: `type()` tells them apart no better
+               hit = m
+            end
+         end
+         if not hit or not hit.plain then return end
+         target = hit.str
+      end
+      if not target then return end
+      regions = regions or guarded_regions(ast)
+      -- The casts the guard makes redundant: those of `v` in what it narrows, and only for
+      -- `==` (a `~=` guard narrows the other way, past an early return or into an `else`).
+      local casts = {}
+      local region = (not g.negated) and regions[n]
+      if region and not (function()
+         for _, r in ipairs(region) do if rebinds(r, v.tk) then return true end end
+         return false
+      end)() then
+         casts = casts_of(region, v.tk, lines)
+      end
+      -- `any` and `"table"`: a map the branch already casts to is the one it means.
+      if from_any and g.tag == "table" then
+         for _, c in ipairs(casts) do
+            if c.table then target = c.text; break end
+         end
+      end
+      local first = leftmost(n.e1)
+      local last = g.lit
+      if g.call ~= n.e1 then last = g.call end
+      local ey, ex
+      if last == g.lit then
+         ey, ex = g.lit.y, g.lit.x + #g.lit.tk
+      else
+         -- `"<tag>" == type(v)`: the call ends at its `)`.
+         local cy, cx = closing_paren(lines, v.y, (lines[v.y] or ""):sub(1, v.x - 1):match("^.*()%(") or v.x)
+         if not cy then return end
+         ey, ex = cy, cx + 1
+      end
+      if not (first and first.y and first.x) then return end
+      local text = v.tk .. " is " .. target
+      if g.negated then text = "not (" .. text .. ")" end
+      local edits = {
+         { line = first.y, col = first.x, end_line = ey, end_col = ex, text = text },
+      }
+      local dropped = 0
+      for _, c in ipairs(casts) do
+         if squash(c.text) == squash(target) then
+            local p = c.paren
+            edits[#edits + 1] = { line = p.y, col = p.x, end_line = p.y, end_col = p.x + 1, text = "" }
+            edits[#edits + 1] = {
+               line = c.v.y, col = c.v.x + #c.v.tk, end_line = c.v.y, end_col = c.close_x + 1, text = "",
+            }
+            dropped = dropped + 1
+         end
+      end
+      local msg = "type(" .. v.tk .. ") " .. (g.negated and "~=" or "==") .. " \"" .. g.tag ..
+         "\" does not narrow '" .. v.tk .. "' (typed " .. (from_any and "any" or "a union") ..
+         "); write `" .. text .. "`, which compiles to the same Lua and does"
+      if dropped > 0 then
+         msg = msg .. ", and drop the " .. (dropped == 1 and "cast" or dropped .. " casts") ..
+            " to " .. target .. " it makes redundant"
+      end
+      report("type-guard", first.y, first.x, msg, { applicability = "safe", edits = edits })
+   end)
+end
+
 local RULES = {
    { "nil-index", lint_nil_index },
    { "nil-return", lint_nil_return },
@@ -1897,6 +2161,7 @@ local RULES = {
    { "enum-cast", lint_enum_cast },
    { "enum-table", lint_enum_table },
    { "union-exhaustive", lint_union_exhaustive },
+   { "type-guard", lint_type_guard },
    { "shadow-local", lint_shadow },
    { "no-global", lint_no_global },
    { "no-any", lint_no_any },

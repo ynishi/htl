@@ -70,7 +70,7 @@ fn every_rule_the_listing_names_is_explained() {
         );
         n += 1;
     }
-    assert_eq!(n, 33, "the listing names the whole lint surface");
+    assert_eq!(n, 34, "the listing names the whole lint surface");
 }
 
 fn write(path: &Path, text: &str) {
