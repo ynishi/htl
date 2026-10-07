@@ -48,6 +48,9 @@ just pre-commit   # cargo fmt --all, then the workspace's tests and clippy
 just pre-push     # the above, plus a full compile and every end-to-end case
 ```
 
+Both gates also run `scripts/check-public-refs`; its header says what it
+rejects and why.
+
 **Green is a precondition, not a verification.** A change to the checker, the
 lints, the test runner, the scaffold or the bundle format is run against a real
 project before the pull request is opened — and through the binary a user
