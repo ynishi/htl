@@ -675,11 +675,18 @@ mod tests {
     use crate::config::HtlConfig;
     use crate::pkg;
 
+    /// Canonical from the start: these tests build a requirer path under this directory
+    /// (`root.join("src/main.tl")`, say) without writing the file, so `canonicalize` cannot
+    /// resolve it and it stays literal, while the resolver's `roots` are canonical, from
+    /// directories that do exist. `std::env::temp_dir()` is `/tmp` on Linux, but on macOS it
+    /// is under `/var`, a symlink to `/private/var` — so the two spellings of the same
+    /// directory disagreed and `[imports]` was not applied (#424). Canonicalizing here once
+    /// means both sides agree regardless.
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("htl-resolver-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        std::fs::canonicalize(&dir).unwrap()
     }
 
     fn write(path: &Path, text: &str) {
