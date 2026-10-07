@@ -1,0 +1,8 @@
+# The project `tests/task_channels.rs` builds against: `daemon.d.tl` is what its
+# `#[host_module]` writes, and `include_tl!("tests/fixtures/task_channels/main.tl")` checks
+# `main.tl` against it at `cargo build`, with `async` / `await` as keywords.
+[layout]
+source = "."
+
+[lang]
+async = true

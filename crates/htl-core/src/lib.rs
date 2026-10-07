@@ -31,7 +31,8 @@
 #![cfg_attr(
     feature = "async",
     doc = "
-//! `htl.task` is installed by [`Htl::install_task_lib`]."
+//! `htl.task` is installed by [`Htl::install_task_lib`]; the channels a host feeds a
+//! running program through are [`task::RecvChannel`] and [`task::SendChannel`]."
 )]
 //!
 //! A value the host puts into the Lua state reaches `.tl` code with a type in one of

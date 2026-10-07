@@ -17,9 +17,53 @@
 //! The preload entry is a loader, not the table: the table is the VM's, created by
 //! mlua-isle on the first `require`, so installing on a state that only checks (the
 //! checker's own, `include_tl!`'s) attaches nothing to it.
+//!
+//! # Channels between the host and Teal
+//!
+//! A program that runs its main loop in Teal — a daemon taking hook requests, webhook
+//! events and timer ticks in one `select` — gets its events from the host over a channel.
+//! [`RecvChannel<T>`] is the end Teal receives from, made beside the [`Sender<T>`] the
+//! host keeps; [`SendChannel<T>`] is the end Teal sends into, made beside the
+//! [`Receiver<T>`] the host drains. Both are mlua-isle's host channels
+//! ([`mlua_isle::runtime::channel`] / [`channel_to_host`](mlua_isle::runtime::channel_to_host))
+//! with the element type kept, which is what the declaration needs: a `#[host_module]`
+//! method returning `RecvChannel<Event>` is declared `function(..): task.RecvChannel<Event>`,
+//! and the generated `.d.tl` imports `htl.task` for it (`htl::dts`), so a handler that
+//! takes the wrong type, or a `send` on that channel, is a check error at `cargo build`.
+//! A channel of [`Request<Req, Resp>`] carries values Teal answers ([`Sender::request`]).
+//!
+//! ```rust,ignore
+//! use htl::task::{RecvChannel, Request, SendChannel};
+//!
+//! pub struct Daemon {
+//!     events: RecvChannel<Event>,
+//!     reports: SendChannel<Report>,
+//! }
+//!
+//! #[host_module(name = "daemon", dts = "scripts/daemon.d.tl", records = [Event, Report])]
+//! impl Daemon {
+//!     pub fn events(&self) -> RecvChannel<Event> { self.events.clone() }
+//!     pub fn reports(&self) -> SendChannel<Report> { self.reports.clone() }
+//! }
+//!
+//! let (tx, events) = RecvChannel::<Event>::new(h.lua(), 64)?;     // tx: any thread or task
+//! let (reports, mut rx) = SendChannel::<Report>::new(h.lua(), 64)?;
+//! Daemon { events, reports }.htl_preload(&h)?;
+//! ```
+//!
+//! The channels are made on the program's state, before it runs, and handed to the module
+//! the methods read them from: a method has no `Lua` to make one with. Making one creates
+//! the state's `task` library if the program has not required `htl.task` yet, so the
+//! channel and a later `require("htl.task")` share it. The contracts — capacity, closing,
+//! conversion errors, cancellation, several receivers — are mlua-isle's, in its `runtime`
+//! module docs ("Host channels and requests", "Channels to the host").
 use crate::{Htl, write_if_changed};
 use anyhow::{Context, Result};
+use mlua::{FromLua, IntoLua, Lua, Value};
+use std::marker::PhantomData;
 use std::path::PathBuf;
+
+pub use mlua_isle::runtime::{Receiver, Request, RequestError, Sender};
 
 const TASK_DTL: &str = include_str!("../lua/task.d.tl");
 
@@ -46,7 +90,9 @@ pub const TASK_LIB: &str = "htl.task";
 /// what notices if a release renames it.
 ///
 /// Channels, timers and select (`channel`, `after`, `ticker`, `select`, `select_raw`) are
-/// mlua-isle's functions forwarded as they are: their objects carry no method of htl's.
+/// mlua-isle's functions forwarded as they are: their objects carry no method of htl's,
+/// and a host channel built on the Rust side (`RecvChannel` / `SendChannel`) is the same
+/// object a `task.channel` is.
 const TASK_LUA: &str = r#"
 local isle = ...
 local pack, unpack, rawget = table.pack, table.unpack, rawget
@@ -167,3 +213,130 @@ impl Htl {
         Ok(())
     }
 }
+
+/// The end of a host channel that Teal receives from: `task.RecvChannel<T>` in a
+/// declaration. Made with [`RecvChannel::new`], beside the [`Sender`] the host feeds it
+/// with; see the [module docs](self) for how a `#[host_module]` hands it out.
+///
+/// A handle to one Lua object: cloning it hands out the same channel, and it is the
+/// program state's, so it stays on the thread that runs the program (the [`Sender`] is
+/// what moves). Each value is converted with `T: IntoLua` when Teal takes it.
+pub struct RecvChannel<T> {
+    ch: mlua::Table,
+    _t: PhantomData<fn() -> T>,
+}
+
+/// The end of a channel that Teal sends into and the host receives from:
+/// `task.SendChannel<T>` in a declaration. Made with [`SendChannel::new`], beside the
+/// [`Receiver`] the host drains.
+///
+/// A handle to one Lua object, as [`RecvChannel`] is. Each value Teal sends is converted
+/// with `T: FromLua` as it is queued; one that does not convert raises in the Teal sender
+/// and is not sent.
+pub struct SendChannel<T> {
+    ch: mlua::Table,
+    _t: PhantomData<fn(T)>,
+}
+
+/// mlua-isle's host channels need the state's `task` library to exist (they are its
+/// `Channel` objects); `require("htl.task")` would create it later, and creating it now
+/// is the same table.
+fn with_task_lib(lua: &Lua) -> Result<()> {
+    let vm = crate::vm(lua)?;
+    vm.task_lib().map_err(crate::isle_error)?;
+    Ok(())
+}
+
+impl<T: IntoLua + Send + 'static> RecvChannel<T> {
+    /// A host channel holding up to `cap` values (`cap >= 1`): the [`Sender`] for the
+    /// host, `Send + Clone`, and the end Teal receives from. Called on the program's
+    /// state ([`Htl::lua`]), on its thread. The channel closes for Teal, after the
+    /// queued values, when every `Sender` is dropped.
+    ///
+    /// # Errors
+    ///
+    /// `cap` 0 (host channels have no rendezvous form) or larger than tokio's bounded
+    /// channel allows, and a failure to create the state's `task` library.
+    pub fn new(lua: &Lua, cap: usize) -> Result<(Sender<T>, RecvChannel<T>)> {
+        with_task_lib(lua)?;
+        let (tx, ch) = mlua_isle::runtime::channel::<T>(lua, cap).map_err(crate::isle_error)?;
+        Ok((tx, RecvChannel::wrap(ch.into_table())))
+    }
+}
+
+impl<T: FromLua + Send + 'static> SendChannel<T> {
+    /// A channel to the host holding up to `cap` values (`cap >= 1`): the end Teal sends
+    /// into, and the [`Receiver`] for the host, `Send`. Called on the program's state
+    /// ([`Htl::lua`]), on its thread. Dropping the `Receiver` closes the channel: Teal's
+    /// sends raise from then on.
+    ///
+    /// # Errors
+    ///
+    /// As [`RecvChannel::new`].
+    pub fn new(lua: &Lua, cap: usize) -> Result<(SendChannel<T>, Receiver<T>)> {
+        with_task_lib(lua)?;
+        let (ch, rx) =
+            mlua_isle::runtime::channel_to_host::<T>(lua, cap).map_err(crate::isle_error)?;
+        Ok((SendChannel::wrap(ch.into_table()), rx))
+    }
+}
+
+macro_rules! channel_end {
+    ($name:ident) => {
+        impl<T> $name<T> {
+            fn wrap(ch: mlua::Table) -> Self {
+                $name {
+                    ch,
+                    _t: PhantomData,
+                }
+            }
+
+            /// The Lua object: the `task` library's `Channel`.
+            pub fn table(&self) -> &mlua::Table {
+                &self.ch
+            }
+        }
+
+        impl<T> Clone for $name<T> {
+            fn clone(&self) -> Self {
+                $name::wrap(self.ch.clone())
+            }
+        }
+
+        impl<T> std::fmt::Debug for $name<T> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_tuple(stringify!($name)).field(&self.ch).finish()
+            }
+        }
+
+        impl<T> IntoLua for $name<T> {
+            fn into_lua(self, _: &Lua) -> mlua::Result<Value> {
+                Ok(Value::Table(self.ch))
+            }
+        }
+
+        /// A channel Teal hands back to the host, as a method parameter. What is checked
+        /// is that it is a channel of the `task` library; its direction and element type
+        /// are the declaration's to hold, as for any other parameter.
+        impl<T> FromLua for $name<T> {
+            fn from_lua(value: Value, _: &Lua) -> mlua::Result<Self> {
+                let refused = |from: &'static str| mlua::Error::FromLuaConversionError {
+                    from,
+                    to: stringify!($name).to_string(),
+                    message: Some("expected a channel of htl.task".to_string()),
+                };
+                let Value::Table(t) = value else {
+                    return Err(refused(value.type_name()));
+                };
+                // A `task` library `Channel` holds its host userdata as `_c`.
+                if !matches!(t.raw_get::<Value>("_c")?, Value::UserData(_)) {
+                    return Err(refused("table"));
+                }
+                Ok($name::wrap(t))
+            }
+        }
+    };
+}
+
+channel_end!(RecvChannel);
+channel_end!(SendChannel);

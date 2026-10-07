@@ -64,6 +64,13 @@
 -- call of one written without `await`. `try_send` / `try_recv` and the case builders do
 -- not wait.
 --
+-- A host hands a channel to Teal from a `#[host_module]` method: `htl::task::RecvChannel<T>`
+-- is declared `task.RecvChannel<T>` (the host sends, Teal receives), `htl::task::SendChannel<T>`
+-- is `task.SendChannel<T>` (Teal sends, the host receives), and `htl::task::Request<A, B>`
+-- is `task.Request<A, B>`, a value Teal answers with `reply`. Calling `send` on a
+-- receive-only channel, or `recv` on a send-only one, is a check error. A local
+-- `task.channel` is both, a `Channel<T>`, and goes wherever either end is asked for.
+--
 -- The module is preloaded by the binary that runs the program on the executor; Lua that
 -- `htl gen` wrote from a file requiring it runs only on such a host.
 local record task

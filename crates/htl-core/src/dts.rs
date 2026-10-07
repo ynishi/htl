@@ -8,7 +8,10 @@
 //! -> `string`, `bool -> boolean`, `Vec<T>` / `&[T]` / `[T; N]` / `VecDeque<T>` /
 //! `HashSet<T>` -> `{T}`, `HashMap<K, V>` / `BTreeMap<K, V>` -> `{K:V}`, `mlua::Value` /
 //! `serde_json::Value` -> `any` (the deliberate escape hatch), `Option<T> -> T`,
-//! `Result<T, _> -> T`, `Strict<T> -> T`, other identifiers pass through as record names.
+//! `Result<T, _> -> T`, `Strict<T> -> T`, `htl::task`'s `RecvChannel<T>` / `SendChannel<T>` /
+//! `Request<A, B>` -> `task.RecvChannel<T>` / `task.SendChannel<T>` / `task.Request<A, B>`
+//! (the declaration then starts with `local type task = require("htl.task")`), other
+//! identifiers pass through as record names.
 //! There is no reflection on types in either direction: a Rust field of type `Foo` is
 //! declared as `Foo`, and it is on the host that a Teal `Foo` exists; the module a
 //! `---@contract` type is declared in goes the other way, Teal to `.d.tl`, with each
@@ -33,6 +36,8 @@
 //! | `mlua::Value` / `serde_json::Value` | `any` | unchanged: the deliberate escape hatch |
 //! | `mlua::Function` as a `#[host_module]` parameter | `f: function` (`Option<Function>` as any `Option` parameter), and a sync fn's ones named in a trailing `---@noyield(f)`; see the `host_module` macro doc for the rule and the overrides | a Lua function the host calls |
 //! | `#[teal(noyield)] update: Function` as a record field | `update: function ---@noyield` (`Option<Function>` as any field); see the `host_module` macro doc, *A Lua function as a parameter*, for when a field says it | a Lua function the host reads off the table and calls |
+//! | `htl::task::RecvChannel<T>` / `SendChannel<T>` (feature `async`) as a `#[host_module]` return or parameter | `task.RecvChannel<T>` / `task.SendChannel<T>`, with `local type task = require("htl.task")` as the file's first line | the `htl.task` channel object: Teal receives from the first and sends into the second, and the other direction is a check error |
+//! | `htl::task::Request<Req, Resp>` as a channel's element | `task.Request<Req, Resp>` | a value Teal answers once with `req:reply(v)` |
 //!
 //! A data-carrying enum is declared nested in the host module (`records = [Shape]`),
 //! where its variant records are reachable as `host.Shape_Circle` for `is`; `uses =
@@ -140,6 +145,16 @@ pub fn teal_type(ty: &Type, self_name: &str) -> Result<String, String> {
                 "Table" => "{any:any}".into(),
                 "Function" => "function".into(),
                 "LuaString" => "string".into(),
+                // `htl::task`'s typed host channels and requests, declared in `htl.task`:
+                // the generated declaration imports it as `task` (see `task_header`).
+                // Matched by name and arity, so a type of the host's own called `Request`
+                // without two type arguments stays a name of its own.
+                "RecvChannel" | "SendChannel" if args.len() == 1 => {
+                    format!("{TASK_ALIAS}.{ident}<{}>", arg(0)?)
+                }
+                "Request" if args.len() == 2 => {
+                    format!("{TASK_ALIAS}.Request<{}, {}>", arg(0)?, arg(1)?)
+                }
                 other => other.to_string(),
             })
         }
@@ -470,6 +485,44 @@ pub fn derives_teal_record(attrs: &[Attribute]) -> bool {
             })
             .unwrap_or(false)
     })
+}
+
+/// The name a generated declaration imports `htl.task` under, and the prefix
+/// [`teal_type`] writes for `RecvChannel<T>` / `SendChannel<T>` / `Request<A, B>`.
+const TASK_ALIAS: &str = "task";
+
+/// `local type task = require("htl.task")` when `decl` mentions a type of `htl.task`
+/// (`task.` at the start of a word), else nothing. Read off the text rather than tracked
+/// through each signature, so a nested record's field and a method's return are covered
+/// by the one test. A `uses` entry already importing a `task` keeps its own line.
+fn task_header(decl: &str, uses: &[String]) -> String {
+    if uses.iter().any(|u| u == TASK_ALIAS) {
+        return String::new();
+    }
+    let needle = format!("{TASK_ALIAS}.");
+    let mentions = decl.match_indices(&needle).any(|(i, _)| {
+        decl[..i]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '.'))
+    });
+    if mentions {
+        format!("local type {TASK_ALIAS} = require(\"htl.task\")\n")
+    } else {
+        String::new()
+    }
+}
+
+/// `decl` with [`task_header`] in front: the import is the file's first line, and the
+/// `uses` lines (if any) and their blank line follow it; with no `uses`, a blank line of
+/// its own separates it from the module.
+fn with_task_header(decl: String, uses: &[String]) -> String {
+    let header = task_header(&decl, uses);
+    match (header.is_empty(), uses.is_empty()) {
+        (true, _) => decl,
+        (false, true) => format!("{header}\n{decl}"),
+        (false, false) => format!("{header}{decl}"),
+    }
 }
 
 /// `local type X = require("X")` per `uses` entry. The `type` form is the one that
@@ -902,6 +955,7 @@ pub fn record_decl(item: &Item) -> Result<RecordDecl, String> {
     let mut decl = uses_header(&attrs.uses);
     decl.push_str(&kind_decl(&name, &kind, ""));
     decl.push_str(&format!("\nreturn {name}\n"));
+    let decl = with_task_header(decl, &attrs.uses);
     Ok(RecordDecl {
         name,
         kind,
@@ -1318,6 +1372,7 @@ pub fn host_decl(
         });
     }
     decl.push_str(&format!("end\n\nreturn {module}\n"));
+    let decl = with_task_header(decl, &attrs.uses);
 
     Ok(HostDecl {
         type_name,
@@ -1853,6 +1908,83 @@ mod tests {
                 .starts_with("local type Mode = require(\"Mode\")\n\nlocal record Run\n"),
             "{}",
             rd.decl
+        );
+    }
+
+    fn host_of(src: &str) -> HostDecl {
+        let file: syn::File = syn::parse_str(src).unwrap();
+        let imp = file
+            .items
+            .iter()
+            .find_map(|i| match i {
+                Item::Impl(imp) => Some(imp),
+                _ => None,
+            })
+            .unwrap();
+        let attrs = parse_host_module_attr(&imp.attrs).unwrap().unwrap();
+        host_decl(imp, attrs, Some(&file.items)).unwrap()
+    }
+
+    /// `htl::task`'s channels and requests are declared as `htl.task`'s types, and the
+    /// file imports that module as `task` on its first line.
+    #[test]
+    fn task_channels_are_declared_from_htl_task_which_the_file_imports() {
+        let hd = host_of(
+            "#[derive(TealRecord)] pub struct Event { pub n: i64 }\n\
+             #[derive(TealRecord)] pub struct Report { pub text: String }\n\
+             pub struct D;\n\
+             #[host_module(name = \"d\", records = [Event, Report])]\n\
+             impl D {\n\
+             \x20   pub fn events(&self) -> htl::task::RecvChannel<Event> { todo!() }\n\
+             \x20   pub fn reports(&self) -> SendChannel<Report> { todo!() }\n\
+             \x20   pub fn give(&self, out: SendChannel<Report>) {}\n\
+             \x20   pub fn calls(&self) -> RecvChannel<Request<String, i64>> { todo!() }\n\
+             }\n",
+        );
+        assert_eq!(
+            hd.decl,
+            "local type task = require(\"htl.task\")\n\n\
+             local record d\n\
+             \x20  record Event\n      n: integer\n   end\n\
+             \x20  record Report\n      text: string\n   end\n\
+             \x20  events: function(self: d): task.RecvChannel<Event>\n\
+             \x20  reports: function(self: d): task.SendChannel<Report>\n\
+             \x20  give: function(self: d, out: task.SendChannel<Report>)\n\
+             \x20  calls: function(self: d): task.RecvChannel<task.Request<string, integer>>\n\
+             end\n\nreturn d\n"
+        );
+    }
+
+    /// The import goes in front of `uses` lines, and only where `task.` is a type of
+    /// `htl.task`: a declaration that does not mention one, or mentions a name that only
+    /// ends in `task`, gets none; a `Request` of the host's own (no type arguments) stays
+    /// its own name.
+    #[test]
+    fn the_task_import_is_written_only_for_a_task_type() {
+        let hd = host_of(
+            "pub struct D;\n\
+             #[host_module(name = \"d\", uses = [Mode])]\n\
+             impl D {\n    pub fn events(&self) -> RecvChannel<Mode> { todo!() }\n}\n",
+        );
+        assert!(
+            hd.decl.starts_with(
+                "local type task = require(\"htl.task\")\nlocal type Mode = require(\"Mode\")\n\nlocal record d\n"
+            ),
+            "{}",
+            hd.decl
+        );
+        let plain = host_of(
+            "pub struct D;\n\
+             #[host_module(name = \"subtask\", uses = [Request])]\n\
+             impl D {\n    pub fn me(&self) -> Self { todo!() }\n    pub fn r(&self, q: Request) -> Request { q }\n}\n",
+        );
+        assert!(!plain.decl.contains("htl.task"), "{}", plain.decl);
+        assert!(
+            plain
+                .decl
+                .contains("r: function(self: subtask, q: Request): Request"),
+            "{}",
+            plain.decl
         );
     }
 
