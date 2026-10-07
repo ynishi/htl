@@ -134,6 +134,57 @@ fn a_program_that_spawns_tasks_checks_clean_and_prints_what_they_returned() {
     assert_eq!(out, "");
 }
 
+/// Channels, timers and `select` from a program: a producer task feeds a channel a select
+/// drains, a task's case, a ticker raced against a timeout, `select_raw` and `default`.
+/// The file checks clean against the bundled declaration, and `htl run` finds each
+/// function on `htl.task`.
+#[test]
+fn a_program_that_selects_over_channels_and_timers_checks_clean_and_runs() {
+    let root = scratch("select");
+    write(
+        &root.join("main.tl"),
+        "local task = require(\"htl.task\")\n\
+         \n\
+         local ch: task.Channel<integer> = task.channel(2)\n\
+         local producer = task.spawn(function(): integer\n\
+         \x20  for i = 1, 3 do ch:send(i) end\n\
+         \x20  ch:close()\n\
+         \x20  return 3\n\
+         end)\n\
+         local sum = 0\n\
+         while task.select({\n\
+         \x20  ch:on(function(v: integer, ok: boolean): boolean\n\
+         \x20     if ok then sum = sum + v end\n\
+         \x20     return ok\n\
+         \x20  end),\n\
+         }) do end\n\
+         print(\"sum\", sum)\n\
+         print(task.select({\n\
+         \x20  producer:on(function(ok: boolean, n: integer): string return tostring(ok) .. \" \" .. n end),\n\
+         }))\n\
+         local tk = task.ticker(5)\n\
+         local ticked: string = task.select({\n\
+         \x20  tk:on(function(ms: number, ok: boolean): string return ok and ms > 0 and \"tick\" or \"closed\" end),\n\
+         \x20  task.after(5000):on(function(): string return \"timeout\" end),\n\
+         })\n\
+         tk:stop()\n\
+         print(ticked)\n\
+         task.after(1):wait()\n\
+         local r: task.Channel<string> = task.channel(0)\n\
+         local i, v, ok = task.select_raw({ r:arm_recv(), task.after(0):arm() })\n\
+         print(\"raw\", i, v, ok)\n\
+         local d: string = task.select({ r:on(function(s: string, _ok: boolean): string return s end) },\n\
+         \x20  { default = function(): string return \"default\" end })\n\
+         print(d)\n",
+    );
+    let (status, _out, err) = htl(&["check", "main.tl"], &root);
+    assert!(status.success(), "{err}");
+    assert!(err.contains("0 error(s)"), "{err}");
+    let (status, out, err) = htl(&["run", "main.tl"], &root);
+    assert!(status.success(), "{err}");
+    assert_eq!(out, "sum\t6\ntrue 3\ntick\nraw\t2\tnil\tnil\ndefault\n");
+}
+
 /// The declaration types the value: `await` of a `Task<string>` assigned to an integer is
 /// refused by `htl check` at the Teal line and column, before anything runs.
 #[test]

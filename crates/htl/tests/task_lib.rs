@@ -2,7 +2,9 @@
 //! design: mlua-isle's task library under a declaration, with `await` over `join`, and
 //! the structure the library promises — an unjoined child is cancelled and waited for
 //! when its parent ends or its scope closes, a child's error reaches the parent as the
-//! value it raised, and a cancel reaches it as one `is_cancelled` recognises.
+//! value it raised, and a cancel reaches it as one `is_cancelled` recognises. Then the
+//! channels, timers and `select` mlua-isle 0.9 added, forwarded on htl's table, and the
+//! rule that a task case a `select` took is the task's one join.
 
 #![cfg(feature = "async")]
 
@@ -250,4 +252,77 @@ fn the_projects_grace_applies_to_a_childs_cancel() {
     out.unwrap();
     assert!(dropped.load(Ordering::SeqCst));
     assert!(took < Duration::from_millis(200), "{took:?}");
+}
+
+/// The functions are forwarded on htl's table: a producer task feeds a local channel, a
+/// select drains it, a task case, a ticker, a timer, `select_raw` and `default`.
+#[test]
+fn channels_timers_and_select_run() {
+    let (_c, h, _) = host();
+    let (out, _) = run(
+        &h,
+        "local task = require('htl.task') \
+         local ch = task.channel(2) \
+         local producer = task.spawn(function() \
+            for i = 1, 3 do ch:send(i) end \
+            ch:close() \
+            return 3 \
+         end) \
+         local sum = 0 \
+         while task.select({ ch:on(function(v, ok) if ok then sum = sum + v end return ok end) }) do end \
+         SUM = sum \
+         TASK = task.select({ producer:on(function(ok, n) return tostring(ok) .. ' ' .. n end) }) \
+         local tk = task.ticker(5) \
+         TICK = task.select({ \
+            tk:on(function(ms, ok) return ok and ms > 0 and 'tick' or 'closed' end), \
+            task.after(5000):on(function() return 'timeout' end), \
+         }) \
+         tk:stop() \
+         task.after(1):wait() \
+         local r = task.channel(0) \
+         RAW = task.select_raw({ r:arm_recv(), task.after(0):arm() }) \
+         DEFAULT = task.select({ r:on(function(s) return s end) }, { default = function() return 'default' end })",
+    );
+    out.unwrap();
+    assert_eq!(global::<i64>(&h, "SUM"), 6);
+    assert_eq!(global::<String>(&h, "TASK"), "true 3");
+    assert_eq!(global::<String>(&h, "TICK"), "tick");
+    assert_eq!(global::<i64>(&h, "RAW"), 2);
+    assert_eq!(global::<String>(&h, "DEFAULT"), "default");
+}
+
+/// A task case a select took is the task's one join: a later `await` is htl's own error,
+/// and so is another case of it. A select that took another case left it joinable.
+#[test]
+fn select_case_then_await() {
+    let (_c, h, _) = host();
+    let (out, _) = run(
+        &h,
+        "local task = require('htl.task') \
+         local t = task.spawn(function() return 7 end) \
+         GOT = task.select({ t:on(function(ok, v) return v end) }) \
+         local ok, err = pcall(t.await, t) \
+         OK = ok ERR = tostring(err) \
+         local ok2, err2 = pcall(t.on, t, function() end) \
+         ERR2 = tostring(err2) \
+         local gate = task.channel(1) \
+         local slow = task.spawn(function() local v = gate:recv() return v end) \
+         OTHER = task.select({ slow:on(function() return 'task' end), task.after(0):on(function() return 'timer' end) }, { biased = true }) \
+         gate:send('later') \
+         LATER = slow:await()",
+    );
+    out.unwrap();
+    assert_eq!(global::<i64>(&h, "GOT"), 7);
+    assert!(!global::<bool>(&h, "OK"));
+    assert_eq!(
+        global::<String>(&h, "ERR"),
+        "htl.task: task already awaited"
+    );
+    assert!(
+        global::<String>(&h, "ERR2").contains("htl.task: task already awaited"),
+        "{}",
+        global::<String>(&h, "ERR2")
+    );
+    assert_eq!(global::<String>(&h, "OTHER"), "timer");
+    assert_eq!(global::<String>(&h, "LATER"), "later");
 }
