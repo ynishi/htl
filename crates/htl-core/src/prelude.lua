@@ -581,12 +581,28 @@ end
 -- its declaration: a `local async function f` reports its own line, a record method
 -- `f: function(..)` the field's line, so an `async function R.f` whose record body
 -- declares `f` is read at the body's line and needs the marker there.
+--
+-- Read at the type's own column (`t.x`): a parameter's type or a second declaration on
+-- the line may hold an unrelated `async function`. `t.x` is at `local` for `local async
+-- function f` (Teal's node starts there), at `async` where `start_at` moves it (`async
+-- function R.f`, a bare `async function f`, `async function(..)` as a value), and at
+-- `function` for `global async function f` (Teal's global node starts at `function`)
+-- and for any type written `function(..)`, where `async` counts only immediately
+-- before it. An annotated local reports its annotation, which is a sync type.
 local function async_at_decl(cache, t)
    local lines = source_lines(cache, t.file)
    if not lines then return false end
    if marker_on(lines, t.y, "async") then return true end
    local line = lines[t.y]
-   return line ~= nil and line:find("%f[%w_]async%s+function%f[^%w_]") ~= nil
+   if not line then return false end
+   local rest = line:sub(t.x)
+   local after = rest:match("^%f[%w_]local%s+(.*)") or rest
+   if after:find("^%f[%w_]async%s+function%f[^%w_]") then return true end
+   if rest:find("^%f[%w_]function%f[^%w_]") then
+      local before = line:sub(1, t.x - 1)
+      return before:find("%f[%w_]async%s*$") ~= nil
+   end
+   return false
 end
 
 -- Resolver for the await rules: true when the function called at (y, x) is async. The
@@ -606,7 +622,7 @@ local function async_resolver(result, filename)
       local id = by_pos[y] and by_pos[y][x]
       if not id then return false end
       local t = deref(id, 0)
-      if not t or t.fields or not t.file or not t.y then return false end
+      if not t or t.fields or not t.file or not t.y or not t.x then return false end
       if marked[id] == nil then marked[id] = async_at_decl(sources, t) end
       return marked[id]
    end
