@@ -75,7 +75,9 @@ That way out is [`ffi`] and [`macro@c_export`]."
 //! it was without it. With it, an `async fn` in a `#[host_module]` is a call Teal can
 //! `await`, `Htl::run_async` / `Htl::run_blocking` run a program as a root on the
 //! executor, and `htl.task` (`Htl::install_task_lib`) is the task library the
-//! `async` / `await` syntax desugars to; the README's Async section is the tour.
+//! `async` / `await` syntax desugars to, with the channels, timers and `select` a loop in
+//! Teal waits on and the typed host channels (`htl::task::RecvChannel` / `SendChannel`)
+//! a host feeds it through; the README's Async section is the tour.
 //!
 //! # Against an unpublished htl
 //!

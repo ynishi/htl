@@ -47,7 +47,7 @@ mlua = { workspace = true }
 # coverage and a host's own callback register with it instead of each taking the one
 # slot Lua has (#350). Its hook part needs no feature; the executor a program that awaits
 # runs on (`Vm::run`) is behind its `tokio`, which htl's `async` feature turns on.
-mlua-isle = { version = "0.8.0", default-features = false }
+mlua-isle = { version = "0.9", default-features = false }
 # `Htl::run_blocking`: the current-thread runtime and `LocalSet` a `Vm::run` root is
 # driven on when the caller has none of its own (`htl run`, `htl test`). The same crate
 # mlua-isle's `tokio` feature already brings in, so it adds nothing to the graph.

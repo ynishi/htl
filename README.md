@@ -421,6 +421,29 @@ http.get("/a") end`: a call of an async function inside a plain closure is
 `await-missing` there. The declaration's header is the reference:
 [`htl::task`](https://docs.rs/htl/latest/htl/task/index.html).
 
+The module also has channels, timers and `select`, so a loop in Teal can wait on whichever
+source is ready first — events a Rust host pushes, values from other tasks, a tick, a
+timeout:
+
+```lua
+local events = daemon:events()            -- task.RecvChannel<daemon.Event>, from the host
+local tick = task.ticker(1000)
+local stop = await task.select({
+   events:on(function(ev: daemon.Event, ok: boolean): boolean return not ok end),
+   tick:on(function(_ms: number, _ok: boolean): boolean return false end),
+   task.after(5000):on(function(): boolean return true end),
+})
+```
+
+Each case's handler is typed by its source, and every case of one `select` returns the same
+type; `send`, `recv`, `wait` and `select` are reported by `await-missing` when written
+without `await`. On the Rust side, a `#[host_module]` method returning
+`htl::task::RecvChannel<Event>` or `SendChannel<Report>` is declared as
+`task.RecvChannel<Event>` / `task.SendChannel<Report>`, and the generated `.d.tl` imports
+`htl.task` for it, so `send` on a receive-only channel or a handler of the wrong type fails
+`include_tl!` at `cargo build`. How a host makes the channels:
+[`htl::task`](https://docs.rs/htl/latest/htl/task/index.html#channels-between-the-host-and-teal).
+
 ### Settings
 
 Two tables of `htl.toml`, both with every key in
