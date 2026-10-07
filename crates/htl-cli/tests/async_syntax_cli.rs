@@ -520,3 +520,172 @@ end
         "the message inside the `if` must be the one `await 1.5` gets at the top level: {err}"
     );
 }
+
+const SAME_LINE_DECLARATIONS_PROGRAM: &str = "\
+local async function same_line(cond: function(): boolean): boolean
+   return cond()
+end
+
+local async function next_line(
+   cond: function(): boolean
+): boolean
+   return cond()
+end
+
+local async function local_on_line(): boolean
+   local cb = function(): boolean return true end
+   return cb()
+end
+
+local async function on_async_line(): boolean local cb = function(): boolean return true end
+   return cb()
+end
+
+return { same_line = same_line, next_line = next_line, local_on_line = local_on_line, on_async_line = on_async_line }
+";
+
+/// A sync parameter's type (`same_line`, `next_line`) or a sync local's inferred type
+/// (`local_on_line`, `on_async_line`) that shares a source line with the enclosing
+/// `async function` keyword must not be read as async itself: none of the four calls
+/// here is of an async function, so `await-missing` stays silent for all of them. (#430)
+#[test]
+fn await_missing_is_silent_when_the_callees_type_shares_the_declaration_line() {
+    let root = scratch("same-line-decl");
+    write(&root.join("htl.toml"), "[lang]\nasync = true\n");
+    write(&root.join("src/main.tl"), SAME_LINE_DECLARATIONS_PROGRAM);
+    let (ok, _, err) = htl(&["check", "src"], &root);
+    assert!(ok, "{err}");
+    assert!(err.contains("0 error(s), 0 warning(s), 0 lint(s)"), "{err}");
+}
+
+/// A plain `local async function f` called without `await` is reported whether the
+/// call sits on the same source line as `f`'s own declaration (`f_same`, called right
+/// after its own `end` on one line) or several lines below it (`f_diff`, called from
+/// `caller`). (#430)
+#[test]
+fn await_missing_still_fires_whether_the_call_shares_the_declaration_line_or_not() {
+    let root = scratch("same-line-and-diff-line-call");
+    write(&root.join("htl.toml"), "[lang]\nasync = true\n");
+    write(
+        &root.join("main.tl"),
+        "local async function f_same(): integer return 1 end print(f_same())
+
+local async function f_diff(): integer
+   return 1
+end
+
+local async function caller(): integer
+   return f_diff()
+end
+print(await caller())
+",
+    );
+    let (ok, _, err) = htl(&["check", "main.tl"], &root);
+    assert!(
+        !ok,
+        "both calls are of async functions without await: {err}"
+    );
+    for want in [
+        "main.tl:1:59: call of an async function without await: f_same may suspend",
+        "main.tl:8:11: call of an async function without await: f_diff may suspend",
+    ] {
+        assert!(err.contains(want), "missing {want:?} in {err}");
+    }
+}
+
+/// An `async function(...)` value assigned to an unannotated local (`g`), sharing a
+/// source line with another, unrelated `async function` declaration (`marker`), is
+/// reported when called without `await`: `g`'s own column sits at its own `async`
+/// keyword, not at `marker`'s. (The silent direction -- a sync declaration sharing a
+/// line with someone else's `async function` -- is `on_async_line`, above.) (#430)
+#[test]
+fn await_missing_still_fires_for_an_async_value_sharing_a_line_with_another_async_function() {
+    let root = scratch("async-value-shares-line");
+    write(&root.join("htl.toml"), "[lang]\nasync = true\n");
+    write(
+        &root.join("main.tl"),
+        "local async function marker(): boolean return true end local g = async function(): boolean return true end
+
+local async function caller(): boolean
+   return g()
+end
+print(await caller())
+",
+    );
+    let (ok, _, err) = htl(&["check", "main.tl"], &root);
+    assert!(!ok, "{err}");
+    assert!(
+        err.contains("main.tl:4:11: call of an async function without await: g may suspend"),
+        "{err}"
+    );
+}
+
+/// `async_at_decl`'s other branch: `t.x` at the type's own `function` keyword with
+/// `async` immediately before it, rather than at `local` or `async` itself. `gf`'s node
+/// is a `global_function`, which Teal starts at `function` (unlike `local_function`,
+/// which starts at `local`), so this is the only spelling that takes this branch on its
+/// own. The second part shares one line between a sync declaration (`a`) and an async
+/// one (`b`): `a`'s own `function` keyword has no `async` immediately before it, `b`'s
+/// does, so the lint must name `b` and not `a`. (#430)
+#[test]
+fn await_missing_fires_for_global_async_function_and_only_names_the_async_one_sharing_a_line() {
+    let root = scratch("global-and-shared-line");
+    write(&root.join("htl.toml"), "[lang]\nasync = true\n");
+    write(
+        &root.join("main.tl"),
+        "global async function gf(): integer
+   return 1
+end
+print(gf())
+
+local function a(): integer return 1 end local async function b(): integer return 2 end
+print(a(), b())
+",
+    );
+    let (ok, _, err) = htl(&["check", "main.tl"], &root);
+    assert!(!ok, "{err}");
+    assert!(
+        err.contains("main.tl:4:7: call of an async function without await: gf may suspend"),
+        "{err}"
+    );
+    assert!(
+        err.contains("main.tl:7:12: call of an async function without await: b may suspend"),
+        "{err}"
+    );
+    assert!(
+        !err.contains("without await: a may suspend"),
+        "the sync declaration sharing the line with `b` must not be named: {err}"
+    );
+}
+
+const DTL_ASYNC_METHOD_HTTP: &str = "\
+local record http
+   get: function(path: string): string ---@async
+end
+return http
+";
+
+/// A `.d.tl` method marked `---@async` is reported when called without `await`;
+/// `marker_on` (the `---@async` reader) is untouched by this fix. (#430)
+#[test]
+fn await_missing_still_fires_for_a_dtl_method_marked_async() {
+    let root = scratch("dtl-marker-still-fires");
+    write(&root.join("htl.toml"), "[lang]\nasync = true\n");
+    write(&root.join("types/http.d.tl"), DTL_ASYNC_METHOD_HTTP);
+    write(
+        &root.join("src/main.tl"),
+        "local http = require(\"http\")
+
+local async function f(): string
+   return http.get(\"/a\")
+end
+print(await f())
+",
+    );
+    let (ok, _, err) = htl(&["check", "src"], &root);
+    assert!(!ok, "{err}");
+    assert!(
+        err.contains("call of an async function without await: http.get may suspend"),
+        "{err}"
+    );
+}
