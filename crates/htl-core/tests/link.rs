@@ -4,6 +4,7 @@
 use htl_core::Htl;
 use htl_core::bundle::{Bundle, Kind};
 use htl_core::link::{LinkOptions, link};
+use htl_core::mlua::{Lua, LuaOptions, StdLib};
 use std::path::{Path, PathBuf};
 
 mod common;
@@ -717,4 +718,28 @@ fn a_global_type_require_is_emitted_and_counted() {
     let linked = link(&h, &root.join("src/main.tl"), &LinkOptions::default()).unwrap();
     assert!(linked.ok(), "{:?}", linked.errors);
     assert_eq!(linked.host_modules, vec!["shape".to_string()]);
+}
+
+#[test]
+fn a_safe_host_program_state_loads_and_runs_a_bundle() {
+    let root = scratch("safe-program-state");
+    write(&root.join("src/main.tl"), "return 42\n");
+
+    let checker = Htl::new().unwrap();
+    checker.add_path(&root.join("src")).unwrap();
+    let linked = link(&checker, &root.join("src/main.tl"), &LinkOptions::default()).unwrap();
+    assert!(linked.errors.is_empty(), "{:?}", linked.errors);
+    let bundle = linked.into_bundle().unwrap();
+    assert!(
+        bundle
+            .modules
+            .iter()
+            .any(|module| { module.name == bundle.entry && module.kind == Kind::Bytecode })
+    );
+
+    let lua = Lua::new_with(StdLib::ALL_SAFE, LuaOptions::default()).unwrap();
+    let program = Htl::with_checker_lua(&checker, lua).unwrap();
+    program.lua().load("assert(debug == nil)").exec().unwrap();
+    let main = program.load_bundle(&bundle, &[]).unwrap();
+    assert_eq!(main.call::<i64>(()).unwrap(), 42);
 }

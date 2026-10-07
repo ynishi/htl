@@ -93,3 +93,13 @@ fn a_memory_limit_the_host_set_stops_a_program_and_the_state_goes_on() {
         .exec("local s = string.rep('x', 1 << 10)", "=small", &[])
         .unwrap();
 }
+
+#[test]
+fn a_new_checker_opens_debug_for_source_aware_callers() {
+    let checker = Htl::new().unwrap();
+    checker
+        .lua()
+        .load("assert(type(debug) == 'table' and type(debug.getinfo) == 'function')")
+        .exec()
+        .unwrap();
+}

@@ -1378,17 +1378,20 @@ pub(crate) fn vm(lua: &Lua) -> Result<mlua_isle::runtime::Vm> {
 }
 
 impl Htl {
-    /// New state. Uses `Lua::unsafe_new` so stripped bytecode bundles can be loaded, and
-    /// opens every standard library — `debug`, `io` and `os` included. That is the right
-    /// state for `htl run`, for the checker, and for a host running Teal it wrote. A host
-    /// running Teal it did not write (a mods directory, a script a user dropped in)
-    /// decides what that Teal may reach, and decides it on the `Lua` it builds itself:
-    /// [`with_checker_lua`](Self::with_checker_lua) takes that state. The checker state
-    /// this makes uses `string`, `table`, `math` and `package`, and `os.getenv` and
-    /// `io.stderr` on its debug paths — and under the split it is not the state a mod
-    /// runs in.
+    /// New state. Uses `Lua::unsafe_new` to open every standard library, including
+    /// `debug`, which mlua's safe constructors do not allow. The declaration searcher
+    /// uses `debug.getinfo` to distinguish a Teal caller from plain Lua. The checker
+    /// also uses `io` and `os` for module lookup, profiling, and diagnostics.
+    ///
+    /// This full-library state is the right one for `htl run`, the checker, and a host
+    /// running Teal it wrote. A host running Teal it did not write (for example, a mod
+    /// or a user-supplied script) can build a more restricted `Lua` and pass it to
+    /// [`with_checker_lua`](Self::with_checker_lua). The checker made by this
+    /// constructor also uses `string`, `table`, `math`, and `package`; on debug paths
+    /// it uses `os.getenv` and `io.stderr`. Those libraries belong to the checker,
+    /// not to the separate program state.
     pub fn new() -> Result<Self> {
-        // SAFETY: we accept binary chunks only from bundles we produced ourselves.
+        // SAFETY: the default state needs the unsafe `debug` library for caller lookup.
         let lua = unsafe { Lua::unsafe_new() };
         Self::from_lua(lua)
     }
@@ -1407,17 +1410,17 @@ impl Htl {
 
     /// [`with_checker`](Self::with_checker) with the program state supplied.
     ///
-    /// This is the constructor for a host that decides what the program state is made of
-    /// — which standard libraries it opens (`Lua::unsafe_new_with`), what its allocator
-    /// is bounded to (`Lua::set_memory_limit`), what callback counts its instructions
-    /// (below) — while the checker keeps running on a state of its own, with whatever it
-    /// needs. Every such limit is mlua's and is set on `lua` by the host; htl adds none
-    /// of its own and puts nothing in the way of them.
+    /// This constructor lets a host choose the program state's libraries
+    /// (`Lua::new_with` or `Lua::unsafe_new_with`), allocator limit
+    /// (`Lua::set_memory_limit`), and instruction callback (below). The checker keeps
+    /// running on a separate state with whatever it needs. The limits are mlua's; htl
+    /// adds none and does not interfere with them.
     ///
     /// What htl itself needs from `lua`: `package` (the searcher and `preload`), the base
     /// library's `load` and `xpcall`, and mlua's default `LuaOptions::catch_rust_panics`.
-    /// A state that will load bundles has to come from `unsafe_new_with`: mlua's safe
-    /// `new_with` refuses binary chunks, which is what a bundle is.
+    /// Safe states can load bytecode bundles too. A host that does not need `debug` can
+    /// use `Lua::new()` or `Lua::new_with(StdLib::ALL_SAFE, ..)`; an integration test
+    /// builds and runs a bytecode bundle in that safe state.
     ///
     /// The state's debug hook is owned: this constructor attaches
     /// [`mlua_isle`]'s [`Vm`](mlua_isle::runtime::Vm) to `lua`, one global hook that
@@ -1453,13 +1456,9 @@ impl Htl {
     /// use htl::mlua::{Lua, LuaOptions, StdLib};
     ///
     /// let checker = Htl::new()?;                     // the checker keeps everything it needs
-    /// // SAFETY: a state that loads bundles has to accept binary chunks, which mlua's safe
-    /// // `new_with` refuses; this one loads only what the host hands it.
-    /// let lua = unsafe {
-    ///     Lua::unsafe_new_with(StdLib::ALL_SAFE ^ StdLib::OS ^ StdLib::IO, LuaOptions::default())
-    /// };
+    /// let lua = Lua::new_with(StdLib::ALL_SAFE, LuaOptions::default())?;
     /// lua.set_memory_limit(8 << 20)?;                // mlua's: past it, an allocation is `MemoryError`
-    /// let h = Htl::with_checker_lua(&checker, lua)?; // the program runs here; `os` and `io` are nil
+    /// let h = Htl::with_checker_lua(&checker, lua)?; // the program runs here without `debug`
     /// ```
     pub fn with_checker_lua(checker: &Htl, lua: Lua) -> Result<Self> {
         attach_hook_owner(&lua)?;
