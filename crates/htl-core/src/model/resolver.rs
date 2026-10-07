@@ -679,7 +679,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("htl-resolver-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        std::fs::canonicalize(dir).unwrap()
     }
 
     fn write(path: &Path, text: &str) {
