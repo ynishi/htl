@@ -913,7 +913,8 @@ fn union_from(en: &ItemEnum, name: &str, variants: &[dts::UnionVariant]) -> Toke
 /// rewritten first, and `include_tl!` / `include_bundle!` check against it. The
 /// breakdown is `htl_core::dts::host_decl`, which `htl dts` runs without building.
 ///
-/// `&str`, `&[T]` and `&Record` parameters are accepted (`&mut` is not); an `Option<T>`
+/// `&str`, `&[T]`, `&Record` and `&Lua` (see *The Lua state as a parameter*) parameters
+/// are accepted (`&mut` is not); an `Option<T>`
 /// parameter is declared `name?: T`, so a caller may write `api:find("x")`; another host
 /// type comes in as `UserDataRef<T>` (`UserDataRefMut<T>` to mutate it, `UserDataOwned<T>`
 /// to keep it) and is declared as `T`; types from other modules come in via `uses =
@@ -1020,6 +1021,37 @@ fn union_from(en: &ItemEnum, name: &str, variants: &[dts::UnionVariant]) -> Toke
 /// field of a struct (a data variant's fields take none); a field has no default to turn
 /// around, so an unmarked one is simply not a boundary. The derive re-emits nothing, so the
 /// attribute stays on the struct, where rustc reads it as the derive's own.
+///
+/// # The Lua state as a parameter
+///
+/// A parameter of type `&Lua` (`&mlua::Lua`, `&htl::mlua::Lua`; matched behind a
+/// reference by the last path segment, as every type here is) is filled from the
+/// closure's own Lua handle rather than from the Lua arguments, and is left out of the
+/// `.d.tl`, the way `&self` is — the method may be given whatever it needs the state for
+/// (building a `htl::task::RecvChannel::new(lua, cap)`, a table, a function) inside the
+/// call instead of having it built beforehand and stored on the host:
+///
+/// ```rust,ignore
+/// #[host_module(name = "host")]
+/// impl Host {
+///     pub fn count(&self, lua: &htl::mlua::Lua) -> i64 { lua.used_memory() as i64 }
+/// }
+/// // count: function(self: host): integer
+/// ```
+///
+/// At most one such parameter, in any position among the others; it takes no
+/// `#[teal(..)]` (that word says how the host calls a Lua function it is handed, and this
+/// is not one). Its name is free — any identifier, `_`, even `this` or `self`'s own
+/// name — because the generated wrapper never reads it back: the value is bound to an
+/// identifier of the macro's own choosing and spliced into the call positionally, the
+/// parameter's declared name serving only the messages above.
+///
+/// A sync method's closure already receives `&Lua` (`add_method`, `add_method_mut`,
+/// `add_function`), so this costs nothing; an `async fn`'s receives an owned `Lua` (mlua
+/// hands over a value there, not a borrow), so the generated wrapper binds the parameter
+/// to a reference into it at the top of the future — sound because an async block may
+/// hold a reference to its own local across its own awaits, the same way it already holds
+/// the receiver's `UserDataRef` across them.
 #[proc_macro_attribute]
 pub fn host_module(attr: TokenStream, item: TokenStream) -> TokenStream {
     let metas = match Punctuated::<Meta, Token![,]>::parse_terminated.parse(attr) {
@@ -1085,18 +1117,34 @@ fn expand_host_module(
             .map(|p| format_ident!("{}", p.name))
             .collect();
         let arg_tys: Vec<&syn::Type> = m.params.iter().map(|p| &p.owned_ty).collect();
-        let call_exprs: Vec<_> = m
-            .params
-            .iter()
-            .map(|p| {
+        // A `&Lua` parameter is not among `m.params` (it is filled from the closure's own
+        // Lua handle, not from the Lua arguments — see `dts::is_lua_ref`), so it is spliced
+        // back into the call at the position it held in the original signature
+        // (`LuaParam::index`), the way `&self` is passed as `this` rather than through
+        // `#pat`. The binding is always this fixed internal identifier, never the user's
+        // own parameter name (`LuaParam::name` is for error messages only): a call is
+        // positional, so what the generated code binds the value to and what the Rust
+        // signature calls its parameter need not be the same word, and the user's word may
+        // collide with one of ours (`this`, a pattern-less `_` falling back to `a0`, two
+        // parameters both named `a0`) without consequence.
+        let htl_lua = format_ident!("__htl_lua");
+        let total = m.params.len() + m.lua_param.is_some() as usize;
+        let mut call_exprs: Vec<proc_macro2::TokenStream> = Vec::with_capacity(total);
+        let mut pi = 0usize;
+        for idx in 0..total {
+            if m.lua_param.as_ref().is_some_and(|lp| lp.index == idx) {
+                call_exprs.push(quote! { #htl_lua });
+            } else {
+                let p = &m.params[pi];
+                pi += 1;
                 let id = format_ident!("{}", p.name);
-                if p.by_ref {
+                call_exprs.push(if p.by_ref {
                     quote! { &#id }
                 } else {
                     quote! { #id }
-                }
-            })
-            .collect();
+                });
+            }
+        }
         let call_args = quote! { #( #call_exprs ),* };
         let call = match m.receiver {
             Some(_) => quote! { this.#fname(#call_args) },
@@ -1127,6 +1175,24 @@ fn expand_host_module(
             },
         };
         let pat = quote! { (#( #arg_pats, )*): (#( #arg_tys, )*) };
+        // A sync closure's first argument is already `&Lua` (mlua's `add_method` /
+        // `add_method_mut` / `add_function`), so a `&Lua` parameter is bound there directly
+        // under the fixed internal name — `_lua`, unused, when the method takes none.
+        let sync_lua = if m.lua_param.is_some() {
+            htl_lua.clone()
+        } else {
+            format_ident!("_lua")
+        };
+        // An async closure's first argument is `Lua` *by value* (mlua hands over an owned
+        // handle there, not a borrow — see the macro doc's async section), so it keeps the
+        // fixed internal name and a `&Lua` parameter borrows from it inside the future with
+        // a `let` at the top of the block: an async block may hold a reference to its own
+        // local across its own awaits (the state the generator transform builds is exactly
+        // what makes that sound), the way it holds the receiver's `UserDataRef` across them.
+        let async_lua_bind = m
+            .lua_param
+            .as_ref()
+            .map(|_| quote! { let #htl_lua = &_lua; });
         // The async variants differ in more than the name: they take the Lua by value and
         // the receiver as a borrow guard (`UserDataRef`) that the future holds across
         // every await, and the future itself must be `'static`. `async move` is what
@@ -1140,19 +1206,23 @@ fn expand_host_module(
             quote! { ::htl::mlua_isle::runtime::cancellable(#fut) }
         };
         registrations.push(match (m.receiver, m.is_async) {
-            (Some(false), false) => quote! { m.add_method(#fname_s, |_lua, this, #pat| #body); },
-            (Some(true), false) => quote! { m.add_method_mut(#fname_s, |_lua, this, #pat| #body); },
-            (None, false) => quote! { m.add_function(#fname_s, |_lua, #pat| #body); },
+            (Some(false), false) => {
+                quote! { m.add_method(#fname_s, |#sync_lua, this, #pat| #body); }
+            }
+            (Some(true), false) => {
+                quote! { m.add_method_mut(#fname_s, |#sync_lua, this, #pat| #body); }
+            }
+            (None, false) => quote! { m.add_function(#fname_s, |#sync_lua, #pat| #body); },
             (Some(false), true) => {
-                let fut = wrap(quote! { async move { #body } });
+                let fut = wrap(quote! { async move { #async_lua_bind #body } });
                 quote! { m.add_async_method(#fname_s, |_lua, this, #pat| #fut); }
             }
             (Some(true), true) => {
-                let fut = wrap(quote! { async move { #body } });
+                let fut = wrap(quote! { async move { #async_lua_bind #body } });
                 quote! { m.add_async_method_mut(#fname_s, |_lua, mut this, #pat| #fut); }
             }
             (None, true) => {
-                let fut = wrap(quote! { async move { #body } });
+                let fut = wrap(quote! { async move { #async_lua_bind #body } });
                 quote! { m.add_async_function(#fname_s, |_lua, #pat| #fut); }
             }
         });

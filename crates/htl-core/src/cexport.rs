@@ -348,6 +348,13 @@ pub fn plan(hd: &HostDecl, imp: &ItemImpl, attrs: CAttrs) -> Result<CPlan, Strin
                 m.name, m.name
             ));
         }
+        if m.lua_param.is_some() {
+            return Err(format!(
+                "c_export: `{type_name}::{}` takes `&Lua`; a C caller has no Lua state to \
+                 hand it",
+                m.name
+            ));
+        }
         let mut params = Vec::new();
         for p in &m.params {
             let cp = param(&type_name, &m.name, p)?;
@@ -391,6 +398,12 @@ pub fn plan(hd: &HostDecl, imp: &ItemImpl, attrs: CAttrs) -> Result<CPlan, Strin
 /// The opener: one options parameter — the JSON object the module doc describes — plus
 /// optionally the interrupt flag.
 fn open_fn(type_name: &str, prefix: &str, m: &HostMethod) -> Result<CFn, String> {
+    if m.lua_param.is_some() {
+        return Err(format!(
+            "c_export: `{type_name}::{}` takes `&Lua`; a C caller has no Lua state to hand it",
+            m.name
+        ));
+    }
     let mut params = Vec::new();
     let mut options = 0;
     for p in &m.params {
@@ -877,6 +890,33 @@ mod tests {
                 .contains("g_handle *g_open(const char *options_json);"),
             "the flag is not a C argument:\n{}",
             p.header()
+        );
+    }
+
+    /// A C caller has no Lua state: a method or an opener taking `&Lua` (#427's own
+    /// parameter, left out of a `#[host_module]`'s `.d.tl`) is refused by name here,
+    /// rather than reaching `rustc` as a wrapper with one fewer argument than the Rust
+    /// signature takes (`htl dts` writes the header without compiling, so this is the
+    /// only place the mismatch can be caught before the generated code fails to build).
+    #[test]
+    fn a_method_taking_lua_is_refused() {
+        let err = refused(
+            "impl G { pub fn open(o: &str) -> Self { todo!() } \
+             pub fn f(&self, lua: &htl::mlua::Lua) -> i64 { todo!() } }",
+        );
+        assert!(
+            err.contains("takes `&Lua`") && err.contains("G::f"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_opener_taking_lua_is_refused() {
+        let err =
+            refused("impl G { pub fn open(o: &str, lua: &htl::mlua::Lua) -> Self { todo!() } }");
+        assert!(
+            err.contains("takes `&Lua`") && err.contains("G::open"),
+            "{err}"
         );
     }
 }
