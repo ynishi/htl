@@ -1,7 +1,6 @@
 <!--
 This file is the rule for a pull request's body, not only its shape. CONTRIBUTING.md
-links here instead of restating it. `scripts/check-body` checks a body against the
-sections below before it is posted, and CI checks it again on the pull request.
+links here instead of restating it.
 
 Copy this file, fill in every section, and delete the comments. Do not leave a
 section empty: write "none" and say why.
@@ -86,6 +85,6 @@ each, or say that none does yet.
 <!--
 The last line is `Refs #N`. Never write close / closes / fix / fixes / resolve /
 resolves before `#N` anywhere in this body: GitHub reads them and closes the issue
-on merge. `land.sh` closes the issue when the whole of it has landed.
+on merge. After merge, close the issue only when the whole of it has landed.
 -->
 Refs #

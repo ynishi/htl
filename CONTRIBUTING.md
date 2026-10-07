@@ -44,9 +44,12 @@ The definition of green is the whole workspace, and it is cheap enough to run
 every time. The recipes are named for the moment they guard:
 
 ```bash
-just pre-commit   # cargo fmt --all, then the workspace's tests and clippy
+just pre-commit   # format, public-reference checks, tests and clippy
 just pre-push     # the above, plus a full compile and every end-to-end case
 ```
+
+Both gates run `scripts/check-public-refs` and its regression tests. CI runs the
+same check on every pull request.
 
 **Green is a precondition, not a verification.** A change to the checker, the
 lints, the test runner, the scaffold or the bundle format is run against a real

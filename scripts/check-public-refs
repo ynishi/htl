@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""Find private paths, machine paths, and missing tools in files Git would publish."""
+
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path, PurePosixPath
+
+
+ROOT = Path(__file__).resolve().parents[1]
+GENERATED_ROOTS = {"target", ".htl", ".mlua-pkgs"}
+RELATIVE_PATH = re.compile(
+    r"(?<![A-Za-z0-9:/_.-])(?:\./)?(?:[A-Za-z0-9_.~-]+/)+[A-Za-z0-9_.~-]+"
+)
+MACHINE_PATH = re.compile(
+    r"(?<![A-Za-z0-9])(?P<unix>/(?:Users|home)/[^/\s`<>]+(?:/[^/\s`<>]+)*)"
+    r"|(?<![A-Za-z0-9])(?P<windows>[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s`<>]+"
+    r"(?:[\\/]+[^\\/\s`<>]+)*)",
+    re.IGNORECASE,
+)
+CODE_SPAN = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
+SCRIPT_REFERENCE = re.compile(
+    r"(?<![A-Za-z0-9_./-])(?:scripts/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+"
+    r"|(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:sh|py))(?![A-Za-z0-9_./\-\)\]])"
+)
+JUST_REFERENCE = re.compile(r"(?<![A-Za-z0-9_-])just\s+([A-Za-z0-9_-]+)")
+
+
+def git(root: Path, *args: str, input_bytes: bytes = b"") -> bytes:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=root,
+        input=input_bytes,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode not in (0, 1):
+        message = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(message or f"git {' '.join(args)} exited {result.returncode}")
+    return result.stdout
+
+
+def nul_paths(data: bytes) -> set[str]:
+    return {os.fsdecode(path) for path in data.split(b"\0") if path}
+
+
+def ignored_paths(root: Path, paths: set[str]) -> set[str]:
+    if not paths:
+        return set()
+    input_bytes = b"\0".join(os.fsencode(path) for path in sorted(paths)) + b"\0"
+    result = subprocess.run(
+        ["git", "check-ignore", "--no-index", "-z", "--stdin"],
+        cwd=root,
+        input=input_bytes,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode not in (0, 1):
+        message = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(message or f"git check-ignore exited {result.returncode}")
+    return nul_paths(result.stdout)
+
+
+def publishable_files(root: Path) -> list[str]:
+    tracked = nul_paths(git(root, "ls-files", "-z"))
+    untracked = nul_paths(git(root, "ls-files", "--others", "--exclude-standard", "-z"))
+    tracked.discard(".gitignore")
+    tracked = {path for path in tracked if Path(path).name != ".gitignore"}
+    untracked = {path for path in untracked if Path(path).name != ".gitignore"}
+    tracked -= ignored_paths(root, tracked)
+    return sorted(tracked | untracked)
+
+
+def recipes(root: Path) -> set[str]:
+    justfile = next(
+        (root / name for name in ("justfile", "Justfile") if (root / name).is_file()),
+        None,
+    )
+    if justfile is None:
+        return set()
+    pattern = re.compile(r"^([A-Za-z0-9_-]+)(?:\s+[^:]*)?:")
+    found = set()
+    for line in justfile.read_text(encoding="utf-8", errors="replace").splitlines():
+        match = pattern.match(line)
+        if match:
+            found.add(match.group(1))
+    return found
+
+
+def private_ancestors(path: str) -> list[str]:
+    candidate = PurePosixPath(path)
+    if candidate.is_absolute() or re.match(r"^[A-Za-z]:", path):
+        return []
+    parts = [part for part in candidate.parts if part not in ("", ".")]
+    if any(part == ".." for part in parts) or len(parts) < 2:
+        return []
+    if parts[0] in GENERATED_ROOTS:
+        return []
+    return ["/".join(parts[:index]) for index in range(1, len(parts))]
+
+
+def is_placeholder(account: str) -> bool:
+    return account in {"…", "...", "ellipsis"}
+
+
+def machine_path_is_private(match: re.Match[str]) -> bool:
+    path = match.group("unix") or match.group("windows")
+    if path.lower().startswith("/home/linuxbrew/.linuxbrew/"):
+        return False
+    account = path.split("/")[2] if match.group("unix") else re.split(r"[\\/]", path)[2]
+    return not is_placeholder(account)
+
+
+def scan_file(root: Path, relpath: str, known_recipes: set[str]) -> list[tuple[str, int, str, str]]:
+    path = root / relpath
+    if path.is_symlink():
+        data = os.fsencode(os.readlink(path))
+    elif path.is_file():
+        data = path.read_bytes()
+    else:
+        return []
+    if b"\0" in data:
+        return []
+    text = data.decode("utf-8", errors="replace")
+    findings: list[tuple[str, int, str, str]] = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        for match in MACHINE_PATH.finditer(line):
+            if machine_path_is_private(match):
+                findings.append((relpath, line_number, "machine-path", ""))
+
+        path_matches = list(RELATIVE_PATH.finditer(line))
+        candidate_ancestors: set[str] = set()
+        for match in path_matches:
+            candidate_ancestors.update(private_ancestors(match.group(0)))
+        probes = {
+            f"{ancestor}/__codex_public_ref_probe__": ancestor
+            for ancestor in candidate_ancestors
+        }
+        ignored_probes = ignored_paths(root, set(probes))
+        ignored_ancestors = {probes[probe] for probe in ignored_probes}
+        for match in path_matches:
+            if ignored_ancestors.intersection(private_ancestors(match.group(0))):
+                findings.append((relpath, line_number, "private-path", ""))
+
+        for span in CODE_SPAN.findall(line):
+            for match in SCRIPT_REFERENCE.finditer(span):
+                reference = match.group(0)
+                if not (root / reference.removeprefix("./")).is_file():
+                    findings.append((relpath, line_number, "missing-tool", reference))
+            for match in JUST_REFERENCE.finditer(span):
+                recipe = match.group(1)
+                if recipe not in known_recipes:
+                    findings.append((relpath, line_number, "missing-tool", f"just {recipe}"))
+    return findings
+
+
+def main() -> int:
+    try:
+        root = ROOT
+        if not git(root, "rev-parse", "--show-toplevel").strip():
+            raise RuntimeError("not inside a Git worktree")
+        known_recipes = recipes(root)
+        findings = [
+            finding
+            for relpath in publishable_files(root)
+            for finding in scan_file(root, relpath, known_recipes)
+        ]
+    except (OSError, RuntimeError) as error:
+        print(f"check-public-refs: {error}", file=sys.stderr)
+        return 2
+
+    for relpath, line, kind, reference in sorted(findings):
+        suffix = f": {reference}" if reference else ""
+        print(f"{relpath}:{line}: {kind}{suffix}")
+    return 1 if findings else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

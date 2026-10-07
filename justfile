@@ -5,8 +5,9 @@
 # moments is harder to take back than the last — a commit is amended, a push is reverted in
 # public, a publish is yanked and never replaced — and a name that says *when* is the one
 # thing a person can act on without reading the recipe. The parts they are assembled from
-# stay runnable on their own for when you already know which answer you want: `fmt`,
-# `check`, `build`, `e2e`, `e2e-scaffold-packaged`, `bench`. `post-publish` is the one
+# stay runnable on their own for when you already know which answer you want:
+# `fmt`, `check-public-refs`, `check`, `build`, `e2e`,
+# `e2e-scaffold-packaged`, `bench`. `post-publish` is the one
 # recipe that runs *after* a moment rather than before it, and it is not part of any gate.
 #
 # These wrap what CONTRIBUTING.md already asks for, so that "did I run everything?" has one
@@ -16,7 +17,7 @@ _default:
     @just --list
 
 # Everything before a commit: format, then the green CONTRIBUTING defines.
-pre-commit: fmt check
+pre-commit: fmt check-public-refs check
 
 # `check` directly rather than a dependency on `pre-commit`, which would also run `fmt`.
 # Reformatting the tree at push time either does nothing, or it edits files the commits
@@ -33,7 +34,7 @@ pre-commit: fmt check
 # still compiles, because it is the one of the three that emits each target's artefact
 # rather than checking it.
 # Everything before a push: the green, a full compile, and every end-to-end case.
-pre-push: check build e2e
+pre-push: check-public-refs check build e2e
 
 # The gate goes last, and not only because it is the slowest thing here. It asks git what
 # belongs in a tarball, so it is the one recipe that an uncommitted change can stop — a
@@ -47,6 +48,11 @@ pre-publish: pre-push e2e-scaffold-packaged
 # Format in place.
 fmt:
     cargo fmt --all
+
+# Check public-facing files for private paths, machine paths, and missing tools.
+check-public-refs:
+    python3 -m unittest discover -s scripts/tests -v
+    python3 scripts/check-public-refs
 
 # `cargo test` and not `cargo test --workspace`, and the two are no longer the same thing:
 # `e2e` is a workspace member that `default-members` leaves out, so the bare form runs every
