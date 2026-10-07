@@ -15,12 +15,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-/// Set when the future of a host call is dropped, as against the call returning.
-struct DropGuard(Arc<AtomicBool>);
+/// Set only when the future is dropped before the call it guards returned.
+struct DropGuard {
+    flag: Arc<AtomicBool>,
+    finished: bool,
+}
 
 impl Drop for DropGuard {
     fn drop(&mut self) {
-        self.0.store(true, Ordering::SeqCst);
+        if !self.finished {
+            self.flag.store(true, Ordering::SeqCst);
+        }
     }
 }
 
@@ -38,8 +43,12 @@ impl Api {
 
     /// `get` with a guard on its future, so a test can tell "dropped" from "returned".
     pub async fn watched(&self, ms: u64) -> String {
-        let _guard = DropGuard(self.dropped.clone());
+        let mut guard = DropGuard {
+            flag: self.dropped.clone(),
+            finished: false,
+        };
         tokio::time::sleep(Duration::from_millis(ms)).await;
+        guard.finished = true;
         "done".to_string()
     }
 }
@@ -96,10 +105,12 @@ fn two_children_wait_together_and_each_hands_back_its_value() {
 
 /// (S4b) The root returns with a child still sleeping: the child is cancelled and its
 /// host future dropped before `run_blocking` returns, not when the state goes away.
+/// `dropped` is set only when the host future is dropped before its sleep finished, so a
+/// run that waited the child out instead of cancelling it fails on that assertion.
 #[test]
 fn a_child_left_sleeping_is_dropped_before_the_run_returns() {
     let (_c, h, dropped) = host();
-    let (out, took) = run(
+    let (out, _) = run(
         &h,
         "local task = require('htl.task') \
          local api = require('api') \
@@ -112,10 +123,6 @@ fn a_child_left_sleeping_is_dropped_before_the_run_returns() {
     assert!(
         dropped.load(Ordering::SeqCst),
         "the child's future was dropped"
-    );
-    assert!(
-        took < Duration::from_millis(200),
-        "not waited out: {took:?}"
     );
 }
 
