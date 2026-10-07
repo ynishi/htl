@@ -41,6 +41,7 @@
 //! | `HashMap<K, V>` / `BTreeMap<K, V>` | `{K:V}` | a table keyed by `K` |
 //! | `mlua::Value` / `serde_json::Value` | `any` | unchanged: the deliberate escape hatch |
 //! | `mlua::Function` as a `#[host_module]` parameter | `f: function` (`Option<Function>` as any `Option` parameter), and a sync fn's ones named in a trailing `---@noyield(f)`; see the `host_module` macro doc for the rule and the overrides | a Lua function the host calls |
+//! | `&mlua::Lua` as a `#[host_module]` parameter | nothing: left out, as `&self` is; see the `host_module` macro doc | the state the method runs on |
 //! | `#[teal(noyield)] update: Function` as a record field | `update: function ---@noyield` (`Option<Function>` as any field); see the `host_module` macro doc, *A Lua function as a parameter*, for when a field says it | a Lua function the host reads off the table and calls |
 //! | `htl::task::RecvChannel<T>` / `SendChannel<T>` (feature `async`) as a `#[host_module]` return or parameter | `task.RecvChannel<T>` / `task.SendChannel<T>`, with `local type task = require("htl.task")` as the file's first line | the `htl.task` channel object: Teal receives from the first and sends into the second, and the other direction is a check error |
 //! | `htl::task::Request<Req, Resp>` as a channel's element | `task.Request<Req, Resp>` | a value Teal answers once with `req:reply(v)` |
@@ -268,6 +269,36 @@ pub fn is_function(ty: &Type) -> bool {
                 _ => false,
             }
         }
+        _ => false,
+    }
+}
+
+/// `true` if `ty` is a reference to mlua's `Lua` — `&Lua`, `&mlua::Lua`, `&htl::mlua::Lua`,
+/// `&::htl::mlua::Lua` — matched by the last path segment, as [`is_function`] is: a
+/// source is read, not resolved, so another crate's type called `Lua` behind a reference
+/// is taken for mlua's. `&mut Lua` does not match (mlua hands out `&Lua`, never `&mut`),
+/// nor does the bare `Lua` with no reference. Such a parameter is filled from the
+/// closure's own Lua handle rather than from the Lua arguments, and is left out of the
+/// `.d.tl`, the way `&self` is ([`host_decl`]).
+pub fn is_lua_ref(ty: &Type) -> bool {
+    match ty {
+        Type::Reference(r) if r.mutability.is_none() => match &*r.elem {
+            Type::Path(p) => p.path.segments.last().is_some_and(|s| s.ident == "Lua"),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// `true` if `ty` is mlua's `Lua` *by value* — no reference at all. Matched the same way
+/// [`is_lua_ref`] matches the reference: a parameter spelled this way is refused in
+/// [`host_decl`] rather than left to fall through to the ordinary parameter path, where it
+/// would be declared `lua: Lua` in the `.d.tl` and then fail at `cargo build` with mlua's
+/// `the trait bound (htl::mlua::Lua,): FromLuaMulti is not satisfied` — the same error
+/// `&Lua` used to produce before this type was given its own path (#427).
+fn is_lua_owned(ty: &Type) -> bool {
+    match ty {
+        Type::Path(p) => p.path.segments.last().is_some_and(|s| s.ident == "Lua"),
         _ => false,
     }
 }
@@ -1284,6 +1315,17 @@ pub struct HostParam {
     pub noyield: bool,
 }
 
+/// A method's `&Lua` parameter ([`is_lua_ref`]), if it has one.
+#[derive(Clone)]
+pub struct LuaParam {
+    /// The Rust parameter name: what the wrapper binds the closure's Lua handle to.
+    pub name: String,
+    /// Its position among the method's *typed* parameters (the receiver is not among
+    /// them) in the original signature — where, among [`HostMethod::params`] (which does
+    /// not hold it), the wrapper splices it back in when it builds the call.
+    pub index: usize,
+}
+
 /// What `#[teal(..)]` on a `#[host_module]` parameter says about a Lua function the host is
 /// handed. The only words a parameter takes; each states the fact outright, so it reads the
 /// same on a sync fn and an `async fn` — only the default it replaces differs.
@@ -1387,6 +1429,10 @@ pub struct HostMethod {
     /// which under `[lang] async` is how the checker knows a call of the method may
     /// suspend (`await-missing`, `await-non-async` in [`crate::lint`]).
     pub is_async: bool,
+    /// The method's `&Lua` parameter, if it has one: at most one, anywhere among the
+    /// parameters, filled from the closure's own Lua handle rather than from the Lua
+    /// arguments (so not among [`params`](Self::params)) and left out of the `.d.tl`.
+    pub lua_param: Option<LuaParam>,
 }
 
 /// A `#[host_module]` impl block, lowered: what Teal is told, and what the macro needs to
@@ -1469,10 +1515,45 @@ pub fn host_decl(
         let mut receiver: Option<bool> = None;
         let mut params = Vec::new();
         let mut teal_params = Vec::new();
+        let mut lua_param: Option<LuaParam> = None;
+        let mut typed_idx = 0usize;
         for a in &f.sig.inputs {
             match a {
                 FnArg::Receiver(r) => receiver = Some(r.mutability.is_some()),
                 FnArg::Typed(pt) => {
+                    let index = typed_idx;
+                    typed_idx += 1;
+                    if is_lua_ref(&pt.ty) {
+                        let pname = match &*pt.pat {
+                            Pat::Ident(pi) => pi.ident.to_string(),
+                            _ => format!("a{index}"),
+                        };
+                        if let Some(prev) = &lua_param {
+                            return Err(format!(
+                                "host_module: `{fname}`: only one `&Lua` parameter is allowed \
+                                 (already have `{}`, found a second, `{pname}`)",
+                                prev.name
+                            ));
+                        }
+                        if pt.attrs.iter().any(|a| a.path().is_ident("teal")) {
+                            return Err(format!(
+                                "host_module: `{fname}`: `#[teal(..)]` on parameter `{pname}`, \
+                                 whose type is `&Lua`: the Lua state takes no word"
+                            ));
+                        }
+                        lua_param = Some(LuaParam { name: pname, index });
+                        continue;
+                    }
+                    if is_lua_owned(&pt.ty) {
+                        let pname = match &*pt.pat {
+                            Pat::Ident(pi) => pi.ident.to_string(),
+                            _ => format!("a{index}"),
+                        };
+                        return Err(format!(
+                            "host_module: `{fname}`: parameter `{pname}` is `Lua` by value; \
+                             take `&Lua`, not `Lua`"
+                        ));
+                    }
                     let (owned_ty, by_ref): (Type, bool) = match &*pt.ty {
                         Type::Reference(r) => {
                             if r.mutability.is_some() {
@@ -1603,6 +1684,7 @@ pub fn host_decl(
             ret_is_result,
             ret_is_unit,
             is_async,
+            lua_param,
         });
     }
     body.push_str(&format!("end\n\nreturn {module}\n"));
@@ -2809,5 +2891,210 @@ mod tests {
             );
             std::fs::remove_dir_all(&dir).unwrap();
         }
+    }
+
+    // ---------------------------------------------------------------- &Lua parameter (#427)
+
+    /// A `&Lua` parameter is filled from the closure's own Lua handle rather than from the
+    /// Lua arguments: left out of the declaration entirely, the way `&self` is — the
+    /// method's Teal arity is unaffected by its presence or its position among the others.
+    #[test]
+    fn a_lua_parameter_is_left_out_of_the_declaration() {
+        let hd = host_of(
+            "pub struct Host;\n\
+             #[host_module(name = \"host\")]\n\
+             impl Host {\n\
+             \x20   pub fn count(&self, lua: &htl::mlua::Lua) -> i64 { lua.used_memory() as i64 }\n\
+             \x20   pub fn mixed(&self, lua: &::htl::mlua::Lua, n: i64) -> i64 { n }\n\
+             \x20   pub fn before(&self, lua: &mlua::Lua, name: &str) -> String { name.to_string() }\n\
+             }\n",
+        );
+        assert!(
+            hd.decl.contains("count: function(self: host): integer\n"),
+            "{}",
+            hd.decl
+        );
+        assert!(
+            hd.decl
+                .contains("mixed: function(self: host, n: integer): integer\n"),
+            "{}",
+            hd.decl
+        );
+        assert!(
+            hd.decl
+                .contains("before: function(self: host, name: string): string\n"),
+            "{}",
+            hd.decl
+        );
+        let m = hd.methods.iter().find(|m| m.name == "count").unwrap();
+        assert!(m.params.is_empty(), "{}", hd.decl);
+        let lp = m.lua_param.as_ref().unwrap();
+        assert_eq!(lp.name, "lua");
+        assert_eq!(lp.index, 0);
+
+        let m = hd.methods.iter().find(|m| m.name == "mixed").unwrap();
+        assert_eq!(m.params.len(), 1);
+        assert_eq!(m.params[0].name, "n");
+        let lp = m.lua_param.as_ref().unwrap();
+        assert_eq!(lp.index, 0, "lua came first in the signature");
+
+        let m = hd.methods.iter().find(|m| m.name == "before").unwrap();
+        assert_eq!(m.params.len(), 1);
+        assert_eq!(m.params[0].name, "name");
+        let lp = m.lua_param.as_ref().unwrap();
+        assert_eq!(lp.index, 0, "lua still came first; `name` is index 1");
+    }
+
+    /// A second `&Lua` parameter is refused.
+    #[test]
+    fn a_second_lua_parameter_is_refused() {
+        let e = match host_of_result(
+            "pub struct Host;\n\
+             #[host_module(name = \"host\")]\n\
+             impl Host {\n\
+             \x20   pub fn f(&self, a: &htl::mlua::Lua, b: &htl::mlua::Lua) -> i64 { 0 }\n\
+             }\n",
+        ) {
+            Ok(hd) => panic!("second &Lua parameter accepted: {}", hd.decl),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("only one `&Lua` parameter is allowed") && e.contains('b'),
+            "{e}"
+        );
+    }
+
+    /// `#[teal(..)]` on a `&Lua` parameter is refused: the word says how the host calls a
+    /// Lua function it is handed, and a `&Lua` is not one.
+    #[test]
+    fn teal_attribute_on_a_lua_parameter_is_refused() {
+        let e = match host_of_result(
+            "pub struct Host;\n\
+             #[host_module(name = \"host\")]\n\
+             impl Host {\n\
+             \x20   pub fn f(&self, #[teal(noyield)] lua: &htl::mlua::Lua) -> i64 { 0 }\n\
+             }\n",
+        ) {
+            Ok(hd) => panic!("#[teal(..)] on a &Lua parameter accepted: {}", hd.decl),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains("whose type is `&Lua`") && e.contains("takes no word"),
+            "{e}"
+        );
+    }
+
+    /// `lua: Lua` (no reference) is refused by name here, instead of being declared
+    /// `lua: Lua` in the `.d.tl` and failing at `cargo build` with mlua's own
+    /// `FromLuaMulti` error — the same failure `&Lua` produced before #427.
+    #[test]
+    fn an_owned_lua_parameter_is_refused() {
+        let e = match host_of_result(
+            "pub struct Host;\n\
+             #[host_module(name = \"host\")]\n\
+             impl Host {\n\
+             \x20   pub fn f(&self, lua: htl::mlua::Lua) -> i64 { 0 }\n\
+             }\n",
+        ) {
+            Ok(hd) => panic!("owned Lua accepted: {}", hd.decl),
+            Err(e) => e,
+        };
+        assert!(
+            e.contains('`') && e.contains("lua") && e.contains("take `&Lua`, not `Lua`"),
+            "{e}"
+        );
+    }
+
+    /// A `&Lua` parameter after another: its position among the typed parameters is where
+    /// it sat in the signature (1, not 0), and the regular parameter before it keeps its
+    /// own place in the declaration.
+    #[test]
+    fn a_lua_parameter_after_another_parameter_keeps_its_signature_position() {
+        let hd = host_of(
+            "pub struct Host;\n\
+             #[host_module(name = \"host\")]\n\
+             impl Host {\n\
+             \x20   pub fn after(&self, n: i64, lua: &htl::mlua::Lua) {}\n\
+             }\n",
+        );
+        assert!(
+            hd.decl
+                .contains("after: function(self: host, n: integer)\n"),
+            "{}",
+            hd.decl
+        );
+        let m = hd.methods.iter().find(|m| m.name == "after").unwrap();
+        assert_eq!(m.params.len(), 1);
+        assert_eq!(m.params[0].name, "n");
+        assert_eq!(m.lua_param.as_ref().unwrap().index, 1);
+    }
+
+    /// `&mut self` with a `&Lua` parameter: the receiver kind and the Lua parameter are
+    /// independent (`add_method_mut`'s closure is `Fn(&Lua, &mut T, A)`, `&Lua` same as
+    /// `add_method`'s).
+    #[test]
+    fn a_mut_self_method_may_also_take_lua() {
+        let hd = host_of(
+            "pub struct Host;\n\
+             #[host_module(name = \"host\")]\n\
+             impl Host {\n\
+             \x20   pub fn bump(&mut self, lua: &htl::mlua::Lua) -> i64 { 0 }\n\
+             }\n",
+        );
+        assert!(
+            hd.decl.contains("bump: function(self: host): integer\n"),
+            "{}",
+            hd.decl
+        );
+        let m = hd.methods.iter().find(|m| m.name == "bump").unwrap();
+        assert_eq!(m.receiver, Some(true));
+        assert!(m.lua_param.is_some());
+    }
+
+    /// No receiver (an associated fn, `add_function`'s closure is also `Fn(&Lua, A)`): the
+    /// `&Lua` parameter works the same way, at its own index.
+    #[test]
+    fn a_lua_parameter_with_no_receiver() {
+        let hd = host_of(
+            "pub struct Host;\n\
+             #[host_module(name = \"host\")]\n\
+             impl Host {\n\
+             \x20   pub fn f(lua: &htl::mlua::Lua, n: i64) -> i64 { n }\n\
+             }\n",
+        );
+        assert!(
+            hd.decl.contains("f: function(n: integer): integer\n"),
+            "{}",
+            hd.decl
+        );
+        let m = hd.methods.iter().find(|m| m.name == "f").unwrap();
+        assert_eq!(m.receiver, None);
+        assert_eq!(m.params.len(), 1);
+        assert_eq!(m.params[0].name, "n");
+        assert_eq!(m.lua_param.as_ref().unwrap().index, 0);
+    }
+
+    /// A `&Lua` parameter written as a bare `_`: its generated name ([`LuaParam::name`]'s
+    /// fallback, `a0`) is never read back out of the pattern, so an unnameable parameter
+    /// works exactly like a named one.
+    #[test]
+    fn a_lua_parameter_written_as_a_bare_underscore() {
+        let hd = host_of(
+            "pub struct Host;\n\
+             #[host_module(name = \"host\")]\n\
+             impl Host {\n\
+             \x20   pub fn f(&self, _: &htl::mlua::Lua, n: i64) -> i64 { n }\n\
+             }\n",
+        );
+        assert!(
+            hd.decl
+                .contains("f: function(self: host, n: integer): integer\n"),
+            "{}",
+            hd.decl
+        );
+        let m = hd.methods.iter().find(|m| m.name == "f").unwrap();
+        assert_eq!(m.params.len(), 1);
+        assert_eq!(m.params[0].name, "n");
+        assert!(m.lua_param.is_some());
     }
 }
