@@ -586,7 +586,19 @@ local function async_at_decl(cache, t)
    if not lines then return false end
    if marker_on(lines, t.y, "async") then return true end
    local line = lines[t.y]
-   return line ~= nil and line:find("%f[%w_]async%s+function%f[^%w_]") ~= nil
+   if not line or not t.x then return false end
+   -- Teal reports a local function's type from the start of `local`, but a function
+   -- type/value from its `function` (or `async`) token. Match only at that position:
+   -- a callback type or local on the same line as another async declaration is not async.
+   local at = line:sub(t.x)
+   if at:match("^%s*local%s+async%s+function%f[^%w_]") or
+      at:match("^%s*async%s+function%f[^%w_]") then
+      return true
+   end
+   if at:match("^%s*function%f[^%w_]") then
+      return line:sub(1, t.x - 1):match("%f[%w_]async%s*$") ~= nil
+   end
+   return false
 end
 
 -- Resolver for the await rules: true when the function called at (y, x) is async. The
