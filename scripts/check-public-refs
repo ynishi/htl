@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+r"""check-public-refs — find references a public reader of this repository
+cannot follow.
+
+python3 rather than POSIX sh + grep: the three rules below need a backquote
+scanner, a .gitignore parser and a few small exceptions (linuxbrew, this
+script's own name), which is regex-and-branches work that is clearer as
+Python than as a chain of greps. python3 is on every macOS box with the
+Command Line Tools installed and every Linux box this runs on, including
+GitHub's ubuntu runners, with nothing to install.
+
+Run from the repository root or any subdirectory; it finds the root itself
+(`git rev-parse --show-toplevel`). With no arguments it checks the published
+set: every tracked file (`git ls-files`), plus every untracked file
+.gitignore does not exclude (`git ls-files --others --exclude-standard`),
+minus `.gitignore` itself — a reader never sees that file's own patterns as
+prose, so it is not scanned, and neither is anything it excludes. Given file
+arguments, it checks only those files, read directly off disk; that is how a
+probe file under a gitignored scratch directory is checked without placing it
+in the published set.
+
+Output is one line per finding, `path:line: <kind>: <reference>`, nothing
+when there is nothing to report, and the exit code is 1 if any finding was
+printed, 0 otherwise.
+
+Three kinds of finding, and nothing else — a rule that flagged every
+repo-relative path that does not exist was tried and rejected: it reported
+941 lines on `main`, because htl's own docs name paths in the *reader's*
+project (`src/main.tl`, `types/`, `mise.toml`), which this repository does
+not have and is not expected to.
+
+- **private-path**: a path into a directory `.gitignore` excludes — read as
+  every name `.gitignore` names, literally, with `*`/`?`/`[` glob lines (like
+  `*.hb`, which matches a file extension, not a directory) and `!` negation
+  lines left out, and any leading/trailing slash stripped. Three excluded
+  directories are not "private" in this sense, because the docs name them on
+  purpose as generated output a reader will see in their own checkout:
+  `target`, `.htl` and `.mlua-pkgs` are hard-coded out of the result below.
+  Everything else `.gitignore` excludes today (`workspace`, `.claude`,
+  `.worktrees`) — and anything it comes to exclude later, with no edit here —
+  counts as private. Naming the directory itself (`workspace/`, `.claude/`)
+  is allowed; a finding needs a path *into* it, so the pattern requires at
+  least one more character after the slash. The reported reference has
+  trailing punctuation (`)]}>"'.,;:`) stripped, so a reference at the end of
+  a sentence or inside a parenthetical reads as the path alone.
+- **machine-path**: an absolute path into a personal home directory, three
+  spellings — macOS home under /Users, Linux home under /home, or a Windows
+  Users directory — each followed by a name that has to contain a letter,
+  digit or underscore. That excludes PUBLIC_DEVELOPMENT.md's own examples,
+  which spell the name as the ellipsis character (…), never a real segment.
+  The Unix spellings also require that whatever comes right before the
+  leading slash is not itself a path or URL character, so a `/home` or
+  `/Users` inside a longer path or a URL (`https://example.com/home/page`,
+  `/usr/home/x`) is not matched at all; and on both spellings, a name
+  starting with `<`, `{` or `$` is notation (`/home/<user>/...`, a
+  `$HOME`-style template) rather than a machine path, and is skipped. A
+  Homebrew-on-Linux prefix (linuxbrew, right after /home/) is the one
+  hard-coded exception: a system install, not a person's home, even though it
+  matches the pattern syntactically.
+- **missing-tool**: a backquoted scripts/-rooted name with no extension, or a
+  .sh/.py extension anywhere, or a backquoted bare name ending .sh/.py, or a
+  backquoted "just" followed by a recipe name, naming a script this
+  repository does not have on disk or a recipe the justfile does not define.
+  Recipe names are read off the justfile itself: any line starting in column
+  0 with a bare name and a colon. A bare *.sh/*.py name with no directory is
+  looked for by basename anywhere in the published set; a scripts/-rooted
+  name and a just recipe are matched exactly, scripts/ alone (naming the
+  directory, not a tool in it) is left alone, and "just" takes only the
+  first whitespace-separated token after it, skipping a token starting with
+  `-` (`just --list`), so a chained or flagged command (`just fmt && just
+  check`, `just pre-push --foo`) is checked by its recipe name, not rejected
+  outright. A reference containing a colon (a traceback's file:line, not a
+  tool name) and a scripts/ path whose extension is anything other than
+  empty, .sh or .py (a project's own Teal source, which htl's docs
+  legitimately name in backticks) are both left alone — this is what keeps
+  the rule from matching the two example projects under examples/, which put
+  their Teal in a directory also named scripts, and this repository's own
+  doc comments naming the reader's `scripts/` layout directory
+  (crates/htl-core/src/project.rs, crates/htl/src/lib.rs).
+"""
+from __future__ import annotations
+import pathlib
+import re
+import subprocess
+import sys
+
+# Generated output the docs describe on purpose, even though .gitignore
+# excludes it. Not private in the private-path sense.
+GENERATED_OUTPUT_DIRS = {"target", ".htl", ".mlua-pkgs"}
+
+# First path segment, right after the Unix home root, allowed as a system
+# install rather than a person's home (Homebrew on Linux).
+HOME_PREFIX_ALLOW = {"linuxbrew"}
+
+# Extensions a scripts/-rooted reference is allowed to have and still be a
+# tool candidate: none, or a shell/python script. Anything else (.tl, .rs,
+# .md, ...) is source a host project keeps under its own scripts/, which
+# htl's docs legitimately name — examples/embed's own Teal lives there.
+TOOL_EXTENSIONS = {"", ".sh", ".py"}
+
+
+def repo_root() -> str:
+    out = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True, check=True,
+    )
+    return out.stdout.strip()
+
+
+def gitignore_dir_names(root: str) -> set[str]:
+    path = pathlib.Path(root, ".gitignore")
+    names = set()
+    if not path.exists():
+        return names
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith("!"):
+            continue
+        if any(c in line for c in "*?["):
+            continue  # a glob for a file pattern (*.hb), not a directory name
+        name = line.strip("/")
+        if name:
+            names.add(name)
+    return names
+
+
+def private_dir_names(root: str) -> set[str]:
+    return gitignore_dir_names(root) - GENERATED_OUTPUT_DIRS
+
+
+def just_recipes(root: str) -> set[str]:
+    path = pathlib.Path(root, "justfile")
+    recipes = set()
+    if not path.exists():
+        return recipes
+    for line in path.read_text().splitlines():
+        m = re.match(r"^([A-Za-z_][A-Za-z0-9_-]*):", line)
+        if m:
+            recipes.add(m.group(1))
+    return recipes
+
+
+def published_files(root: str) -> list[str]:
+    tracked = subprocess.run(
+        ["git", "ls-files"], cwd=root, capture_output=True, text=True, check=True,
+    ).stdout.splitlines()
+    untracked = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        cwd=root, capture_output=True, text=True, check=True,
+    ).stdout.splitlines()
+    return [f for f in tracked + untracked if f != ".gitignore"]
+
+
+def private_path_pattern(dir_names: set[str]) -> re.Pattern | None:
+    if not dir_names:
+        return None
+    alts = "|".join(re.escape(d) for d in sorted(dir_names, key=len, reverse=True))
+    # A directory name from .gitignore, not preceded by another path
+    # character (so it is not matched inside a longer segment), followed by
+    # "/" and at least one more character that is not whitespace or a
+    # backquote — a path *into* the directory, not just the directory named.
+    return re.compile(r"(?<![\w./-])(?:" + alts + r")/[^\s`]+")
+
+
+# The lookbehind keeps a /home or /Users that is part of a longer path or a
+# URL (https://example.com/home/page, /usr/home/x) from matching: whatever
+# comes right before the leading slash must not itself be a path/URL
+# character.
+MACHINE_PATH_UNIX_RE = re.compile(r"(?<![\w.~:/-])/(Users|home)/([^\s`]+)")
+MACHINE_PATH_WIN_RE = re.compile(r"[A-Za-z]:\\Users\\([^\s`]+)")
+
+# A first segment starting with one of these is notation, not a machine
+# path: a placeholder (<user>, {name}) or a shell/template variable ($HOME).
+NOTATION_PREFIXES = ("<", "{", "$")
+
+
+def _is_real_name(segment: str) -> bool:
+    if segment.startswith(NOTATION_PREFIXES):
+        return False
+    return bool(re.search(r"[A-Za-z0-9_]", segment))
+
+
+def machine_path_findings(line: str) -> list[str]:
+    findings = []
+    for m in MACHINE_PATH_UNIX_RE.finditer(line):
+        root_kind, rest = m.group(1), m.group(2)
+        first_segment = rest.split("/", 1)[0]
+        if root_kind == "home" and first_segment in HOME_PREFIX_ALLOW:
+            continue
+        if not _is_real_name(first_segment):
+            continue  # PUBLIC_DEVELOPMENT.md's own "…" placeholder, or notation
+        findings.append(m.group(0))
+    for m in MACHINE_PATH_WIN_RE.finditer(line):
+        rest = m.group(1)
+        if not _is_real_name(rest.split("\\", 1)[0]):
+            continue
+        findings.append(m.group(0))
+    return findings
+
+
+BARE_SCRIPT_RE = re.compile(r"^[\w.-]+\.(?:sh|py)$")
+
+
+def missing_tool_findings(line: str, root: str, recipes: set[str], files: list[str]) -> list[str]:
+    findings = []
+    for content in re.findall(r"`([^`]+)`", line):
+        if content.startswith("just "):
+            rest = content[len("just "):].strip()
+            if not rest:
+                continue
+            token = rest.split()[0]
+            if token.startswith("-"):
+                continue  # a flag (`just --list`), not a recipe name
+            if token not in recipes:
+                findings.append(content)
+        elif content.startswith("scripts/"):
+            if content == "scripts/":
+                continue  # names the directory, not a tool in it
+            if ":" in content:
+                continue  # a traceback's file:line, not a tool name
+            if pathlib.PurePosixPath(content).suffix not in TOOL_EXTENSIONS:
+                continue  # a host project's own source under its scripts/
+            if not pathlib.Path(root, content).exists():
+                findings.append(content)
+        elif BARE_SCRIPT_RE.match(content):
+            if not any(pathlib.PurePosixPath(f).name == content for f in files):
+                findings.append(content)
+    return findings
+
+
+def scan_file(path: pathlib.Path, display_path: str, private_re, root, recipes, files) -> list[str]:
+    out = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return out
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        if private_re is not None:
+            for m in private_re.finditer(line):
+                ref = m.group(0).rstrip(""")]}>"'.,;:""")
+                out.append(f"{display_path}:{lineno}: private-path: {ref}")
+        for ref in machine_path_findings(line):
+            out.append(f"{display_path}:{lineno}: machine-path: {ref}")
+        for ref in missing_tool_findings(line, root, recipes, files):
+            out.append(f"{display_path}:{lineno}: missing-tool: {ref}")
+    return out
+
+
+def main(argv: list[str]) -> int:
+    root = repo_root()
+    private_re = private_path_pattern(private_dir_names(root))
+    recipes = just_recipes(root)
+    files = published_files(root)
+
+    findings: list[str] = []
+    if argv:
+        for arg in argv:
+            findings.extend(scan_file(pathlib.Path(arg), arg, private_re, root, recipes, files))
+    else:
+        for rel in files:
+            findings.extend(
+                scan_file(pathlib.Path(root, rel), rel, private_re, root, recipes, files)
+            )
+
+    if findings:
+        print("\n".join(findings))
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

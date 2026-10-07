@@ -10,6 +10,15 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  public-refs:
+    name: public refs
+    runs-on: ubuntu-latest
+    # Its own job, not a step of `check` below: a finding is named as what it
+    # is in the pull request's check list, and it needs no Rust toolchain.
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/check-public-refs
+
   check:
     name: test + clippy (${{ matrix.toolchain }})
     runs-on: ubuntu-latest
