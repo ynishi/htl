@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0](https://github.com/ynishi/htl/compare/v0.12.0...v0.13.0) - 2026-10-07
+
+### Added
+
+- htl.task forwards channel, after, ticker, select and select_raw, typed in task.d.tl, and a task's case taken by select is its one await
+- htl::task::RecvChannel / SendChannel / Request, which a #[host_module] declares as htl.task's types in a .d.tl that imports it
+- htl-core builds on mlua 0.12.2 and mlua-isle 0.9, whose task library has channels, timers and select
+
+### Other
+
+- the README's Tasks section and the htl crate doc name channels, timers, select and the typed host channels
+
 ## [0.12.0](https://github.com/ynishi/htl/compare/v0.11.0...v0.12.0) - 2026-09-30
 
 ### Added
