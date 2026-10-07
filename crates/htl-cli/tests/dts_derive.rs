@@ -228,3 +228,51 @@ fn a_data_enum_asking_for_its_own_dts_is_refused_with_advice() {
     assert!(err.contains("records = [Shape]"), "{err}");
     assert!(!root.join("types/Shape.d.tl").exists());
 }
+
+/// `uses = [name = "module.path"]` (#426): a local name that differs from the module
+/// `require` resolves, for a type whose `.d.tl` is not its own name — a library record
+/// reached as `types.Event` because it lives at `somelib/types.d.tl`. `htl dts` writes
+/// the import under the local name, and the field it types the same way; `htl check`
+/// then accepts a script against both that declaration and the library's, written here
+/// as a dependency's `.d.tl` would be.
+#[test]
+fn dts_writes_a_uses_entry_under_a_module_path_and_check_accepts_it() {
+    let root = scratch("module-path");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    );
+    write(&root.join("htl.toml"), "");
+    write(
+        &root.join("src/main.rs"),
+        "use htl::TealRecord;\n\n\
+         #[derive(TealRecord)]\n\
+         #[teal(dts = \"types/Run.d.tl\", uses = [types = \"somelib.types\"])]\n\
+         pub struct Run { pub ev: types::Event }\n\nfn main() {}\n",
+    );
+    write(
+        &root.join("types/somelib/types.d.tl"),
+        "local record types\n   record Event\n      id: string\n   end\nend\n\nreturn types\n",
+    );
+    let out = htl(&root, &["dts"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    let run = std::fs::read_to_string(root.join("types/Run.d.tl")).unwrap();
+    assert_eq!(
+        run,
+        "local type types = require(\"somelib.types\")\n\n\
+         local record Run\n   ev: types.Event\nend\n\nreturn Run\n"
+    );
+
+    write(
+        &root.join("src/main.tl"),
+        "local Run = require(\"Run\")\n\n\
+         local r: Run = { ev = { id = \"x\" } }\n\
+         print(r.ev.id)\n",
+    );
+    let out = htl(&root, &["check", "src/main.tl", "--no-cache"]);
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("0 error(s)"), "{err}");
+}

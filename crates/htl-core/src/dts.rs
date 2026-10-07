@@ -10,8 +10,14 @@
 //! `serde_json::Value` -> `any` (the deliberate escape hatch), `Option<T> -> T`,
 //! `Result<T, _> -> T`, `Strict<T> -> T`, `htl::task`'s `RecvChannel<T>` / `SendChannel<T>` /
 //! `Request<A, B>` -> `task.RecvChannel<T>` / `task.SendChannel<T>` / `task.Request<A, B>`
-//! (the declaration then starts with `local type task = require("htl.task")`), other
-//! identifiers pass through as record names.
+//! (the declaration then starts with `local type task = require("htl.task")`, itself a
+//! default `uses` entry — see below), other identifiers pass through as record names. A
+//! qualified Rust path whose *first* segment is a `uses` entry's local name, for a module
+//! other than `htl.task`, passes through dotted the same way (`types::Event` under
+//! `uses = [types = ".."]` becomes `types.Event`, ahead of every other rule, so
+//! `types::Value` is `types.Value` and not `any`) — any other qualified path
+//! (`crate::geom::Point`, a type with no matching `uses` entry, or one pointed at
+//! `htl.task` itself) keeps only its last segment, the same as a bare identifier.
 //! There is no reflection on types in either direction: a Rust field of type `Foo` is
 //! declared as `Foo`, and it is on the host that a Teal `Foo` exists; the module a
 //! `---@contract` type is declared in goes the other way, Teal to `.d.tl`, with each
@@ -41,7 +47,17 @@
 //!
 //! A data-carrying enum is declared nested in the host module (`records = [Shape]`),
 //! where its variant records are reachable as `host.Shape_Circle` for `is`; `uses =
-//! [Name]` imports a type from another module with `local type Name = require("Name")`.
+//! [Name]` imports a type from another module with `local type Name = require("Name")`,
+//! a bare entry's local name and module path being the same word. `uses = [name =
+//! "module.path"]` (an entry written `ident = "string"`) lets them differ: `local type
+//! name = require("module.path")`, which is what a type whose module is not its own name
+//! needs — `htl.task`'s types used as `task.RecvChannel<T>`, or a library record from
+//! `somelib.types` used as `types.Event`. `htl.task` is itself written this way: the
+//! generator adds a default `task = "htl.task"` entry when the declaration needs one of
+//! `htl.task`'s own types and no entry already names `task` — a `uses` entry that does
+//! name `task` for `htl.task` itself is accepted in the default's place (no second line);
+//! one that names `task` for a different module, where the declaration also needs
+//! `htl.task`, is refused, naming both; see [`TealAttrs::uses`].
 //! `#[teal(rename_all = "..")]` on an enum takes serde's set — `lowercase`, `UPPERCASE`,
 //! `PascalCase`, `camelCase`, `snake_case`, `SCREAMING_SNAKE_CASE`, `kebab-case`,
 //! `SCREAMING-KEBAB-CASE` — and `#[teal(name = "..")]` on one variant overrides it. A
@@ -65,9 +81,9 @@
 //!   narrows with `is module.N_A`, so it needs the variant records by name, and a
 //!   `.d.tl` module exports one name — the union. `#[teal(dts = ..)]` on one is refused
 //!   with that advice rather than writing a declaration nobody can narrow against.
-//! - **`uses` imports with `local type X = require("X")`**. A module whose value is only
-//!   a type (an alias, an enum) is "abstract" to Teal when required as a value, and the
-//!   `type` form imports a record just the same, so one form serves every kind.
+//! - **`uses` imports with `local type name = require("module")`**. A module whose value
+//!   is only a type (an alias, an enum) is "abstract" to Teal when required as a value,
+//!   and the `type` form imports a record just the same, so one form serves every kind.
 //! - **The tag is `kind`, the newtype payload is `value`**, and neither is configurable:
 //!   a name that differs per host is a name the reader has to look up, and these are
 //!   what Teal's own `where` examples use. A struct variant may not carry a field named
@@ -84,6 +100,7 @@
 //!   `Function` / `Option<Function>` field of a struct, which says how the host calls it
 //!   rather than how it is spelled; anything else in a field's `#[teal(..)]` is refused.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use syn::punctuated::Punctuated;
 use syn::{
@@ -95,17 +112,36 @@ use syn::{
 
 /// Map a Rust type to a Teal type name. `self_name` replaces `Self`.
 pub fn teal_type(ty: &Type, self_name: &str) -> Result<String, String> {
+    teal_type_in(ty, self_name, &[])
+}
+
+/// [`teal_type`], with `uses` in scope: a qualified Rust path (`types::Event`) whose
+/// *first* segment is one of `uses`'s local names, for a module other than `htl.task`,
+/// crosses dotted (`types.Event`) — the word that entry's import resolves under — ahead
+/// of every other rule here, so a name that would otherwise be special (`types::Value`,
+/// `mytask::RecvChannel<T>`) still dots rather than being read as `any` or mistaken for
+/// `htl.task`'s own channel. A qualified path whose first segment is not a `uses` name —
+/// `crate::geom::Point`, `self::Point`, simply `geom::Point` with no matching entry —
+/// keeps only its last segment (`Point`), as every other mapping here does; a `.d.tl`
+/// would otherwise be asked to resolve a dotted name nothing imports. A `uses` entry
+/// whose module *is* `htl.task` is not treated specially here at all: `task::RecvChannel`
+/// still reaches the arity-matched `RecvChannel` arm below, which writes the `task.`
+/// prefix itself.
+fn teal_type_in(ty: &Type, self_name: &str, uses: &[Use]) -> Result<String, String> {
     match ty {
-        Type::Reference(r) => teal_type(&r.elem, self_name),
-        Type::Paren(p) => teal_type(&p.elem, self_name),
+        Type::Reference(r) => teal_type_in(&r.elem, self_name, uses),
+        Type::Paren(p) => teal_type_in(&p.elem, self_name, uses),
         Type::Tuple(t) if t.elems.is_empty() => Ok(String::new()),
         Type::Tuple(t) => {
-            let parts: Result<Vec<_>, _> =
-                t.elems.iter().map(|e| teal_type(e, self_name)).collect();
+            let parts: Result<Vec<_>, _> = t
+                .elems
+                .iter()
+                .map(|e| teal_type_in(e, self_name, uses))
+                .collect();
             Ok(parts?.join(", "))
         }
-        Type::Slice(s) => Ok(format!("{{{}}}", teal_type(&s.elem, self_name)?)),
-        Type::Array(a) => Ok(format!("{{{}}}", teal_type(&a.elem, self_name)?)),
+        Type::Slice(s) => Ok(format!("{{{}}}", teal_type_in(&s.elem, self_name, uses)?)),
+        Type::Array(a) => Ok(format!("{{{}}}", teal_type_in(&a.elem, self_name, uses)?)),
         Type::Path(p) => {
             let seg = p.path.segments.last().ok_or("empty type path")?;
             let ident = seg.ident.to_string();
@@ -123,8 +159,32 @@ pub fn teal_type(ty: &Type, self_name: &str) -> Result<String, String> {
             let arg = |i: usize| -> Result<String, String> {
                 args.get(i)
                     .ok_or_else(|| format!("{ident}: missing type argument {i}"))
-                    .and_then(|t| teal_type(t, self_name))
+                    .and_then(|t| teal_type_in(t, self_name, uses))
             };
+            // A path qualified by one of `uses`'s local names, for a module other than
+            // `htl.task`, crosses dotted ahead of every special case below — `Vec`,
+            // `Value`, `RecvChannel` included — so `uses = [mytask = "my.task"]`'s
+            // `mytask::RecvChannel<i64>` is `mytask.RecvChannel` and is not mistaken for
+            // `htl.task`'s own `RecvChannel`, and `types::Value` under a `uses = [types =
+            // ".."]` is `types.Value`, not `any`. Generic arguments are dropped here, the
+            // same as the bare fallback below (`other => other.to_string()`): a `uses`
+            // name's own `Container<T>` crosses as `name.Container`, not
+            // `name.Container<T>`. A `uses` entry whose module *is* `htl.task` is left to
+            // the arity-matched `RecvChannel` / `SendChannel` / `Request` arms below
+            // instead (an explicit `task = "htl.task"` entry's `task::RecvChannel<T>`
+            // must still reach them).
+            if p.path.segments.len() > 1
+                && let Some(u) = uses.iter().find(|u| p.path.segments[0].ident == u.name)
+                && u.module != "htl.task"
+            {
+                return Ok(p
+                    .path
+                    .segments
+                    .iter()
+                    .map(|s| s.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("."));
+            }
             Ok(match ident.as_str() {
                 "f32" | "f64" => "number".into(),
                 "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64"
@@ -146,7 +206,7 @@ pub fn teal_type(ty: &Type, self_name: &str) -> Result<String, String> {
                 "Function" => "function".into(),
                 "LuaString" => "string".into(),
                 // `htl::task`'s typed host channels and requests, declared in `htl.task`:
-                // the generated declaration imports it as `task` (see `task_header`).
+                // the generated declaration imports it as `task` (see `with_task_default`).
                 // Matched by name and arity, so a type of the host's own called `Request`
                 // without two type arguments stays a name of its own.
                 "RecvChannel" | "SendChannel" if args.len() == 1 => {
@@ -182,10 +242,10 @@ pub fn is_option(ty: &Type) -> bool {
 }
 
 /// `true` if the type is mlua's `Function` — a Lua function handed to the host — bare,
-/// behind a reference, or as `Option<Function>`. Matched by the
-/// path's last segment, as every mapping here is: `mlua::Function`, `htl::mlua::Function`
-/// and an imported `Function` are the same parameter to a source that is read, not
-/// resolved.
+/// behind a reference, or as `Option<Function>`. Matched by the path's last segment, as
+/// every mapping here is except a `uses` name's own qualified types ([`teal_type`]):
+/// `mlua::Function`, `htl::mlua::Function` and an imported `Function` are the same
+/// parameter to a source that is read, not resolved.
 pub fn is_function(ty: &Type) -> bool {
     match ty {
         Type::Reference(r) => is_function(&r.elem),
@@ -325,6 +385,31 @@ impl RenameRule {
     }
 }
 
+/// One `uses` entry: the local name a `.d.tl` imports a module's type under, and the
+/// module `require` resolves it from. A bare `uses = [X]` entry is `Use { name: "X",
+/// module: "X" }` (the bare form); `uses = [name = "module.path"]` is
+/// `Use { name: "name", module: "module.path" }`, for a module whose path is not the word
+/// a declaration uses the type under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Use {
+    /// The local name: what the `.d.tl` calls `require`'s result, and what a reference to
+    /// one of the module's types is qualified with (`task.RecvChannel<T>`).
+    pub name: String,
+    /// What `require` is asked for: a bare entry's own name, or the string after `=`.
+    pub module: String,
+}
+
+impl Use {
+    /// `uses = [X]`: `X` is both the local name and the module `require` resolves.
+    fn bare(name: impl Into<String>) -> Self {
+        let name = name.into();
+        Self {
+            module: name.clone(),
+            name,
+        }
+    }
+}
+
 /// `#[teal(...)]` / `#[host_module(...)]` arguments.
 #[derive(Debug, Clone, Default)]
 pub struct TealAttrs {
@@ -341,8 +426,21 @@ pub struct TealAttrs {
     pub rename_all: Option<RenameRule>,
     /// `.d.tl` output path, relative to the crate's `CARGO_MANIFEST_DIR`.
     pub dts: Option<String>,
-    /// Types declared in their own `.d.tl` module: emits `local type X = require("X")`.
-    pub uses: Vec<String>,
+    /// Types declared in their own `.d.tl` module: `uses = [X]` emits
+    /// `local type X = require("X")`. `uses = [name = "module.path"]` — an entry written
+    /// `ident = "string"`, the one other shape a `uses` element may take, refused when
+    /// the left side is not a single identifier, the right not a non-empty string of
+    /// letters, digits, `_`, `.` or `-`, or a local name is given twice — emits
+    /// `local type name = require("module.path")`, for a type whose module is not its own
+    /// name (`types = "somelib.types"` for a type used as `types.Event`); the same name
+    /// is what a qualified Rust field or return type (`name::Type`) crosses dotted under
+    /// (`teal_type`). `htl::task`'s types (`task = "htl.task"`) are folded in this
+    /// way too, as the default entry [`host_decl`] / [`record_decl`] add when the
+    /// declaration needs one and no entry already names `task`; a `uses` entry that does
+    /// name `task` for `htl.task` itself needs no second line, one that names it for a
+    /// *different* module while the declaration also needs `htl.task` is refused, naming
+    /// both. See [`Use`].
+    pub uses: Vec<Use>,
     /// `#[derive(TealRecord)]` types (structs and enums in the same source file) nested
     /// inside the module record.
     pub records: Vec<String>,
@@ -385,7 +483,86 @@ fn type_list(arr: &syn::ExprArray, key: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// Parse `name = "..", rename_all = "..", dts = "..", uses = [A, B], records = [C]`.
+/// `true` for a non-empty string of letters, digits, `_`, `.` or `-` — the characters a
+/// dotted Teal module path (and `require`'s argument) is made of; anything else would
+/// land unescaped inside `require("...")` ([`uses_header`]) and either break the string
+/// literal or `require` nothing a file could ever be named.
+fn valid_module_path(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+/// `uses = [Mode, task = "htl.task"]`: a bare path is [`Use::bare`], and `ident = "str"`
+/// (parsed as an assignment expression — `=` inside an array literal) is `Use { name:
+/// ident, module: str }`. A repeated local name, in either form, is refused naming it;
+/// `=`'s left side must be a single identifier and its right a string of the characters
+/// [`valid_module_path`] accepts.
+fn use_list(arr: &syn::ExprArray) -> Result<Vec<Use>, String> {
+    let expected = "`uses` expects a list of type names, or `name = \"module.path\"`";
+    let mut out: Vec<Use> = Vec::new();
+    let mut seen_names: HashSet<String> = HashSet::new();
+    let mut push = |u: Use| -> Result<(), String> {
+        if !seen_names.insert(u.name.clone()) {
+            return Err(format!(
+                "`uses` names `{}` twice; each local name may appear once",
+                u.name
+            ));
+        }
+        out.push(u);
+        Ok(())
+    };
+    for e in &arr.elems {
+        match e {
+            Expr::Path(p) => {
+                let name = p
+                    .path
+                    .segments
+                    .last()
+                    .map(|s| s.ident.to_string())
+                    .unwrap_or_default();
+                push(Use::bare(name))?;
+            }
+            Expr::Assign(a) => {
+                let Expr::Path(name_path) = &*a.left else {
+                    return Err(format!(
+                        "{expected} (the left side of `=` must be a single identifier, got an expression)"
+                    ));
+                };
+                let Some(name) = name_path.path.get_ident() else {
+                    return Err(format!(
+                        "{expected} (the left side of `=` must be a single identifier, got a path)"
+                    ));
+                };
+                let Expr::Lit(syn::ExprLit {
+                    lit: Lit::Str(module),
+                    ..
+                }) = &*a.right
+                else {
+                    return Err(format!(
+                        "{expected} (the right side of `=` must be a string literal)"
+                    ));
+                };
+                let module = module.value();
+                if !valid_module_path(&module) {
+                    return Err(format!(
+                        "`uses`'s module path must be non-empty and made only of letters, \
+                         digits, `_`, `.` or `-`, got {module:?}"
+                    ));
+                }
+                push(Use {
+                    name: name.to_string(),
+                    module,
+                })?;
+            }
+            _ => return Err(expected.into()),
+        }
+    }
+    Ok(out)
+}
+
+/// Parse `name = "..", rename_all = "..", dts = "..", uses = [A, b = "mod.b"], records =
+/// [C]`.
 ///
 /// Every key is parsed here whatever it sits on; where a key is meaningful is decided by
 /// the caller (`rename_all` on an enum, `name` alone on a variant).
@@ -406,7 +583,7 @@ pub fn parse_attr_metas(metas: impl IntoIterator<Item = Meta>) -> Result<TealAtt
                 out.rename_all = Some(RenameRule::parse(&lit_str(&l.lit)?)?)
             }
             ("dts", Expr::Lit(l)) => out.dts = Some(lit_str(&l.lit)?),
-            ("uses", Expr::Array(arr)) => out.uses = type_list(arr, "uses")?,
+            ("uses", Expr::Array(arr)) => out.uses = use_list(arr)?,
             ("records", Expr::Array(arr)) => out.records = type_list(arr, "records")?,
             ("errors", Expr::Lit(l)) => {
                 let v = lit_str(&l.lit)?;
@@ -491,48 +668,68 @@ pub fn derives_teal_record(attrs: &[Attribute]) -> bool {
 /// [`teal_type`] writes for `RecvChannel<T>` / `SendChannel<T>` / `Request<A, B>`.
 const TASK_ALIAS: &str = "task";
 
-/// `local type task = require("htl.task")` when `decl` mentions a type of `htl.task`
-/// (`task.` at the start of a word), else nothing. Read off the text rather than tracked
-/// through each signature, so a nested record's field and a method's return are covered
-/// by the one test. A `uses` entry already importing a `task` keeps its own line.
-fn task_header(decl: &str, uses: &[String]) -> String {
-    if uses.iter().any(|u| u == TASK_ALIAS) {
-        return String::new();
+/// `true` when `body` contains a type [`teal_type_in`] wrote from `htl.task` — the
+/// generated forms `task.RecvChannel<`, `task.SendChannel<` or `task.Request<` — as
+/// opposed to any other text ending in `task.`, which may be an unrelated `uses` entry's
+/// own local name (a host module called `task`, say, with a field `j: task::Job`).
+fn mentions_htl_task_type(body: &str) -> bool {
+    ["task.RecvChannel<", "task.SendChannel<", "task.Request<"]
+        .iter()
+        .any(|needle| body.contains(needle))
+}
+
+/// `uses`, with a default `task = "htl.task"` entry prepended when `body` contains a type
+/// `htl.task` declares (see [`mentions_htl_task_type`]) and no entry already names
+/// `task`. Read off the text rather than tracked through each signature, so a nested
+/// record's field and a method's return are covered by the one test. `what` names the
+/// item an error is about (`` host_module `d` `` / `` TealRecord `Run` ``) — `htl dts`
+/// reports an error with no file or source span of its own, so the message is the only
+/// place a reader finds which declaration it was.
+///
+/// A `uses` entry already naming `task` is left as written when it points at `htl.task`
+/// itself (no second line) or when the declaration does not need `htl.task` at all; one
+/// that names `task` for a *different* module while the declaration does need `htl.task`
+/// is refused — a `.d.tl` cannot import two modules under the one local name, and nothing
+/// says which of `task.RecvChannel<..>` and the user's own `task.*` the file meant.
+fn with_task_default(what: &str, body: &str, uses: &[Use]) -> Result<Vec<Use>, String> {
+    let needs_htl_task = mentions_htl_task_type(body);
+    if let Some(existing) = uses.iter().find(|u| u.name == TASK_ALIAS) {
+        return if needs_htl_task && existing.module != "htl.task" {
+            Err(format!(
+                "{what}: `uses` names `task` for \"{}\", but the declaration also needs \
+                 `htl.task` (a channel or request of `htl::task`'s); name the `uses` \
+                 entry something other than `task`, or point it at \"htl.task\"",
+                existing.module
+            ))
+        } else {
+            Ok(uses.to_vec())
+        };
     }
-    let needle = format!("{TASK_ALIAS}.");
-    let mentions = decl.match_indices(&needle).any(|(i, _)| {
-        decl[..i]
-            .chars()
-            .next_back()
-            .is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '.'))
+    if !needs_htl_task {
+        return Ok(uses.to_vec());
+    }
+    let mut out = Vec::with_capacity(uses.len() + 1);
+    out.push(Use {
+        name: TASK_ALIAS.to_string(),
+        module: "htl.task".to_string(),
     });
-    if mentions {
-        format!("local type {TASK_ALIAS} = require(\"htl.task\")\n")
-    } else {
-        String::new()
-    }
+    out.extend_from_slice(uses);
+    Ok(out)
 }
 
-/// `decl` with [`task_header`] in front: the import is the file's first line, and the
-/// `uses` lines (if any) and their blank line follow it; with no `uses`, a blank line of
-/// its own separates it from the module.
-fn with_task_header(decl: String, uses: &[String]) -> String {
-    let header = task_header(&decl, uses);
-    match (header.is_empty(), uses.is_empty()) {
-        (true, _) => decl,
-        (false, true) => format!("{header}\n{decl}"),
-        (false, false) => format!("{header}{decl}"),
-    }
-}
-
-/// `local type X = require("X")` per `uses` entry. The `type` form is the one that
-/// imports an alias or an enum — a module whose value is only a type is "abstract" to
-/// Teal when required as a value — and it imports a record just the same, so one form
-/// serves every kind a `.d.tl` can return.
-fn uses_header(uses: &[String]) -> String {
+/// `local type name = require("module")` per `uses` entry, in the order written (the
+/// default `task` entry [`with_task_default`] adds, when it applies, is first), followed
+/// by a blank line; empty when there are none. The `type` form is the one that imports an
+/// alias or an enum — a module whose value is only a type is "abstract" to Teal when
+/// required as a value — and it imports a record just the same, so one form serves every
+/// kind a `.d.tl` can return.
+fn uses_header(uses: &[Use]) -> String {
     let mut s = String::new();
     for u in uses {
-        s.push_str(&format!("local type {u} = require(\"{u}\")\n"));
+        s.push_str(&format!(
+            "local type {} = require(\"{}\")\n",
+            u.name, u.module
+        ));
     }
     if !uses.is_empty() {
         s.push('\n');
@@ -644,10 +841,13 @@ type Fields = (Vec<(String, String)>, Vec<String>);
 
 /// The fields of a struct record (`struct_record` = `true`) or of a data variant, and which
 /// of them carry `#[teal(noyield)]` (always none for a variant, whose fields take no word).
+/// `uses` is what a qualified field type crosses dotted against ([`teal_type_in`]): the
+/// record's own at the top level, the host's for one nested through `records = [..]`.
 fn record_fields(
     fields: &syn::FieldsNamed,
     self_name: &str,
     struct_record: bool,
+    uses: &[Use],
 ) -> Result<Fields, String> {
     let mut out = Vec::new();
     let mut noyield = Vec::new();
@@ -672,7 +872,7 @@ fn record_fields(
             }
             noyield.push(fi.clone());
         }
-        let tt = teal_type(&f.ty, self_name)?;
+        let tt = teal_type_in(&f.ty, self_name, uses)?;
         out.push((fi, tt));
     }
     Ok((out, noyield))
@@ -725,14 +925,14 @@ fn field_noyield(attrs: &[Attribute], rec: &str, fname: &str) -> Result<bool, St
 }
 
 /// The kind a struct lowers to: named fields -> record, one unnamed field -> alias.
-fn struct_kind(st: &ItemStruct, name: &str) -> Result<RecordKind, String> {
+fn struct_kind(st: &ItemStruct, name: &str, uses: &[Use]) -> Result<RecordKind, String> {
     match &st.fields {
         syn::Fields::Named(fields) => {
-            let (fields, noyield) = record_fields(fields, name, true)?;
+            let (fields, noyield) = record_fields(fields, name, true, uses)?;
             Ok(RecordKind::Record { fields, noyield })
         }
         syn::Fields::Unnamed(u) if u.unnamed.len() == 1 => Ok(RecordKind::Alias {
-            inner: teal_type(&u.unnamed[0].ty, name)?,
+            inner: teal_type_in(&u.unnamed[0].ty, name, uses)?,
         }),
         syn::Fields::Unnamed(_) => Err(format!(
             "TealRecord: `{name}` is a tuple struct with more than one field; only a newtype (`struct {name}(T)`) lowers to a Teal type"
@@ -792,8 +992,14 @@ fn reject_duplicate_words(en: &ItemEnum, words: &[String], enum_name: &str) -> R
 }
 
 /// The kind an enum lowers to: all unit variants -> `enum`, otherwise a union of
-/// `where`-discriminated records.
-fn enum_kind(en: &ItemEnum, name: &str, rule: Option<RenameRule>) -> Result<RecordKind, String> {
+/// `where`-discriminated records. `uses` is what a variant's field types cross dotted
+/// against ([`teal_type_in`]).
+fn enum_kind(
+    en: &ItemEnum,
+    name: &str,
+    rule: Option<RenameRule>,
+    uses: &[Use],
+) -> Result<RecordKind, String> {
     if en.variants.is_empty() {
         return Err(format!(
             "TealRecord: `{name}` has no variants and has nothing to declare"
@@ -818,7 +1024,7 @@ fn enum_kind(en: &ItemEnum, name: &str, rule: Option<RenameRule>) -> Result<Reco
         let shape = match &v.fields {
             syn::Fields::Unit => VariantShape::Unit,
             syn::Fields::Unnamed(u) if u.unnamed.len() == 1 => {
-                VariantShape::Newtype(teal_type(&u.unnamed[0].ty, name)?)
+                VariantShape::Newtype(teal_type_in(&u.unnamed[0].ty, name, uses)?)
             }
             syn::Fields::Unnamed(_) => {
                 return Err(
@@ -838,7 +1044,7 @@ fn enum_kind(en: &ItemEnum, name: &str, rule: Option<RenameRule>) -> Result<Reco
                         "TealRecord: {name}::{vname}: a field named `kind` collides with the variant tag"
                     ));
                 }
-                VariantShape::Struct(record_fields(fields, name, false)?.0)
+                VariantShape::Struct(record_fields(fields, name, false, uses)?.0)
             }
         };
         variants.push(UnionVariant {
@@ -850,29 +1056,49 @@ fn enum_kind(en: &ItemEnum, name: &str, rule: Option<RenameRule>) -> Result<Reco
     Ok(RecordKind::Union { variants })
 }
 
-/// Name, attributes and kind of a `#[derive(TealRecord)]` item.
-fn record_parts(item: &Item) -> Result<(String, TealAttrs, RecordKind), String> {
-    let (attrs, ident) = match item {
-        Item::Struct(st) => (parse_teal_attrs(&st.attrs)?, st.ident.to_string()),
-        Item::Enum(en) => (parse_teal_attrs(&en.attrs)?, en.ident.to_string()),
-        _ => return Err("TealRecord: only structs and enums are supported".into()),
-    };
-    let name = attrs.name.clone().unwrap_or(ident);
-    let kind = match item {
+/// Attributes and name of a `#[derive(TealRecord)]` item, its [`RecordKind`] not built yet
+/// — that is [`record_kind`], which takes a `uses` list of the caller's choosing: the
+/// item's own at the top level ([`record_parts`]), the host's for a record reached
+/// through `records = [..]` ([`nested_record_decls`]).
+fn record_attrs(item: &Item) -> Result<(TealAttrs, String), String> {
+    match item {
+        Item::Struct(st) => Ok((parse_teal_attrs(&st.attrs)?, st.ident.to_string())),
+        Item::Enum(en) => Ok((parse_teal_attrs(&en.attrs)?, en.ident.to_string())),
+        _ => Err("TealRecord: only structs and enums are supported".into()),
+    }
+}
+
+/// The [`RecordKind`] `item` (named `name`, with enum variants spelled by `rename_all`)
+/// lowers to, its field types resolved against `uses` ([`teal_type_in`]).
+fn record_kind(
+    item: &Item,
+    name: &str,
+    rename_all: Option<RenameRule>,
+    uses: &[Use],
+) -> Result<RecordKind, String> {
+    match item {
         Item::Struct(st) => {
             // `rename_all` spells variants, and a struct has none. Field renaming is a
             // separate decision, so this is refused rather than silently ignored.
-            if attrs.rename_all.is_some() {
+            if rename_all.is_some() {
                 return Err(format!(
                     "TealRecord: `{name}`: `rename_all` applies to enum variants; \
                      record fields are declared under their Rust names"
                 ));
             }
-            struct_kind(st, &name)?
+            struct_kind(st, name, uses)
         }
-        Item::Enum(en) => enum_kind(en, &name, attrs.rename_all)?,
+        Item::Enum(en) => enum_kind(en, name, rename_all, uses),
         _ => unreachable!(),
-    };
+    }
+}
+
+/// Name, attributes and kind of a `#[derive(TealRecord)]` item, its own `uses` resolving
+/// its field types.
+fn record_parts(item: &Item) -> Result<(String, TealAttrs, RecordKind), String> {
+    let (attrs, ident) = record_attrs(item)?;
+    let name = attrs.name.clone().unwrap_or(ident);
+    let kind = record_kind(item, &name, attrs.rename_all, &attrs.uses)?;
     Ok((name, attrs, kind))
 }
 
@@ -952,10 +1178,10 @@ pub fn record_decl(item: &Item) -> Result<RecordDecl, String> {
              drop `dts` and declare it nested in the host module with `records = [{name}]`"
         ));
     }
-    let mut decl = uses_header(&attrs.uses);
-    decl.push_str(&kind_decl(&name, &kind, ""));
-    decl.push_str(&format!("\nreturn {name}\n"));
-    let decl = with_task_header(decl, &attrs.uses);
+    let mut body = kind_decl(&name, &kind, "");
+    body.push_str(&format!("\nreturn {name}\n"));
+    let uses = with_task_default(&format!("TealRecord `{name}`"), &body, &attrs.uses)?;
+    let decl = format!("{}{body}", uses_header(&uses));
     Ok(RecordDecl {
         name,
         kind,
@@ -983,9 +1209,16 @@ pub fn find_item<'a>(items: &'a [Item], name: &str) -> Option<&'a Item> {
     None
 }
 
+/// `uses` is the host's — a nested record's field types resolve against the `uses` the
+/// host module itself declared, not against anything the nested item might declare of
+/// its own, so `task::Job` nested beside a host's `uses = [task = ".."]` crosses the same
+/// way whichever `#[host_module]` method also returns it. A `#[teal(uses = ..)]` on the
+/// nested item itself writes no import line of its own either way: only the host
+/// module's `uses_header` is ever emitted, once, at the top of the file.
 fn nested_record_decls(
     names: &[String],
     file_items: Option<&[Item]>,
+    uses: &[Use],
 ) -> Result<Vec<String>, String> {
     if names.is_empty() {
         return Ok(Vec::new());
@@ -1007,7 +1240,8 @@ fn nested_record_decls(
         // host's signatures say `X` too. A `#[teal(name = ..)]` rename could satisfy
         // neither — and `Self` inside the item would already have been mapped to the
         // rename — so it is refused rather than half-applied.
-        let (renamed, attrs, kind) = record_parts(it)?;
+        let (attrs, ident) = record_attrs(it)?;
+        let renamed = attrs.name.clone().unwrap_or(ident);
         if attrs.name.is_some() {
             return Err(format!(
                 "host_module: `{name}` is nested through `records` and cannot be renamed \
@@ -1015,6 +1249,7 @@ fn nested_record_decls(
                  `.d.tl` of its own (`#[teal(dts = ..)]`) and import it with `uses = [{renamed}]`"
             ));
         }
+        let kind = record_kind(it, &renamed, attrs.rename_all, uses)?;
         out.push(kind_decl(name, &kind, "   "));
     }
     Ok(out)
@@ -1203,10 +1438,9 @@ pub fn host_decl(
         _ => ErrMode::Raise,
     };
 
-    let mut decl = uses_header(&attrs.uses);
-    decl.push_str(&format!("local record {module}\n"));
-    for r in nested_record_decls(&attrs.records, file_items)? {
-        decl.push_str(&r);
+    let mut body = format!("local record {module}\n");
+    for r in nested_record_decls(&attrs.records, file_items, &attrs.uses)? {
+        body.push_str(&r);
     }
 
     let mut methods = Vec::new();
@@ -1264,7 +1498,7 @@ pub fn host_decl(
                         Pat::Ident(pi) => pi.ident.to_string(),
                         _ => format!("a{}", params.len()),
                     };
-                    let teal = teal_type(&owned_ty, &module)?;
+                    let teal = teal_type_in(&owned_ty, &module, &attrs.uses)?;
                     let optional = is_option(&owned_ty);
                     let callback = param_callback_attr(&pt.attrs, &fname, &pname)?;
                     let is_fn = is_function(&owned_ty);
@@ -1321,7 +1555,7 @@ pub fn host_decl(
         }
         let (ret_teal, ret_is_result) = match &f.sig.output {
             ReturnType::Default => (String::new(), false),
-            ReturnType::Type(_, t) => (teal_type(t, &module)?, is_result(t)),
+            ReturnType::Type(_, t) => (teal_type_in(t, &module, &attrs.uses)?, is_result(t)),
         };
         let ret_is_unit = ret_teal.is_empty();
         // Teal-side return: `Result` in return mode becomes `T, string` (`boolean, string`
@@ -1357,7 +1591,7 @@ pub fn host_decl(
         } else {
             format!(" ---@noyield({})", noyield.join(", "))
         };
-        decl.push_str(&format!(
+        body.push_str(&format!(
             "   {fname}: function({}){ret_suffix}{async_marker}{noyield_marker}\n",
             teal_params.join(", ")
         ));
@@ -1371,8 +1605,9 @@ pub fn host_decl(
             is_async,
         });
     }
-    decl.push_str(&format!("end\n\nreturn {module}\n"));
-    let decl = with_task_header(decl, &attrs.uses);
+    body.push_str(&format!("end\n\nreturn {module}\n"));
+    let uses = with_task_default(&format!("host_module `{module}`"), &body, &attrs.uses)?;
+    let decl = format!("{}{body}", uses_header(&uses));
 
     Ok(HostDecl {
         type_name,
@@ -1911,7 +2146,166 @@ mod tests {
         );
     }
 
+    /// `uses = [name = "module.path"]`: the local name and the module `require` resolves
+    /// differ, and a field whose Rust path is qualified by that name crosses dotted the
+    /// same way — the acceptance case of #426 (a record from `somelib.types`, used as
+    /// `types.Event`).
+    #[test]
+    fn uses_imports_a_module_path_under_a_different_local_name() {
+        let rd = record_decl(&item(
+            "#[derive(TealRecord)] #[teal(uses = [types = \"somelib.types\"])] \
+             pub struct Run { pub ev: types::Event }",
+        ))
+        .unwrap();
+        assert_eq!(
+            rd.decl,
+            "local type types = require(\"somelib.types\")\n\n\
+             local record Run\n   ev: types.Event\nend\n\nreturn Run\n"
+        );
+    }
+
+    /// A qualified Rust path keeps only its last segment — the same as a bare identifier
+    /// — unless a `uses` entry names its *first* segment: `crate::geom::Point`,
+    /// `self::Point` and `geom::Point` all cross as plain `Point` with no `uses` at all,
+    /// and so does `UserDataRef<crate::Point>` (the qualifier is on the inner type, which
+    /// `UserDataRef` passes through unwrapped). `htl::task::Request` with the wrong
+    /// arity (one type argument, not two) falls out of the `Request` special case and
+    /// through the same rule, to `Request` — not `htl.task.Request`, which no `.d.tl`
+    /// would declare (#426).
+    #[test]
+    fn a_qualified_path_keeps_its_last_segment_unless_uses_names_its_first_segment() {
+        let ty = |s: &str| syn::parse_str::<Type>(s).unwrap();
+        for src in [
+            "crate::geom::Point",
+            "self::Point",
+            "geom::Point",
+            "UserDataRef<crate::Point>",
+        ] {
+            assert_eq!(teal_type(&ty(src), "Self").unwrap(), "Point", "{src}");
+        }
+        assert_eq!(
+            teal_type(&ty("htl::task::Request<i64>"), "Self").unwrap(),
+            "Request"
+        );
+    }
+
+    /// A `uses` name whose module is not `htl.task` dots ahead of every special case,
+    /// including `RecvChannel`/`SendChannel`/`Request`'s own: `mytask::RecvChannel<i64>`
+    /// under `uses = [mytask = "my.task"]` is `mytask.RecvChannel` (its generic argument
+    /// dropped, the same as a bare unknown identifier would be), not `task.RecvChannel`,
+    /// and does not trigger the `htl.task` default (#426).
+    #[test]
+    fn a_uses_qualified_path_dots_ahead_of_the_special_case_names() {
+        let hd = host_of(
+            "pub struct D;\n\
+             #[host_module(name = \"d\", uses = [mytask = \"my.task\"])]\n\
+             impl D {\n    pub fn job(&self) -> mytask::RecvChannel<i64> { todo!() }\n}\n",
+        );
+        assert!(
+            hd.decl
+                .contains("job: function(self: d): mytask.RecvChannel\n"),
+            "{}",
+            hd.decl
+        );
+        assert!(!hd.decl.contains("htl.task"), "{}", hd.decl);
+    }
+
+    /// `uses` threaded all the way through a `#[host_module]` declaration: a parameter
+    /// (`ev: types::Event`), an `Option<..>` return and a `Result<.., _>` return (both
+    /// cross as the bare `types.Event`, the way `Option` / `Result` always unwrap), and a
+    /// field of a record nested through `records = [..]`, which resolves against the
+    /// host's `uses` rather than anything of its own (#426).
+    #[test]
+    fn uses_is_threaded_through_host_decl_params_returns_and_nested_records() {
+        let hd = host_of(
+            "#[derive(TealRecord)] pub struct Nested { pub ev: types::Event }\n\
+             pub struct D;\n\
+             #[host_module(name = \"d\", uses = [types = \"somelib.types\"], records = [Nested])]\n\
+             impl D {\n\
+             \x20   pub fn take(&self, ev: types::Event) -> i64 { 0 }\n\
+             \x20   pub fn maybe(&self) -> Option<types::Event> { None }\n\
+             \x20   pub fn try_get(&self) -> Result<types::Event, String> { todo!() }\n\
+             }\n",
+        );
+        assert_eq!(
+            hd.decl,
+            "local type types = require(\"somelib.types\")\n\n\
+             local record d\n\
+             \x20  record Nested\n      ev: types.Event\n   end\n\
+             \x20  take: function(self: d, ev: types.Event): integer\n\
+             \x20  maybe: function(self: d): types.Event\n\
+             \x20  try_get: function(self: d): types.Event\n\
+             end\n\nreturn d\n"
+        );
+    }
+
+    /// A field whose Rust type happens to be qualified by a module also called `task`,
+    /// with no `uses` entry naming it, crosses as a plain `Job` and does not trip the
+    /// `htl.task` default: nothing here is one of `htl.task`'s own types (#426).
+    #[test]
+    fn a_task_qualified_field_with_no_uses_entry_does_not_add_the_htl_task_default() {
+        let hd = host_of(
+            "pub struct D;\n\
+             #[host_module(name = \"d\")]\n\
+             impl D {\n    pub fn job(&self) -> task::Job { todo!() }\n}\n",
+        );
+        assert!(
+            hd.decl.contains("job: function(self: d): Job\n"),
+            "{}",
+            hd.decl
+        );
+        assert!(!hd.decl.contains("htl.task"), "{}", hd.decl);
+    }
+
+    /// `use_list`'s refusals: a right side that is not a string literal, a left side
+    /// that is not a single identifier, a module path with a character `require("...")`
+    /// could not carry unescaped, and a local name written
+    /// twice — bare or `= ".."`, against each other or against itself.
+    #[test]
+    fn uses_refuses_a_malformed_module_path_entry() {
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] #[teal(uses = [t = 5])] pub struct R { pub x: t::T }",
+        ))
+        .unwrap_err();
+        assert!(e.contains("string literal"), "{e}");
+
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] #[teal(uses = [a::b = \"m\"])] pub struct R { pub x: i64 }",
+        ))
+        .unwrap_err();
+        assert!(e.contains("single identifier"), "{e}");
+
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] #[teal(uses = [t = \"a b\"])] pub struct R { pub x: i64 }",
+        ))
+        .unwrap_err();
+        assert!(e.contains("letters, digits"), "{e}");
+        assert!(e.contains("\"a b\""), "{e}");
+
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] #[teal(uses = [t = \"\"])] pub struct R { pub x: i64 }",
+        ))
+        .unwrap_err();
+        assert!(e.contains("letters, digits"), "{e}");
+
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] #[teal(uses = [x = \"a\", x = \"b\"])] pub struct R { pub y: i64 }",
+        ))
+        .unwrap_err();
+        assert!(e.contains("`x`") && e.contains("twice"), "{e}");
+
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] #[teal(uses = [Mode, Mode = \"m\"])] pub struct R { pub y: i64 }",
+        ))
+        .unwrap_err();
+        assert!(e.contains("`Mode`") && e.contains("twice"), "{e}");
+    }
+
     fn host_of(src: &str) -> HostDecl {
+        host_of_result(src).unwrap()
+    }
+
+    fn host_of_result(src: &str) -> Result<HostDecl, String> {
         let file: syn::File = syn::parse_str(src).unwrap();
         let imp = file
             .items
@@ -1922,7 +2316,7 @@ mod tests {
             })
             .unwrap();
         let attrs = parse_host_module_attr(&imp.attrs).unwrap().unwrap();
-        host_decl(imp, attrs, Some(&file.items)).unwrap()
+        host_decl(imp, attrs, Some(&file.items))
     }
 
     /// `htl::task`'s channels and requests are declared as `htl.task`'s types, and the
@@ -1986,6 +2380,41 @@ mod tests {
             "{}",
             plain.decl
         );
+    }
+
+    /// A user `uses` entry naming `task` for `htl.task` itself takes the default entry's
+    /// place (one line, no error); naming `task` for a *different* module, where the
+    /// declaration also needs `htl.task`, is refused rather than silently preferred: a
+    /// `.d.tl` cannot import two modules under one local name (#426).
+    #[test]
+    fn a_user_uses_entry_named_task_for_htl_task_is_accepted_any_other_module_is_refused() {
+        // A user `uses` entry naming `task` for `htl.task` itself is the same import the
+        // default would have written: accepted, one line, no error.
+        let hd = host_of(
+            "pub struct D;\n\
+             #[host_module(name = \"d\", uses = [task = \"htl.task\"])]\n\
+             impl D {\n    pub fn events(&self) -> RecvChannel<Mode> { todo!() }\n}\n",
+        );
+        assert!(
+            hd.decl
+                .starts_with("local type task = require(\"htl.task\")\n\nlocal record d\n"),
+            "{}",
+            hd.decl
+        );
+
+        // A `task` entry for a *different* module, where the declaration also needs
+        // `htl.task`, cannot be resolved into one `.d.tl`: refused, naming both.
+        let err = match host_of_result(
+            "pub struct D;\n\
+             #[host_module(name = \"d\", uses = [task = \"something.else\"])]\n\
+             impl D {\n    pub fn events(&self) -> RecvChannel<Mode> { todo!() }\n}\n",
+        ) {
+            Ok(hd) => panic!("expected an error, got {}", hd.decl),
+            Err(e) => e,
+        };
+        assert!(err.contains("something.else"), "{err}");
+        assert!(err.contains("htl.task"), "{err}");
+        assert!(err.starts_with("host_module `d`:"), "{err}");
     }
 
     /// Every kind nested in a host module: what `records = [..]` writes, indented, with

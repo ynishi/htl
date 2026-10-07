@@ -917,11 +917,16 @@ fn union_from(en: &ItemEnum, name: &str, variants: &[dts::UnionVariant]) -> Toke
 /// parameter is declared `name?: T`, so a caller may write `api:find("x")`; another host
 /// type comes in as `UserDataRef<T>` (`UserDataRefMut<T>` to mutate it, `UserDataOwned<T>`
 /// to keep it) and is declared as `T`; types from other modules come in via `uses =
-/// [Name]`, nested `#[derive(TealRecord)]` types via `records = [..]`. `Result<T, E>`
-/// returns raise a Lua error on `Err` by default; with `errors = "return"` on the
-/// attribute they come back Lua-style (`v, nil` / `nil, err`), so `local ok, err =
-/// store:write(name, text)` needs no `pcall`. A parameter that may see a value from
-/// outside checked Teal is a `Strict<T>` (`htl::teal::Strict`).
+/// [Name]` (`local type Name = require("Name")`) — or, when the module a type lives in is
+/// not its own name, `uses = [name = "module.path"]` (`local type name =
+/// require("module.path")`), which is also how a Rust field or return whose type is
+/// qualified by that same name (`name::Type`) crosses, as `name.Type`, ahead of any other
+/// rule — a qualified type with no matching `uses` entry crosses under its own last
+/// segment, same as a bare one. Nested `#[derive(TealRecord)]` types come in via
+/// `records = [..]`. `Result<T, E>` returns raise a Lua error on `Err` by default; with
+/// `errors = "return"` on the attribute they come back Lua-style (`v, nil` / `nil, err`),
+/// so `local ok, err = store:write(name, text)` needs no `pcall`. A parameter that may
+/// see a value from outside checked Teal is a `Strict<T>` (`htl::teal::Strict`).
 ///
 /// With the `async` feature a method may be `async`, in the same `impl` as the sync
 /// ones:
