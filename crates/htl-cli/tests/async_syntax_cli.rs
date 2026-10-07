@@ -210,3 +210,313 @@ fn the_four_rules_are_reported_by_name_and_replayed_from_the_cache() {
         assert!(line.trim_end().ends_with(level), "{line}");
     }
 }
+
+const IF_THEN_BODY_PROGRAM: &str = "\
+local task = require(\"htl.task\")
+local async function f(): integer
+   await task.after(1):wait()
+   return 1
+end
+local x = 1
+if x == 1 then
+   local v = await f()
+   print(v)
+end
+";
+
+/// The issue's reproduction: an `await` in an `if`'s `then` body used to be refused as if
+/// nothing followed it (`if_blocks`, where Teal keeps an `if`'s branches, was invisible to
+/// the walk that resolves `await`'s operand). It checks clean and runs.
+#[test]
+fn await_in_an_if_then_body_checks_and_runs() {
+    let root = scratch("if-then-body");
+    write(
+        &root.join("htl.toml"),
+        "[layout]\nsource = \"src\"\n\n[lang]\nasync = true\n",
+    );
+    write(&root.join("src/main.tl"), IF_THEN_BODY_PROGRAM);
+    let (ok, _, err) = htl(&["check", "src"], &root);
+    assert!(ok, "{err}");
+    assert!(err.contains("0 error(s)"), "{err}");
+    let (ok, out, err) = htl(&["run", "src/main.tl"], &root);
+    assert!(ok, "{err}");
+    assert_eq!(out, "1\n");
+}
+
+const IF_EVERYWHERE_PROGRAM: &str = "\
+local task = require(\"htl.task\")
+
+local async function ready(): boolean
+   return true
+end
+
+local async function f(): integer
+   return 1
+end
+
+-- An `if` body inside an async function, and an awaited method call in an `if` body.
+local async function h(): integer
+   if true then
+      await task.after(1):wait()
+      return 2
+   end
+   return 0
+end
+
+-- An `if` body inside an async function, a plain `await` of a call.
+local async function g(n: integer): integer
+   if n == 1 then
+      return await f()
+   end
+   return 0
+end
+
+local parts: {string} = {}
+local x = 1
+
+-- The condition.
+if await ready() then
+   table.insert(parts, \"cond\")
+end
+
+-- The `then` body, and (below) the `elseif` and `else` bodies of the same chain.
+if x == 1 then
+   local v = await f()
+   table.insert(parts, \"then:\" .. tostring(v))
+elseif x == 2 then
+   table.insert(parts, \"elseif-unreached\")
+else
+   table.insert(parts, \"else-unreached\")
+end
+
+-- The `elseif` body.
+if x == 2 then
+   table.insert(parts, \"then-unreached\")
+elseif x == 1 then
+   local v = await f()
+   table.insert(parts, \"elseif:\" .. tostring(v))
+else
+   table.insert(parts, \"else-unreached2\")
+end
+
+-- The `else` body.
+if x == 2 then
+   table.insert(parts, \"then-unreached2\")
+else
+   local v = await f()
+   table.insert(parts, \"else:\" .. tostring(v))
+end
+
+local gv = await g(1)
+table.insert(parts, \"nested:\" .. tostring(gv))
+
+local hv = await h()
+table.insert(parts, \"method:\" .. tostring(hv))
+
+print(table.concat(parts, \",\"))
+";
+
+/// One case for each row of the issue's table: `await` in an `if`'s condition, `then`
+/// body, `elseif` body and `else` body; an `if` body inside an async function; and an
+/// awaited method call in an `if` body. Each one checks clean, the run shows the branch
+/// that executed, and `gen` writes line for line.
+///
+/// `fmt --check` is not asserted here: `htl fmt` currently re-indents a statement-level
+/// `await <call>` (such as `await task.after(1):wait()` below) one level shallower than
+/// it should be, regardless of whether it is inside an `if` — a separate, pre-existing
+/// defect, not something this fix changes.
+#[test]
+fn await_works_in_every_part_of_an_if_and_inside_an_async_function() {
+    let root = scratch("if-everywhere");
+    write(&root.join("htl.toml"), "[lang]\nasync = true\n");
+    write(&root.join("main.tl"), IF_EVERYWHERE_PROGRAM);
+    let (ok, _, err) = htl(&["check", "main.tl"], &root);
+    assert!(ok, "{err}");
+    assert!(err.contains("0 error(s)"), "{err}");
+    let (ok, out, err) = htl(&["run", "main.tl"], &root);
+    assert!(ok, "{err}");
+    assert_eq!(out, "cond,then:1,elseif:1,else:1,nested:1,method:2\n");
+    let (ok, out, err) = htl(&["gen", "main.tl"], &root);
+    assert!(ok, "{err}");
+    assert_eq!(
+        out.lines().count(),
+        IF_EVERYWHERE_PROGRAM.lines().count(),
+        "{out}"
+    );
+}
+
+/// An `async local` awaited in an `if`'s condition: `t`'s `variable` node sits in the
+/// `if_block`'s `exp` and is rewritten to `t:await()` there; before the fix nothing under
+/// an `if` was indexed, so the operand was not found.
+#[test]
+fn an_async_local_awaited_in_an_if_condition_checks_and_runs() {
+    let root = scratch("async-local-if-condition");
+    write(&root.join("htl.toml"), "[lang]\nasync = true\n");
+    write(
+        &root.join("main.tl"),
+        "local async function work(): boolean
+   return true
+end
+async local t = work()
+if await t then
+   print(\"a\")
+end
+",
+    );
+    let (ok, _, err) = htl(&["check", "main.tl"], &root);
+    assert!(ok, "{err}");
+    assert!(err.contains("0 error(s)"), "{err}");
+    let (ok, out, err) = htl(&["run", "main.tl"], &root);
+    assert!(ok, "{err}");
+    assert_eq!(out, "a\n");
+}
+
+/// An `async local` declared inside an `if` body and awaited in that same body: the scope
+/// walk (`mark_task_vars`) that marks a `variable` node as naming a task has the same
+/// `if_blocks` blind spot the operand walk did, so it has to see into the `if` too for the
+/// task to be recognised as one at all, rather than rejected as "not an async local".
+#[test]
+fn an_async_local_declared_and_awaited_inside_an_if_body_checks_and_runs() {
+    let root = scratch("async-local-in-if-body");
+    write(&root.join("htl.toml"), "[lang]\nasync = true\n");
+    write(
+        &root.join("main.tl"),
+        "local async function work(): boolean
+   return true
+end
+local x = 1
+if x == 1 then
+   async local t = work()
+   print(await t)
+end
+",
+    );
+    let (ok, _, err) = htl(&["check", "main.tl"], &root);
+    assert!(ok, "{err}");
+    assert!(err.contains("0 error(s)"), "{err}");
+    let (ok, out, err) = htl(&["run", "main.tl"], &root);
+    assert!(ok, "{err}");
+    assert_eq!(out, "true\n");
+}
+
+/// An `async function` declared with `local`, entirely inside an `if` body: `by_pos` has
+/// to find the `local_function` node there for the `async` keyword to attach to it at
+/// all, and the call awaiting it is itself inside the same `if` body.
+#[test]
+fn an_async_local_function_declared_inside_an_if_body_checks_and_runs() {
+    let root = scratch("async-local-function-in-if-body");
+    write(&root.join("htl.toml"), "[lang]\nasync = true\n");
+    write(
+        &root.join("main.tl"),
+        "local x = 1
+if x == 1 then
+   local async function work(): boolean
+      return true
+   end
+   print(await work())
+end
+",
+    );
+    let (ok, _, err) = htl(&["check", "main.tl"], &root);
+    assert!(ok, "{err}");
+    assert!(err.contains("0 error(s)"), "{err}");
+    let (ok, out, err) = htl(&["run", "main.tl"], &root);
+    assert!(ok, "{err}");
+    assert_eq!(out, "true\n");
+}
+
+const NOT_A_CALL_MESSAGE: &str = "syntax error: 'await' needs a call after it: await f(x)";
+const NOT_AN_ASYNC_LOCAL_MESSAGE: &str = "'await' on 'f', which is not an async local: an async \
+function is awaited at its call (await f(x)), a task at the name an 'async local' gave it";
+const APPLIES_TO_A_CALL_MESSAGE: &str = "syntax error: 'await' applies to a call: await f(x)";
+
+/// `await` on something that is not a call reports one of three messages, depending on
+/// what is there: for a unary minus, the token after `await` is not one the operand walk
+/// starts from (a name, a parenthesis, a float or string literal), so nothing is found and
+/// the generic message is given ("needs a call after it"); a plain local is a name, but
+/// not one an `async local` gave a task to ("which is not an async local"); a float
+/// literal is something, but still not a call ("applies to a call"). Each one is the same
+/// inside an `if` as it is at the top level: the fix that lets the walk see `if` bodies
+/// must not also make it accept an operand it would otherwise reject.
+#[test]
+fn await_on_a_non_call_inside_an_if_reports_the_same_error_as_outside_one() {
+    let root = scratch("not-a-call");
+    write(&root.join("htl.toml"), "[lang]\nasync = true\n");
+
+    write(
+        &root.join("top.tl"),
+        "local v = await -1
+print(v)
+",
+    );
+    let (ok, _, err) = htl(&["check", "top.tl"], &root);
+    assert!(!ok);
+    assert!(err.contains(NOT_A_CALL_MESSAGE), "{err}");
+
+    write(
+        &root.join("in_if.tl"),
+        "local x = 1
+if x == 1 then
+   local v = await -1
+   print(v)
+end
+",
+    );
+    let (ok, _, err) = htl(&["check", "in_if.tl"], &root);
+    assert!(!ok);
+    assert!(err.contains(NOT_A_CALL_MESSAGE), "{err}");
+
+    write(
+        &root.join("top_local.tl"),
+        "local f = 1
+local v = await f
+print(v)
+",
+    );
+    let (ok, _, err) = htl(&["check", "top_local.tl"], &root);
+    assert!(!ok);
+    assert!(err.contains(NOT_AN_ASYNC_LOCAL_MESSAGE), "{err}");
+
+    write(
+        &root.join("in_if_local.tl"),
+        "local f = 1
+local x = 1
+if x == 1 then
+   local v = await f
+   print(v)
+end
+",
+    );
+    let (ok, _, err) = htl(&["check", "in_if_local.tl"], &root);
+    assert!(!ok);
+    assert!(
+        err.contains(NOT_AN_ASYNC_LOCAL_MESSAGE),
+        "the message inside the `if` must be the one `await f` gets at the top level: {err}"
+    );
+
+    write(
+        &root.join("top_number.tl"),
+        "local v = await 1.5
+print(v)
+",
+    );
+    let (ok, _, err) = htl(&["check", "top_number.tl"], &root);
+    assert!(!ok);
+    assert!(err.contains(APPLIES_TO_A_CALL_MESSAGE), "{err}");
+
+    write(
+        &root.join("in_if_number.tl"),
+        "local x = 1
+if x == 1 then
+   local v = await 1.5
+   print(v)
+end
+",
+    );
+    let (ok, _, err) = htl(&["check", "in_if_number.tl"], &root);
+    assert!(!ok);
+    assert!(
+        err.contains(APPLIES_TO_A_CALL_MESSAGE),
+        "the message inside the `if` must be the one `await 1.5` gets at the top level: {err}"
+    );
+}

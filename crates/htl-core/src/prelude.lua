@@ -1387,33 +1387,65 @@ local function is_node(v)
 end
 
 -- Numeric children in order, then named ones in a fixed order, so a walk is deterministic.
+-- A string-keyed child is usually a node itself (`body`, `exp`, ...), but Teal does not
+-- wrap every list in one: an `if`'s branches sit in `if_blocks = {}`, a plain array with
+-- no `kind` or `y` of its own (`if_blocks` is the only such array in Teal's parser today;
+-- `unattached_comments` is an array too, but of `{x, y, text}` tokens with no `kind`).
+-- Such an array is walked element by element instead.
+--
+-- `f` is called as `f(child, key, holder)` with `holder[key] == child`; `holder` is `node`
+-- for a numeric or direct string-keyed child and the array for an element of one.
+--
+-- `op` (an operator's `{op=, prec=, arity=}`, unary or binary) and `if_parent` (an
+-- `if_block`'s back-pointer to its `if`) are excluded from the string-keyed children: `op`
+-- is not a node at all, and `if_parent` is one but not a child — it is the parent, set by
+-- the parser before this ever runs. Following it loops in a walk with no visited set
+-- (`mark_task_vars`; `index_nodes` is stopped by its own `parents[node]` guard).
 local function each_child(node, f)
    for i = 1, #node do
       local c = node[i]
-      if is_node(c) then f(c, i) end
+      if is_node(c) then f(c, i, node) end
    end
    local keys = {}
    for k, v in pairs(node) do
-      if type(k) == "string" and k ~= "op" and is_node(v) then keys[#keys + 1] = k end
+      if type(k) == "string" and k ~= "op" and k ~= "if_parent" and type(v) == "table" then
+         if is_node(v) or (v.kind == nil and is_node(v[1])) then
+            keys[#keys + 1] = k
+         end
+      end
    end
    table.sort(keys)
-   for _, k in ipairs(keys) do f(node[k], k) end
+   for _, k in ipairs(keys) do
+      local v = node[k]
+      if is_node(v) then
+         f(v, k, node)
+      else
+         for i = 1, #v do
+            if is_node(v[i]) then f(v[i], i, v) end
+         end
+      end
+   end
 end
 
--- Every node by (line, column), parents first, and each node's slot in its parent.
+-- Every node by (line, column), parents first, and where each one sits: `parent`, the
+-- node above it (for the postfix climb and `start_at`; neither ever meets a node reached
+-- through an array), and `holder` / `key` such that `holder[key] == node`, which `holder`
+-- is not always `parent`: an `if_block` reached through its `if`'s `if_blocks` sits in
+-- that array, not in the `if` node directly, so a write meant for the `if_block` has to go
+-- through `holder` (the array) or it would land on the wrong key of the wrong table.
 local function index_nodes(ast)
    local by_pos, parents = {}, {}
-   local function visit(node, parent, key)
+   local function visit(node, parent, holder, key)
       if parents[node] then return end
-      parents[node] = { parent = parent, key = key }
+      parents[node] = { parent = parent, holder = holder, key = key }
       local yl = by_pos[node.y]
       if not yl then yl = {}; by_pos[node.y] = yl end
       local xl = yl[node.x]
       if not xl then xl = {}; yl[node.x] = xl end
       xl[#xl + 1] = node
-      each_child(node, function(c, k) visit(c, node, k) end)
+      each_child(node, function(c, k, h) visit(c, node, h, k) end)
    end
-   visit(ast, nil, nil)
+   visit(ast, nil, nil, nil)
    return by_pos, parents
 end
 
@@ -1439,10 +1471,10 @@ end
 local function graft(root, name, with)
    local done = false
    local function go(node)
-      each_child(node, function(c, k)
+      each_child(node, function(c, k, holder)
          if done then return end
          if c.kind == "variable" and c.tk == name then
-            node[k] = with
+            holder[k] = with
             done = true
          else
             go(c)
@@ -1622,7 +1654,7 @@ local function apply_async_marks(ast, marks, errs, filename)
                call.htl_task_await = true
                call.htl_await_at = { y = m.y, x = m.x }
                local slot = parents[target]
-               slot.parent[slot.key] = call
+               slot.holder[slot.key] = call
             else
                err(m, "'await' on '" .. tostring(target.tk) .. "', which is not an async local: " ..
                   "an async function is awaited at its call (await f(x)), a task at the name " ..
