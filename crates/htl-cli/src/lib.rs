@@ -575,11 +575,14 @@ Examples:
     /// Report how many declarations carry each of htl's nine markers, and where
     ///
     /// `applicable` is how many declarations a lint has found the evidence to call
-    /// candidates for a marker — none does yet, so every row's `applicable` is empty (`-`)
-    /// in this release, not `0`: a feature with no evidence counted is a different claim
-    /// from a feature nothing is applicable to, and this command does not guess between
-    /// them. It is a report, not a gate: the exit code is always 0. README, "Adoption":
-    /// https://github.com/ynishi/htl#adoption-htl-adopt
+    /// candidates for a marker. Only `---@struct`'s row has one so far — what
+    /// `unmarked-struct` would report, a record built whole at every one of its
+    /// construction sites and left unmarked; every other row is empty (`-`), not `0`: a
+    /// feature with no evidence counted is a different claim from a feature nothing is
+    /// applicable to, and this command does not guess between them. `--detail` lists
+    /// each candidate after the row's marked declarations, with `(applicable: built
+    /// whole at N site(s))`. It is a report, not a gate: the exit code is always 0.
+    /// README, "Adoption": https://github.com/ynishi/htl#adoption-htl-adopt
     #[command(after_long_help = "\
 Examples:
   htl adopt                      which of htl's nine markers this project writes, and how much
@@ -595,7 +598,8 @@ Examples:
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
         /// List every marked declaration under the table, file:line and name, grouped by
-        /// feature; the plain form prints the table alone
+        /// feature, and each `applicable` candidate after them; the plain form prints
+        /// the table alone
         #[arg(long)]
         detail: bool,
         /// Build the census from a fresh check even if a cached one is available, and
@@ -1597,8 +1601,8 @@ struct UnusedFlags {
 /// What `htl adopt` was asked for, beyond the paths.
 struct AdoptFlags {
     json: bool,
-    /// List every marked declaration under the table; the plain form prints the table
-    /// alone.
+    /// List every marked declaration under the table, and each `applicable` candidate
+    /// after them; the plain form prints the table alone.
     detail: bool,
     use_cache: bool,
     explain: bool,
@@ -2747,13 +2751,23 @@ fn print_adopt(rep: &htl::adopt::Report, detail: bool) {
         );
     }
     if detail {
-        // Padded to the longest `file:line` of every site about to be printed, not per
-        // feature: one column, so the names line up down the whole list.
+        // Padded to the longest `file:line` of every site and every candidate about to
+        // be printed, not per feature: one column, so the names line up down the whole
+        // list, a candidate's line included.
         let line_width = rep
             .features
             .iter()
-            .flat_map(|f| f.sites.iter())
-            .map(|s| format!("{}:{}", s.file.display(), s.line).len())
+            .flat_map(|f| {
+                f.sites
+                    .iter()
+                    .map(|s| format!("{}:{}", s.file.display(), s.line))
+                    .chain(
+                        f.candidates
+                            .iter()
+                            .map(|c| format!("{}:{}", c.file.display(), c.line)),
+                    )
+            })
+            .map(|s| s.len())
             .max()
             .unwrap_or(0);
         for f in &rep.features {
@@ -2763,6 +2777,23 @@ fn print_adopt(rep: &htl::adopt::Report, detail: bool) {
                     format!("---@{}", f.marker),
                     format!("{}:{}", s.file.display(), s.line),
                     s.name,
+                    width = width,
+                    line_width = line_width
+                );
+            }
+            // A candidate's line ends with how many construction sites made it one, so
+            // a reader can tell it from a marked declaration above it.
+            for c in &f.candidates {
+                let sites = if c.sites == 1 {
+                    "1 site".to_string()
+                } else {
+                    format!("{} sites", c.sites)
+                };
+                eprintln!(
+                    "  {:<width$}{:<line_width$}  {}  (applicable: built whole at {sites})",
+                    format!("---@{}", f.marker),
+                    format!("{}:{}", c.file.display(), c.line),
+                    c.name,
                     width = width,
                     line_width = line_width
                 );

@@ -1,5 +1,6 @@
 //! `htl adopt` through the real binary: the table with no marker anywhere, the table with
-//! some, `--detail`, the replay, `--help`, and the one file kind the census excludes.
+//! some, `--detail`, the replay, `--help`, the one file kind the census excludes, and the
+//! `---@struct` row's `applicable` (#304).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -57,6 +58,119 @@ fn two_markers_project(name: &str) -> PathBuf {
     root
 }
 
+/// As [`two_markers_project`], with an unmarked `Point` (one field, `v`) added right
+/// after `find`: declared at `src/a.tl:11`, built whole by `p1` at `src/a.tl:14`, and
+/// built from `second_site` by `p2` at `src/a.tl:15` — a candidate for `---@struct`
+/// (#304) when `second_site` sets `v` too, and not one when it does not (`"{}"`,
+/// one site short). `Foo` (`src/a.tl:3`), `find` (`src/a.tl:8`) and `Bar`
+/// (`src/b.tl:10`) keep the positions [`two_markers_project`]'s own tests assert against.
+fn candidate_project(name: &str, second_site: &str) -> PathBuf {
+    let root = scratch(name);
+    write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
+    write(
+        &root.join("src/a.tl"),
+        &format!(
+            "-- a\n-- a\nlocal record Foo   ---@struct\n   x: string\nend\n\n\
+             ---@nilable\nlocal function find(): string\n   return \"x\"\nend\n\
+             local record Point\n   v: string\nend\n\
+             local p1: Point = {{ v = \"a\" }}\nlocal p2: Point = {second_site}\n\
+             print(p1, p2)\n\nreturn {{}}\n"
+        ),
+    );
+    write(
+        &root.join("src/b.tl"),
+        "-- b\n-- b\n-- b\n-- b\n-- b\n-- b\n-- b\n-- b\n-- b\n\
+         local record Bar   ---@struct\n   y: string\nend\n\nreturn {}\n",
+    );
+    root
+}
+
+/// Two records in two different files, each a candidate for `---@struct`: `Alpha`
+/// (`src/a.tl:3`, built once, in `a.tl`) and `Beta` (`src/b.tl:2`, built twice -- once
+/// in `b.tl` itself, once from `a.tl`, which requires `b.tl`). `b.tl`'s own require is
+/// `b`'s own file reading itself; `a.tl`'s is a requirer's resolution of the same file,
+/// which need not spell it identically -- and reaches `checked` here through the cache
+/// `adopt` reads candidates back through (#304), not a fresh `CheckInfo`.
+fn two_candidates_project(name: &str) -> PathBuf {
+    let root = scratch(name);
+    write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
+    write(
+        &root.join("src/a.tl"),
+        "local b = require(\"b\")\n\n\
+         local record Alpha\n   x: string\nend\n\n\
+         local a1: Alpha = { x = \"a\" }\n\
+         local b1: b.Beta = { y = \"b\" }\n\
+         print(a1, b1)\n\nreturn { Alpha = Alpha }\n",
+    );
+    write(
+        &root.join("src/b.tl"),
+        "local record b\n   record Beta\n      y: string\n   end\nend\n\n\
+         local b2: b.Beta = { y = \"c\" }\nprint(b2)\n\nreturn b\n",
+    );
+    root
+}
+
+#[test]
+fn candidates_across_two_files_are_ordered_by_their_own_declaring_file() {
+    let root = two_candidates_project("ordered");
+    let (ok, stdout, stderr) = htl(&["adopt", "--format", "json"], &root);
+    assert!(ok, "{stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is one JSON document");
+    assert_eq!(
+        v["features"][0]["candidates"],
+        serde_json::json!([
+            { "file": "src/a.tl", "line": 3, "name": "Alpha", "sites": 1 },
+            { "file": "src/b.tl", "line": 2, "name": "Beta", "sites": 2 },
+        ]),
+        "{v}"
+    );
+    assert_eq!(v["features"][0]["applicable"], 2, "{v}");
+}
+
+/// `-- htl: allow(unmarked-struct)` on `Point`'s own declaration line leaves it out of
+/// both `applicable` and `candidates`, the same way the comment silences the lint's own
+/// finding (#304) -- `unmarked_structs` reads no source of its own, so `adopt`
+/// has to apply the check itself, through `lint::line_is_allowed`.
+#[test]
+fn an_allow_comment_on_the_declaration_is_not_a_candidate() {
+    let root = scratch("allowed");
+    write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
+    write(
+        &root.join("src/a.tl"),
+        "local record Point   -- htl: allow(unmarked-struct)\n   v: string\nend\n\n\
+         local p1: Point = { v = \"a\" }\nlocal p2: Point = { v = \"b\" }\n\
+         print(p1, p2)\n\nreturn {}\n",
+    );
+    let (ok, stdout, stderr) = htl(&["adopt", "--format", "json"], &root);
+    assert!(ok, "{stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is one JSON document");
+    assert_eq!(v["features"][0]["applicable"], 0, "{v}");
+    assert_eq!(v["features"][0]["candidates"], serde_json::json!([]), "{v}");
+    assert_eq!(v["summary"]["applicable"], 0);
+}
+
+/// As above, with `unmarked-struct` named among several in one list-form comment
+/// (`-- htl: allow(no-any, unmarked-struct)`) rather than alone -- `collect_allows`
+/// splits on commas, so the second name has to be read as its own, not as part of the
+/// first or swallowed by the parentheses matching only the whole list as one word.
+#[test]
+fn an_allow_comment_naming_several_rules_is_not_a_candidate_either() {
+    let root = scratch("allowed-list");
+    write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
+    write(
+        &root.join("src/a.tl"),
+        "local record Point   -- htl: allow(no-any, unmarked-struct)\n   v: string\nend\n\n\
+         local p1: Point = { v = \"a\" }\nlocal p2: Point = { v = \"b\" }\n\
+         print(p1, p2)\n\nreturn {}\n",
+    );
+    let (ok, stdout, stderr) = htl(&["adopt", "--format", "json"], &root);
+    assert!(ok, "{stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is one JSON document");
+    assert_eq!(v["features"][0]["applicable"], 0, "{v}");
+    assert_eq!(v["features"][0]["candidates"], serde_json::json!([]), "{v}");
+    assert_eq!(v["summary"]["applicable"], 0);
+}
+
 #[test]
 fn a_project_with_no_marker_reports_every_feature_unused() {
     let root = unmarked_project("none");
@@ -84,10 +198,13 @@ fn a_project_with_no_marker_reports_every_feature_unused() {
 }
 
 /// The whole stderr, not a substring: both rows and the summary line are deterministic
-/// for this fixture, so there is nothing to pick out piecemeal.
+/// for this fixture, so there is nothing to pick out piecemeal. `---@struct`'s
+/// `applicable` is `0`, not `-`: `unmarked-struct` has run over this fixture and found no
+/// candidate (`Foo` and `Bar` are both marked already), which is a count, not an absence
+/// of one -- unlike every other row here, which still has no lint behind it at all.
 const TWO_MARKERS_PLAIN_STDERR: &str = "\
 feature          used  applicable
----@struct          2           -
+---@struct          2           0
 ---@optional        0           -
 ---@sealed          0           -
 ---@extensible      0           -
@@ -101,10 +218,10 @@ htl adopt: 2 of 9 features used, 3 markers in 2 files
 
 /// As [`TWO_MARKERS_PLAIN_STDERR`], with `--detail`'s three lines (feature order: `Foo` and
 /// `Bar` under `---@struct`, file then line; `find` under `---@nilable`) inserted between
-/// the table and the summary.
+/// the table and the summary. No candidate line: this fixture has none.
 const TWO_MARKERS_DETAIL_STDERR: &str = "\
 feature          used  applicable
----@struct          2           -
+---@struct          2           0
 ---@optional        0           -
 ---@sealed          0           -
 ---@extensible      0           -
@@ -136,9 +253,11 @@ fn a_project_with_two_structs_and_a_nilable_function_counts_each_marker() {
     let features = v["features"].as_array().unwrap();
     assert_eq!(features[0]["marker"], "struct");
     assert_eq!(features[0]["used"], 2);
-    assert!(features[0]["applicable"].is_null(), "{v}");
+    assert_eq!(features[0]["applicable"], 0, "{v}");
+    assert_eq!(features[0]["candidates"], serde_json::json!([]), "{v}");
     assert_eq!(v["summary"]["used"], 2);
     assert_eq!(v["summary"]["markers"], 3);
+    assert_eq!(v["summary"]["applicable"], 0);
 }
 
 #[test]
@@ -291,14 +410,14 @@ fn a_replayed_project_prints_the_same_table_and_the_cache_says_so() {
 }
 
 #[test]
-fn help_says_what_applicable_means_and_that_it_is_empty_this_release() {
+fn help_says_which_row_has_applicable() {
     let out = Command::new(common::htl_bin())
         .args(["adopt", "--help"])
         .output()
         .unwrap();
     let help = String::from_utf8_lossy(&out.stdout);
     assert!(help.contains("applicable"), "{help}");
-    assert!(help.contains("this release"), "{help}");
+    assert!(help.contains("unmarked-struct"), "{help}");
 }
 
 #[test]
@@ -314,4 +433,109 @@ fn a_dtl_declaration_carrying_a_marker_does_not_move_its_row() {
         err.contains("htl adopt: 0 of 9 features used, no markers"),
         "a declaration's own markers are not the project's authors' writing: {err}"
     );
+}
+
+/// As [`TWO_MARKERS_PLAIN_STDERR`], but `Point` (unmarked, built whole at two sites) makes
+/// the `---@struct` row's `applicable` `1` instead of `-`; every other row is still `-`,
+/// and the summary line is unchanged (a candidate carries no marker, so it adds nothing
+/// to `used` or `markers`).
+const CANDIDATE_PLAIN_STDERR: &str = "\
+feature          used  applicable
+---@struct          2           1
+---@optional        0           -
+---@sealed          0           -
+---@extensible      0           -
+---@nilable         1           -
+---@contract        0           -
+---@required        0           -
+---@async           0           -
+---@noyield         0           -
+htl adopt: 2 of 9 features used, 3 markers in 2 files
+";
+
+/// As [`CANDIDATE_PLAIN_STDERR`], with `--detail`'s four lines inserted: `Foo` and `Bar`
+/// (used sites) before `Point` (the candidate, with its site count) under `---@struct`,
+/// then `find` under `---@nilable`.
+const CANDIDATE_DETAIL_STDERR: &str = "\
+feature          used  applicable
+---@struct          2           1
+---@optional        0           -
+---@sealed          0           -
+---@extensible      0           -
+---@nilable         1           -
+---@contract        0           -
+---@required        0           -
+---@async           0           -
+---@noyield         0           -
+  ---@struct      src/a.tl:3   Foo
+  ---@struct      src/b.tl:10  Bar
+  ---@struct      src/a.tl:11  Point  (applicable: built whole at 2 sites)
+  ---@nilable     src/a.tl:8   find
+htl adopt: 2 of 9 features used, 3 markers in 2 files
+";
+
+#[test]
+fn the_struct_row_counts_the_records_unmarked_struct_would_report() {
+    let root = candidate_project("row", "{ v = \"b\" }");
+    let (ok, _, err) = htl(&["adopt"], &root);
+    assert!(ok, "{err}");
+    assert_eq!(err, CANDIDATE_PLAIN_STDERR);
+
+    let (ok, stdout, stderr) = htl(&["adopt", "--format", "json"], &root);
+    assert!(ok, "{stderr}");
+    assert!(
+        stderr.trim().is_empty(),
+        "json mode keeps stderr silent: {stderr}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is one JSON document");
+    let features = v["features"].as_array().unwrap();
+    assert_eq!(features[0]["marker"], "struct");
+    assert_eq!(features[0]["applicable"], 1);
+    assert_eq!(
+        features[0]["candidates"],
+        serde_json::json!([{ "file": "src/a.tl", "line": 11, "name": "Point", "sites": 2 }]),
+        "{v}"
+    );
+    for f in &features[1..] {
+        assert!(f["applicable"].is_null(), "{f}");
+        assert_eq!(f["candidates"], serde_json::json!([]), "{f}");
+    }
+    assert_eq!(v["summary"]["applicable"], 1);
+}
+
+#[test]
+fn detail_lists_candidates_after_the_marked_declarations() {
+    let root = candidate_project("detail-candidate", "{ v = \"b\" }");
+    let (ok, _, err) = htl(&["adopt", "--detail"], &root);
+    assert!(ok, "{err}");
+    assert_eq!(err, CANDIDATE_DETAIL_STDERR);
+}
+
+#[test]
+fn a_record_built_short_at_one_site_is_not_a_candidate() {
+    let root = candidate_project("short", "{}");
+    let (ok, _, err) = htl(&["adopt"], &root);
+    assert!(ok, "{err}");
+    let struct_row = err
+        .lines()
+        .find(|l| l.trim_start().starts_with("---@struct"))
+        .unwrap_or_else(|| panic!("no ---@struct row: {err}"));
+    assert_eq!(
+        struct_row, "---@struct          2           0",
+        "{struct_row}"
+    );
+
+    let (ok, _, detail_err) = htl(&["adopt", "--detail"], &root);
+    assert!(ok, "{detail_err}");
+    assert!(
+        !detail_err.contains("Point"),
+        "a record built short at one site is not a candidate: {detail_err}"
+    );
+
+    let (ok, stdout, stderr) = htl(&["adopt", "--format", "json"], &root);
+    assert!(ok, "{stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is one JSON document");
+    assert_eq!(v["features"][0]["applicable"], 0);
+    assert_eq!(v["features"][0]["candidates"], serde_json::json!([]), "{v}");
+    assert_eq!(v["summary"]["applicable"], 0);
 }

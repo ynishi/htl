@@ -280,6 +280,44 @@ pub struct CheckInfo {
     /// Empty for a `.d.tl`: `htl dts` writes `---@async` / `---@noyield` into a
     /// declaration itself, and this is a census of what the project's own authors wrote.
     pub markers: Vec<MarkerSite>,
+    /// One entry per table literal this check found built as a declared record — marked
+    /// `---@struct` or not, whole or not — the input [`unmarked_structs`] groups by
+    /// declaration and `htl adopt`'s `---@struct` row (#304) reads the same way.
+    /// An inferred record (a bare `{ ... }` with no declaration anywhere) is not one of
+    /// these; see [`StructSite::record_file`].
+    ///
+    /// Empty for a `.d.tl`, as [`CheckInfo::markers`] is: no literal is built in a
+    /// declaration file either.
+    pub struct_sites: Vec<StructSite>,
+}
+
+/// One table literal a check found built as a declared record (see
+/// [`CheckInfo::struct_sites`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StructSite {
+    /// The declaring file, as the checker found it — a mod's literal names its SDK's
+    /// file here, not its own. Canonicalised where a caller compares it to another
+    /// file's spelling, the way [`global_redeclarations`] compares [`GlobalSite::file`].
+    pub record_file: String,
+    /// Line of the record's own declaration (`record Point`, or `type Point = record`),
+    /// in `record_file`.
+    pub record_line: usize,
+    /// The record's own name, as written on its declaration line.
+    pub record_name: String,
+    /// Whether the record carries `---@struct`, read from `record_file`'s own lines —
+    /// the same read [`crate`]'s `struct-fields` lint resolves a literal's spec from.
+    pub marked: bool,
+    /// Line of the literal itself, in the file being checked.
+    pub line: usize,
+    /// Column of the same.
+    pub col: usize,
+    /// Whether this literal sets every field the record's own body declares — the same
+    /// fields `struct-fields` would require if the record were marked, with no
+    /// `---@optional` exemption: a field that marker would exempt still has to be set
+    /// for this to be `true`. `false` for a record whose body declares no data field at
+    /// all; nothing to set is not evidence that this literal, or any other, sets
+    /// everything.
+    pub complete: bool,
 }
 
 /// One marker the census found on a declaration (see [`CheckInfo::markers`]).
@@ -991,6 +1029,105 @@ pub fn global_redeclarations(infos: &[(PathBuf, CheckInfo)]) -> Vec<Diagnostic> 
             Some("global-redeclaration"),
         ));
     }
+    out
+}
+
+/// One record [`unmarked_structs`] found a candidate for `---@struct` (#304).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnmarkedStruct {
+    /// The record's declaring file, as the walk that found it spelled it — not
+    /// canonicalised, so a caller reports the path the project's own files use.
+    pub file: PathBuf,
+    /// Line of the record's own declaration.
+    pub line: usize,
+    /// The record's own name.
+    pub name: String,
+    /// How many construction sites the group has, every one of them already setting
+    /// every field the record's own body declares — what made the record a candidate.
+    pub sites: usize,
+}
+
+/// A record declared among a run's own files, built whole at every one of its
+/// construction sites, and left unmarked (#304; `htl adopt`'s `---@struct` row reads
+/// the same list). A record is a candidate when all four hold:
+///
+/// 1. it is not marked `---@struct` ([`StructSite::marked`]);
+/// 2. it has at least one construction site — a record nobody builds says nothing
+///    about itself, marked or not;
+/// 3. every site of it is [`complete`](StructSite::complete) — a record built short at
+///    even one site is the open question `struct-fields` already answers once the
+///    record carries the marker, not evidence either way for this rule;
+/// 4. the record's own file is one the walk checked ([`StructSite::record_file`],
+///    canonicalised, among `checked`'s own paths) — a record declared in a dependency's
+///    `.d.tl`, or anywhere outside the walk, is not the project's to mark.
+///
+/// `checked` is one entry per file the walk visited, paired with the construction-site
+/// census found in it ([`CheckInfo::struct_sites`] for the lint's own call, below; `htl
+/// adopt` (`crate::adopt::adopt`) pairs its own checked files with the same census read
+/// back through the cache, [`cache::StructSiteJson`], so the two callers share this
+/// function's body rather than each walking the four conditions themselves). Sites are
+/// grouped by `(canonicalised record_file, record_line)`, the same two-part key
+/// [`global_redeclarations`] groups a global's sites by and for the same reason: two
+/// spellings of one path are one record, and the line is what tells two records of one
+/// file apart. `file` in the result is the record's file as the walk itself spelled it —
+/// whichever `checked` path canonicalises to the group's key — not the canonical form,
+/// so a caller reports a path that exists in the project's own tree. Ordered by `(file,
+/// line)`.
+pub fn unmarked_structs(checked: &[(PathBuf, Vec<StructSite>)]) -> Vec<UnmarkedStruct> {
+    use std::collections::{BTreeMap, HashMap};
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    // Canonical -> the path as `checked` itself spells it (the walk's own spelling of
+    // the file it checked), not a site's: `StructSite::record_file` is a *requirer's*
+    // resolution of the declaring file, read off `t.file` in whichever file built the
+    // literal, and two requirers can spell the same declaring file two different ways
+    // (`./src/geom.tl` from one directory, an absolute path from another, the
+    // declaring file's own check spelling itself a third). Reading the file's own entry
+    // in `checked` instead is what keeps every record of one file sorting together
+    // under one spelling, rather than under whichever site happened to be seen first.
+    let walked: HashMap<PathBuf, PathBuf> =
+        checked.iter().map(|(f, _)| (canon(f), f.clone())).collect();
+
+    struct Candidate {
+        name: String,
+        sites: usize,
+        every_site_complete: bool,
+        marked: bool,
+    }
+    let mut by_record: BTreeMap<(PathBuf, usize), Candidate> = BTreeMap::new();
+    for (_, sites) in checked {
+        for s in sites {
+            let key = (canon(Path::new(&s.record_file)), s.record_line);
+            let c = by_record.entry(key).or_insert_with(|| Candidate {
+                name: s.record_name.clone(),
+                sites: 0,
+                every_site_complete: true,
+                marked: s.marked,
+            });
+            // Always at least 1 here: a group exists in `by_record` only because this
+            // loop just inserted or found an entry for a site that reached it.
+            c.sites += 1;
+            c.every_site_complete = c.every_site_complete && s.complete;
+        }
+    }
+    let mut out = Vec::new();
+    for ((canon_file, line), c) in by_record {
+        // Condition 4: the record's own file is one the walk checked.
+        let Some(file) = walked.get(&canon_file) else {
+            continue;
+        };
+        // Conditions 1-3: not marked, and (inherently, from the loop above) at least
+        // one site, every one of them complete.
+        if c.marked || !c.every_site_complete {
+            continue;
+        }
+        out.push(UnmarkedStruct {
+            file: file.clone(),
+            line,
+            name: c.name,
+            sites: c.sites,
+        });
+    }
+    out.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
     out
 }
 
@@ -3018,6 +3155,26 @@ fn read_checkinfo(t: &Table) -> Result<CheckInfo> {
             .collect::<Result<Vec<_>>>()?,
         Err(_) => Vec::new(),
     };
+    // Absent the same way `markers` above is, from a prelude built before this existed.
+    let struct_sites = match t.get::<Table>("struct_sites") {
+        Ok(list) => list
+            .sequence_values::<Table>()
+            .map(|s| {
+                let s = s?;
+                let record: Table = s.get("record")?;
+                Ok(StructSite {
+                    record_file: record.get("file")?,
+                    record_line: record.get("line")?,
+                    record_name: record.get("name")?,
+                    marked: s.get("marked")?,
+                    line: s.get("y")?,
+                    col: s.get("x")?,
+                    complete: s.get("complete")?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        Err(_) => Vec::new(),
+    };
     let closure_requires = match t.get::<Table>("closure_requires") {
         Ok(list) => list
             .sequence_values::<Table>()
@@ -3049,6 +3206,7 @@ fn read_checkinfo(t: &Table) -> Result<CheckInfo> {
         lint_items,
         global_sites,
         markers,
+        struct_sites,
         closure_requires,
     })
 }
