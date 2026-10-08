@@ -19,7 +19,7 @@
 
 mod common;
 
-use common::{config, scratch, write};
+use common::{config, tempdir, write};
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use htl_core::Htl;
 use htl_core::fix::{FixOptions, fix_file};
@@ -48,8 +48,8 @@ fn world_source(deps: usize) -> String {
 
 /// A project whose `world.tl` needs one forward-reference fix, and a second module requiring
 /// it — which is what puts `world` in the store and made #29 visible in the first place.
-fn project(deps: usize) -> (PathBuf, PathBuf) {
-    let dir = scratch(&format!("d{deps}"));
+fn project(deps: usize) -> (common::TempDir, PathBuf) {
+    let dir = tempdir(&format!("d{deps}"));
     for i in 0..deps {
         write(
             &dir.join(format!("dep_{i}.tl")),

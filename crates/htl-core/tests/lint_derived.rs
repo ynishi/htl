@@ -5,12 +5,12 @@
 
 use htl_core::Htl;
 use htl_core::dts;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-derived", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-derived", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -29,7 +29,7 @@ fn lints_of(dir: &Path, file: &str) -> Vec<String> {
 /// A derived unit enum in a `.d.tl` module of its own, imported with `local type`.
 #[test]
 fn enum_exhaustive_sees_a_derived_enum() {
-    let dir = scratch("enum");
+    let dir = tempdir("enum");
     let item: syn::Item =
         syn::parse_str("#[derive(TealRecord)] pub enum Behavior { Chase, Wander, Flee }").unwrap();
     let rd = dts::record_decl(&item).unwrap();
@@ -52,7 +52,7 @@ fn enum_exhaustive_sees_a_derived_enum() {
 /// renamed words, and a chain that leaves one out is still reported by its word.
 #[test]
 fn enum_exhaustive_sees_the_renamed_words() {
-    let dir = scratch("enum-renamed");
+    let dir = tempdir("enum-renamed");
     let item: syn::Item = syn::parse_str(
         "#[derive(TealRecord)] #[teal(rename_all = \"snake_case\")] pub enum State { Open, InReview, Closed }",
     )
@@ -77,7 +77,7 @@ fn enum_exhaustive_sees_the_renamed_words() {
 /// records keep their Rust names, and `union-exhaustive` counts them as it always did.
 #[test]
 fn union_exhaustive_counts_the_variants_of_a_renamed_union() {
-    let dir = scratch("union-renamed");
+    let dir = tempdir("union-renamed");
     let file: syn::File = syn::parse_str(
         "#[derive(TealRecord)] #[teal(rename_all = \"snake_case\")] pub enum Step { Idle, InReview(f64), NeedsWork { why: String } }\n\
          pub struct Host;\n\
@@ -120,7 +120,7 @@ fn union_exhaustive_counts_the_variants_of_a_renamed_union() {
 /// measured against every variant the Rust enum has.
 #[test]
 fn union_exhaustive_sees_a_derived_union() {
-    let dir = scratch("union");
+    let dir = tempdir("union");
     let file: syn::File = syn::parse_str(
         "#[derive(TealRecord)] pub enum Shape { Dot, Circle(f64), Rect { w: f64, h: f64 } }\n\
          pub struct Host;\n\

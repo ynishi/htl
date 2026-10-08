@@ -2,13 +2,13 @@
 //! source alone — an enum and a newtype included — so a fresh checkout checks before
 //! anything is built. The crate here is never compiled; the scan is syntactic.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-dts", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-dts", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -24,8 +24,8 @@ fn htl(root: &Path, args: &[&str]) -> Output {
         .unwrap()
 }
 
-fn host_crate(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn host_crate(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(
         &root.join("Cargo.toml"),
         "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
@@ -110,7 +110,7 @@ fn dts_writes_an_enum_an_alias_and_a_nested_union() {
 /// script passing the Rust spelling is a type error before anything runs.
 #[test]
 fn dts_writes_the_renamed_words_and_check_holds_them() {
-    let root = scratch("renamed");
+    let root = tempdir("renamed");
     write(
         &root.join("Cargo.toml"),
         "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
@@ -160,7 +160,7 @@ fn dts_writes_the_renamed_words_and_check_holds_them() {
 /// A record field of the same shape stays `T` — every Teal record field is nilable.
 #[test]
 fn dts_marks_an_option_parameter_optional_and_check_takes_both_calls() {
-    let root = scratch("optional");
+    let root = tempdir("optional");
     write(
         &root.join("Cargo.toml"),
         "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
@@ -213,7 +213,7 @@ fn dts_marks_an_option_parameter_optional_and_check_takes_both_calls() {
 
 #[test]
 fn a_data_enum_asking_for_its_own_dts_is_refused_with_advice() {
-    let root = scratch("refused");
+    let root = tempdir("refused");
     write(
         &root.join("Cargo.toml"),
         "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
@@ -237,7 +237,7 @@ fn a_data_enum_asking_for_its_own_dts_is_refused_with_advice() {
 /// as a dependency's `.d.tl` would be.
 #[test]
 fn dts_writes_a_uses_entry_under_a_module_path_and_check_accepts_it() {
-    let root = scratch("module-path");
+    let root = tempdir("module-path");
     write(
         &root.join("Cargo.toml"),
         "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
@@ -286,7 +286,7 @@ fn dts_writes_a_uses_entry_under_a_module_path_and_check_accepts_it() {
 /// scaffolded project — this test, like the rest of this file, never compiles the Rust.
 #[test]
 fn dts_nests_a_record_named_through_a_module_path_and_check_accepts_host_dot_name() {
-    let root = scratch("module-record");
+    let root = tempdir("module-record");
     write(
         &root.join("Cargo.toml"),
         "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
@@ -336,7 +336,7 @@ fn dts_nests_a_record_named_through_a_module_path_and_check_accepts_host_dot_nam
 /// reads `geom.rs` but finds nothing by that name there, naming the file.
 #[test]
 fn dts_refuses_a_module_qualified_record_naming_the_missing_module_or_record() {
-    let root = scratch("module-record-missing");
+    let root = tempdir("module-record-missing");
     write(
         &root.join("Cargo.toml"),
         "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",

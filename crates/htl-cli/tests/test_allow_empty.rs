@@ -6,7 +6,7 @@
 //! guard against a wrong directory or `--lib` that finds nothing. These cases hold it in
 //! place and check the flag does not also loosen a run that has files.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
 
 mod common;
@@ -20,8 +20,8 @@ fn write(path: &Path, text: &str) {
 }
 
 /// A library with a module and no `.tl` that loads `htl.test`.
-fn untested(name: &str) -> PathBuf {
-    let root = common::scratch("htl-cli-allow-empty", name);
+fn untested(name: &str) -> common::TempDir {
+    let root = common::tempdir("htl-cli-allow-empty", name);
     write(&root.join("htl.toml"), "[check]\n");
     write(
         &root.join("src/adder.tl"),

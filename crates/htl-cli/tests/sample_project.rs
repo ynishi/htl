@@ -14,16 +14,16 @@
 //! The two `failing/` fixtures had no caller at all before this file: they were checked in
 //! to be run by hand and nothing ever ran them.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-sample", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-sample", name)
 }
 
-/// A fixture's absolute path. The tests run from a scratch directory rather than from the
+/// A fixture's absolute path. The tests run from a temp directory rather than from the
 /// checkout, so every path handed to the binary has to be absolute.
 fn fixture(rel: &str) -> String {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -67,7 +67,7 @@ fn run_with(args: &[&str], extra: &[String], cwd: &Path) -> (bool, String) {
 /// below ambiguous, so this is the one that has to stay quiet.
 #[test]
 fn the_sample_modules_check_clean() {
-    let dir = scratch("check");
+    let dir = tempdir("check");
     let (ok, out) = run_with(&["check"], &sample(), &dir);
     assert!(ok, "the sample must check clean:\n{out}");
     assert!(
@@ -80,7 +80,7 @@ fn the_sample_modules_check_clean() {
 /// the exit code: a suite whose cases stopped being collected would exit zero too.
 #[test]
 fn the_sample_suite_passes() {
-    let dir = scratch("test");
+    let dir = tempdir("test");
     let (ok, out) = run(&["test", &fixture("sample/util_test.tl")], &dir);
     assert!(ok, "the sample suite must pass:\n{out}");
     assert!(
@@ -99,12 +99,12 @@ fn the_sample_suite_passes() {
 /// the first would pass while the cache saved nothing.
 ///
 /// A store lives beside the `htl.toml` a project has; a bare set of files has none, so the
-/// CLI falls back to the working directory. That is why this runs from a scratch directory
+/// CLI falls back to the working directory. That is why this runs from a temp directory
 /// — it is what makes "cold" mean cold on a machine that has run this suite before, and it
 /// leaves nothing behind in the checkout.
 #[test]
 fn the_second_check_is_answered_out_of_the_store() {
-    let dir = scratch("cache");
+    let dir = tempdir("cache");
     let files = sample();
 
     let (ok, cold) = run_with(&["check", "--explain-cache"], &files, &dir);
@@ -134,7 +134,7 @@ fn the_second_check_is_answered_out_of_the_store() {
 /// checked, so three entries are what a second run would have to read.
 #[test]
 fn cache_status_reports_what_the_check_wrote() {
-    let dir = scratch("status");
+    let dir = tempdir("status");
     let (ok, check) = run_with(&["check"], &sample(), &dir);
     assert!(ok, "{check}");
 
@@ -151,7 +151,7 @@ fn cache_status_reports_what_the_check_wrote() {
 /// still exit non-zero — and the file it stopped over has to be counted as one with errors.
 #[test]
 fn a_failing_suite_names_every_failure_and_exits_non_zero() {
-    let dir = scratch("failing");
+    let dir = tempdir("failing");
     let (ok, out) = run(&["test", &fixture("failing/bad_test.tl")], &dir);
     assert!(!ok, "a suite with failing cases must not exit zero:\n{out}");
     assert!(
@@ -175,7 +175,7 @@ fn a_failing_suite_names_every_failure_and_exits_non_zero() {
 /// refusal — nothing passed *and* nothing failed, because no case ran.
 #[test]
 fn a_suite_that_does_not_type_check_is_refused_before_it_runs() {
-    let dir = scratch("typed");
+    let dir = tempdir("typed");
     let (ok, out) = run(&["test", &fixture("failing/typed_test.tl")], &dir);
     assert!(!ok, "a suite that does not type check must fail:\n{out}");
     assert!(

@@ -7,13 +7,13 @@
 //! lint (fatal under `strict`), `htl dts` exits non-zero, and `htl run` says it on
 //! stderr. What none of them may do is write nothing and report nothing.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-publish", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-publish", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -31,8 +31,8 @@ fn htl(root: &Path, args: &[&str]) -> Output {
 
 /// A project whose declaring module has a function on a table it never declares a record
 /// for: there is nowhere in the declaration for it to go.
-fn unpublishable(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn unpublishable(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), "[[contract]]\ndir = \"mods\"\n");
     write(
         &root.join("src/defs.tl"),
@@ -90,7 +90,7 @@ fn run_says_it_on_stderr() {
 /// The publishable case, for contrast: written, announced, and silent on a second run.
 #[test]
 fn a_declaration_only_module_is_published_and_announced() {
-    let root = scratch("ok");
+    let root = tempdir("ok");
     write(&root.join("htl.toml"), "[[contract]]\ndir = \"mods\"\n");
     write(
         &root.join("src/defs.tl"),
@@ -128,7 +128,7 @@ fn a_declaration_only_module_is_published_and_announced() {
 /// module publishing once per contract instead of once.
 #[test]
 fn two_contracts_are_published_once_each_and_report_nothing() {
-    let root = scratch("two-contracts");
+    let root = tempdir("two-contracts");
     write(
         &root.join("htl.toml"),
         "[[contract]]\ndir = \"mods_a\"\n\n[[contract]]\ndir = \"mods_b\"\n",

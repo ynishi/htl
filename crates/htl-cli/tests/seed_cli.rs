@@ -3,13 +3,13 @@
 //! A test that draws randomness is only worth writing if a failure can be looked at
 //! again, which means the seed has to be printed and accepted back.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-seed", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-seed", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -32,8 +32,8 @@ fn htl(args: &[&str], cwd: &Path) -> (bool, String, String) {
 
 /// Two files, each printing one draw, so a run's values can be compared with a run of
 /// one file on its own.
-fn project() -> PathBuf {
-    let root = scratch("proj");
+fn project() -> common::TempDir {
+    let root = tempdir("proj");
     write(
         &root.join("tests/a_test.tl"),
         "local t = require(\"htl.test\")\n\
@@ -100,7 +100,7 @@ fn the_seed_is_printed_every_run_and_differs_when_not_given() {
 fn json_carries_the_seed() {
     // Its own project: `--format json` puts one document on stdout, and the fixture above
     // prints its draws there.
-    let root = scratch("json");
+    let root = tempdir("json");
     write(
         &root.join("tests/quiet_test.tl"),
         "local t = require(\"htl.test\")\n\

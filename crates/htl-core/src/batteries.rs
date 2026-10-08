@@ -185,6 +185,7 @@ impl Htl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core_common;
 
     #[test]
     fn every_module_the_build_carries_is_required_as_std() -> Result<()> {
@@ -284,8 +285,7 @@ mod tests {
     /// checker (declaration) and the program state (preload).
     #[test]
     fn a_script_using_std_checks_and_runs() -> Result<()> {
-        let dir = std::env::temp_dir().join(format!("htl-std-{}", std::process::id()));
-        std::fs::create_dir_all(&dir)?;
+        let dir = core_common::tempdir("htl-std", "default");
         let file = dir.join("main.tl");
         std::fs::write(
             &file,
@@ -301,7 +301,6 @@ mod tests {
         let (code, info) = h.gen_lua(&file)?;
         assert!(info.ok(), "{info:?}");
         h.exec(&code.expect("generated"), "@main.tl", &[])?;
-        std::fs::remove_dir_all(&dir)?;
         Ok(())
     }
 }

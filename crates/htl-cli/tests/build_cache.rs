@@ -2,13 +2,13 @@
 //! so the way `htl check` does, and writes the same bundle; `--no-cache` stays silent; and
 //! the `gen` entries `htl test` writes are the ones `htl build` reads, and the reverse.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-build-cache", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-build-cache", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -30,8 +30,8 @@ fn htl(args: &[&str], cwd: &Path) -> (bool, String, String) {
 }
 
 /// main -> util, with a test file for util so `htl test` has something to store.
-fn project(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn project(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), "[check]\n");
     write(
         &root.join("src/main.tl"),

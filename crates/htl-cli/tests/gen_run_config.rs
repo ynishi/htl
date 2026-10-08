@@ -12,13 +12,13 @@
 //! requires sits beside the file requiring it, so every case here fails without the config
 //! and passes with it, and a regression cannot hide behind the layout rule.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-gen-run-config", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-gen-run-config", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -50,8 +50,8 @@ fn htl(args: &[&str], cwd: &Path) -> (bool, String, String) {
 /// modules in `<name>/init.tl` form. `types/` holds a second declaration, which is on the
 /// search path because `search_paths` puts it there for every project. `src/entry.tl`
 /// requires across the gap: it sits in `src/` and the module it wants is under `lib/`.
-fn project(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn project(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(
         &root.join("htl.toml"),
         "[check]\npaths = [\"lib\", \"types\"]\n",

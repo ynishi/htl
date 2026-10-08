@@ -161,7 +161,7 @@ fn assert_tree(case: &str, root: &Path) {
 
 #[test]
 fn new_writes_the_plain_tree() {
-    let root = common::scratch("htl-cli-snapshot", "plain");
+    let root = common::tempdir("htl-cli-snapshot", "plain");
     htl(&["new", "sample"], &root);
     assert_tree("plain", &root.join("sample"));
 }
@@ -172,7 +172,7 @@ fn new_writes_the_plain_tree() {
 /// above all — is reviewed.
 #[test]
 fn new_htl_main_writes_the_plain_tree() {
-    let root = common::scratch("htl-cli-snapshot", "plain-main");
+    let root = common::tempdir("htl-cli-snapshot", "plain-main");
     htl(&["new", "sample", "--htl", "main"], &root);
     assert_tree("plain", &root.join("sample"));
 }
@@ -182,21 +182,21 @@ fn new_htl_main_writes_the_plain_tree() {
 /// README paragraph that mentions it.
 #[test]
 fn new_no_x_writes_the_plain_tree_without_the_dependency() {
-    let root = common::scratch("htl-cli-snapshot", "plain-no-x");
+    let root = common::tempdir("htl-cli-snapshot", "plain-no-x");
     htl(&["new", "sample", "--no-x"], &root);
     assert_tree("plain-no-x", &root.join("sample"));
 }
 
 #[test]
 fn new_lib_writes_no_entry_script() {
-    let root = common::scratch("htl-cli-snapshot", "lib");
+    let root = common::tempdir("htl-cli-snapshot", "lib");
     htl(&["new", "sample", "--lib"], &root);
     assert_tree("lib", &root.join("sample"));
 }
 
 #[test]
 fn new_embed_writes_the_rust_host() {
-    let root = common::scratch("htl-cli-snapshot", "embed");
+    let root = common::tempdir("htl-cli-snapshot", "embed");
     htl(&["new", "sample", "--embed"], &root);
     assert_tree("embed", &root.join("sample"));
 }
@@ -206,7 +206,7 @@ fn new_embed_writes_the_rust_host() {
 /// thing the two differ in, normalised away above.
 #[test]
 fn new_embed_htl_main_writes_what_the_default_writes() {
-    let root = common::scratch("htl-cli-snapshot", "embed-main");
+    let root = common::tempdir("htl-cli-snapshot", "embed-main");
     htl(&["new", "sample", "--embed", "--htl", "main"], &root);
     assert_tree("embed", &root.join("sample"));
 }
@@ -215,14 +215,14 @@ fn new_embed_htl_main_writes_what_the_default_writes() {
 /// the two write the same tree rather than two trees that happen to look alike.
 #[test]
 fn new_target_bin_writes_what_embed_writes() {
-    let root = common::scratch("htl-cli-snapshot", "target-bin");
+    let root = common::tempdir("htl-cli-snapshot", "target-bin");
     htl(&["new", "sample", "--target", "bin"], &root);
     assert_tree("embed", &root.join("sample"));
 }
 
 #[test]
 fn new_lib_embed_writes_the_rust_host_without_a_binary() {
-    let root = common::scratch("htl-cli-snapshot", "lib-embed");
+    let root = common::tempdir("htl-cli-snapshot", "lib-embed");
     htl(&["new", "sample", "--lib", "--embed"], &root);
     assert_tree("lib-embed", &root.join("sample"));
 }
@@ -233,7 +233,7 @@ fn new_lib_embed_writes_the_rust_host_without_a_binary() {
 /// caller's `restype` or the C caller's `free` shows up in this diff or nowhere.
 #[test]
 fn new_lib_target_cdylib_writes_the_c_abi_library_and_its_callers() {
-    let root = common::scratch("htl-cli-snapshot", "cdylib");
+    let root = common::tempdir("htl-cli-snapshot", "cdylib");
     htl(&["new", "sample", "--lib", "--target", "cdylib"], &root);
     assert_tree("cdylib", &root.join("sample"));
 }
@@ -244,7 +244,7 @@ fn new_lib_target_cdylib_writes_the_c_abi_library_and_its_callers() {
 /// halves a compiler does not check until somebody runs the project.
 #[test]
 fn new_target_window_writes_the_window_host() {
-    let root = common::scratch("htl-cli-snapshot", "window");
+    let root = common::tempdir("htl-cli-snapshot", "window");
     htl(&["new", "sample", "--target", "window"], &root);
     assert_tree("window", &root.join("sample"));
 }
@@ -253,7 +253,7 @@ fn new_target_window_writes_the_window_host() {
 /// from the directory. Sharing the snapshot is the assertion.
 #[test]
 fn init_in_an_empty_directory_writes_what_new_would() {
-    let root = common::scratch("htl-cli-snapshot", "init");
+    let root = common::tempdir("htl-cli-snapshot", "init");
     let dir = root.join("sample");
     std::fs::create_dir_all(&dir).unwrap();
     htl(&["init"], &dir);
@@ -262,7 +262,7 @@ fn init_in_an_empty_directory_writes_what_new_would() {
 
 #[test]
 fn init_embed_in_an_empty_directory_writes_what_new_would() {
-    let root = common::scratch("htl-cli-snapshot", "init-embed");
+    let root = common::tempdir("htl-cli-snapshot", "init-embed");
     let dir = root.join("sample");
     std::fs::create_dir_all(&dir).unwrap();
     htl(&["init", "--embed"], &dir);
@@ -276,7 +276,7 @@ fn init_embed_in_an_empty_directory_writes_what_new_would() {
 /// `htl init --target` on a real project actually gets.
 #[test]
 fn init_target_fills_in_the_rust_side_of_a_plain_project() {
-    let root = common::scratch("htl-cli-snapshot", "init-target");
+    let root = common::tempdir("htl-cli-snapshot", "init-target");
     let dir = root.join("sample");
     htl(&["new", "sample"], &root);
     htl(&["init", "--target", "bin"], &dir);

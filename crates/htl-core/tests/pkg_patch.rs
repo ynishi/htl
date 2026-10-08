@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-pkgpatch", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-pkgpatch", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -19,7 +19,7 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
-/// git, with an identity of its own: the scratch repositories are not the person's, and a
+/// git, with an identity of its own: the tempdir repositories are not the person's, and a
 /// machine with no `user.email` configured must still be able to run these.
 fn git(cwd: &Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
@@ -46,21 +46,22 @@ const DECL: &str = "local record mathx\n   twice: function(n: number): number\ne
 
 /// A dependency as a repository on disk: a source under `src/`, the declaration it
 /// publishes under `types/`, one commit. Returns what to pin it by.
-fn remote(name: &str) -> (String, String) {
-    let dir = scratch(name);
+fn remote(name: &str) -> (common::TempDir, String, String) {
+    let dir = tempdir(name);
     write(&dir.join("src/mathx.tl"), SOURCE);
     write(&dir.join("types/mathx.d.tl"), DECL);
     git(&dir, &["init", "-q"]);
     git(&dir, &["add", "."]);
     git(&dir, &["commit", "-qm", "mathx"]);
     let sha = git(&dir, &["rev-parse", "HEAD"]);
-    (format!("file://{}", dir.display()), sha)
+    let url = format!("file://{}", dir.display());
+    (dir, url, sha)
 }
 
 /// The same dependency, published as an mlua-pkg project itself — which is what a
 /// package that has dependencies of its own looks like, and what `patch` copies whole.
-fn remote_with_manifest(name: &str) -> (String, String) {
-    let dir = scratch(name);
+fn remote_with_manifest(name: &str) -> (common::TempDir, String, String) {
+    let dir = tempdir(name);
     write(
         &dir.join("mlua-pkg.toml"),
         "[package]\nname = \"mathx\"\nversion = \"0.1.0\"\nentry = \"src\"\n",
@@ -71,12 +72,13 @@ fn remote_with_manifest(name: &str) -> (String, String) {
     git(&dir, &["add", "."]);
     git(&dir, &["commit", "-qm", "mathx"]);
     let sha = git(&dir, &["rev-parse", "HEAD"]);
-    (format!("file://{}", dir.display()), sha)
+    let url = format!("file://{}", dir.display());
+    (dir, url, sha)
 }
 
 /// A project depending on it, with a comment of its own in the manifest.
-fn project(name: &str, url: &str, sha: &str) -> PathBuf {
-    let root = scratch(name);
+fn project(name: &str, url: &str, sha: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(
         &root.join("mlua-pkg.toml"),
         &format!(
@@ -91,7 +93,7 @@ fn project(name: &str, url: &str, sha: &str) -> PathBuf {
 
 #[test]
 fn patch_takes_the_package_root_into_the_tree_and_records_where_it_came_from() {
-    let (url, sha) = remote("remote-take");
+    let (_dep, url, sha) = remote("remote-take");
     let root = project("take", &url, &sha);
 
     let done = MluaProject::at(&root).patch("mathx", false).unwrap();
@@ -146,7 +148,7 @@ fn patch_takes_the_package_root_into_the_tree_and_records_where_it_came_from() {
 
 #[test]
 fn a_name_the_manifest_does_not_declare_is_refused_before_anything_is_written() {
-    let (url, sha) = remote("remote-unknown");
+    let (_dep, url, sha) = remote("remote-unknown");
     let root = project("unknown", &url, &sha);
     let before = std::fs::read_to_string(root.join("mlua-pkg.toml")).unwrap();
 
@@ -168,7 +170,7 @@ fn a_name_the_manifest_does_not_declare_is_refused_before_anything_is_written() 
 /// overwritten — and `--force` is how it is discarded on purpose.
 #[test]
 fn a_copy_with_uncommitted_changes_is_not_overwritten() {
-    let (url, sha) = remote("remote-dirty");
+    let (_dep, url, sha) = remote("remote-dirty");
     let root = project("dirty", &url, &sha);
     git(&root, &["init", "-q"]);
     let p = MluaProject::at(&root);
@@ -207,8 +209,8 @@ fn a_copy_with_uncommitted_changes_is_not_overwritten() {
 /// A project holding a patch, as an install leaves it: the manifest names the directory,
 /// the copy is there, and the lockfile says which revision the pin resolves to and which
 /// one the copy was taken from.
-fn installed_patch(name: &str, locked: &str, base: Option<&str>) -> PathBuf {
-    let root = scratch(name);
+fn installed_patch(name: &str, locked: &str, base: Option<&str>) -> common::TempDir {
+    let root = tempdir(name);
     write(
         &root.join("mlua-pkg.toml"),
         "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[deps.mathx]\n\
@@ -263,7 +265,7 @@ fn a_patch_is_in_use_while_the_pin_still_resolves_to_its_base() {
 /// whatever is in the directory. That is said rather than guessed at.
 #[test]
 fn a_copy_git_cannot_account_for_is_not_overwritten_either() {
-    let (url, sha) = remote("remote-nogit");
+    let (_dep, url, sha) = remote("remote-nogit");
     let root = project("nogit", &url, &sha);
     let p = MluaProject::at(&root);
     p.patch("mathx", false).unwrap();
@@ -280,7 +282,7 @@ fn a_copy_git_cannot_account_for_is_not_overwritten_either() {
 /// #267 saw: `patches/<dep>/.htl/modules/entries` in the tarball cargo was verifying.
 #[test]
 fn the_dependencys_own_manifest_does_not_make_the_copy_a_project() {
-    let (url, sha) = remote_with_manifest("remote-own-manifest");
+    let (_dep, url, sha) = remote_with_manifest("remote-own-manifest");
     let root = project("own-manifest", &url, &sha);
     MluaProject::at(&root).patch("mathx", false).unwrap();
     assert!(
@@ -404,7 +406,7 @@ fn the_directory_on_the_path_is_the_one_holding_the_entry_under_the_dependencys_
 /// found there too.
 #[test]
 fn a_target_dir_copy_is_linked_and_read_at_its_require_root() {
-    let root = scratch("target-dir-entry");
+    let root = tempdir("target-dir-entry");
     write(
         &root.join("mlua-pkg.toml"),
         "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[deps.lsh]\n\

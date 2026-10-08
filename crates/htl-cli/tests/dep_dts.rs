@@ -2,7 +2,7 @@
 //!
 //! The fixture under `tests/fixtures/dep_dts/` is the pair this is about: `dep` names
 //! `dts/dep.d.tl` in `[package.metadata.htl]`, `consumer` depends on it by path. Both are
-//! copied into a scratch directory first — `htl dts` writes into `consumer/types/`, and a
+//! copied into a temp directory first — `htl dts` writes into `consumer/types/`, and a
 //! test that wrote into the checkout would pass once.
 //!
 //! Nothing here builds either crate. `cargo metadata` resolves the graph, the fixture has
@@ -43,13 +43,17 @@ fn relock(root: &Path) {
     let _ = std::fs::remove_file(root.join("Cargo.lock"));
 }
 
-/// Copy the fixture pair into a fresh scratch directory, `Cargo.toml.in` becoming the
-/// `Cargo.toml` cargo reads. Returns the consumer, which is where the commands are run.
-fn project(name: &str) -> PathBuf {
-    let root = common::scratch("htl-cli-dep-dts", name);
+/// Copy the fixture pair into a fresh temp directory, `Cargo.toml.in` becoming the
+/// `Cargo.toml` cargo reads. Returns the temp directory's own guard alongside the
+/// consumer, which is where the commands are run — `dep` sits beside it under the same
+/// guard, so a caller that kept only the consumer path would see the guard drop (and the
+/// whole fixture pair removed) before the first command ran.
+fn project(name: &str) -> (common::TempDir, PathBuf) {
+    let root = common::tempdir("htl-cli-dep-dts", name);
     let from = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/dep_dts");
     copy_tree(&from, &root);
-    root.join("consumer")
+    let consumer = root.join("consumer");
+    (root, consumer)
 }
 
 fn copy_tree(from: &Path, to: &Path) {
@@ -70,7 +74,7 @@ fn copy_tree(from: &Path, to: &Path) {
 /// The first acceptance: written, reported, and a no-op the second time.
 #[test]
 fn a_shipped_declaration_is_written_reported_and_then_unchanged() {
-    let root = project("materialise");
+    let (_dir, root) = project("materialise");
     let out = htl(&root, &["dts"]);
     assert!(out.status.success(), "{}", err(&out));
     assert!(
@@ -97,7 +101,7 @@ fn a_shipped_declaration_is_written_reported_and_then_unchanged() {
 /// where the path below `types/` is the module name). It records what the copy came from.
 #[test]
 fn a_note_beside_the_copy_records_which_crate_it_came_from() {
-    let root = project("note");
+    let (_dir, root) = project("note");
     assert!(htl(&root, &["dts"]).status.success());
     let note = std::fs::read_to_string(root.join("types/dep/.htl-dts")).unwrap();
     assert!(note.contains("crate = \"dep\""), "{note}");
@@ -110,7 +114,7 @@ fn a_note_beside_the_copy_records_which_crate_it_came_from() {
 /// checkout where `htl dts` has never been run.
 #[test]
 fn a_script_requiring_the_module_checks_with_no_hand_written_declaration() {
-    let root = project("check");
+    let (_dir, root) = project("check");
     let out = htl(&root, &["check", "src/main.tl", "--no-cache"]);
     assert!(out.status.success(), "{}", err(&out));
     assert!(root.join("types/dep/dep.d.tl").is_file());
@@ -134,7 +138,7 @@ fn a_script_requiring_the_module_checks_with_no_hand_written_declaration() {
 /// started shipping is told which one is read and which one is not.
 #[test]
 fn a_hand_written_declaration_beside_the_shipped_one_is_a_duplicate() {
-    let root = project("duplicate");
+    let (_dir, root) = project("duplicate");
     assert!(htl(&root, &["dts"]).status.success());
     write(&root.join("types/dep.d.tl"), DECL);
     let out = htl(&root, &["check", "src/main.tl", "--no-cache"]);
@@ -152,7 +156,7 @@ fn a_hand_written_declaration_beside_the_shipped_one_is_a_duplicate() {
 /// command has no business removing committed files.
 #[test]
 fn a_declaration_left_by_a_dependency_that_is_gone_is_reported_not_deleted() {
-    let root = project("orphan");
+    let (_dir, root) = project("orphan");
     assert!(htl(&root, &["dts"]).status.success());
     write(
         &root.join("Cargo.toml"),
@@ -171,7 +175,7 @@ fn a_declaration_left_by_a_dependency_that_is_gone_is_reported_not_deleted() {
 /// either way, and only the message says whose manifest is wrong.
 #[test]
 fn a_crate_naming_a_file_it_does_not_ship_fails_naming_the_crate() {
-    let root = project("missing");
+    let (_dir, root) = project("missing");
     let dep = root.parent().unwrap().join("dep");
     std::fs::remove_file(dep.join("dts/dep.d.tl")).unwrap();
     let out = htl(&root, &["dts"]);
@@ -187,7 +191,7 @@ fn a_crate_naming_a_file_it_does_not_ship_fails_naming_the_crate() {
 /// took both, in name order.
 #[test]
 fn a_star_in_the_manifest_ships_every_matching_file() {
-    let root = project("glob");
+    let (_dir, root) = project("glob");
     let dep = root.parent().unwrap().join("dep");
     write(
         &dep.join("Cargo.toml"),
@@ -218,7 +222,7 @@ fn a_star_in_the_manifest_ships_every_matching_file() {
 /// pattern — the line to fix — the way it names a listed file that is not there.
 #[test]
 fn a_star_matching_nothing_fails_naming_the_pattern() {
-    let root = project("glob-none");
+    let (_dir, root) = project("glob-none");
     let dep = root.parent().unwrap().join("dep");
     write(
         &dep.join("Cargo.toml"),
@@ -238,7 +242,7 @@ fn a_star_matching_nothing_fails_naming_the_pattern() {
 /// entry would land as `thing.d.tl` and only `require("thing")` would resolve.
 #[test]
 fn a_dts_root_keeps_the_namespace_and_require_reads_it() {
-    let root = project("dts-root");
+    let (_dir, root) = project("dts-root");
     let dep = root.parent().unwrap().join("dep");
     write(
         &dep.join("Cargo.toml"),
@@ -283,7 +287,7 @@ fn a_dts_root_keeps_the_namespace_and_require_reads_it() {
 /// they were one target and the second was a duplicate.
 #[test]
 fn two_namespaces_may_hold_the_same_module_name() {
-    let root = project("dts-root-two");
+    let (_dir, root) = project("dts-root-two");
     let dep = root.parent().unwrap().join("dep");
     write(
         &dep.join("Cargo.toml"),
@@ -307,7 +311,7 @@ fn two_namespaces_may_hold_the_same_module_name() {
 /// The entries the root does cover are written all the same.
 #[test]
 fn an_entry_outside_the_dts_root_fails_naming_the_entry_and_the_root() {
-    let root = project("dts-root-stray");
+    let (_dir, root) = project("dts-root-stray");
     let dep = root.parent().unwrap().join("dep");
     write(
         &dep.join("Cargo.toml"),
@@ -333,7 +337,7 @@ fn an_entry_outside_the_dts_root_fails_naming_the_entry_and_the_root() {
 /// what a file under `types/` is for is the project's to say.
 #[test]
 fn a_declaration_from_a_previous_layout_is_reported_left_in_place() {
-    let root = project("dts-root-moved");
+    let (_dir, root) = project("dts-root-moved");
     assert!(htl(&root, &["dts"]).status.success());
     assert!(root.join("types/dep/dep.d.tl").is_file());
     let dep = root.parent().unwrap().join("dep");
@@ -357,7 +361,7 @@ fn a_declaration_from_a_previous_layout_is_reported_left_in_place() {
 /// carried which rule name.
 #[test]
 fn the_report_carries_no_rule_name_for_either_condition() {
-    let root = project("no-rule-name");
+    let (_dir, root) = project("no-rule-name");
     assert!(htl(&root, &["dts"]).status.success());
     // A dependency that is gone (its declaration stays under types/), and a declaration
     // the surviving manifest names but does not ship.
@@ -395,11 +399,11 @@ fn the_report_carries_no_rule_name_for_either_condition() {
 /// both readings of "absent from the resolved set" apart.
 #[test]
 fn the_crate_std_carries_is_not_reported_as_a_departed_dependency() {
-    let root = project("carried");
-    let scratch = root.parent().unwrap().to_path_buf();
+    let (_dir, root) = project("carried");
+    let parent = root.parent().unwrap().to_path_buf();
     // A path dependency with that crate's name: the skip is by name, and the fixture is
     // the smaller half of what the real one ships.
-    let batteries = scratch.join("mlua-batteries");
+    let batteries = parent.join("mlua-batteries");
     write(
         &batteries.join("Cargo.toml"),
         "[package]\nname = \"mlua-batteries\"\nversion = \"0.7.2\"\nedition = \"2024\"\n\n\
@@ -457,7 +461,7 @@ fn the_crate_std_carries_is_not_reported_as_a_departed_dependency() {
 /// the run says so instead of resolving over it. The file is byte-identical afterwards.
 #[test]
 fn a_lockfile_the_manifest_has_outgrown_is_refused_naming_it() {
-    let root = project("stale-lock");
+    let (_dir, root) = project("stale-lock");
     // A lockfile for the manifest as it stands, written by the first run.
     assert!(htl(&root, &["dts"]).status.success());
     let lock = root.join("Cargo.lock");
@@ -497,7 +501,7 @@ fn a_lockfile_the_manifest_has_outgrown_is_refused_naming_it() {
 /// graph is read and cargo writes what that build would have written.
 #[test]
 fn a_project_with_no_lockfile_yet_is_resolved_rather_than_refused() {
-    let root = project("no-lock");
+    let (_dir, root) = project("no-lock");
     assert!(!root.join("Cargo.lock").exists());
     let out = htl(&root, &["dts"]);
     let msg = err(&out);
@@ -510,7 +514,7 @@ fn a_project_with_no_lockfile_yet_is_resolved_rather_than_refused() {
 /// reader to `--list-lints` for either of them, and neither is there.
 #[test]
 fn neither_condition_is_a_configurable_lint_name() {
-    let root = project("not-a-lint");
+    let (_dir, root) = project("not-a-lint");
     let out = htl(&root, &["check", "--list-lints"]);
     let listed = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(out.status.success(), "{}", err(&out));

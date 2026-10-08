@@ -673,6 +673,7 @@ fn walk_skips(root: &Path, rel: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::config::HtlConfig;
+    use crate::core_common;
     use crate::pkg;
 
     /// Canonical from the start: these tests build a requirer path under this directory
@@ -682,11 +683,14 @@ mod tests {
     /// is under `/var`, a symlink to `/private/var` — so the two spellings of the same
     /// directory disagreed and `[imports]` was not applied (#424). Canonicalizing here once
     /// means both sides agree regardless.
-    fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("htl-resolver-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::canonicalize(&dir).unwrap()
+    ///
+    /// Returns the directory's own guard alongside the canonical path: canonicalizing
+    /// makes a second, derived `PathBuf`, so the guard has to come back too or it drops
+    /// (and the directory is removed) right here, before a caller ever reads the path.
+    fn tempdir(tag: &str) -> (core_common::TempDir, PathBuf) {
+        let dir = core_common::tempdir("htl-resolver", tag);
+        let canonical = std::fs::canonicalize(&dir).unwrap();
+        (dir, canonical)
     }
 
     fn write(path: &Path, text: &str) {
@@ -706,7 +710,7 @@ mod tests {
     /// once the table is rebuilt, so a host that adds nothing never rebuilds it.
     #[test]
     fn gained_names_only_a_file_a_rebuild_would_add() {
-        let root = scratch("gained");
+        let (_dir, root) = tempdir("gained");
         write(&root.join("src/main.tl"), "return {}\n");
         let r = Resolver::new(&Project::load(&root, HtlConfig::default()).unwrap());
         assert!(!r.gained("main"), "in the table already");
@@ -729,7 +733,7 @@ mod tests {
 
     #[test]
     fn a_file_answers_to_its_model_name_and_no_template_invents_another() {
-        let root = scratch("names");
+        let (_dir, root) = tempdir("names");
         write(&root.join("src/util/util.tl"), "");
         write(&root.join("src/game/init.tl"), "");
         write(
@@ -761,7 +765,7 @@ mod tests {
 
     #[test]
     fn the_test_root_is_read_by_tests() {
-        let root = scratch("tests");
+        let (_dir, root) = tempdir("tests");
         write(&root.join("tests/helper.tl"), "");
         write(&root.join("tests/a_test.tl"), "");
         let r = Resolver::new(&Project::load(&root, HtlConfig::default()).unwrap());
@@ -782,7 +786,7 @@ mod tests {
 
     #[test]
     fn imports_and_dependency_names() {
-        let root = scratch("imports");
+        let (_dir, root) = tempdir("imports");
         write(
             &root.join(pkg::MANIFEST_NAME),
             "[package]\nname = \"game\"\nversion = \"0.1.0\"\n",
@@ -832,7 +836,7 @@ mod tests {
 
     #[test]
     fn a_dependency_does_not_see_the_projects_own_modules() {
-        let root = scratch("dep-view");
+        let (_dir, root) = tempdir("dep-view");
         write(
             &root.join(pkg::MANIFEST_NAME),
             "[package]\nname = \"game\"\nversion = \"0.1.0\"\n",
@@ -864,7 +868,7 @@ mod tests {
 
     #[test]
     fn a_file_under_a_name_the_host_provides_is_shadowed_and_a_declaration_is_not() {
-        let root = scratch("host");
+        let (_dir, root) = tempdir("host");
         write(&root.join("src/game.d.tl"), "");
         let cfg = || HtlConfig::parse("[build]\nhost = [\"game\"]\n").unwrap();
         let main = root.join("src/main.tl");
@@ -920,7 +924,7 @@ mod tests {
 
     #[test]
     fn a_name_with_only_a_declaration_is_provided_by_the_environment() {
-        let root = scratch("declared");
+        let (_dir, root) = tempdir("declared");
         // Declared: a hand-written declaration in the declaration root, and one beside the
         // sources, neither with anything behind it.
         write(&root.join("types/socket/http.d.tl"), "");
@@ -1008,7 +1012,7 @@ mod tests {
 
     #[test]
     fn a_module_beside_its_directorys_init_is_ambiguous() {
-        let root = scratch("init");
+        let (_dir, root) = tempdir("init");
         write(&root.join("src/demo.tl"), "");
         write(&root.join("src/demo/init.tl"), "");
         let r = Resolver::new(&Project::load(&root, HtlConfig::default()).unwrap());

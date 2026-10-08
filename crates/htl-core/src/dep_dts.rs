@@ -658,6 +658,7 @@ pub fn orphans(types: &Path, decls: &[DepDecl]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core_common;
 
     fn meta(json: &str) -> serde_json::Value {
         serde_json::from_str(json).unwrap()
@@ -784,8 +785,7 @@ mod tests {
     /// plain path beside it is untouched, and no directory is read for it.
     #[test]
     fn a_star_in_the_file_name_is_every_matching_file_in_that_directory() {
-        let dir = std::env::temp_dir().join(format!("htl-dep-dts-glob-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = core_common::tempdir("htl-dep-dts-glob", "default");
         std::fs::create_dir_all(dir.join("types/b")).unwrap();
         for f in ["json.d.tl", "env.d.tl", "README.md", "init.tl"] {
             std::fs::write(dir.join("types/b").join(f), "").unwrap();
@@ -811,21 +811,18 @@ mod tests {
         );
         assert_eq!(d[0].source, dir.join("types/b/env.d.tl"));
         assert_eq!(d[0].under(), Ok(PathBuf::from("env.d.tl")));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A pattern nothing matches is passed on as written, so the report names the pattern
     /// — the manifest line to fix — rather than nothing at all.
     #[test]
     fn a_star_that_matches_nothing_is_reported_as_the_pattern() {
-        let dir = std::env::temp_dir().join(format!("htl-dep-dts-noglob-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = core_common::tempdir("htl-dep-dts-noglob", "default");
         std::fs::create_dir_all(dir.join("dts")).unwrap();
         std::fs::write(dir.join("dts/notes.txt"), "").unwrap();
         assert_eq!(expand(&dir, "dts/*.d.tl"), ["dts/*.d.tl"]);
         assert_eq!(expand(&dir, "missing/*.d.tl"), ["missing/*.d.tl"]);
         assert_eq!(expand(&dir, "dts/plain.d.tl"), ["dts/plain.d.tl"]);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -912,8 +909,7 @@ mod tests {
     /// start, and what lands keeps the namespace between them.
     #[test]
     fn a_dts_root_and_a_star_compose() {
-        let dir = std::env::temp_dir().join(format!("htl-dep-dts-root-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = core_common::tempdir("htl-dep-dts-root", "default");
         std::fs::create_dir_all(dir.join("types/mine")).unwrap();
         for f in ["thing.d.tl", "other.d.tl", "notes.md"] {
             std::fs::write(dir.join("types/mine").join(f), "").unwrap();
@@ -926,7 +922,6 @@ mod tests {
         .unwrap();
         let under: Vec<String> = d.iter().map(|d| slashed(&d.under().unwrap())).collect();
         assert_eq!(under, ["mine/other.d.tl", "mine/thing.d.tl"], "{d:?}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A materialised directory and its note, for asking `orphans` what it says about one.
@@ -951,8 +946,7 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn a_crate_this_build_carries_is_not_reported_as_a_departed_dependency() {
-        let dir = std::env::temp_dir().join(format!("htl-dep-dts-skip-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = core_common::tempdir("htl-dep-dts-skip", "default");
         materialised(&dir, crate::batteries::CRATE, &["json.d.tl"]);
         materialised(&dir, "gone", &["gone.d.tl"]);
 
@@ -977,7 +971,6 @@ mod tests {
             departed.contains("gone is no longer a dependency"),
             "{departed}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The skip and the report ask one question, so a crate that is still shipping its own
@@ -985,8 +978,7 @@ mod tests {
     /// the files it lists.
     #[test]
     fn a_live_crates_own_files_are_not_orphans() {
-        let dir = std::env::temp_dir().join(format!("htl-dep-dts-live-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = core_common::tempdir("htl-dep-dts-live", "default");
         materialised(&dir, "dep", &["dep.d.tl", "old.d.tl"]);
         let live = DepDecl {
             package: "dep".into(),
@@ -999,13 +991,11 @@ mod tests {
         assert_eq!(out.len(), 1, "{out:?}");
         assert!(out[0].contains("types/dep/old.d.tl"), "{out:?}");
         assert!(out[0].contains("dep no longer ships it"), "{out:?}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn the_note_round_trips_and_marks_the_directory() {
-        let dir = std::env::temp_dir().join(format!("htl-dep-dts-note-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = core_common::tempdir("htl-dep-dts-note", "default");
         let note = Note {
             package: "dep".into(),
             version: "0.1.0".into(),
@@ -1025,6 +1015,5 @@ mod tests {
             vec![dir.join("types/dep")]
         );
         assert_eq!(Note::read(&dir.join("types/dep")), Some(note));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

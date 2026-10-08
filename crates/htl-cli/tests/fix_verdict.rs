@@ -6,13 +6,13 @@
 //! the same. Before, fix judged on its own errors alone: a name with two owners, a lint at
 //! `deny` and `strict` all passed there and failed `htl check` (#316).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-fix-verdict", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-fix-verdict", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -42,8 +42,8 @@ fn both(root: &Path) -> ((bool, String), (bool, String)) {
 
 /// A project whose two files require each other: a `require-cycle` lint, which no fix
 /// removes, and nothing else. `lint` is the `htl.toml` around it.
-fn cycle(name: &str, lint: &str) -> PathBuf {
-    let root = scratch(name);
+fn cycle(name: &str, lint: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), lint);
     write(
         &root.join("mlua-pkg.toml"),
@@ -97,7 +97,7 @@ fn strict_fails_both() {
 /// project, which belongs to neither file.
 #[test]
 fn a_name_with_two_owners_fails_both() {
-    let root = scratch("two-owners");
+    let root = tempdir("two-owners");
     write(&root.join("htl.toml"), "");
     write(
         &root.join("mlua-pkg.toml"),

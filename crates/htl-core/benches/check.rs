@@ -31,7 +31,7 @@
 
 mod common;
 
-use common::{config, scratch, write};
+use common::{config, tempdir, write};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use htl_core::Htl;
 use std::hint::black_box;
@@ -75,12 +75,12 @@ fn filler(record: &str, fns: usize) -> String {
 ///
 /// Shape: `util` is required by everything; `core_0..core_3` require `util`; the rest
 /// are `feat_i`, each requiring `util` and one `core`.
-fn project(n: usize, fns: usize) -> (PathBuf, Vec<PathBuf>) {
+fn project(n: usize, fns: usize) -> (common::TempDir, Vec<PathBuf>) {
     assert!(
         n > CORES + 1,
         "n must leave room for the leaf and the cores"
     );
-    let dir = scratch(&format!("proj{n}x{fns}"));
+    let dir = tempdir(&format!("proj{n}x{fns}"));
     let mut files = Vec::with_capacity(n);
 
     write(

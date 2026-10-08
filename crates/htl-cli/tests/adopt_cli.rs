@@ -2,13 +2,13 @@
 //! some, `--detail`, the replay, `--help`, the one file kind the census excludes, and the
 //! `---@struct` row's `applicable` (#304).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-adopt", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-adopt", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -30,8 +30,8 @@ fn htl(args: &[&str], cwd: &Path) -> (bool, String, String) {
 }
 
 /// A project with no marker anywhere.
-fn unmarked_project(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn unmarked_project(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
     write(&root.join("src/main.tl"), "print(1)\n");
     root
@@ -42,8 +42,8 @@ fn unmarked_project(name: &str) -> PathBuf {
 /// `Bar` at `src/b.tl:10` — the exact positions the tests below assert the plain and
 /// `--detail` stderr against. The lines above each declaration are comments only so each
 /// one lands at the line its name is read against below.
-fn two_markers_project(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn two_markers_project(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
     write(
         &root.join("src/a.tl"),
@@ -64,8 +64,8 @@ fn two_markers_project(name: &str) -> PathBuf {
 /// (#304) when `second_site` sets `v` too, and not one when it does not (`"{}"`,
 /// one site short). `Foo` (`src/a.tl:3`), `find` (`src/a.tl:8`) and `Bar`
 /// (`src/b.tl:10`) keep the positions [`two_markers_project`]'s own tests assert against.
-fn candidate_project(name: &str, second_site: &str) -> PathBuf {
-    let root = scratch(name);
+fn candidate_project(name: &str, second_site: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
     write(
         &root.join("src/a.tl"),
@@ -91,8 +91,8 @@ fn candidate_project(name: &str, second_site: &str) -> PathBuf {
 /// `b`'s own file reading itself; `a.tl`'s is a requirer's resolution of the same file,
 /// which need not spell it identically -- and reaches `checked` here through the cache
 /// `adopt` reads candidates back through (#304), not a fresh `CheckInfo`.
-fn two_candidates_project(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn two_candidates_project(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
     write(
         &root.join("src/a.tl"),
@@ -133,7 +133,7 @@ fn candidates_across_two_files_are_ordered_by_their_own_declaring_file() {
 /// has to apply the check itself, through `lint::line_is_allowed`.
 #[test]
 fn an_allow_comment_on_the_declaration_is_not_a_candidate() {
-    let root = scratch("allowed");
+    let root = tempdir("allowed");
     write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
     write(
         &root.join("src/a.tl"),
@@ -155,7 +155,7 @@ fn an_allow_comment_on_the_declaration_is_not_a_candidate() {
 /// first or swallowed by the parentheses matching only the whole list as one word.
 #[test]
 fn an_allow_comment_naming_several_rules_is_not_a_candidate_either() {
-    let root = scratch("allowed-list");
+    let root = tempdir("allowed-list");
     write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
     write(
         &root.join("src/a.tl"),
@@ -278,7 +278,7 @@ fn detail_lists_every_marked_declaration_and_the_plain_form_does_not() {
 /// `src/y/b.tl`, asked about `src/x` alone, report the first and not the second.
 #[test]
 fn paths_narrow_the_counts_to_the_files_under_them() {
-    let root = scratch("narrow");
+    let root = tempdir("narrow");
     write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
     write(
         &root.join("src/x/a.tl"),
@@ -319,7 +319,7 @@ fn paths_narrow_the_counts_to_the_files_under_them() {
 /// `src/x` on the command line.
 #[test]
 fn run_from_a_subdirectory_counts_that_subdirectory() {
-    let root = scratch("subdir");
+    let root = tempdir("subdir");
     write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
     write(
         &root.join("src/x/a.tl"),
@@ -359,7 +359,7 @@ fn run_from_a_subdirectory_counts_that_subdirectory() {
 /// one. The error count still surfaces, as the exact line `print_adopt` prints for it.
 #[test]
 fn a_type_error_does_not_empty_the_census_and_the_error_line_is_printed() {
-    let root = scratch("type-error");
+    let root = tempdir("type-error");
     write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
     write(
         &root.join("src/main.tl"),

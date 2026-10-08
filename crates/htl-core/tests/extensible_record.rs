@@ -11,12 +11,12 @@
 use htl_core::Htl;
 use htl_core::pkg::TealResolver;
 use mlua_pkg::Registry;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-extensible", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-extensible", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -44,14 +44,14 @@ const SITE: &str = "local defs = require(\"defs\")\nlocal m: defs.Mod = { name =
 /// The marker's whole job, in the project's own code.
 #[test]
 fn an_extensible_record_accepts_a_key_it_does_not_declare() {
-    let errors = errors_of(&scratch("open"), OPEN, SITE);
+    let errors = errors_of(&tempdir("open"), OPEN, SITE);
     assert!(errors.is_empty(), "{errors:?}");
 }
 
 /// Without it the record is closed, which is every record today.
 #[test]
 fn an_unmarked_record_still_refuses_the_same_key() {
-    let errors = errors_of(&scratch("closed"), CLOSED, SITE);
+    let errors = errors_of(&tempdir("closed"), CLOSED, SITE);
     assert_eq!(errors.len(), 1, "{errors:?}");
     assert!(errors[0].contains("unknown field extra"), "{}", errors[0]);
 }
@@ -62,7 +62,7 @@ fn an_unmarked_record_still_refuses_the_same_key() {
 fn the_marker_is_read_on_the_line_above_the_declaration() {
     let defs = "local record defs\n   ---@extensible\n   record Mod\n      name: string\n      \
                 hp: integer\n   end\nend\nreturn defs\n";
-    let errors = errors_of(&scratch("above"), defs, SITE);
+    let errors = errors_of(&tempdir("above"), defs, SITE);
     assert!(errors.is_empty(), "{errors:?}");
 }
 
@@ -72,7 +72,7 @@ fn the_marker_is_read_on_the_line_above_the_declaration() {
 fn reading_an_undeclared_key_is_still_an_error() {
     let site = "local defs = require(\"defs\")\nlocal m: defs.Mod = { name = \"m\", hp = 1, extra \
                 = \"x\" }\nprint(m.extra)\nreturn m\n";
-    let errors = errors_of(&scratch("read"), OPEN, site);
+    let errors = errors_of(&tempdir("read"), OPEN, site);
     assert_eq!(errors.len(), 1, "{errors:?}");
     assert!(
         errors[0].contains("invalid key 'extra'"),
@@ -96,7 +96,7 @@ fn a_record_nested_under_an_extensible_one_is_not_extensible() {
                 end\nend\nreturn defs\n";
     let site = "local defs = require(\"defs\")\nlocal i: defs.Mod.Inner = { a = \"a\", extra = 1 \
                 }\nreturn i\n";
-    let errors = errors_of(&scratch("nested"), defs, site);
+    let errors = errors_of(&tempdir("nested"), defs, site);
     assert_eq!(errors.len(), 1, "{errors:?}");
     assert!(errors[0].contains("unknown field extra"), "{}", errors[0]);
 }
@@ -106,7 +106,7 @@ fn a_record_nested_under_an_extensible_one_is_not_extensible() {
 fn a_declared_field_still_has_to_hold_its_type() {
     let site = "local defs = require(\"defs\")\nlocal m: defs.Mod = { name = 2, hp = 1, extra = 3 \
                 }\nreturn m\n";
-    let errors = errors_of(&scratch("typed"), OPEN, site);
+    let errors = errors_of(&tempdir("typed"), OPEN, site);
     assert_eq!(errors.len(), 1, "{errors:?}");
     assert!(
         errors[0].contains("in record field: name") && errors[0].contains("expected string"),
@@ -121,7 +121,7 @@ fn a_declared_field_still_has_to_hold_its_type() {
 /// set instead is still pointed at.
 #[test]
 fn struct_and_extensible_still_report_a_missing_required_field() {
-    let dir = scratch("struct");
+    let dir = tempdir("struct");
     write(
         &dir.join("defs.tl"),
         "local record defs\n   ---@struct\n   record MonsterDef   ---@extensible\n      id: \
@@ -158,7 +158,7 @@ fn struct_and_extensible_still_report_a_missing_required_field() {
 /// field (`extra: {string: any}`).
 #[test]
 fn a_misspelled_optional_field_is_the_price_and_is_silent() {
-    let dir = scratch("cost");
+    let dir = tempdir("cost");
     write(
         &dir.join("defs.tl"),
         "local record defs\n   ---@struct\n   record MonsterDef   ---@extensible\n      id: \
@@ -185,8 +185,8 @@ fn a_misspelled_optional_field_is_the_price_and_is_silent() {
 /// The resolver type-checks a module's source before handing the value over, so the
 /// record's closedness is a wall at `require` as well as at `htl check`. These two say
 /// the wall is where the marker puts it and not somewhere else.
-fn resolver_dir(name: &str, defs: &str) -> PathBuf {
-    let dir = scratch(name);
+fn resolver_dir(name: &str, defs: &str) -> common::TempDir {
+    let dir = tempdir(name);
     write(&dir.join("defs.tl"), defs);
     write(
         &dir.join("three.tl"),

@@ -6,12 +6,12 @@
 //! is made, a table constructor and an `as` cast.
 
 use htl_core::Htl;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-sealed", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-sealed", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -73,8 +73,8 @@ fn write_gate(dir: &Path, extra: &str) {
     );
 }
 
-fn project(name: &str) -> PathBuf {
-    let dir = scratch(name);
+fn project(name: &str) -> common::TempDir {
+    let dir = tempdir(name);
     write_gate(&dir, "");
     dir
 }
@@ -227,7 +227,7 @@ fn a_record_nested_in_a_sealed_one_is_not_sealed() {
 /// Two rules, one site: the record is built where it may not be, *and* short of a field.
 #[test]
 fn struct_fields_and_sealed_record_both_fire_at_one_site() {
-    let dir = scratch("both");
+    let dir = tempdir("both");
     write(
         &dir.join("gate.tl"),
         "local record gate\n   ---@struct\n   record Judged      ---@sealed\n\
@@ -257,7 +257,7 @@ fn struct_fields_and_sealed_record_both_fire_at_one_site() {
 /// On by default and silent by default: a record without the marker is nobody's business.
 #[test]
 fn a_record_without_the_marker_is_not_reported() {
-    let dir = scratch("unmarked");
+    let dir = tempdir("unmarked");
     write(
         &dir.join("gate.tl"),
         "local record gate\n   record Loose\n      a: string\n   end\nend\n\nreturn gate\n",

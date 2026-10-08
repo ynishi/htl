@@ -3,12 +3,12 @@
 //! search path, so two directories with a same-named module never see each other's.
 
 use htl_core::Htl;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-store", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-store", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -18,8 +18,8 @@ fn write(path: &Path, text: &str) {
 
 #[test]
 fn same_named_modules_in_two_dirs_stay_apart_across_checks() {
-    let a = scratch("a");
-    let b = scratch("b");
+    let a = tempdir("a");
+    let b = tempdir("b");
     write(
         &a.join("util.tl"),
         "local record util\nend\nfunction util.f(): integer\n   return 1\nend\nreturn util\n",
@@ -64,7 +64,7 @@ fn same_named_modules_in_two_dirs_stay_apart_across_checks() {
 
 #[test]
 fn seeded_check_reports_the_same_as_a_cold_one() {
-    let dir = scratch("same");
+    let dir = tempdir("same");
     write(
         &dir.join("dep.tl"),
         "local record dep\nend\nfunction dep.f(): integer\n   return \"wrong\"\nend\nreturn dep\n",

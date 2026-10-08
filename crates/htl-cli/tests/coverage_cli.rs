@@ -2,13 +2,13 @@
 //!
 //! A percentage says how much of a module was missed; the `never ran:` line says what.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-cov", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-cov", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -31,8 +31,8 @@ fn htl(args: &[&str], cwd: &Path) -> (bool, String, String) {
 
 /// `helper` is called through `hit`; `resolve_counter` is not called at all; `tiny` is
 /// not called either but is written on one line, where the body has no span of its own.
-fn project() -> PathBuf {
-    let root = scratch("neverran");
+fn project() -> common::TempDir {
+    let root = tempdir("neverran");
     // What makes the directory a project whose `src/` its tests read.
     write(&root.join("htl.toml"), "");
     write(

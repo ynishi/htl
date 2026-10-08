@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-global-redecl", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-global-redecl", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -51,8 +51,8 @@ fn lints(infos: &[(PathBuf, CheckInfo)]) -> Vec<String> {
 }
 
 /// `ma` requires `a`, `mb` requires `b`, and each reads `VERSION`.
-fn two_declarations(name: &str, a: &str, b: &str) -> PathBuf {
-    let root = scratch(name);
+fn two_declarations(name: &str, a: &str, b: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("types/a.d.tl"), a);
     write(&root.join("types/b.d.tl"), b);
     for (m, d) in [("ma", "a"), ("mb", "b")] {
@@ -108,7 +108,7 @@ fn checker_errors(infos: &[(PathBuf, CheckInfo)]) -> Vec<String> {
 /// does not step aside for the error.
 #[test]
 fn a_different_type_in_one_environment_is_reported_whatever_the_checker_saw() {
-    let root = scratch("typed-one-env");
+    let root = tempdir("typed-one-env");
     write(&root.join("types/a.d.tl"), "global VERSION: string\n");
     write(&root.join("types/b.d.tl"), "global VERSION: integer\n");
     for (m, d) in [("ma", "a"), ("mb", "b")] {
@@ -164,7 +164,7 @@ fn a_different_type_in_two_environments_is_the_lints_to_report() {
 
 #[test]
 fn one_declaration_required_by_three_modules_is_nothing() {
-    let root = scratch("one");
+    let root = tempdir("one");
     write(&root.join("types/host.d.tl"), "global VERSION: string\n");
     for m in ["m1", "m2", "m3"] {
         write(
@@ -180,7 +180,7 @@ fn one_declaration_required_by_three_modules_is_nothing() {
 
 #[test]
 fn a_module_declaring_what_a_declaration_file_declares_is_a_second_site() {
-    let root = scratch("tl-and-dtl");
+    let root = tempdir("tl-and-dtl");
     write(&root.join("types/host.d.tl"), "global VERSION: string\n");
     write(
         &root.join("lib/own/init.tl"),

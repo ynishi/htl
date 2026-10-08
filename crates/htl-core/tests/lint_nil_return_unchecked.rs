@@ -9,14 +9,14 @@
 //! tell.
 
 use htl_core::Htl;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
 const RULE: &str = "nil-return-unchecked";
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-nil-flow", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-nil-flow", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -61,8 +61,8 @@ const DECL: &str = "local record p\n\
      end\n\
      return p\n";
 
-fn project(name: &str) -> PathBuf {
-    let dir = scratch(name);
+fn project(name: &str) -> common::TempDir {
+    let dir = tempdir(name);
     write(&dir.join("types/p.d.tl"), DECL);
     dir
 }

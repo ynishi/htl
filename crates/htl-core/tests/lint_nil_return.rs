@@ -7,12 +7,12 @@
 //! the project's own source all reach the rule the same way.
 
 use htl_core::Htl;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-nil-return", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-nil-return", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -64,8 +64,8 @@ const DECL: &str = "local record p\n\
      end\n\
      return p\n";
 
-fn project(name: &str) -> PathBuf {
-    let dir = scratch(name);
+fn project(name: &str) -> common::TempDir {
+    let dir = tempdir(name);
     write(&dir.join("types/p.d.tl"), DECL);
     dir
 }
@@ -152,7 +152,7 @@ fn a_trailing_marker_does_not_reach_the_declaration_below_it() {
 /// site writes.
 #[test]
 fn a_marked_function_in_the_checked_file_is_reported_by_its_own_name() {
-    let dir = scratch("own-file");
+    let dir = tempdir("own-file");
     write(
         &dir.join("main.tl"),
         "---@nilable\n\
@@ -181,7 +181,7 @@ fn a_marked_function_in_the_checked_file_is_reported_by_its_own_name() {
 /// loosely would report every call of every field of the record.
 #[test]
 fn the_marker_on_a_record_reports_nothing() {
-    let dir = scratch("record-marker");
+    let dir = tempdir("record-marker");
     write(
         &dir.join("types/r.d.tl"),
         "local record r   ---@nilable\n\

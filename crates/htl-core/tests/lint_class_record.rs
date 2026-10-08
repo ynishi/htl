@@ -2,12 +2,12 @@
 //! their metatable does not survive serialization or the Rust boundary.
 
 use htl_core::Htl;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-classrec", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-classrec", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -35,7 +35,7 @@ local a = Actor.new(3)\na:hit(1)\nlocal p: Pos = { x = 1, y = 2 }\nprint(a.hp, p
 
 #[test]
 fn off_by_default() {
-    let dir = scratch("default");
+    let dir = tempdir("default");
     write(&dir.join("c.tl"), SRC);
     let lints = lints_of(&dir, "c.tl", None);
     assert!(
@@ -46,7 +46,7 @@ fn off_by_default() {
 
 #[test]
 fn flags_records_with_metamethods_including_nested() {
-    let dir = scratch("on");
+    let dir = tempdir("on");
     write(&dir.join("c.tl"), SRC);
     let lints: Vec<String> = lints_of(&dir, "c.tl", Some("+class-record"))
         .into_iter()

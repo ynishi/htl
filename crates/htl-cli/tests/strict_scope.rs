@@ -12,13 +12,13 @@
 //! model adds — a finding fatal without `strict`, and one advisory beside it — is
 //! `lint_levels.rs`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-strict-scope", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-strict-scope", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -41,8 +41,8 @@ fn htl(args: &[&str], cwd: &Path) -> (i32, String) {
 
 /// A module and a test over it, both type-correct and both holding an unused local —
 /// a Teal warning, no error and no lint.
-fn project(name: &str, htl_toml: &str) -> PathBuf {
-    let root = scratch(name);
+fn project(name: &str, htl_toml: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), htl_toml);
     write(
         &root.join("src/greet.tl"),

@@ -9,7 +9,7 @@
 //! `false`. The cases below are the two sides of that line and the two scaffolds that stand
 //! on the Teal side of it.
 //!
-//! Every project is written by `htl new` into a scratch directory, so what is under test is
+//! Every project is written by `htl new` into a temp directory, so what is under test is
 //! the binary a user runs on a project it wrote.
 
 use std::path::{Path, PathBuf};
@@ -34,24 +34,27 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
-/// `htl new <name> <flags>` in a fresh scratch directory; the project's root, with the
+/// `htl new <name> <flags>` in a fresh temp directory; the project's root, with the
 /// `[patch]` the packaged gate asks for ([`common::write_patch_config`]) when it asks.
-fn new_project(test: &str, name: &str, flags: &[&str]) -> PathBuf {
-    let root = common::scratch("htl-cli-decl-callers", test);
+/// Returns the temp directory's own guard alongside the project path: `project` is a
+/// subdirectory of it, not the directory itself, so a caller that dropped the guard early
+/// would see the project it just wrote vanish before the first command ran against it.
+fn new_project(test: &str, name: &str, flags: &[&str]) -> (common::TempDir, PathBuf) {
+    let root = common::tempdir("htl-cli-decl-callers", test);
     let mut args = vec!["new", name];
     args.extend_from_slice(flags);
     let (ok, text) = run(&args, &root);
     assert!(ok, "htl new {flags:?}:\n{text}");
     let project = root.join(name);
     common::write_patch_config(&project);
-    project
+    (root, project)
 }
 
 /// A library project with the Problem's layout from #402: `knl_types` declared in
 /// `types/` and implemented nowhere — the host provides it — and the plain Lua modules that
 /// ask for it, each typed by a declaration of its own so a Teal test can require them.
-fn lua_callers(test: &str) -> PathBuf {
-    let p = new_project(test, "app", &["--lib"]);
+fn lua_callers(test: &str) -> (common::TempDir, PathBuf) {
+    let (dir, p) = new_project(test, "app", &["--lib"]);
     write(
         &p.join("types/knl_types.d.tl"),
         "local record knl_types\n   SessionId: string\nend\nreturn knl_types\n",
@@ -80,7 +83,7 @@ fn lua_callers(test: &str) -> PathBuf {
         &p.join("types/direct.d.tl"),
         "local record direct\n   m: any\nend\nreturn direct\n",
     );
-    p
+    (dir, p)
 }
 
 /// `pcall(require, name)` in a `.lua` is `false` for a name only a declaration answers,
@@ -88,7 +91,7 @@ fn lua_callers(test: &str) -> PathBuf {
 /// "present" one whose first use raised.
 #[test]
 fn a_pcall_require_from_plain_lua_does_not_find_a_declared_only_module() {
-    let p = lua_callers("pcall");
+    let (_dir, p) = lua_callers("pcall");
     write(
         &p.join("tests/opt_lua_test.tl"),
         "local t = require(\"htl.test\")\n\
@@ -110,7 +113,7 @@ fn a_pcall_require_from_plain_lua_does_not_find_a_declared_only_module() {
 /// ways out — the `Registry`'s text — rather than handing back a table that fails later.
 #[test]
 fn a_require_from_plain_lua_fails_at_the_require_naming_the_declaration() {
-    let p = lua_callers("direct");
+    let (_dir, p) = lua_callers("direct");
     write(
         &p.join("tests/direct_test.tl"),
         "local t = require(\"htl.test\")\n\
@@ -142,7 +145,7 @@ fn a_require_from_plain_lua_fails_at_the_require_naming_the_declaration() {
 /// Teal still gets the stand-in, whose first index names what is missing.
 #[test]
 fn a_pcall_require_from_teal_still_gets_the_stand_in() {
-    let p = lua_callers("teal-pcall");
+    let (_dir, p) = lua_callers("teal-pcall");
     write(
         &p.join("tests/teal_pcall_test.tl"),
         "local t = require(\"htl.test\")\n\
@@ -168,7 +171,7 @@ fn a_pcall_require_from_teal_still_gets_the_stand_in() {
 /// answered the `.lua` with it.
 #[test]
 fn a_pcall_require_from_plain_lua_after_a_teal_require_still_does_not_find_the_module() {
-    let p = lua_callers("teal-first");
+    let (_dir, p) = lua_callers("teal-first");
     write(
         &p.join("tests/order_test.tl"),
         "local t = require(\"htl.test\")\n\
@@ -197,7 +200,7 @@ fn a_pcall_require_from_plain_lua_after_a_teal_require_still_does_not_find_the_m
 /// so it still resolves to the declaration.
 #[test]
 fn the_window_scaffolds_engine_test_still_passes_without_a_window() {
-    let p = new_project("window", "win", &["--target", "window"]);
+    let (_dir, p) = new_project("window", "win", &["--target", "window"]);
     let (ok, text) = run(&["check", "."], &p);
     assert!(ok, "htl check:\n{text}");
     assert!(p.join("types/htl-mq/mq.d.tl").is_file(), "{text}");
@@ -213,7 +216,7 @@ fn the_window_scaffolds_engine_test_still_passes_without_a_window() {
 /// it fails at the call — after the line before it printed — not at the `require`.
 #[test]
 fn a_teal_entry_still_fails_at_the_call_to_its_host_not_the_require() {
-    let p = new_project("embed", "emb", &["--embed"]);
+    let (_dir, p) = new_project("embed", "emb", &["--embed"]);
     let (ok, text) = run(&["run", "src/main.tl"], &p);
     assert!(!ok, "htl run without the host passed:\n{text}");
     assert!(text.contains("hello, teal"), "{text}");

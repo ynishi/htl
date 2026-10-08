@@ -7,12 +7,12 @@
 
 use htl_core::Htl;
 use htl_core::fix::{FixOptions, fix_file};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-enum-boundary", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-enum-boundary", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -25,8 +25,8 @@ const DEFS: &str = "local record defs\n   enum State\n      \"open\"\n      \"as
       return defs\n";
 
 /// A project with `defs.State` (six values) and `defs.Row` (a row read back as strings).
-fn project(name: &str) -> PathBuf {
-    let dir = scratch(name);
+fn project(name: &str) -> common::TempDir {
+    let dir = tempdir(name);
     write(&dir.join("defs.tl"), DEFS);
     dir
 }

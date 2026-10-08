@@ -6,13 +6,13 @@
 //! the walk, and the direction is the dangerous one: an error that should be reported
 //! disappears because something checked earlier happened to provide the module.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-order", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-order", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -53,8 +53,8 @@ fn diagnostics(args: &[&str], cwd: &Path) -> Vec<String> {
 /// Two directories where one provides a module the other requires but does not have. The
 /// only reason `b` could ever resolve `util` is `a` being on the path. A flat project, so
 /// that the tree can be walked: `a/util.tl` is `a.util`, and `util` is nobody's.
-fn two_dirs() -> PathBuf {
-    let root = scratch("two");
+fn two_dirs() -> common::TempDir {
+    let root = tempdir("two");
     write(&root.join("htl.toml"), "[layout]\nsource = \".\"\n");
     write(
         &root.join("a/util.tl"),
@@ -104,7 +104,7 @@ fn walking_a_tree_agrees_with_checking_its_files_one_at_a_time() {
 /// root to read, and a file resolves its `require`s beside it and nowhere else.
 #[test]
 fn a_test_file_still_sees_the_project_root_and_src() {
-    let root = scratch("tests-layout");
+    let root = tempdir("tests-layout");
     write(&root.join("htl.toml"), "");
     write(
         &root.join("src/util.tl"),
@@ -129,8 +129,8 @@ fn a_test_file_still_sees_the_project_root_and_src() {
 ///
 /// The shape is a project's: the host's names in one declaration file under `types/`, and
 /// modules under `lib/` that require it.
-fn globals_project() -> PathBuf {
-    let root = scratch("globals");
+fn globals_project() -> common::TempDir {
+    let root = tempdir("globals");
     write(&root.join("htl.toml"), "[check]\npaths = [\"lib\"]\n");
     write(
         &root.join("types/host_globals.d.tl"),
@@ -170,8 +170,8 @@ fn a_global_from_a_required_module_reaches_every_file_whatever_the_order() {
 /// once per run and its result served to every requirer, so the record is one type in all
 /// of them; walked once per requirer, it was one type per requirer and the second consumer
 /// could not call the middle module.
-fn global_record_project() -> PathBuf {
-    let root = scratch("global-record");
+fn global_record_project() -> common::TempDir {
+    let root = tempdir("global-record");
     write(
         &root.join("htl.toml"),
         "[layout]\nsource = \".\"\n[lint.rules]\nno-global = \"allow\"\n",
@@ -227,7 +227,7 @@ fn a_record_declared_beside_a_global_is_one_type_whatever_the_order() {
 /// it without having it is told so from anywhere.
 #[test]
 fn the_working_directory_is_not_searched() {
-    let root = scratch("cwd-not-searched");
+    let root = tempdir("cwd-not-searched");
     let project = root.join("project");
     write(&project.join("htl.toml"), "");
     write(
@@ -247,7 +247,7 @@ fn the_working_directory_is_not_searched() {
 /// naming both owners — not settled by which of the two the search path met first.
 #[test]
 fn a_name_the_project_and_a_dependency_both_implement_is_an_error() {
-    let root = scratch("own-vs-dep");
+    let root = tempdir("own-vs-dep");
     write(&root.join("htl.toml"), "");
     write(
         &root.join("mlua-pkg.toml"),
@@ -280,7 +280,7 @@ fn a_name_the_project_and_a_dependency_both_implement_is_an_error() {
 /// that call, while one that lands on another dependency is not.
 #[test]
 fn a_dependency_does_not_see_the_projects_own_modules() {
-    let root = scratch("dep-view");
+    let root = tempdir("dep-view");
     write(&root.join("htl.toml"), "");
     write(
         &root.join("mlua-pkg.toml"),
@@ -321,7 +321,7 @@ fn a_dependency_does_not_see_the_projects_own_modules() {
 /// dependency's own `require`s keep meaning the dependency's modules.
 #[test]
 fn imports_say_which_module_a_shared_name_means() {
-    let root = scratch("imports");
+    let root = tempdir("imports");
     write(
         &root.join("htl.toml"),
         "[imports]\nmathx = \"dep:mathx\"\nmathx_local = \"own:mathx\"\n",
@@ -378,7 +378,7 @@ fn imports_say_which_module_a_shared_name_means() {
 /// `<crate>.mq` as well as to `mq`; neither is the file's name.
 #[test]
 fn a_file_answers_to_its_model_name_only() {
-    let root = scratch("model-names");
+    let root = tempdir("model-names");
     write(&root.join("htl.toml"), "");
     write(&root.join("src/util/util.tl"), "return { n = 1 }\n");
     write(
@@ -409,7 +409,7 @@ fn a_file_answers_to_its_model_name_only() {
 /// run serves both from the dependency, and the bundle carries both.
 #[test]
 fn run_time_and_the_bundle_resolve_as_the_check_did() {
-    let root = scratch("run-resolves");
+    let root = tempdir("run-resolves");
     write(&root.join("htl.toml"), "");
     write(
         &root.join("mlua-pkg.toml"),
@@ -463,7 +463,7 @@ fn run_time_and_the_bundle_resolve_as_the_check_did() {
 /// for a test in `tests/sub/`, and the next run says so instead of replaying the entry.
 #[test]
 fn a_cached_test_sees_a_helper_added_under_tests() {
-    let root = scratch("cache-helper");
+    let root = tempdir("cache-helper");
     write(&root.join("htl.toml"), "");
     write(&root.join("src/helper.tl"), "return { v = 1 }\n");
     write(
@@ -495,7 +495,7 @@ fn a_cached_test_sees_a_helper_added_under_tests() {
 /// the same name.
 #[test]
 fn a_require_of_a_name_two_files_implement_names_both() {
-    let root = scratch("ambiguous-require");
+    let root = tempdir("ambiguous-require");
     write(&root.join("htl.toml"), "");
     write(&root.join("src/demo.tl"), "return { n = 1 }\n");
     write(&root.join("src/demo/init.tl"), "return { n = 2 }\n");
@@ -531,7 +531,7 @@ fn a_require_of_a_name_two_files_implement_names_both() {
 /// the two.
 #[test]
 fn a_plain_lua_require_of_a_name_two_files_implement_is_refused_at_run_time_and_in_a_bundle() {
-    let root = scratch("ambiguous-lua");
+    let root = tempdir("ambiguous-lua");
     write(&root.join("htl.toml"), "");
     write(&root.join("src/demo.tl"), "return { n = 1 }\n");
     write(&root.join("src/demo/init.tl"), "return { n = 2 }\n");
@@ -585,7 +585,7 @@ fn a_plain_lua_require_of_a_name_two_files_implement_is_refused_at_run_time_and_
 /// `.htl/` there.
 #[test]
 fn the_store_is_at_the_project_root_wherever_the_command_ran() {
-    let root = scratch("store-root");
+    let root = tempdir("store-root");
     write(
         &root.join("mlua-pkg.toml"),
         "[package]\nname = \"p\"\nversion = \"0.1.0\"\n",
@@ -611,7 +611,7 @@ fn the_store_is_at_the_project_root_wherever_the_command_ran() {
 /// named on its own is still checked: that question has an answer without a project.
 #[test]
 fn a_directory_with_no_project_is_refused_and_a_file_is_still_checked() {
-    let root = scratch("no-project");
+    let root = tempdir("no-project");
     write(&root.join("a.tl"), "print(1)\n");
     let run = |args: &[&str]| {
         let out = Command::new(common::htl_bin())
@@ -642,8 +642,8 @@ fn a_directory_with_no_project_is_refused_and_a_file_is_still_checked() {
 /// A global declared by a module only the first link of a chain requires, and a file
 /// that requires nothing and reads it anyway. Through the CLI: the chain is clean and the
 /// loose file is told `unknown variable`, whatever the order and alone.
-fn global_chain_project() -> PathBuf {
-    let root = scratch("global-chain");
+fn global_chain_project() -> common::TempDir {
+    let root = tempdir("global-chain");
     write(
         &root.join("htl.toml"),
         "[layout]\nsource = \".\"\n[lint.rules]\nno-global = \"allow\"\n",
@@ -695,8 +695,8 @@ fn a_global_reaches_the_end_of_a_require_chain_and_nowhere_else() {
 /// is one line naming both sites, and it is the same line when every file replays from
 /// the cache — the sites ride on the check, so a run that builds no checker still has
 /// them.
-fn global_redeclared_project() -> PathBuf {
-    let root = scratch("global-redecl");
+fn global_redeclared_project() -> common::TempDir {
+    let root = tempdir("global-redecl");
     write(
         &root.join("htl.toml"),
         "[layout]\nsource = \".\"\n[lint.rules]\nno-global = \"allow\"\n",

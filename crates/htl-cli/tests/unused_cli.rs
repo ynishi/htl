@@ -1,13 +1,13 @@
 //! `htl unused` through the real binary: the three shapes it reports on, and the four it
 //! has to stay quiet about.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-unused", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-unused", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -29,8 +29,8 @@ fn htl(args: &[&str], cwd: &Path) -> (bool, String, String) {
 }
 
 /// An entry script, the module it requires, a test, and a module nothing reaches.
-fn project(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn project(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
     write(
         &root.join("src/main.tl"),
@@ -192,7 +192,7 @@ fn the_entry_a_rust_host_embeds_is_an_entry() {
 
 /// The same project with two `[deps]`, one of them required. Both are `target_dir`
 /// copies, which resolve from the tree without an install.
-fn project_with_deps(name: &str) -> PathBuf {
+fn project_with_deps(name: &str) -> common::TempDir {
     let root = project(name);
     write(
         &root.join("mlua-pkg.toml"),
@@ -247,7 +247,7 @@ fn a_dependency_only_an_unreached_module_requires_is_still_unused() {
 
 #[test]
 fn a_project_with_no_entry_gets_a_message_rather_than_a_list() {
-    let root = scratch("no-entry");
+    let root = tempdir("no-entry");
     write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
     write(
         &root.join("src/util.tl"),
@@ -336,7 +336,7 @@ fn a_clean_project_exits_zero_and_says_so_and_the_flag_fails_on_a_finding() {
 /// requires is reported.
 #[test]
 fn the_entry_is_main_tl_in_the_source_root_the_layout_names() {
-    let root = scratch("layout-main");
+    let root = tempdir("layout-main");
     write(&root.join("htl.toml"), "[layout]\nsource = \"lib\"\n");
     write(
         &root.join("lib/main.tl"),
@@ -358,7 +358,7 @@ fn the_entry_is_main_tl_in_the_source_root_the_layout_names() {
 /// project model has the root either way, and the answer is the one an `htl.toml` gives.
 #[test]
 fn an_mlua_pkg_project_is_walked_from_its_root_whatever_the_paths() {
-    let root = scratch("mlua-pkg-root");
+    let root = tempdir("mlua-pkg-root");
     write(
         &root.join("mlua-pkg.toml"),
         "[package]\nname = \"p\"\nversion = \"0.1.0\"\n",
@@ -399,7 +399,7 @@ fn an_mlua_pkg_project_is_walked_from_its_root_whatever_the_paths() {
 /// even though the generator erases the require, so `htl unused` does not report it.
 #[test]
 fn a_declaration_imported_with_local_type_is_reached() {
-    let root = scratch("local-type");
+    let root = tempdir("local-type");
     write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
     write(
         &root.join("src/main.tl"),

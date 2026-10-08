@@ -1,12 +1,12 @@
 //! `htl.test` matchers, `expect_all`, per-test timing and fail-fast through the runner.
 
 use htl_core::testing::{RunOptions, run_test_file};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-runner", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-runner", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -16,7 +16,7 @@ fn write(path: &Path, text: &str) {
 
 #[test]
 fn matchers_and_expect_all_are_typed_and_run() {
-    let dir = scratch("matchers");
+    let dir = tempdir("matchers");
     write(
         &dir.join("m_test.tl"),
         "local t = require(\"htl.test\")\n\
@@ -75,7 +75,7 @@ fn matchers_and_expect_all_are_typed_and_run() {
 /// The three negations that had no opposite matcher; each fails with its own message.
 #[test]
 fn negated_matchers_pass_and_fail_with_specific_messages() {
-    let dir = scratch("negated");
+    let dir = tempdir("negated");
     write(
         &dir.join("n_test.tl"),
         "local t = require(\"htl.test\")\n\
@@ -124,7 +124,7 @@ fn negated_matchers_pass_and_fail_with_specific_messages() {
 
 #[test]
 fn fail_fast_stops_after_the_first_failure_in_a_file() {
-    let dir = scratch("failfast");
+    let dir = tempdir("failfast");
     write(
         &dir.join("f_test.tl"),
         "local t = require(\"htl.test\")\n\
@@ -159,7 +159,7 @@ fn fail_fast_stops_after_the_first_failure_in_a_file() {
 #[test]
 fn session_shares_the_checker_but_not_program_state() {
     use htl_core::testing::TestSession;
-    let dir = scratch("session");
+    let dir = tempdir("session");
     // What makes the directory a project whose `src/` its tests read.
     write(&dir.join("htl.toml"), "");
     // Module with state: a counter that survives only within one program state.
@@ -224,7 +224,7 @@ fn session_shares_the_checker_but_not_program_state() {
 #[test]
 fn snapshots_write_compare_diff_and_update() {
     use htl_core::testing::{TestSession, snapshot_dir};
-    let dir = scratch("snap");
+    let dir = tempdir("snap");
     let file = dir.join("tests").join("screen_test.tl");
     let src = |title: &str| {
         format!(
@@ -329,7 +329,7 @@ fn snapshots_write_compare_diff_and_update() {
 #[test]
 fn coverage_reports_executed_statements_with_tl_line_numbers() {
     use htl_core::testing::TestSession;
-    let dir = scratch("coverage");
+    let dir = tempdir("coverage");
     // What makes the directory a project whose `src/` its tests read.
     write(&dir.join("htl.toml"), "");
     write(
@@ -418,7 +418,7 @@ fn coverage_reports_executed_statements_with_tl_line_numbers() {
 #[test]
 fn a_library_without_tests_field_still_reports() {
     // The runner contract only requires passed / failed / failures.
-    let dir = scratch("minimal-lib");
+    let dir = tempdir("minimal-lib");
     write(
         &dir.join("mini.lua"),
         "local M = { n = 0 }\nfunction M.check(b) M.n = M.n + 1 M.ok = (M.ok == nil or M.ok) and b end\n\
@@ -456,7 +456,7 @@ fn every_form_the_readme_documents_type_checks_and_runs() {
     // `run` and `configure` are the runner's side of the contract, not a test's, and are
     // exercised by every other test here; everything a test file is documented to call
     // is below.
-    let dir = scratch("documented-surface");
+    let dir = tempdir("documented-surface");
     write(
         &dir.join("s_test.tl"),
         "local t = require(\"htl.test\")\n\

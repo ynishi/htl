@@ -29,7 +29,7 @@ fn write(dir: &Path, name: &str, src: &str) -> std::path::PathBuf {
 /// Before the fix this panicked at the first call rather than reporting anything.
 #[test]
 fn a_selection_set_from_a_split_state_takes_effect() {
-    let dir = common::scratch("htl-core-split", "select-lints");
+    let dir = common::tempdir("htl-core-split", "select-lints");
     let file = write(&dir, "m.tl", SRC);
 
     let checker = Htl::new().unwrap();
@@ -62,7 +62,7 @@ fn a_selection_set_from_a_split_state_takes_effect() {
 /// local nobody reads is reported under.
 #[test]
 fn a_teal_warning_kind_turned_off_stays_off() {
-    let dir = common::scratch("htl-core-split", "tl-kind");
+    let dir = common::tempdir("htl-core-split", "tl-kind");
     let file = write(
         &dir,
         "m.tl",
@@ -95,7 +95,7 @@ fn a_teal_warning_kind_turned_off_stays_off() {
 /// What it answers is not the point here — that it answers at all from a split state is.
 #[test]
 fn check_written_answers_from_a_split_state() {
-    let dir = common::scratch("htl-core-split", "check-written");
+    let dir = common::tempdir("htl-core-split", "check-written");
     let file = write(&dir, "m.tl", "local x: integer = 1\nreturn x\n");
 
     let checker = Htl::new().unwrap();
