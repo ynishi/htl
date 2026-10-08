@@ -5,13 +5,13 @@
 //! out flat without saying so: every walk refuses it, naming `[layout] source = "."` and
 //! the source directory as the two ways out.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-walk-outside", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-walk-outside", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -32,8 +32,8 @@ fn htl(args: &[&str], cwd: &Path) -> (bool, String) {
 }
 
 /// A project with one source file and a `.tl` at its root that would not type-check.
-fn project(name: &str, toml: &str) -> PathBuf {
-    let root = scratch(name);
+fn project(name: &str, toml: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), toml);
     write(
         &root.join("mlua-pkg.toml"),
@@ -102,8 +102,8 @@ fn a_flat_projects_root_file_is_its_own() {
 }
 
 /// A project with no `src/` and its code at the root: flat, but not declared so.
-fn undeclared_flat(name: &str, toml: Option<&str>) -> PathBuf {
-    let root = scratch(name);
+fn undeclared_flat(name: &str, toml: Option<&str>) -> common::TempDir {
+    let root = tempdir(name);
     if let Some(toml) = toml {
         write(&root.join("htl.toml"), toml);
     }
@@ -197,7 +197,7 @@ fn a_named_file_in_an_undeclared_flat_project_is_checked() {
 /// No `src/` and nothing at the root is not a flat project: nothing to refuse.
 #[test]
 fn no_source_directory_and_nothing_at_the_root_is_not_refused() {
-    let root = scratch("empty-project");
+    let root = tempdir("empty-project");
     write(
         &root.join("mlua-pkg.toml"),
         "[package]\nname = \"empty\"\nversion = \"0.1.0\"\n",

@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-pkgtypes", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-pkgtypes", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -23,8 +23,8 @@ const DECL: &str = "local record mathx\n   twice: function(n: number): number\ne
 /// the cache, `vendored/<name>` a symlink to its *package root*, and a lockfile saying
 /// which directory below that root the entry is. (mlua-pkg pointed the symlink at the
 /// entry directory until 0.11 and points it at the root from there on.)
-fn project_with_dep(name: &str, entry: &str, decls: &[(&str, &str)]) -> PathBuf {
-    let root = scratch(name);
+fn project_with_dep(name: &str, entry: &str, decls: &[(&str, &str)]) -> common::TempDir {
+    let root = tempdir(name);
     write(
         &root.join("mlua-pkg.toml"),
         "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[deps]\n",
@@ -57,8 +57,8 @@ fn project_with_dep(name: &str, entry: &str, decls: &[(&str, &str)]) -> PathBuf 
 }
 
 /// A project with nothing installed: `types/` is a project's either way.
-fn bare_project(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn bare_project(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(
         &root.join("mlua-pkg.toml"),
         "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[deps]\n",
@@ -68,8 +68,8 @@ fn bare_project(name: &str) -> PathBuf {
 
 /// A checkout shaped like teal-types: `types/<library>/<module>.d.tl`, with a nested
 /// module and a file that is not a declaration at all.
-fn teal_types_checkout(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn teal_types_checkout(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("types/luasocket/socket.d.tl"), DECL);
     write(&root.join("types/luasocket/ltn12.d.tl"), DECL);
     write(&root.join("types/luasocket/socket/http.d.tl"), DECL);
@@ -169,7 +169,7 @@ fn only_declarations_are_taken() {
 
 #[test]
 fn nothing_happens_before_an_install() {
-    let root = scratch("uninstalled");
+    let root = tempdir("uninstalled");
     write(
         &root.join("mlua-pkg.toml"),
         "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[deps]\n",

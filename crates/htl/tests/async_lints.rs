@@ -10,11 +10,10 @@ use htl::Htl;
 use htl::config::LangConfig;
 use std::path::{Path, PathBuf};
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("htl-async-lints-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+mod common;
+
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-async-lints", name)
 }
 
 fn write(dir: &Path, name: &str, text: &str) -> PathBuf {
@@ -89,7 +88,7 @@ fn at<'a>(lints: &'a [String], pos: &str) -> Vec<&'a String> {
 
 #[test]
 fn each_rule_reports_its_case_at_the_line_and_column() {
-    let dir = scratch("rules");
+    let dir = tempdir("rules");
     write(&dir, "types/http.d.tl", HTTP);
     let main = write(&dir, "main.tl", MAIN);
     let ci = checker(&dir, true, "").check(&main).unwrap();
@@ -158,7 +157,7 @@ fn each_rule_reports_its_case_at_the_line_and_column() {
 /// read as a possible entry and its top level says nothing.
 #[test]
 fn a_required_modules_top_level_await_is_reported_by_the_requirer_and_not_by_its_own_check() {
-    let dir = scratch("module");
+    let dir = tempdir("module");
     write(&dir, "types/http.d.tl", HTTP);
     let module = write(
         &dir,
@@ -199,7 +198,7 @@ fn a_required_modules_top_level_await_is_reported_by_the_requirer_and_not_by_its
 /// declaring line, which the resolver reads the way it reads `---@async`.
 #[test]
 fn an_async_function_of_a_required_module_needs_await_at_its_call() {
-    let dir = scratch("teal-callee");
+    let dir = tempdir("teal-callee");
     write(
         &dir,
         "lib.tl",
@@ -231,7 +230,7 @@ fn an_async_function_of_a_required_module_needs_await_at_its_call() {
 /// The levels are the registry's, and a spec moves them like any other rule's.
 #[test]
 fn a_spec_turns_a_rule_off_or_up() {
-    let dir = scratch("levels");
+    let dir = tempdir("levels");
     write(&dir, "types/http.d.tl", HTTP);
     let main = write(&dir, "main.tl", MAIN);
     let off = checker(&dir, true, "-await-non-async,-task-escape")
@@ -275,7 +274,7 @@ fn a_spec_turns_a_rule_off_or_up() {
 /// marker is an ordinary declaration then.
 #[test]
 fn with_the_setting_off_nothing_is_reported() {
-    let dir = scratch("off");
+    let dir = tempdir("off");
     write(&dir, "types/http.d.tl", HTTP);
     write(&dir, "types/api.d.tl", API);
     let main = write(
@@ -318,7 +317,7 @@ fn the_macro_declares_an_async_fn_with_the_marker() {
         decl.contains("sync: function(self: api, path: string): string\n"),
         "{decl}"
     );
-    let dir = scratch("macro");
+    let dir = tempdir("macro");
     write(&dir, "types/api.d.tl", decl);
     let main = write(
         &dir,
@@ -384,7 +383,7 @@ fn the_macro_declares_a_sync_fn_s_function_parameters_noyield() {
         decl.contains("each: function(self: api, f: function): string ---@noyield(f)\n"),
         "{decl}"
     );
-    let dir = scratch("macro-noyield");
+    let dir = tempdir("macro-noyield");
     write(&dir, "types/api.d.tl", decl);
     let main = write(
         &dir,
@@ -459,7 +458,7 @@ fn the_derive_declares_a_record_field_noyield() {
         ),
         "{decl}"
     );
-    let dir = scratch("derive-noyield");
+    let dir = tempdir("derive-noyield");
     write(&dir, "types/api.d.tl", decl);
     let main = write(
         &dir,
@@ -562,7 +561,7 @@ return Doc
 
 #[test]
 fn an_async_function_handed_to_a_c_callee_is_reported_at_the_argument() {
-    let dir = scratch("callbacks");
+    let dir = tempdir("callbacks");
     write(&dir, "types/http.d.tl", HTTP);
     write(&dir, "types/order.d.tl", ORDER);
     write(&dir, "types/doc.d.tl", DOC);
@@ -718,7 +717,7 @@ print(keyed, named)
 
 #[test]
 fn an_async_function_handed_to_a_host_parameter_marked_noyield_is_reported_at_the_argument() {
-    let dir = scratch("noyield");
+    let dir = tempdir("noyield");
     write(&dir, "types/api.d.tl", API);
     let main = write(&dir, "main.tl", HOST_CALLBACKS);
     let ci = checker(&dir, true, "").check(&main).unwrap();

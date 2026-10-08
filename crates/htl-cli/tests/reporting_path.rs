@@ -7,13 +7,13 @@
 //! tests below hold the two halves of that: the five commands agree line for line on
 //! what a finding looks like, and `htl build` still does not fail on a lint.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-reporting-path", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-reporting-path", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -51,8 +51,8 @@ fn diagnostics(stderr: &str) -> Vec<String> {
 /// One file with exactly one of each: a warning (a local nothing reads), a lint (a cast
 /// to an enum, which nothing checks at run time) and an error (a string where a number
 /// was declared).
-fn one_of_each(name: &str) -> PathBuf {
-    let dir = scratch(name);
+fn one_of_each(name: &str) -> common::TempDir {
+    let dir = tempdir(name);
     write(
         &dir.join("src/main.tl"),
         "local record M\n   enum State\n      \"open\"\n      \"closed\"\n   end\nend\n\n\
@@ -66,8 +66,8 @@ fn one_of_each(name: &str) -> PathBuf {
 
 /// A project whose only finding is a lint, and one that carries a fix — so it is also
 /// what says whether the fix hint reached these commands.
-fn lints_only(name: &str) -> PathBuf {
-    let dir = scratch(name);
+fn lints_only(name: &str) -> common::TempDir {
+    let dir = tempdir(name);
     write(
         &dir.join("src/main.tl"),
         "global counter: integer = 0\n\n\

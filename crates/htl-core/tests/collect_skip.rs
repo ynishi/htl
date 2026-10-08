@@ -26,8 +26,8 @@ fn not_walked(root: &Path, purpose: htl_core::model::Purpose) -> Vec<PathBuf> {
         .not_walked(purpose)
 }
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-skip", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-skip", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -49,8 +49,8 @@ fn rel(root: &Path, files: &[PathBuf]) -> Vec<String> {
     v
 }
 
-fn project() -> PathBuf {
-    let root = scratch("proj");
+fn project() -> common::TempDir {
+    let root = tempdir("proj");
     write(
         &root.join("mlua-pkg.toml"),
         "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[deps]\n",
@@ -92,7 +92,8 @@ fn project() -> PathBuf {
 #[test]
 fn collect_tl_skips_packages_build_output_and_dot_dirs() {
     let root = project();
-    let files = collect_tl(std::slice::from_ref(&root)).unwrap();
+    let root_buf = root.to_path_buf();
+    let files = collect_tl(std::slice::from_ref(&root_buf)).unwrap();
     assert_eq!(
         rel(&root, &files),
         vec!["src/main.tl", "src/util.tl", "tests/util_test.tl"]
@@ -102,7 +103,8 @@ fn collect_tl_skips_packages_build_output_and_dot_dirs() {
 #[test]
 fn discover_tests_skips_dependency_tests() {
     let root = project();
-    let files = discover_tests(std::slice::from_ref(&root)).unwrap();
+    let root_buf = root.to_path_buf();
+    let files = discover_tests(std::slice::from_ref(&root_buf)).unwrap();
     assert_eq!(rel(&root, &files), vec!["tests/util_test.tl"]);
 }
 
@@ -121,8 +123,8 @@ fn an_explicit_root_inside_a_skipped_dir_is_still_walked() {
 
 /// A project holding a dependency it patched: `patch_dir` on the dep, and the copy under
 /// `patches/mathx` with a source and a test of the dependency's own.
-fn patched_project() -> PathBuf {
-    let root = scratch("patched");
+fn patched_project() -> common::TempDir {
+    let root = tempdir("patched");
     write(
         &root.join("mlua-pkg.toml"),
         "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[deps.mathx]\n\
@@ -142,7 +144,8 @@ fn patched_project() -> PathBuf {
 #[test]
 fn a_patched_dependency_is_checked_with_the_project() {
     let root = patched_project();
-    let files = collect_tl(std::slice::from_ref(&root)).unwrap();
+    let root_buf = root.to_path_buf();
+    let files = collect_tl(std::slice::from_ref(&root_buf)).unwrap();
     assert_eq!(
         rel(&root, &files),
         vec![
@@ -160,17 +163,21 @@ fn a_patched_dependency_is_checked_with_the_project() {
 #[test]
 fn fmt_and_test_leave_a_patched_dependency_alone() {
     let root = patched_project();
+    let root_buf = root.to_path_buf();
     let skip = not_walked(&root, htl_core::model::Purpose::Own);
     assert_eq!(skip.len(), 1, "{skip:?}");
     assert!(skip[0].ends_with("patches/mathx"), "{skip:?}");
 
-    let files = collect_tl_skipping(std::slice::from_ref(&root), &skip).unwrap();
+    let files = collect_tl_skipping(std::slice::from_ref(&root_buf), &skip).unwrap();
     assert_eq!(rel(&root, &files), vec!["src/main.tl"]);
 
-    let tests = discover_tests_skipping(std::slice::from_ref(&root), &skip).unwrap();
+    let tests = discover_tests_skipping(std::slice::from_ref(&root_buf), &skip).unwrap();
     assert!(tests.is_empty(), "{tests:?}");
     assert_eq!(
-        rel(&root, &discover_tests(std::slice::from_ref(&root)).unwrap()),
+        rel(
+            &root,
+            &discover_tests(std::slice::from_ref(&root_buf)).unwrap()
+        ),
         vec!["patches/mathx/tests/mathx_test.tl"],
         "and it is the skip that leaves them out, not the walk missing them"
     );
@@ -201,8 +208,8 @@ fn project_pkgs_dir_is_skipped_by_path() {
 /// A project holding a `target_dir` dep: the copy is committed to the repo under a name the
 /// project chose, and `lua/mine.tl` — the project's own — sits beside it under the same
 /// parent. Only the manifest says which is which.
-fn target_dir_project() -> PathBuf {
-    let root = scratch("targetdir");
+fn target_dir_project() -> common::TempDir {
+    let root = tempdir("targetdir");
     write(
         &root.join("mlua-pkg.toml"),
         "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[deps.mathx]\n\
@@ -230,8 +237,9 @@ fn target_dir_project() -> PathBuf {
 #[test]
 fn a_target_dir_copy_is_not_the_projects_to_check() {
     let root = target_dir_project();
+    let root_buf = root.to_path_buf();
     let skip = not_walked(&root, htl_core::model::Purpose::Check);
-    let files = collect_tl_skipping(std::slice::from_ref(&root), &skip).unwrap();
+    let files = collect_tl_skipping(std::slice::from_ref(&root_buf), &skip).unwrap();
     assert_eq!(
         rel(&root, &files),
         vec!["lua/mine.tl", "src/main.tl", "tests/main_test.tl"],
@@ -244,8 +252,9 @@ fn a_target_dir_copy_is_not_the_projects_to_check() {
 #[test]
 fn a_target_dir_copys_tests_are_not_the_projects() {
     let root = target_dir_project();
+    let root_buf = root.to_path_buf();
     let skip = not_walked(&root, htl_core::model::Purpose::Test);
-    let files = discover_tests_skipping(std::slice::from_ref(&root), &skip).unwrap();
+    let files = discover_tests_skipping(std::slice::from_ref(&root_buf), &skip).unwrap();
     assert_eq!(rel(&root, &files), vec!["tests/main_test.tl"]);
 }
 
@@ -264,8 +273,8 @@ fn a_project_with_no_target_dir_copies_skips_nothing_extra() {
 /// parse but names the library is a test — the failure it will report is the point.
 #[test]
 fn a_test_is_a_file_that_loads_the_test_library() {
-    let root = std::env::temp_dir().join(format!("htl-discover-lib-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = common::tempdir("htl-discover-lib", "project");
+    let root_buf = root.to_path_buf();
     let t = "local t = require(\"htl.test\")\nt.it(\"x\", function() end)\n";
     write(&root.join("tests/combat.tl"), t);
     write(&root.join("tests/combat/hit.tl"), t);
@@ -277,7 +286,7 @@ fn a_test_is_a_file_that_loads_the_test_library() {
         &root.join("tests/broken.tl"),
         "local t = require(\"htl.test\")\nlocal x: = \n",
     );
-    let files = discover_tests(std::slice::from_ref(&root)).unwrap();
+    let files = discover_tests(std::slice::from_ref(&root_buf)).unwrap();
     assert_eq!(
         rel(&root, &files),
         vec![

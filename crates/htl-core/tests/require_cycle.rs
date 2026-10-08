@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-cycle", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-cycle", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -29,7 +29,7 @@ fn check_all(dir: &Path, names: &[&str]) -> Vec<(PathBuf, CheckInfo)> {
 
 #[test]
 fn two_file_cycle_is_reported_once() {
-    let dir = scratch("ab");
+    let dir = tempdir("ab");
     write(
         &dir.join("a.tl"),
         "local b = require(\"b\")\nlocal record a\nend\nfunction a.f(): integer return 1 end\nprint(b)\nreturn a\n",
@@ -52,7 +52,7 @@ fn two_file_cycle_is_reported_once() {
 
 #[test]
 fn dag_has_no_cycles() {
-    let dir = scratch("dag");
+    let dir = tempdir("dag");
     write(
         &dir.join("defs.tl"),
         "local record defs\n   record P\n      x: number\n   end\nend\nreturn defs\n",
@@ -71,7 +71,7 @@ fn dag_has_no_cycles() {
 
 #[test]
 fn three_file_cycle_names_the_loop() {
-    let dir = scratch("abc");
+    let dir = tempdir("abc");
     write(
         &dir.join("a.tl"),
         "local b = require(\"b\")\nprint(b)\nreturn {}\n",
@@ -101,7 +101,7 @@ fn three_file_cycle_names_the_loop() {
 /// generator erases both requires, so nothing that runs loops. Not a cycle.
 #[test]
 fn a_loop_of_erased_type_only_requires_is_not_a_cycle() {
-    let dir = scratch("types-only");
+    let dir = tempdir("types-only");
     write(
         &dir.join("a.tl"),
         "local type b = require(\"b\")\nlocal record a\n   record A\n      other: b.B\n   end\nend\nreturn a\n",
@@ -128,7 +128,7 @@ fn a_loop_of_erased_type_only_requires_is_not_a_cycle() {
 /// One live edge and one erased back edge: still no loop in what runs.
 #[test]
 fn a_loop_closed_only_by_an_erased_require_is_not_a_cycle() {
-    let dir = scratch("half-erased");
+    let dir = tempdir("half-erased");
     write(
         &dir.join("a.tl"),
         "local b = require(\"b\")\nlocal record a\n   record A\n      n: integer\n   end\nend\nprint(b)\nreturn a\n",

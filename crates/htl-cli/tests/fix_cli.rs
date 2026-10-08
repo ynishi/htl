@@ -5,8 +5,8 @@ use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-fix", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-fix", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -38,8 +38,8 @@ fn git(args: &[&str], cwd: &Path) -> bool {
 
 const NUM: &str = "local total = 0\ntotal = total + 1.5\nprint(total)\n";
 
-fn repo() -> Option<PathBuf> {
-    let root = scratch("repo");
+fn repo() -> Option<common::TempDir> {
+    let root = tempdir("repo");
     if !git(&["init", "-q"], &root) {
         return None; // no git on this machine: the guard tests cannot run
     }
@@ -57,7 +57,7 @@ fn repo() -> Option<PathBuf> {
 
 #[test]
 fn refuses_outside_a_repo_and_dirty_files() {
-    let plain = scratch("plain");
+    let plain = tempdir("plain");
     write(
         &plain.join("htl.toml"),
         "[lint.rules]\nexplicit-number = \"warn\"\n",
@@ -166,7 +166,7 @@ const STRUCT_SITE: &str =
 /// JSON, and written by nothing — not even `--unsafe`.
 #[test]
 fn a_suggestion_is_shown_and_never_written() {
-    let dir = scratch("suggest");
+    let dir = tempdir("suggest");
     write(&dir.join("htl.toml"), "");
     write(&dir.join("src/defs.tl"), STRUCT_DEFS);
     write(&dir.join("src/mod.tl"), STRUCT_SITE);
@@ -281,7 +281,7 @@ fn the_old_error_spelling_says_what_it_is_called_now() {
 /// write, and only a real run writes it.
 #[test]
 fn a_dry_run_writes_no_declaration_and_says_which_it_would() {
-    let root = scratch("dry-dts");
+    let root = tempdir("dry-dts");
     write(&root.join("htl.toml"), "[[contract]]\ndir = \"mods\"\n");
     write(
         &root.join("mlua-pkg.toml"),

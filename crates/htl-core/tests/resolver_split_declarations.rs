@@ -13,15 +13,15 @@ use htl_core::pkg::TealResolver;
 use mlua_pkg::Registry;
 use mlua_pkg::resolvers::MemoryResolver;
 use std::panic::AssertUnwindSafe;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
 const DECL: &str = "local record foo\n   t: function(): string\nend\nreturn foo\n";
 const IMPL: &str = "return { t = function() return 'REAL' end }\n";
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-split-declarations", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-split-declarations", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -33,14 +33,14 @@ fn write(path: &Path, text: &str) {
 /// Before the fix this `require` took the host's thread down instead of failing.
 #[test]
 fn a_declaration_in_a_split_state_errors_rather_than_panicking() {
-    let root = scratch("alone");
+    let root = tempdir("alone");
     write(&root.join("foo.d.tl"), DECL);
 
     let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let checker = Htl::new().unwrap();
         let program = Htl::with_checker_lua(&checker, Lua::new()).unwrap();
         let mut reg = Registry::new();
-        reg.add(TealResolver::new(&root).unwrap());
+        reg.add(TealResolver::new(root.to_path_buf()).unwrap());
         reg.install(program.lua()).unwrap();
         program
             .lua()
@@ -58,14 +58,14 @@ fn a_declaration_in_a_split_state_errors_rather_than_panicking() {
 /// #295's case A in a split state: the declaration root first, the module in memory.
 #[test]
 fn a_declaration_in_a_split_state_steps_aside_for_an_embedded_module() {
-    let root = scratch("embedded");
+    let root = tempdir("embedded");
     write(&root.join("foo.d.tl"), DECL);
 
     let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let checker = Htl::new().unwrap();
         let program = Htl::with_checker_lua(&checker, Lua::new()).unwrap();
         let mut reg = Registry::new();
-        reg.add(TealResolver::new(&root).unwrap());
+        reg.add(TealResolver::new(root.to_path_buf()).unwrap());
         reg.add(MemoryResolver::new().add("foo", IMPL));
         reg.install(program.lua()).unwrap();
         program

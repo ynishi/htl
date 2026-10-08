@@ -5,13 +5,13 @@
 //! the scaffold recorded, and the `--format` help of the commands whose text form is a
 //! report.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-scaffold", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-scaffold", name)
 }
 
 fn htl(args: &[&str], cwd: &Path) -> (bool, String, String) {
@@ -52,7 +52,7 @@ fn dep_line(manifest: &Path, name: &str) -> String {
 /// build.
 #[test]
 fn new_pins_the_htl_this_binary_was_built_with() {
-    let root = scratch("dep");
+    let root = tempdir("dep");
     let (ok, _, stderr) = htl(&["new", "a", "--target", "bin"], &root);
     assert!(ok, "{stderr}");
     let line = htl_line(&root.join("a/Cargo.toml"));
@@ -77,7 +77,7 @@ fn new_pins_the_htl_this_binary_was_built_with() {
 /// presence is held to the pin, under whichever binary is running.
 #[test]
 fn new_writes_mise_toml_exactly_when_it_pins_a_release() {
-    let root = scratch("mise");
+    let root = tempdir("mise");
     let (ok, _, stderr) = htl(&["new", "a", "--target", "bin"], &root);
     assert!(ok, "{stderr}");
     let line = htl_line(&root.join("a/Cargo.toml"));
@@ -110,7 +110,7 @@ fn new_writes_mise_toml_exactly_when_it_pins_a_release() {
 /// with the branch.
 #[test]
 fn new_htl_main_writes_a_git_pin() {
-    let root = scratch("main-pin");
+    let root = tempdir("main-pin");
     let (ok, _, stderr) = htl(&["new", "b", "--target", "bin", "--htl", "main"], &root);
     assert!(ok, "{stderr}");
     let line = htl_line(&root.join("b/Cargo.toml"));
@@ -124,7 +124,7 @@ fn new_htl_main_writes_a_git_pin() {
 /// path into its layout.
 #[test]
 fn new_htl_path_writes_a_path_pin() {
-    let root = scratch("path-pin");
+    let root = tempdir("path-pin");
     let (ok, _, stderr) = htl(
         &["new", "c", "--target", "bin", "--htl", "path:../co"],
         &root,
@@ -141,7 +141,7 @@ fn new_htl_path_writes_a_path_pin() {
 /// target, before the directory exists, so a typo leaves nothing behind.
 #[test]
 fn a_release_by_number_is_refused_before_writing() {
-    let root = scratch("bad-pin");
+    let root = tempdir("bad-pin");
     let (ok, _, stderr) = htl(&["new", "d", "--htl", "0.3"], &root);
     assert!(!ok, "{stderr}");
     assert!(stderr.contains("unsupported htl `0.3`"), "{stderr}");
@@ -157,7 +157,7 @@ fn a_release_by_number_is_refused_before_writing() {
 /// This is the case that would break first if they were not.
 #[test]
 fn the_cdylib_pin_keeps_its_features_under_every_pin_kind() {
-    let root = scratch("cdylib-pin");
+    let root = tempdir("cdylib-pin");
     let (ok, _, stderr) = htl(
         &["new", "e", "--lib", "--target", "cdylib", "--htl", "main"],
         &root,
@@ -174,7 +174,7 @@ fn the_cdylib_pin_keeps_its_features_under_every_pin_kind() {
 /// it. One tree, two crates; two trees would be two htls in one binary.
 #[test]
 fn the_window_targets_htl_mq_line_follows_the_pin() {
-    let root = scratch("window-pin");
+    let root = tempdir("window-pin");
 
     let (ok, _, stderr) = htl(&["new", "w", "--target", "window", "--htl", "main"], &root);
     assert!(ok, "{stderr}");
@@ -203,7 +203,7 @@ fn the_window_targets_htl_mq_line_follows_the_pin() {
 /// exists.
 #[test]
 fn the_window_target_needs_an_entry_script_and_refuses_lib() {
-    let root = scratch("window-needs-script");
+    let root = tempdir("window-needs-script");
     let (ok, _, stderr) = htl(&["new", "sample", "--target", "window", "--lib"], &root);
     assert!(!ok, "{stderr}");
     assert!(
@@ -224,7 +224,7 @@ fn the_window_target_needs_an_entry_script_and_refuses_lib() {
 /// the key accepts.
 #[test]
 fn new_records_the_target_under_every_pin() {
-    let root = scratch("build-target");
+    let root = tempdir("build-target");
     let config = |name: &str| std::fs::read_to_string(root.join(name).join("htl.toml")).unwrap();
 
     let (ok, _, stderr) = htl(&["new", "a5", "--target", "bin"], &root);
@@ -274,7 +274,7 @@ fn new_records_the_target_under_every_pin() {
 /// than a note the project keeps about itself.
 #[test]
 fn build_refuses_a_project_whose_target_is_not_hb() {
-    let root = scratch("build-not-hb");
+    let root = tempdir("build-not-hb");
     // Only a pin that reads the key makes the scaffold write it, so the refusal below is
     // reached through what `htl new` produced rather than through a hand-written file.
     let (ok, _, stderr) = htl(&["new", "b", "--target", "bin", "--htl", "main"], &root);
@@ -302,7 +302,7 @@ fn build_refuses_a_project_whose_target_is_not_hb() {
 /// the refusal above must not be what every build does.
 #[test]
 fn build_bundles_an_hb_project() {
-    let root = scratch("build-hb");
+    let root = tempdir("build-hb");
     let (ok, _, stderr) = htl(&["new", "a"], &root);
     assert!(ok, "{stderr}");
     let dir = root.join("a");
@@ -334,7 +334,7 @@ fn build_bundles_an_hb_project() {
 /// at `opt-level = 0`: the scaffold says so and sets the override.
 #[test]
 fn embed_scaffold_optimises_the_proc_macro_build() {
-    let root = scratch("opt");
+    let root = tempdir("opt");
     let (ok, _, stderr) = htl(&["new", "sample", "--embed"], &root);
     assert!(ok, "{stderr}");
     let cargo = std::fs::read_to_string(root.join("sample/Cargo.toml")).unwrap();
@@ -354,7 +354,7 @@ fn embed_scaffold_optimises_the_proc_macro_build() {
 /// argument actually crosses (`cargo run -- Ada`); this holds the shape that makes it.
 #[test]
 fn embed_scaffold_runs_main_as_a_bundle_that_fills_arg() {
-    let root = scratch("arg");
+    let root = tempdir("arg");
     let (ok, _, stderr) = htl(&["new", "sample", "--embed"], &root);
     assert!(ok, "{stderr}");
     let main_rs = std::fs::read_to_string(root.join("sample/src/main.rs")).unwrap();
@@ -383,7 +383,7 @@ fn embed_scaffold_runs_main_as_a_bundle_that_fills_arg() {
 /// what another crate embeds it for.
 #[test]
 fn lib_embed_scaffold_writes_the_library_and_no_binary() {
-    let root = scratch("lib");
+    let root = tempdir("lib");
     let (ok, _, stderr) = htl(&["new", "sample", "--embed", "--lib"], &root);
     assert!(ok, "{stderr}");
     assert!(!root.join("sample/src/main.rs").exists());
@@ -397,7 +397,7 @@ fn lib_embed_scaffold_writes_the_library_and_no_binary() {
 /// script gets both, and the binary goes through the library rather than around it.
 #[test]
 fn the_binary_reaches_the_host_through_the_library() {
-    let root = scratch("through-lib");
+    let root = tempdir("through-lib");
     let (ok, _, stderr) = htl(&["new", "sample", "--embed"], &root);
     assert!(ok, "{stderr}");
     let main_rs = std::fs::read_to_string(root.join("sample/src/main.rs")).unwrap();
@@ -410,7 +410,7 @@ fn the_binary_reaches_the_host_through_the_library() {
 /// snapshot tests pin the tree; this pins that the shorthand still reaches it.
 #[test]
 fn embed_and_target_bin_write_the_same_thing() {
-    let root = scratch("same");
+    let root = tempdir("same");
     let (ok, _, stderr) = htl(&["new", "by-flag", "--embed"], &root);
     assert!(ok, "{stderr}");
     let (ok, _, stderr) = htl(&["new", "by-name", "--target", "bin"], &root);
@@ -428,7 +428,7 @@ fn embed_and_target_bin_write_the_same_thing() {
 /// directory exists.
 #[test]
 fn the_cdylib_target_needs_lib_and_says_so_before_writing_anything() {
-    let root = scratch("cdylib-needs-lib");
+    let root = tempdir("cdylib-needs-lib");
     let (ok, _, stderr) = htl(&["new", "sample", "--target", "cdylib"], &root);
     assert!(!ok, "{stderr}");
     assert!(
@@ -444,7 +444,7 @@ fn the_cdylib_target_needs_lib_and_says_so_before_writing_anything() {
 /// *for*, so a reader of the test knows what would break.
 #[test]
 fn the_cdylib_scaffold_is_a_c_library_with_the_export_attribute() {
-    let root = scratch("cdylib");
+    let root = tempdir("cdylib");
     let (ok, _, stderr) = htl(&["new", "sample", "--lib", "--target", "cdylib"], &root);
     assert!(ok, "{stderr}");
     let dir = root.join("sample");
@@ -488,7 +488,7 @@ fn the_cdylib_scaffold_is_a_c_library_with_the_export_attribute() {
 /// do not share a help page, which is the collision #189 removed.
 #[test]
 fn target_help_lists_every_registered_target_and_never_the_old_flag() {
-    let root = scratch("target-help");
+    let root = tempdir("target-help");
     for cmd in [&["new", "--help"][..], &["init", "--help"][..]] {
         let (ok, stdout, _) = htl(cmd, &root);
         assert!(ok);
@@ -506,7 +506,7 @@ fn target_help_lists_every_registered_target_and_never_the_old_flag() {
 /// settled before the first write, so a typo leaves no half-written directory behind.
 #[test]
 fn an_unknown_target_is_refused_before_anything_is_written() {
-    let root = scratch("unknown");
+    let root = tempdir("unknown");
     let (ok, _, stderr) = htl(&["new", "sample", "--target", "nope"], &root);
     assert!(!ok, "{stderr}");
     assert!(stderr.contains("bin"), "the registered names:\n{stderr}");
@@ -519,7 +519,7 @@ fn an_unknown_target_is_refused_before_anything_is_written() {
 /// answered with the ones that replaced them rather than with a half-written directory.
 #[test]
 fn an_old_target_name_is_refused_with_the_new_ones() {
-    let root = scratch("old-names");
+    let root = tempdir("old-names");
     for old in ["rust", "ffi"] {
         let (ok, _, stderr) = htl(&["new", "x", "--target", old], &root);
         assert!(!ok, "`{old}` should not be a target:\n{stderr}");
@@ -533,7 +533,7 @@ fn an_old_target_name_is_refused_with_the_new_ones() {
 /// says which files it left alone, so nothing is skipped in silence.
 #[test]
 fn init_with_a_target_reports_what_it_kept() {
-    let root = scratch("init-target");
+    let root = tempdir("init-target");
     let (ok, _, stderr) = htl(&["new", "sample"], &root);
     assert!(ok, "{stderr}");
     let dir = root.join("sample");
@@ -552,7 +552,7 @@ fn init_with_a_target_reports_what_it_kept() {
 /// the kept list is what asking for a target buys, not noise on every re-run.
 #[test]
 fn init_without_a_target_still_says_nothing_to_do() {
-    let root = scratch("init-plain");
+    let root = tempdir("init-plain");
     let (ok, _, stderr) = htl(&["new", "sample"], &root);
     assert!(ok, "{stderr}");
     let (ok, _, stderr) = htl(&["init"], &root.join("sample"));
@@ -565,7 +565,7 @@ fn init_without_a_target_still_says_nothing_to_do() {
 /// script — before the directory exists, like every other refusal `htl new` makes.
 #[test]
 fn a_rust_keyword_is_refused_by_every_target_that_writes_a_crate() {
-    let root = scratch("kw-rust");
+    let root = tempdir("kw-rust");
     for args in [
         &["new", "pub", "--embed"][..],
         &["new", "pub", "--embed", "--lib"][..],
@@ -588,7 +588,7 @@ fn a_rust_keyword_is_refused_by_every_target_that_writes_a_crate() {
 /// taken there — and the project they write is one this binary checks.
 #[test]
 fn a_rust_keyword_is_a_plain_project_that_checks() {
-    let root = scratch("kw-rust-plain");
+    let root = tempdir("kw-rust-plain");
     for name in ["pub", "match"] {
         let (ok, _, stderr) = htl(&["new", name], &root);
         assert!(ok, "{name}:\n{stderr}");
@@ -602,7 +602,7 @@ fn a_rust_keyword_is_a_plain_project_that_checks() {
 /// plain tree is the one that breaks first.
 #[test]
 fn a_lua_keyword_is_refused_by_every_target() {
-    let root = scratch("kw-lua");
+    let root = tempdir("kw-lua");
     for args in [
         &["new", "end"][..],
         &["new", "end", "--embed"][..],
@@ -627,7 +627,7 @@ fn a_lua_keyword_is_refused_by_every_target() {
 /// written around — so this is a refusal about the Rust half and nothing else.
 #[test]
 fn a_leading_digit_is_refused_for_a_crate_and_still_written_plain() {
-    let root = scratch("kw-digit");
+    let root = tempdir("kw-digit");
     let (ok, _, stderr) = htl(&["new", "123abc", "--embed"], &root);
     assert!(!ok, "{stderr}");
     assert!(
@@ -645,7 +645,7 @@ fn a_leading_digit_is_refused_for_a_crate_and_still_written_plain() {
 /// is what makes the identifier, are the names the scaffold has always written.
 #[test]
 fn a_name_a_keyword_is_only_part_of_is_still_scaffolded() {
-    let root = scratch("kw-near");
+    let root = tempdir("kw-near");
     for name in ["pubs", "my-lib"] {
         let (ok, _, stderr) = htl(&["new", name, "--embed"], &root);
         assert!(ok, "{name}:\n{stderr}");
@@ -659,7 +659,7 @@ fn a_name_a_keyword_is_only_part_of_is_still_scaffolded() {
 /// it — and the directory it was pointed at is as empty afterwards as it was before.
 #[test]
 fn init_refuses_a_keyword_directory_and_leaves_it_empty() {
-    let root = scratch("kw-init");
+    let root = tempdir("kw-init");
     let dir = root.join("pub");
     std::fs::create_dir_all(&dir).unwrap();
     let (ok, _, stderr) = htl(&["init", "--embed"], &dir);
@@ -673,7 +673,7 @@ fn init_refuses_a_keyword_directory_and_leaves_it_empty() {
 
 #[test]
 fn format_help_does_not_promise_stderr_for_report_commands() {
-    let root = scratch("help");
+    let root = tempdir("help");
     for cmd in [
         &["bundle", "info", "--help"][..],
         &["cache", "status", "--help"][..],

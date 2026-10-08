@@ -11,12 +11,12 @@
 use htl_core::Htl;
 use htl_core::pkg::TealResolver;
 use mlua_pkg::Registry;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-resolver-naming", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-resolver-naming", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -42,7 +42,7 @@ fn n_of(h: &Htl, name: &str) -> Result<i64, String> {
 
 #[test]
 fn a_file_named_after_its_directory_is_a_submodule_of_a_script_directory() {
-    let dir = scratch("top");
+    let dir = tempdir("top");
     write(&dir.join("util/util.tl"), "return { n = 1 }\n");
     write(
         &dir.join("main.tl"),
@@ -52,7 +52,7 @@ fn a_file_named_after_its_directory_is_a_submodule_of_a_script_directory() {
         &dir.join("fine.tl"),
         "local util = require(\"util.util\")\nreturn { n = util.n + 1 }\n",
     );
-    let h = host(TealResolver::new(&dir).unwrap());
+    let h = host(TealResolver::new(dir.to_path_buf()).unwrap());
 
     assert_eq!(n_of(&h, "util.util"), Ok(1));
     assert_eq!(n_of(&h, "fine"), Ok(2));
@@ -65,13 +65,17 @@ fn a_file_named_after_its_directory_is_a_submodule_of_a_script_directory() {
 
 #[test]
 fn a_directory_of_packages_reads_a_flat_package_by_its_entry() {
-    let dir = scratch("packages");
+    let dir = tempdir("packages");
     write(
         &dir.join("mathx/mathx.tl"),
         "local sub = require(\"mathx.sub\")\nreturn { n = sub.n * 2 }\n",
     );
     write(&dir.join("mathx/sub.tl"), "return { n = 21 }\n");
-    let h = host(TealResolver::new(&dir).unwrap().holding_packages());
+    let h = host(
+        TealResolver::new(dir.to_path_buf())
+            .unwrap()
+            .holding_packages(),
+    );
 
     assert_eq!(n_of(&h, "mathx"), Ok(42));
     assert_eq!(n_of(&h, "mathx.sub"), Ok(21));
@@ -79,10 +83,10 @@ fn a_directory_of_packages_reads_a_flat_package_by_its_entry() {
 
 #[test]
 fn two_implementations_of_one_name_are_an_error() {
-    let dir = scratch("ambiguous");
+    let dir = tempdir("ambiguous");
     write(&dir.join("util.tl"), "return { n = 1 }\n");
     write(&dir.join("util/init.tl"), "return { n = 2 }\n");
-    let h = host(TealResolver::new(&dir).unwrap());
+    let h = host(TealResolver::new(dir.to_path_buf()).unwrap());
 
     let e = n_of(&h, "util").unwrap_err();
     assert!(

@@ -19,7 +19,10 @@
 //! It is a separate file from `scaffold_targets.rs` for the same reason `embed_publish.rs`
 //! and `htlx_consumer.rs` are: it is not about a target `htl new --target` offers, and
 //! duplicating the handful of helpers it needs is cheaper to read than a shared module
-//! would be. [`cargo`] is explained there; this repeats only what it does, not why.
+//! would be. [`cargo`] is explained there; this repeats only what it does, not why. The
+//! one exception is `tempdir`'s directory guard (`mod common`), shared with every other
+//! integration suite in the workspace so it is removed when the test is, rather than a
+//! fifth copy of a `Drop` impl.
 //!
 //! The dependency is `crates/htl` of *this checkout*, always, by path — not
 //! `HTL_PATCH_HTL` / `HTL_PATCH_CORE` / `HTL_PATCH_MACROS`, which `embed_publish.rs` and
@@ -35,6 +38,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
+
+mod common;
 
 /// The root of this workspace: this crate sits directly under it.
 fn workspace_root() -> &'static Path {
@@ -83,10 +88,8 @@ fn cargo_target_dir() -> &'static Path {
 
 /// A fresh directory under the system temp dir, outside the checkout so the CLI runs
 /// against the project's own configuration and not this repository's.
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("htl-e2e-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+fn tempdir(name: &str) -> common::TempDir {
+    let dir = common::tempdir("htl-e2e", name);
     println!("scaffolding into {}", dir.display());
     dir
 }
@@ -147,8 +150,8 @@ fn use_io_tl(method: &str) -> String {
 /// with no rename in sight), and then the rename `#429` reported, built once more.
 #[test]
 fn a_host_module_declared_after_the_include_tl_that_checks_against_it_builds_in_one_pass() {
-    let scratch = scratch("hostorder");
-    let project = scratch.join("hostorder");
+    let dir = tempdir("hostorder");
+    let project = dir.join("hostorder");
     fs::create_dir_all(project.join("src")).unwrap_or_else(|e| panic!("{e}"));
 
     fs::write(
@@ -211,5 +214,5 @@ fn a_host_module_declared_after_the_include_tl_that_checks_against_it_builds_in_
         "the project compiled, so its own #[host_module] should have written this:\n{decl}"
     );
 
-    fs::remove_dir_all(&scratch).ok();
+    fs::remove_dir_all(&dir).ok();
 }

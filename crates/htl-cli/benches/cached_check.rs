@@ -18,9 +18,16 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
+
+/// `TempDir` and `tempdir` are implemented once, in
+/// `crates/htl-core/tests/common/mod.rs`, and brought in here by `#[path]`: the workspace
+/// shares test helpers by linking the one file rather than copying it.
+#[allow(dead_code)]
+#[path = "../../htl-core/tests/common/mod.rs"]
+mod core_common;
 
 const MODULES: usize = 48;
 const CORES: usize = 4;
@@ -56,16 +63,9 @@ fn core_source(i: usize, salt: u32) -> String {
     )
 }
 
-/// An `n`-module project under a fresh directory.
-fn project(n: usize) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "htl-cli-bench-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+/// An `n`-module project under a fresh directory, removed when the returned guard drops.
+fn project(n: usize) -> core_common::TempDir {
+    let root = core_common::tempdir("htl-cli-bench", &n.to_string());
     write(&root.join("htl.toml"), "[check]\n");
     write(
         &root.join("src/util.tl"),

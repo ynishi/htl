@@ -3,12 +3,12 @@
 
 use htl_core::fix::{FixOptions, fix_file, unified_diff};
 use htl_core::{Applicability, Htl};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-fix", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-fix", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -23,7 +23,7 @@ function world:alive(w: world.W): boolean\n   return w.hp > 0\nend\n\nreturn wor
 
 #[test]
 fn diagnostics_carry_fixes_with_applicability() {
-    let dir = scratch("carry");
+    let dir = tempdir("carry");
     write(&dir.join("world.tl"), FWD);
     write(
         &dir.join("num.tl"),
@@ -83,7 +83,7 @@ fn diagnostics_carry_fixes_with_applicability() {
 
 #[test]
 fn fix_file_applies_safe_fixes_and_is_idempotent() {
-    let dir = scratch("apply");
+    let dir = tempdir("apply");
     write(&dir.join("world.tl"), FWD);
     let h = Htl::new().unwrap();
     h.add_path(&dir).unwrap();
@@ -108,7 +108,7 @@ fn fix_file_applies_safe_fixes_and_is_idempotent() {
 
 #[test]
 fn unsafe_fixes_need_the_flag_or_promotion() {
-    let dir = scratch("unsafe");
+    let dir = tempdir("unsafe");
     write(
         &dir.join("glob.tl"),
         "global counter: integer = 0\nprint(counter)\n",
@@ -160,7 +160,7 @@ fn unsafe_fixes_need_the_flag_or_promotion() {
 
 #[test]
 fn dry_run_and_diff_leave_the_file_alone() {
-    let dir = scratch("dry");
+    let dir = tempdir("dry");
     write(
         &dir.join("num.tl"),
         "local total = 0\ntotal = total + 1.5\nprint(total)\n",
@@ -200,7 +200,7 @@ fn dry_run_and_diff_leave_the_file_alone() {
 /// `got number, expected integer` error); the unrelated error simply remains.
 #[test]
 fn other_type_errors_do_not_block_but_syntax_errors_do() {
-    let dir = scratch("other-errors");
+    let dir = tempdir("other-errors");
     write(
         &dir.join("num.tl"),
         "local total = 0\ntotal = total + 1.5\nlocal s: string = 1\nprint(total, s)\n",
@@ -257,7 +257,7 @@ fn other_type_errors_do_not_block_but_syntax_errors_do() {
 /// requirer the same fix applied cleanly, which is what made this hard to see.
 #[test]
 fn a_correct_fix_survives_when_another_module_requires_the_one_being_fixed() {
-    let dir = scratch("requirer");
+    let dir = tempdir("requirer");
     write(&dir.join("world.tl"), FWD);
     write(
         &dir.join("main.tl"),
@@ -293,12 +293,12 @@ fn a_correct_fix_survives_when_another_module_requires_the_one_being_fixed() {
 }
 
 /// What a dry run says it would leave is what a real run leaves. They disagreed: the dry run
-/// wrote to a scratch path no store entry named and got the right answer, the real run
+/// wrote to a tempdir path no store entry named and got the right answer, the real run
 /// re-checked the path the store knew and got the stale one.
 #[test]
 fn a_dry_run_and_a_real_run_agree_on_the_same_tree() {
-    let dry = scratch("agree-dry");
-    let real = scratch("agree-real");
+    let dry = tempdir("agree-dry");
+    let real = tempdir("agree-real");
     for dir in [&dry, &real] {
         write(&dir.join("world.tl"), FWD);
         write(
@@ -352,7 +352,7 @@ fn a_fix_that_makes_things_worse_is_reverted() {
     // trigger: explicit-number on a name that is also used as a type-annotated
     // parameter later cannot be produced, so drive the revert through the API with a
     // file where the applied edit lands inside a string (line/col from a stale check).
-    let dir = scratch("revert");
+    let dir = tempdir("revert");
     write(&dir.join("world.tl"), FWD);
     let h = Htl::new().unwrap();
     h.add_path(&dir).unwrap();
@@ -381,7 +381,7 @@ fn a_fix_that_makes_things_worse_is_reverted() {
 /// recognises by its message, `tl:error` is every other error. Naming one selects that one.
 #[test]
 fn the_two_error_classes_select_different_things() {
-    let dir = scratch("classes");
+    let dir = tempdir("classes");
     write(&dir.join("world.tl"), FWD);
     let h = Htl::new().unwrap();
     h.add_path(&dir).unwrap();
@@ -442,7 +442,7 @@ fn the_two_error_classes_select_different_things() {
 /// run that fixes nothing and reads like a project with nothing to fix.
 #[test]
 fn the_old_error_spelling_is_refused_by_name() {
-    let dir = scratch("renamed");
+    let dir = tempdir("renamed");
     write(&dir.join("world.tl"), FWD);
     let h = Htl::new().unwrap();
     h.add_path(&dir).unwrap();
@@ -488,7 +488,7 @@ fn the_old_error_spelling_is_refused_by_name() {
 /// A name that was never a rule is refused too, and the message says where the names are.
 #[test]
 fn a_name_that_is_not_a_rule_is_refused_before_anything_is_read() {
-    let dir = scratch("typo");
+    let dir = tempdir("typo");
     // No file written: the request is wrong whatever the tree holds.
     let h = Htl::new().unwrap();
     let err = fix_file(
@@ -516,7 +516,7 @@ fn a_name_that_is_not_a_rule_is_refused_before_anything_is_read() {
 /// writes the error.
 #[test]
 fn the_items_a_check_carries_are_what_its_text_says() {
-    let dir = scratch("items");
+    let dir = tempdir("items");
     write(
         &dir.join("all.tl"),
         "local record R\nend\nfunction R.a(): integer return R.b() end\nfunction R.b(): integer return 1 end\n\

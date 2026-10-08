@@ -79,7 +79,7 @@ impl FixOptions {
 /// quiet run from a busy one that undid itself.
 #[derive(Debug, Clone)]
 pub struct Applied {
-    /// The file as the caller named it — not the scratch path a dry run writes to.
+    /// The file as the caller named it — not the temporary copy's path a dry run writes to.
     pub file: PathBuf,
     /// The line the diagnostic was on, before this pass's edits moved anything.
     pub line: usize,
@@ -151,9 +151,9 @@ pub fn fix_file(h: &Htl, path: &Path, opts: &FixOptions) -> Result<FileOutcome> 
     };
     let mut check = h.check(path)?;
     let mut last_set: Option<BTreeSet<String>> = None;
-    // A dry run checks from a scratch copy so the tree stays untouched.
-    let scratch = if opts.dry_run {
-        Some(scratch_path(path)?)
+    // A dry run checks from a temporary copy so the tree stays untouched.
+    let temp = if opts.dry_run {
+        Some(temp_path(path)?)
     } else {
         None
     };
@@ -194,10 +194,10 @@ pub fn fix_file(h: &Htl, path: &Path, opts: &FixOptions) -> Result<FileOutcome> 
             break;
         }
         // Write, re-check, keep or revert.
-        let target = scratch.as_deref().unwrap_or(path);
+        let target = temp.as_deref().unwrap_or(path);
         std::fs::write(target, &next).with_context(|| format!("writing {}", target.display()))?;
         // Ask about the file that was just written, not about the one the checker's store
-        // remembers. A dry run got the right answer by accident — it writes to a scratch path
+        // remembers. A dry run got the right answer by accident — it writes to a temporary path
         // no store entry names — while a real run re-checked the path the store knew and was
         // handed the result from before the write, then reverted a correct fix for leaving
         // the error count unchanged.
@@ -237,7 +237,7 @@ pub fn fix_file(h: &Htl, path: &Path, opts: &FixOptions) -> Result<FileOutcome> 
             break;
         }
     }
-    if let Some(s) = &scratch {
+    if let Some(s) = &temp {
         let _ = std::fs::remove_file(s);
         if let Some(d) = s.parent() {
             let _ = std::fs::remove_dir(d);
@@ -501,7 +501,7 @@ impl LineIndex {
     }
 }
 
-fn scratch_path(path: &Path) -> Result<PathBuf> {
+fn temp_path(path: &Path) -> Result<PathBuf> {
     let stem = path
         .file_name()
         .and_then(|s| s.to_str())

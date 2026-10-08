@@ -15,13 +15,13 @@
 //! the division: ordinary shadowing is Teal's, a required module's name is htl's, two
 //! declarations in one scope stay Teal's as they always were.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-shadow-local", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-shadow-local", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -45,8 +45,8 @@ const SRC: &str = "local dep = require(\"dep\")\nlocal record m\nend\n\n\
                    return outer\nend\n\nfunction m.at(dep: string): string\n   return dep\n\
                    end\n\nlocal same = 1\nlocal same = 2\nprint(same)\n\nreturn m\n";
 
-fn project(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn project(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), "[lint]\n");
     write(
         &root.join("src/dep.tl"),

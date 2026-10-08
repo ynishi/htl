@@ -1778,22 +1778,34 @@ fn c_method_fn(
     }
 }
 
+/// `TempDir` and `tempdir` are implemented once, in
+/// `crates/htl-core/tests/common/mod.rs`, and brought in here by `#[path]`: the workspace
+/// shares test helpers by linking the one file rather than copying it. A `#[path]` `mod`
+/// item names any file on disk regardless of crate boundary, which is how this reaches
+/// `htl-core`'s file even though this crate's unit tests are a different compilation unit
+/// from `htl-core`'s integration tests, with no dev-dependency between the two crates to
+/// share it through otherwise. Declared at the crate root,
+/// rather than nested inside `mod tests` below, because a `#[path]` on an item of an
+/// *inline* module resolves relative to a directory named for that module (here,
+/// `src/tests/`) that does not exist on disk, and the OS refuses to resolve a `..` through
+/// a directory it cannot open — nested, the exact same attribute reads
+/// `crates/htl-core/tests/common/mod.rs` as `src/tests/../../../htl-core/...` and fails to
+/// find it. A top-level item has no such phantom segment.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../htl-core/tests/common/mod.rs"]
+mod core_common;
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A fresh directory under the system temp dir. Counted rather than timestamped: the
-    /// clock advances in microsecond steps, so two calls close together get the same
-    /// value and the same directory.
-    fn scratch(name: &str) -> PathBuf {
-        static NTH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "htl-macros-test-{name}-{}-{}",
-            std::process::id(),
-            NTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A fresh directory under the system temp dir, removed when the returned guard
+    /// drops. `TempDir` and the implementation are `htl-core`'s, reached through
+    /// `core_common` (declared at the crate root, above) — see its doc for what the
+    /// guard promises, the panic case included.
+    fn tempdir(name: &str) -> core_common::TempDir {
+        core_common::tempdir("htl-macros-test", name)
     }
 
     fn write(path: &Path, text: &str) {
@@ -1812,7 +1824,7 @@ mod tests {
     /// `src/helper.tl`.
     #[test]
     fn include_tl_and_htl_check_read_the_same_file_for_a_name() {
-        let root = scratch("same-as-check");
+        let root = tempdir("same-as-check");
         write(&root.join("htl.toml"), "");
         write(
             &root.join("src/helper.tl"),
@@ -1871,7 +1883,7 @@ mod tests {
     /// project.
     #[test]
     fn include_resolves_vendored_dep_from_mlua_pkg_project() {
-        let root = scratch("vendored");
+        let root = tempdir("vendored");
         write(
             &root.join("mlua-pkg.toml"),
             "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[deps]\n",
@@ -1962,7 +1974,7 @@ end
 
 return M
 ";
-        let root = scratch("comment-lines");
+        let root = tempdir("comment-lines");
         write(&root.join("src/doc2.tl"), DOC);
         let embedded = || match resolve_include(&root, "src/doc2.tl", false)
             .expect("the module checks")
@@ -2017,7 +2029,7 @@ end
 return M
 --- doc after return, last line of the file
 ";
-        let root = scratch("comment-lines-tail");
+        let root = tempdir("comment-lines-tail");
         write(&root.join("src/doc5.tl"), DOC);
         let embedded = || match resolve_include(&root, "src/doc5.tl", false)
             .expect("the module checks")
@@ -2044,7 +2056,7 @@ return M
     /// `target_dir` deps (physically vendored under the manifest) resolve too.
     #[test]
     fn include_resolves_target_dir_dep() {
-        let root = scratch("targetdir");
+        let root = tempdir("targetdir");
         write(
             &root.join("mlua-pkg.toml"),
             "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[deps]\nmathx = { git = \"https://example.invalid/mathx\", tag = \"v1\", target_dir = \"lua/mathx\" }\n",
@@ -2073,7 +2085,8 @@ return M
     /// (#267).
     #[test]
     fn include_resolves_a_patched_dep_in_the_copy_cargo_package_verifies() {
-        let root = scratch("packaged-patch").join("target/package/p-0.1.0");
+        let dir = tempdir("packaged-patch");
+        let root = dir.join("target/package/p-0.1.0");
         write(
             &root.join("mlua-pkg.toml"),
             "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[deps.mathx]\n\
@@ -2107,7 +2120,7 @@ return M
     /// A flat package exposes its top-level module as `<name>/<name>.tl`.
     #[test]
     fn include_resolves_flat_package_module() {
-        let root = scratch("flat");
+        let root = tempdir("flat");
         write(
             &root.join("mlua-pkg.toml"),
             "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[deps]\n",
@@ -2127,12 +2140,12 @@ return M
     /// same-named module sitting there is neither picked up nor tracked by a relative path.
     #[test]
     fn include_ignores_modules_in_the_process_cwd() {
-        let decoy = scratch("cwd-decoy");
+        let decoy = tempdir("cwd-decoy");
         write(
             &decoy.join("Tasks.tl"),
             "local record Tasks\nend\nreturn Tasks\n",
         );
-        let root = scratch("cwd-crate");
+        let root = tempdir("cwd-crate");
         write(
             &root.join("src/main.tl"),
             "local ok, t = pcall(require, \"Tasks\")\nprint(ok, t)\n",
@@ -2155,7 +2168,7 @@ return M
     /// advice in both; at `deny`, or under `strict`, it fails both.
     #[test]
     fn include_judges_by_htl_toml_levels_as_check_does() {
-        let root = scratch("htl-toml");
+        let root = tempdir("htl-toml");
         // `no-any` is off by default; the script only trips when htl.toml enables it.
         write(&root.join("src/main.tl"), "local x: any = 1\nprint(x)\n");
         resolve_include(&root, "src/main.tl", false).expect("no-any is off by default");
@@ -2183,7 +2196,7 @@ return M
     /// them expands the macro again instead of keeping the last verdict.
     #[test]
     fn the_settings_a_verdict_comes_from_are_tracked() {
-        let root = scratch("settings-tracked");
+        let root = tempdir("settings-tracked");
         write(&root.join("htl.toml"), "[lint]\nstrict = true\n");
         write(&root.join("src/main.tl"), "print(1)\n");
         let toml = std::fs::canonicalize(root.join("htl.toml")).unwrap();
@@ -2200,7 +2213,7 @@ return M
         assert!(tokens.contains("option_env ! (\"HTL_LINTS\")"), "{tokens}");
 
         // No htl.toml: nothing to track but the environment.
-        let bare = scratch("settings-bare");
+        let bare = tempdir("settings-bare");
         write(&bare.join("src/main.tl"), "print(1)\n");
         assert!(
             resolve_include(&bare, "src/main.tl", false)
@@ -2236,7 +2249,7 @@ return M
     /// which the tests of this crate share.
     #[test]
     fn htl_lint_caps_raises_or_is_refused() {
-        let root = scratch("htl-lint-env");
+        let root = tempdir("htl-lint-env");
         write(&root.join("src/main.tl"), "local x: any = 1\nprint(x)\n");
         let path = root.join("src/main.tl");
         let lints = vec![htl_core::Diagnostic::parse(
@@ -2263,7 +2276,7 @@ return M
     /// dependents, and what comes out is the same either way.
     #[test]
     fn macros_replay_from_the_run_cache_on_the_second_expansion() {
-        let root = scratch("cache");
+        let root = tempdir("cache");
         write(&root.join("htl.toml"), "[check]\n");
         write(
             &root.join("src/main.tl"),
@@ -2326,7 +2339,7 @@ return M
             );
         };
 
-        let bare = scratch("nocfg");
+        let bare = tempdir("nocfg");
         sources(&bare);
         for _ in 0..2 {
             let out = resolve_bundle(&bare, "src/main.tl", &opts).expect("links");
@@ -2334,7 +2347,8 @@ return M
         }
         assert!(!bare.join(".htl").exists(), "no htl.toml, no store");
 
-        let published = scratch("publish").join("target/package/host-0.1.0");
+        let published_dir = tempdir("publish");
+        let published = published_dir.join("target/package/host-0.1.0");
         sources(&published);
         write(&published.join("htl.toml"), "[check]\n");
         for _ in 0..2 {
@@ -2353,7 +2367,7 @@ return M
     /// expansion fails with it.
     #[test]
     fn bundle_takes_the_host_names_from_the_crates_host_modules() {
-        let root = scratch("bundle-host-module");
+        let root = tempdir("bundle-host-module");
         write(&root.join("htl.toml"), "");
         write(
             &root.join("Cargo.toml"),
@@ -2396,7 +2410,7 @@ return M
     /// is tracked, and a type error anywhere in the closure is a compile error.
     #[test]
     fn bundle_links_closure_tracks_inputs_and_fails_on_type_errors() {
-        let root = scratch("bundle");
+        let root = tempdir("bundle");
         write(
             &root.join("src/main.tl"),
             "local util = require(\"util\")\nlocal host = require(\"host\")\nprint(util.twice(host.base()))\n",
@@ -2468,7 +2482,7 @@ return M
     /// Lua would have raised at the module's first `require`.
     #[test]
     fn include_fails_on_a_dependency_type_error() {
-        let root = scratch("deperr");
+        let root = tempdir("deperr");
         write(
             &root.join("mlua-pkg.toml"),
             "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[deps]\n",
@@ -2492,7 +2506,7 @@ return M
     /// Without a project the same script fails: the dep is genuinely not on the path.
     #[test]
     fn include_without_project_does_not_see_vendored_dir() {
-        let root = scratch("noproject");
+        let root = tempdir("noproject");
         write(
             &root.join(".htl/modules/entries/mathx/init.tl"),
             "return {}\n",

@@ -3,13 +3,13 @@
 //! errors, the project's findings about itself (a contract marker, a require cycle) and a
 //! dependency's `required_by` used to come in three spellings in one report.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-one-path", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-one-path", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -31,8 +31,8 @@ fn htl(args: &[&str], cwd: &Path) -> (String, String) {
 
 /// A project with a type error of its own, a require cycle, and a contract marker left at
 /// the root: a finding from the checker, one from the project layer, one about a marker.
-fn project() -> PathBuf {
-    let root = scratch("mixed");
+fn project() -> common::TempDir {
+    let root = tempdir("mixed");
     write(&root.join("htl.toml"), "[[contract]]\ndir = \"mods\"\n");
     write(
         &root.join("mlua-pkg.toml"),
@@ -113,7 +113,7 @@ fn from_a_subdirectory_paths_read_against_it() {
 /// not there is said once, with no position.
 #[test]
 fn build_spells_the_linkers_errors_as_the_checks() {
-    let root = scratch("build");
+    let root = tempdir("build");
     write(&root.join("htl.toml"), "[build]\nextra = [\"ghost\"]\n");
     write(
         &root.join("mlua-pkg.toml"),
@@ -150,7 +150,7 @@ fn build_spells_the_linkers_errors_as_the_checks() {
 /// file spelled as `htl check` spells it from the same directory.
 #[test]
 fn junit_spells_a_failed_check_as_the_report_does() {
-    let root = scratch("junit");
+    let root = tempdir("junit");
     write(
         &root.join("mlua-pkg.toml"),
         "[package]\nname = \"game\"\nversion = \"0.1.0\"\n",
@@ -170,7 +170,7 @@ fn junit_spells_a_failed_check_as_the_report_does() {
 /// line, a runtime error's position, the junit suite, the JSON document, a snapshot.
 #[test]
 fn htl_test_names_its_files_as_check_does() {
-    let root = scratch("test-files");
+    let root = tempdir("test-files");
     write(
         &root.join("mlua-pkg.toml"),
         "[package]\nname = \"game\"\nversion = \"0.1.0\"\n",

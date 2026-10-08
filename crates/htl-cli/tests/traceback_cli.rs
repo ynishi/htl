@@ -4,13 +4,13 @@
 //! so a development command shows them by default. These pin that they are there, that
 //! they name `.tl` files and Teal lines, and that the JSON document carries the same.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-traceback", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-traceback", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -49,8 +49,8 @@ const DEPTH: &str = "local record depth\n\
                      \n\
                      return depth\n";
 
-fn project(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn project(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("depth.tl"), DEPTH);
     write(
         &root.join("boom.tl"),

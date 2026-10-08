@@ -3,13 +3,13 @@
 //! the store on a replay, in `--format json` with `required_by` and `origin`; `htl fix`
 //! reports them and leaves the dependency alone.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-deperr", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-deperr", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -44,8 +44,8 @@ const FIXED_MATHX: &str = "local record mathx\nend\nfunction mathx.twice(n: numb
 
 /// An mlua-pkg project with `mathx` installed under `.htl/modules` — broken at line 4 —
 /// and two modules that require it.
-fn project(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn project(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), "[check]\n");
     write(
         &root.join("mlua-pkg.toml"),
@@ -170,7 +170,7 @@ fn a_replay_carries_the_dependency_error_and_an_edit_to_the_dependency_changes_i
 
 #[test]
 fn a_module_under_check_paths_is_external() {
-    let root = scratch("external");
+    let root = tempdir("external");
     write(&root.join("htl.toml"), "[check]\npaths = [\"mods\"]\n");
     write(&root.join("mods/ext.tl"), BROKEN_MATHX);
     write(
@@ -194,7 +194,7 @@ fn a_module_under_check_paths_is_external() {
 /// own error and nothing says it a second time on the requirer's behalf.
 #[test]
 fn a_project_file_outside_the_walk_is_reported_once_either_way() {
-    let root = scratch("own");
+    let root = tempdir("own");
     write(&root.join("htl.toml"), "[check]\n");
     write(&root.join("src/util.tl"), BROKEN_MATHX);
     write(
@@ -293,7 +293,7 @@ fn a_dependencys_path_reads_against_the_directory_the_command_ran_in() {
 /// the directory it starts from.
 #[test]
 fn an_external_dependencys_path_is_folded_rather_than_kept_with_dot_dot() {
-    let root = scratch("external");
+    let root = tempdir("external");
     let proj = root.join("proj");
     write(&proj.join("htl.toml"), "[check]\npaths = [\"../shared\"]\n");
     write(&root.join("shared/mathx.tl"), BROKEN_MATHX);
@@ -320,7 +320,7 @@ fn an_external_dependencys_path_is_folded_rather_than_kept_with_dot_dot() {
 /// that parent called it a dependency's.
 #[test]
 fn a_file_beside_a_vendored_copy_is_the_projects_own() {
-    let root = scratch("origin-beside-copy");
+    let root = tempdir("origin-beside-copy");
     write(&root.join("htl.toml"), "[layout]\nsource = \"lua\"\n");
     write(
         &root.join("mlua-pkg.toml"),

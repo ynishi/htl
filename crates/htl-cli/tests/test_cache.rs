@@ -4,13 +4,13 @@
 //! on what the tests do, so it is reusable. Whether they pass does, so it is not: every one
 //! of these runs actually runs the tests, and the assertions below check that it did.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-testcache", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-testcache", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -43,8 +43,8 @@ fn passed(v: &serde_json::Value) -> u64 {
 }
 
 /// A module, a passing test over it, and a second test that does not touch it.
-fn project(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn project(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), "[check]\n");
     write(
         &root.join("src/adder.tl"),
@@ -202,7 +202,7 @@ fn no_cache_neither_reads_nor_writes() {
 /// second run has to reach `shape.lua` exactly as the first did.
 #[test]
 fn a_declaration_beside_a_lua_module_is_not_preloaded_over_it() {
-    let root = scratch("decl-lua");
+    let root = tempdir("decl-lua");
     write(&root.join("htl.toml"), "[check]\n");
     write(
         &root.join("src/shape.d.tl"),
@@ -242,7 +242,7 @@ fn a_declaration_beside_a_lua_module_is_not_preloaded_over_it() {
 /// error, not `top`'s two.
 #[test]
 fn editing_a_declaration_two_requires_below_a_test_rechecks_the_test() {
-    let root = scratch("closure");
+    let root = tempdir("closure");
     let host = "local record host\n   record Std\n      version: string\n   end\nend\nglobal std: host.Std\nreturn host\n";
     write(&root.join("htl.toml"), "[check]\n");
     write(&root.join("types/host.d.tl"), host);

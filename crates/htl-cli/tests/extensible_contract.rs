@@ -6,13 +6,13 @@
 //! written against a newer SDK sets a key the declaration has not heard of yet, and
 //! without the marker `htl check` refuses it the same way it refuses a mod that is short.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-extensible", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-extensible", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -34,8 +34,8 @@ fn output(out: &Output) -> String {
 
 /// A project with a contract directory and a mod that sets every field the contract asks
 /// for and one key beside them. `marker` is what the record carries.
-fn project(name: &str, marker: &str) -> PathBuf {
-    let root = scratch(name);
+fn project(name: &str, marker: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), "[[contract]]\ndir = \"mods\"\n");
     write(
         &root.join("src/defs.tl"),

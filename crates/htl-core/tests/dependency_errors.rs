@@ -4,12 +4,12 @@
 //! dropped — the project checks clean and fails at its first `require`.
 
 use htl_core::Htl;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-deperr", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-deperr", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -19,8 +19,8 @@ fn write(path: &Path, text: &str) {
 
 /// `src/geometry.tl` requires `mathx` (broken at line 5), which requires `inner` (broken
 /// at line 4). Neither error is geometry's own.
-fn project(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn project(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(
         &root.join("src/geometry.tl"),
         "local mathx = require(\"mathx\")\nlocal record geometry\nend\n\
@@ -110,7 +110,7 @@ fn a_module_checked_directly_owns_its_error() {
 /// A declaration goes through the same path as a source.
 #[test]
 fn a_declaration_with_an_error_is_reported_the_same_way() {
-    let root = scratch("decl");
+    let root = tempdir("decl");
     write(
         &root.join("types/host.d.tl"),
         "local record host\n   run: function(): Nope\nend\nreturn host\n",
@@ -133,7 +133,7 @@ fn a_declaration_with_an_error_is_reported_the_same_way() {
 /// Nothing required, nothing reported; and a clean dependency contributes nothing.
 #[test]
 fn a_clean_dependency_reports_nothing() {
-    let root = scratch("clean");
+    let root = tempdir("clean");
     write(
         &root.join("mods/mathx.tl"),
         "local record mathx\nend\nfunction mathx.twice(n: number): number\n   return n * 2\nend\nreturn mathx\n",

@@ -7,13 +7,13 @@
 //! first call of anything the two do not share. `host-module-shadowed` says so at the
 //! require.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-host-shadow", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-host-shadow", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -68,7 +68,7 @@ const MAIN_TL: &str = "local host = require(\"host\")\nprint(host.only_in_teal()
 /// the module the host registers and the file the check read.
 #[test]
 fn a_teal_file_named_after_a_host_module_is_reported() {
-    let root = scratch("shadowed");
+    let root = tempdir("shadowed");
     write(&root.join("Cargo.toml"), MANIFEST);
     write(&root.join("src/lib.rs"), &host_rs("host", "Host"));
     write(&root.join("src/host.tl"), HOST_TL);
@@ -90,7 +90,7 @@ fn a_teal_file_named_after_a_host_module_is_reported() {
 /// and it resolves to the file alone. Either way there is no divergence to report.
 #[test]
 fn the_report_needs_both_halves() {
-    let without_teal = scratch("host-only");
+    let without_teal = tempdir("host-only");
     write(&without_teal.join("Cargo.toml"), MANIFEST);
     write(&without_teal.join("src/lib.rs"), &host_rs("host", "Host"));
     write(
@@ -106,7 +106,7 @@ fn the_report_needs_both_halves() {
         "a declaration is how a host module is typed, not a second implementation"
     );
 
-    let without_host = scratch("teal-only");
+    let without_host = tempdir("teal-only");
     write(&without_host.join("Cargo.toml"), MANIFEST);
     write(&without_host.join("src/lib.rs"), "pub struct Host;\n");
     write(&without_host.join("src/host.tl"), HOST_TL);
@@ -121,7 +121,7 @@ fn the_report_needs_both_halves() {
 /// two things, not about a project having both a host and Teal files.
 #[test]
 fn a_teal_file_of_another_name_is_silent() {
-    let root = scratch("different-names");
+    let root = tempdir("different-names");
     write(&root.join("Cargo.toml"), MANIFEST);
     write(&root.join("src/lib.rs"), &host_rs("engine", "Engine"));
     write(
@@ -143,7 +143,7 @@ fn a_teal_file_of_another_name_is_silent() {
 /// to say — including about a Teal module named `host`.
 #[test]
 fn a_project_with_no_rust_host_is_silent() {
-    let root = scratch("no-host");
+    let root = tempdir("no-host");
     write(&root.join("htl.toml"), "[lint]\n");
     write(&root.join("src/host.tl"), HOST_TL);
     write(&root.join("src/main.tl"), MAIN_TL);

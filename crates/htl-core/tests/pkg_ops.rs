@@ -1,7 +1,7 @@
 //! `htl pkg` through mlua-pkg's library rather than its binary: what install, add, update
 //! and clean do to a project, and where they put things.
 //!
-//! The dependency is a git repository in a scratch directory, so these run offline and the
+//! The dependency is a git repository in a temp directory, so these run offline and the
 //! revisions are real ones rather than fixtures.
 
 use htl_core::Htl;
@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-pkgops", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-pkgops", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -45,22 +45,23 @@ const DECL: &str = "local record mathx\n   twice: function(n: number): number\ne
 
 /// A dependency as a repository on disk: `src/` is the entry, `types/` is what it
 /// publishes. Returns what to pin it by.
-fn remote(name: &str) -> (String, String) {
-    let dir = scratch(name);
+fn remote(name: &str) -> (common::TempDir, String, String) {
+    let dir = tempdir(name);
     write(&dir.join("src/mathx.tl"), SOURCE);
     write(&dir.join("types/mathx.d.tl"), DECL);
     git(&dir, &["init", "-q"]);
     git(&dir, &["add", "."]);
     git(&dir, &["commit", "-qm", "mathx"]);
     let sha = git(&dir, &["rev-parse", "HEAD"]);
-    (format!("file://{}", dir.display()), sha)
+    let url = format!("file://{}", dir.display());
+    (dir, url, sha)
 }
 
 /// The same dependency as a repository really is: the package (both manifests, the
 /// README, the licence texts, a dotfile of its own below the root) with the repository's
 /// housekeeping beside it — a CI workflow, ignore rules, a stray `.DS_Store`.
-fn remote_with_housekeeping(name: &str) -> (String, String) {
-    let dir = scratch(name);
+fn remote_with_housekeeping(name: &str) -> (common::TempDir, String, String) {
+    let dir = tempdir(name);
     write(&dir.join("src/mathx.tl"), SOURCE);
     write(&dir.join("src/.luacheckrc"), "std = \"lua54\"\n");
     write(&dir.join("types/mathx.d.tl"), DECL);
@@ -82,11 +83,12 @@ fn remote_with_housekeeping(name: &str) -> (String, String) {
     git(&dir, &["add", "-A"]);
     git(&dir, &["commit", "-qm", "mathx"]);
     let sha = git(&dir, &["rev-parse", "HEAD"]);
-    (format!("file://{}", dir.display()), sha)
+    let url = format!("file://{}", dir.display());
+    (dir, url, sha)
 }
 
-fn project(name: &str, url: &str, sha: &str) -> PathBuf {
-    let root = scratch(name);
+fn project(name: &str, url: &str, sha: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(
         &root.join("mlua-pkg.toml"),
         &format!(
@@ -101,7 +103,7 @@ fn project(name: &str, url: &str, sha: &str) -> PathBuf {
 /// takes the directory it is given and reads neither the environment nor `target/`.
 #[test]
 fn install_places_packages_under_the_directory_htl_names() {
-    let (url, sha) = remote("remote-install");
+    let (_dep, url, sha) = remote("remote-install");
     let root = project("install", &url, &sha);
     // A `target/` in the project would send mlua-pkg's own binary to `target/mlua-pkgs`.
     std::fs::create_dir_all(root.join("target")).unwrap();
@@ -134,15 +136,19 @@ fn install_places_packages_under_the_directory_htl_names() {
 
 /// What a crate carrying an mlua-pkg project looks like once `cargo package` has copied
 /// it: the tracked files under `target/package/<crate>/`, which is the manifest, the
-/// lockfile and the sources, and never `.htl/`. Returns the copy's root.
-fn packaged_copy(name: &str, from: &Path) -> PathBuf {
-    let copy = scratch(name).join("target/package/p-0.1.0");
+/// lockfile and the sources, and never `.htl/`. Returns the temp directory's own guard
+/// alongside the copy's root, which is a subdirectory of it — bound to nothing on its
+/// own, the guard would drop (and the copy be removed) at the end of this function,
+/// before a caller ever read it.
+fn packaged_copy(name: &str, from: &Path) -> (common::TempDir, PathBuf) {
+    let dir = tempdir(name);
+    let copy = dir.join("target/package/p-0.1.0");
     for f in ["mlua-pkg.toml", "mlua-pkg.lock"] {
         std::fs::create_dir_all(&copy).unwrap();
         std::fs::copy(from.join(f), copy.join(f)).unwrap();
     }
     write(&copy.join("src/main.tl"), "print(1)\n");
-    copy
+    (dir, copy)
 }
 
 /// Reading a project must not write in the tree `cargo package` is verifying. The copy
@@ -153,7 +159,7 @@ fn packaged_copy(name: &str, from: &Path) -> PathBuf {
 /// refuse the tarball it had just built (#267).
 #[test]
 fn nothing_is_written_into_the_copy_cargo_package_verifies() {
-    let (url, sha) = remote("remote-packaged");
+    let (_dep, url, sha) = remote("remote-packaged");
     let root = project("packaged", &url, &sha);
     MluaProject::at(&root).install().unwrap();
     assert!(
@@ -161,7 +167,7 @@ fn nothing_is_written_into_the_copy_cargo_package_verifies() {
         "the checkout is where install writes the links"
     );
 
-    let copy = packaged_copy("verify", &root);
+    let (_copy_dir, copy) = packaged_copy("verify", &root);
     let p = MluaProject::find(&copy.join("src/main.tl")).unwrap();
     assert_eq!(p.root, std::fs::canonicalize(&copy).unwrap());
     assert_eq!(
@@ -178,7 +184,7 @@ fn nothing_is_written_into_the_copy_cargo_package_verifies() {
     // The same copy anywhere else is an ordinary project, and the repair still runs: a
     // checkout whose `.htl/` was never installed, or was installed by an htl too old to
     // write the links, gets them from the next command that reads the project.
-    let elsewhere = scratch("elsewhere");
+    let elsewhere = tempdir("elsewhere");
     std::fs::create_dir_all(&elsewhere).unwrap();
     for f in ["mlua-pkg.toml", "mlua-pkg.lock"] {
         std::fs::copy(root.join(f), elsewhere.join(f)).unwrap();
@@ -188,7 +194,7 @@ fn nothing_is_written_into_the_copy_cargo_package_verifies() {
     Htl::new().unwrap().apply_project(&q).unwrap();
     assert!(
         std::fs::symlink_metadata(elsewhere.join(".htl/modules/entries/mathx")).is_ok(),
-        "outside build scratch the link is written as it always was"
+        "outside build XPROTECTEDX the link is written as it always was"
     );
 }
 
@@ -196,7 +202,7 @@ fn nothing_is_written_into_the_copy_cargo_package_verifies() {
 /// so per package rather than leaving htl to work it out.
 #[test]
 fn install_resolves_a_patched_dependency_from_its_copy() {
-    let (url, sha) = remote("remote-patched");
+    let (_dep, url, sha) = remote("remote-patched");
     let root = project("patched", &url, &sha);
     let p = MluaProject::at(&root);
     p.patch("mathx", false).unwrap();
@@ -227,7 +233,7 @@ fn install_resolves_a_patched_dependency_from_its_copy() {
 /// one's commits.
 #[test]
 fn patch_drops_the_repositorys_dot_entries_and_keeps_the_package() {
-    let (url, sha) = remote_with_housekeeping("remote-housekeeping");
+    let (_dep, url, sha) = remote_with_housekeeping("remote-housekeeping");
     let root = project("housekeeping", &url, &sha);
     let done = MluaProject::at(&root).patch("mathx", false).unwrap();
     assert_eq!(
@@ -276,7 +282,7 @@ fn patch_drops_the_repositorys_dot_entries_and_keeps_the_package() {
 /// project keeps building — against upstream, with the copy unread in the tree.
 #[test]
 fn add_keeps_the_patch_a_dependency_already_declares() {
-    let (url, sha) = remote("remote-add");
+    let (_dep, url, sha) = remote("remote-add");
     let root = project("add", &url, &sha);
     MluaProject::at(&root).patch("mathx", false).unwrap();
 
@@ -307,7 +313,7 @@ fn add_keeps_the_patch_a_dependency_already_declares() {
 /// A dependency the manifest did not have: nothing to carry, and the entry is written.
 #[test]
 fn add_writes_a_dependency_the_manifest_did_not_have() {
-    let (url, sha) = remote("remote-new");
+    let (_dep, url, sha) = remote("remote-new");
     let root = project("new", &url, &sha);
     let done = MluaProject::at(&root)
         .add(AddSpec {
@@ -327,7 +333,7 @@ fn add_writes_a_dependency_the_manifest_did_not_have() {
 /// it needs, and says that it had to.
 #[test]
 fn add_writes_the_manifest_when_there_is_none() {
-    let root = scratch("add-bare");
+    let root = tempdir("add-bare");
     std::fs::create_dir_all(&root).unwrap();
     let done = MluaProject::at(&root)
         .add(AddSpec::new("mathx", "https://example.invalid/mathx"))
@@ -342,7 +348,7 @@ fn add_writes_the_manifest_when_there_is_none() {
 /// every run. A report a person reads, and diffs against the last one, is sorted.
 #[test]
 fn update_reports_its_dependencies_in_a_stable_order() {
-    let root = scratch("update");
+    let root = tempdir("update");
     // Both are pinned to a commit, which update skips before it touches the network — so
     // this asserts the ordering without fetching anything.
     write(
@@ -371,7 +377,7 @@ fn update_reports_its_dependencies_in_a_stable_order() {
 
 #[test]
 fn clean_tells_an_empty_cache_from_a_swept_one_and_from_no_lockfile() {
-    let (url, sha) = remote("remote-clean");
+    let (_dep, url, sha) = remote("remote-clean");
     let root = project("clean", &url, &sha);
     let p = MluaProject::at(&root);
     assert_eq!(p.clean(false).unwrap(), CleanReport::NoLockfile);

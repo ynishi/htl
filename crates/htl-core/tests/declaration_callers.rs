@@ -10,13 +10,12 @@
 
 use htl_core::Htl;
 use htl_core::mlua::{Lua, LuaOptions, StdLib};
-use std::path::PathBuf;
 
 mod common;
 
 /// A directory holding `knl.d.tl` and nothing implementing it.
-fn declared_only(name: &str) -> PathBuf {
-    let dir = common::scratch("htl-core-decl-callers", name);
+fn declared_only(name: &str) -> common::TempDir {
+    let dir = common::tempdir("htl-core-decl-callers", name);
     std::fs::write(
         dir.join("knl.d.tl"),
         "local record knl\n   id: string\nend\nreturn knl\n",

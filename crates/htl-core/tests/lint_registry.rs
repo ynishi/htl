@@ -10,6 +10,8 @@
 use htl_core::Htl;
 use htl_core::lint::{Level, RULES, Side, Surfaces};
 
+mod common;
+
 #[test]
 fn lint_lua_implements_exactly_the_lua_side_of_the_registry() {
     let h = Htl::new().unwrap();
@@ -141,8 +143,7 @@ fn the_registry_holds_the_fix_classes_and_marks_them_as_not_lints() {
 /// so this is the assertion that they still reach Lua.
 #[test]
 fn a_fresh_checker_runs_the_default_rules() {
-    let dir = std::env::temp_dir().join("htl-core-lint-registry");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::tempdir("htl-core-lint-registry", "defaults");
     let f = dir.join("defaults.tl");
     std::fs::write(
         &f,
@@ -168,8 +169,7 @@ fn a_fresh_checker_runs_the_default_rules() {
 /// which is what lets `Diagnostic::parse` read it with no case of its own.
 #[test]
 fn a_teal_warning_carries_its_kind_into_the_check_result() {
-    let dir = std::env::temp_dir().join("htl-core-lint-registry-warnings");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::tempdir("htl-core-lint-registry", "warnings");
     let f = dir.join("warned.tl");
     std::fs::write(
         &f,

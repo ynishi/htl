@@ -10,8 +10,8 @@ use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-resolve", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-resolve", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -46,8 +46,8 @@ fn row(out: &str, path: &str) -> String {
 }
 
 /// A project with one module and nothing to shadow it.
-fn plain(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn plain(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
     write(
         &root.join("src/util.tl"),
@@ -73,7 +73,7 @@ fn one_candidate_is_reported_as_the_file_that_is_read() {
 /// effect. The rows say which, rather than leaving it to be worked out from a lint.
 #[test]
 fn several_candidates_name_the_one_that_is_read_and_what_it_shadows() {
-    let root = scratch("several");
+    let root = tempdir("several");
     write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
     write(&root.join("src/mq.d.tl"), DECL);
     write(&root.join("types/mq.d.tl"), DECL);
@@ -92,7 +92,7 @@ fn several_candidates_name_the_one_that_is_read_and_what_it_shadows() {
 /// wins. A report ordered by directory would name the wrong winner.
 #[test]
 fn a_source_further_along_the_path_is_still_the_one_read() {
-    let root = scratch("source-wins");
+    let root = tempdir("source-wins");
     write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
     write(&root.join("src/mq.d.tl"), DECL);
     write(
@@ -113,7 +113,7 @@ fn a_source_further_along_the_path_is_still_the_one_read() {
 /// the run loads the `.lua`. Reporting that as hidden would be the wrong answer.
 #[test]
 fn the_lua_a_declaration_types_is_reported_as_what_the_run_loads() {
-    let root = scratch("lua");
+    let root = tempdir("lua");
     write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
     write(&root.join("types/mq.d.tl"), DECL);
     write(
@@ -133,7 +133,7 @@ fn the_lua_a_declaration_types_is_reported_as_what_the_run_loads() {
 /// project did not write it, and the row says which dependency it belongs to.
 #[test]
 fn a_module_installed_under_htl_modules_names_the_dependency() {
-    let root = scratch("dependency");
+    let root = tempdir("dependency");
     write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
     write(
         &root.join("mlua-pkg.toml"),
@@ -175,7 +175,7 @@ fn a_name_that_resolves_to_nothing_says_so_and_exits_non_zero() {
 
 #[test]
 fn the_json_carries_the_same_rows() {
-    let root = scratch("json");
+    let root = tempdir("json");
     write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
     write(&root.join("src/mq.d.tl"), DECL);
     write(&root.join("types/mq.d.tl"), DECL);
@@ -211,13 +211,16 @@ fn the_json_carries_the_same_rows() {
 
 // ---------------------------------------------------------------- a crate's declaration
 
-/// Copy the `dep_dts` fixture into a scratch directory, `Cargo.toml.in` becoming the
-/// `Cargo.toml` cargo reads. Returns the consumer, where the commands run.
-fn fixture(name: &str) -> PathBuf {
-    let root = scratch(name);
+/// Copy the `dep_dts` fixture into a temp directory, `Cargo.toml.in` becoming the
+/// `Cargo.toml` cargo reads. Returns the temp directory's own guard alongside the
+/// consumer, where the commands run — the guard has to outlive the path, or the
+/// directory it names is gone before the first command runs.
+fn fixture(name: &str) -> (common::TempDir, PathBuf) {
+    let root = tempdir(name);
     let from = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/dep_dts");
     copy_tree(&from, &root);
-    root.join("consumer")
+    let consumer = root.join("consumer");
+    (root, consumer)
 }
 
 fn copy_tree(from: &Path, to: &Path) {
@@ -239,7 +242,7 @@ fn copy_tree(from: &Path, to: &Path) {
 /// wants, and the file itself does not say. The note `htl dts` leaves beside it does.
 #[test]
 fn a_declaration_a_crate_ships_names_the_crate() {
-    let root = fixture("crate");
+    let (_dir, root) = fixture("crate");
     // `resolve` generates what a check would, so the copy under types/dep/ is there
     // without anyone having run `htl dts` first.
     let hand =
@@ -274,7 +277,7 @@ fn a_declaration_a_crate_ships_names_the_crate() {
 /// implementations of one name are both reported, as the error they are.
 #[test]
 fn the_rows_are_the_models_and_two_implementations_are_ambiguous() {
-    let root = scratch("model-rows");
+    let root = tempdir("model-rows");
     write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
     write(&root.join("src/util/util.tl"), "return {}\n");
     let (ok, out, _) = htl(&["resolve", "util"], &root);

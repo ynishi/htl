@@ -24,7 +24,7 @@ fn write(dir: &Path, name: &str, src: &str) -> std::path::PathBuf {
 /// searcher.
 #[test]
 fn a_program_state_the_host_built_opens_what_the_host_chose() {
-    let dir = common::scratch("htl-core-own-lua", "no-os-io");
+    let dir = common::tempdir("htl-core-own-lua", "no-os-io");
     write(
         &dir,
         "m.tl",

@@ -7,12 +7,12 @@
 
 use htl_core::Htl;
 use htl_core::fix::{FixOptions, fix_file};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-struct", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-struct", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -65,7 +65,7 @@ fn spelled(dir: &Path, literal: &str) -> Vec<String> {
 /// One edit away, so the key that was written is the answer and "mark it optional" is not.
 #[test]
 fn a_misspelled_key_is_named_instead_of_the_standing_advice() {
-    let dir = scratch("typo");
+    let dir = tempdir("typo");
     spelling_defs(&dir);
     let lints = spelled(
         &dir,
@@ -87,7 +87,7 @@ fn a_misspelled_key_is_named_instead_of_the_standing_advice() {
 /// Two edits, believable in a name long enough that two is still a small share of it.
 #[test]
 fn a_longer_name_is_matched_two_edits_away() {
-    let dir = scratch("typo-long");
+    let dir = tempdir("typo-long");
     spelling_defs(&dir);
     let lints = spelled(
         &dir,
@@ -105,7 +105,7 @@ fn a_longer_name_is_matched_two_edits_away() {
 /// Levenshtein charges it two edits — outside the bound for a name this short.
 #[test]
 fn two_letters_swapped_is_one_edit() {
-    let dir = scratch("swap");
+    let dir = tempdir("swap");
     write(
         &dir.join("defs.tl"),
         "local record defs\n   ---@struct\n   record Tag\n      label: string\n      n: integer\n   end\nend\nreturn defs\n",
@@ -127,7 +127,7 @@ fn two_letters_swapped_is_one_edit() {
 
 #[test]
 fn a_field_simply_left_out_keeps_the_old_message() {
-    let dir = scratch("plain");
+    let dir = tempdir("plain");
     spelling_defs(&dir);
     let lints = spelled(&dir, "{ id = \"x\", hp = 1, description = \"d\" }");
     assert_eq!(lints.len(), 1, "{lints:?}");
@@ -142,7 +142,7 @@ fn a_field_simply_left_out_keeps_the_old_message() {
 /// An extra key that is nothing like the missing one is not offered as a suggestion.
 #[test]
 fn an_unrelated_extra_key_is_not_offered() {
-    let dir = scratch("unrelated");
+    let dir = tempdir("unrelated");
     spelling_defs(&dir);
     let lints = spelled(
         &dir,
@@ -155,7 +155,7 @@ fn an_unrelated_extra_key_is_not_offered() {
 
 #[test]
 fn a_field_left_out_is_reported_where_the_record_is_built() {
-    let dir = scratch("missing");
+    let dir = tempdir("missing");
     defs(&dir);
     write(
         &dir.join("mod.tl"),
@@ -178,7 +178,7 @@ fn a_field_left_out_is_reported_where_the_record_is_built() {
 
 #[test]
 fn the_optional_fields_may_be_absent_and_a_whole_literal_is_silent() {
-    let dir = scratch("complete");
+    let dir = tempdir("complete");
     defs(&dir);
     write(
         &dir.join("mod.tl"),
@@ -192,7 +192,7 @@ fn the_optional_fields_may_be_absent_and_a_whole_literal_is_silent() {
 /// on the line above) keeps working.
 #[test]
 fn a_trailing_marker_does_not_reach_the_next_line() {
-    let dir = scratch("trailing");
+    let dir = tempdir("trailing");
     write(
         &dir.join("defs.tl"),
         "local record defs\n   record Def   ---@struct\n      a: string   ---@optional\n\
@@ -216,7 +216,7 @@ fn a_trailing_marker_does_not_reach_the_next_line() {
 /// The form a mod actually writes: records nested in an array of them.
 #[test]
 fn an_element_of_an_array_of_the_record_is_held_to_it() {
-    let dir = scratch("array");
+    let dir = tempdir("array");
     defs(&dir);
     write(
         &dir.join("mod.tl"),
@@ -229,7 +229,7 @@ fn an_element_of_an_array_of_the_record_is_held_to_it() {
 
 #[test]
 fn a_literal_passed_as_a_typed_argument_is_held_to_it() {
-    let dir = scratch("argument");
+    let dir = tempdir("argument");
     defs(&dir);
     write(
         &dir.join("mod.tl"),
@@ -242,7 +242,7 @@ fn a_literal_passed_as_a_typed_argument_is_held_to_it() {
 
 #[test]
 fn a_record_without_the_marker_is_held_to_nothing() {
-    let dir = scratch("loose");
+    let dir = tempdir("loose");
     defs(&dir);
     write(
         &dir.join("mod.tl"),
@@ -255,7 +255,7 @@ fn a_record_without_the_marker_is_held_to_nothing() {
 /// changes the verdict for every file that builds it — including within one process.
 #[test]
 fn marking_a_field_optional_afterwards_silences_it() {
-    let dir = scratch("reread");
+    let dir = tempdir("reread");
     defs(&dir);
     write(
         &dir.join("mod.tl"),
@@ -320,7 +320,7 @@ fn fix_only(dir: &Path, file: &str, opts: FixOptions) -> htl_core::fix::FileOutc
 /// message lists them in, which is alphabetical.
 #[test]
 fn the_fix_names_every_missing_field_in_declaration_order() {
-    let dir = scratch("fix-order");
+    let dir = tempdir("fix-order");
     order_defs(&dir);
     write(
         &dir.join("mod.tl"),
@@ -355,7 +355,7 @@ fn the_fix_names_every_missing_field_in_declaration_order() {
 /// trailing comment, and a single-line constructor stays on its line.
 #[test]
 fn the_fix_lands_where_the_entries_already_there_are() {
-    let dir = scratch("fix-layout");
+    let dir = tempdir("fix-layout");
     order_defs(&dir);
     write(
         &dir.join("multi.tl"),
@@ -401,7 +401,7 @@ fn the_fix_lands_where_the_entries_already_there_are() {
 /// the lint is still there afterwards.
 #[test]
 fn the_suggestion_is_never_applied() {
-    let dir = scratch("fix-skipped");
+    let dir = tempdir("fix-skipped");
     order_defs(&dir);
     let src = "local defs = require(\"defs\")\nlocal n: defs.Node = { zeta = \"z\" }\nreturn n\n";
     write(&dir.join("mod.tl"), src);
@@ -442,7 +442,7 @@ fn the_suggestion_is_never_applied() {
 /// value, which is the one outcome this must not have.
 #[test]
 fn what_it_inserts_does_not_check() {
-    let dir = scratch("fix-refused");
+    let dir = tempdir("fix-refused");
     order_defs(&dir);
     write(
         &dir.join("mod.tl"),
@@ -480,7 +480,7 @@ fn what_it_inserts_does_not_check() {
 /// out and is whole.
 #[test]
 fn a_nested_record_type_is_not_a_field_the_literal_must_set() {
-    let dir = scratch("nested-type");
+    let dir = tempdir("nested-type");
     write(
         &dir.join("holder.tl"),
         "local record Holder   ---@struct\n   id: integer   ---@optional\n   record Sub\n      other: string\n   end\nend\n\n\
@@ -497,7 +497,7 @@ fn a_nested_record_type_is_not_a_field_the_literal_must_set() {
 /// declaration's own text before either reaches the shape test. Only `name` is missing.
 #[test]
 fn a_nested_type_alias_is_not_a_field_the_literal_must_set() {
-    let dir = scratch("nested-alias");
+    let dir = tempdir("nested-alias");
     write(
         &dir.join("t.tl"),
         "local record T   ---@struct\n   type Alias = string\n   type Fn = function(integer): integer\n   name: string\nend\n\n\
@@ -513,7 +513,7 @@ fn a_nested_type_alias_is_not_a_field_the_literal_must_set() {
 /// declares under it.
 #[test]
 fn an_optional_field_keeps_its_marker_when_a_later_nested_record_shadows_its_name() {
-    let dir = scratch("shadow-nested");
+    let dir = tempdir("shadow-nested");
     write(
         &dir.join("only_id.tl"),
         "local record OnlyId   ---@struct\n   id: integer   ---@optional\n   record Sub\n      id: string\n   end\nend\n\n\
@@ -527,7 +527,7 @@ fn an_optional_field_keeps_its_marker_when_a_later_nested_record_shadows_its_nam
 /// its own marker whichever side of a nested record of the same name it is declared on.
 #[test]
 fn an_optional_field_keeps_its_marker_when_an_earlier_nested_record_shares_its_name() {
-    let dir = scratch("shadow-nested-before");
+    let dir = tempdir("shadow-nested-before");
     write(
         &dir.join("id_after.tl"),
         "local record IdAfter   ---@struct\n   record Sub\n      id: string\n   end\n   id: integer   ---@optional\nend\n\n\
@@ -542,7 +542,7 @@ fn an_optional_field_keeps_its_marker_when_an_earlier_nested_record_shares_its_n
 /// name, not `Outer`'s.
 #[test]
 fn a_nested_record_with_its_own_marker_is_its_own_spec() {
-    let dir = scratch("nested-spec");
+    let dir = tempdir("nested-spec");
     write(
         &dir.join("outer.tl"),
         "local record Outer   ---@struct\n   id: string   ---@optional\n   record Inner   ---@struct\n      a: string\n      b: string\n   end\nend\n\n\
@@ -565,7 +565,7 @@ fn a_nested_record_with_its_own_marker_is_its_own_spec() {
 /// the body itself declares, is missing.
 #[test]
 fn a_method_defined_by_a_statement_is_not_a_field_the_literal_must_set() {
-    let dir = scratch("method-field");
+    let dir = tempdir("method-field");
     write(
         &dir.join("with_fn.tl"),
         "local record WithFn   ---@struct\n   id: integer\n   go: function(WithFn)\nend\n\n\
@@ -588,7 +588,7 @@ fn a_method_defined_by_a_statement_is_not_a_field_the_literal_must_set() {
 /// the same.
 #[test]
 fn a_record_with_no_own_fields_is_not_held_to_a_nested_records() {
-    let dir = scratch("no-own-fields");
+    let dir = tempdir("no-own-fields");
     write(
         &dir.join("holder.tl"),
         "local record Holder   ---@struct\n   record Sub\n      other: string\n   end\nend\n\n\
@@ -602,7 +602,7 @@ fn a_record_with_no_own_fields_is_not_held_to_a_nested_records() {
 /// own placeholder, not the nested one's.
 #[test]
 fn the_fix_for_a_shadowed_field_spells_the_outer_records_own_type() {
-    let dir = scratch("shadow-fix");
+    let dir = tempdir("shadow-fix");
     write(
         &dir.join("defs.tl"),
         "local record defs\n   ---@struct\n   record OnlyId\n      id: integer\n      other: string\n      record Sub\n         id: string\n      end\n   end\nend\nreturn defs\n",
@@ -623,7 +623,7 @@ fn the_fix_for_a_shadowed_field_spells_the_outer_records_own_type() {
 /// to correct the key that is there, not to add a second one beside it.
 #[test]
 fn a_misspelled_field_is_not_offered_as_an_insertion() {
-    let dir = scratch("fix-typo");
+    let dir = tempdir("fix-typo");
     spelling_defs(&dir);
     write(
         &dir.join("mod.tl"),
@@ -653,7 +653,7 @@ fn a_misspelled_field_is_not_offered_as_an_insertion() {
 /// beside its three copied siblings.
 #[test]
 fn an_interface_copied_function_field_stays_required() {
-    let dir = scratch("iface-fn-required");
+    let dir = tempdir("iface-fn-required");
     write(
         &dir.join("a.tl"),
         "local interface I\n   cb: function()\n   mode: string\n   n: integer\n   pos: integer\nend\n\n\

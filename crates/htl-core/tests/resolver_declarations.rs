@@ -11,7 +11,7 @@ use htl_core::Htl;
 use htl_core::pkg::TealResolver;
 use mlua_pkg::Registry;
 use mlua_pkg::resolvers::{FsResolver, MemoryResolver, NativeResolver};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
@@ -20,8 +20,8 @@ const DECL: &str = "local record foo\n   t: function(): string\nend\nreturn foo\
 /// The implementation the chain has to reach.
 const IMPL: &str = "return { t = function() return 'REAL' end }\n";
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-declarations", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-declarations", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -37,13 +37,13 @@ fn call_t(h: &Htl) -> mlua::Result<String> {
 /// behind it anywhere. Only stepping aside reaches it.
 #[test]
 fn a_declaration_root_first_then_an_embedded_module() {
-    let root1 = scratch("a");
+    let root1 = tempdir("a");
     write(&root1.join("foo.d.tl"), DECL);
 
     let h = Htl::new().unwrap();
     let mut reg = Registry::new();
-    reg.add(TealResolver::new(&root1).unwrap());
-    reg.add(FsResolver::new(&root1).unwrap());
+    reg.add(TealResolver::new(root1.to_path_buf()).unwrap());
+    reg.add(FsResolver::new(root1.to_path_buf()).unwrap());
     reg.add(MemoryResolver::new().add("foo", IMPL));
     reg.install(h.lua()).unwrap();
 
@@ -54,17 +54,17 @@ fn a_declaration_root_first_then_an_embedded_module() {
 /// precisely what the old comment claimed it stepped aside for and did not.
 #[test]
 fn a_declaration_in_one_tier_and_the_implementation_in_the_next() {
-    let root1 = scratch("b1");
-    let root2 = scratch("b2");
+    let root1 = tempdir("b1");
+    let root2 = tempdir("b2");
     write(&root1.join("foo.d.tl"), DECL);
     write(&root2.join("foo.lua"), IMPL);
 
     let h = Htl::new().unwrap();
     let mut reg = Registry::new();
-    reg.add(TealResolver::new(&root1).unwrap());
-    reg.add(FsResolver::new(&root1).unwrap());
-    reg.add(TealResolver::new(&root2).unwrap());
-    reg.add(FsResolver::new(&root2).unwrap());
+    reg.add(TealResolver::new(root1.to_path_buf()).unwrap());
+    reg.add(FsResolver::new(root1.to_path_buf()).unwrap());
+    reg.add(TealResolver::new(root2.to_path_buf()).unwrap());
+    reg.add(FsResolver::new(root2.to_path_buf()).unwrap());
     reg.install(h.lua()).unwrap();
 
     assert_eq!(call_t(&h).unwrap(), "REAL");
@@ -74,7 +74,7 @@ fn a_declaration_in_one_tier_and_the_implementation_in_the_next() {
 /// 2, so stepping aside is what hands the name over to it.
 #[test]
 fn a_declaration_steps_aside_for_a_preloaded_implementation() {
-    let root1 = scratch("c");
+    let root1 = tempdir("c");
     write(&root1.join("foo.d.tl"), DECL);
 
     let h = Htl::new().unwrap();
@@ -83,8 +83,8 @@ fn a_declaration_steps_aside_for_a_preloaded_implementation() {
         .exec()
         .unwrap();
     let mut reg = Registry::new();
-    reg.add(TealResolver::new(&root1).unwrap());
-    reg.add(FsResolver::new(&root1).unwrap());
+    reg.add(TealResolver::new(root1.to_path_buf()).unwrap());
+    reg.add(FsResolver::new(root1.to_path_buf()).unwrap());
     reg.install(h.lua()).unwrap();
 
     assert_eq!(call_t(&h).unwrap(), "REAL");
@@ -94,14 +94,14 @@ fn a_declaration_steps_aside_for_a_preloaded_implementation() {
 /// handle, now handled by the `FsResolver` behind it rather than by a filesystem probe.
 #[test]
 fn a_declaration_steps_aside_for_a_lua_sibling() {
-    let root1 = scratch("d");
+    let root1 = tempdir("d");
     write(&root1.join("foo.d.tl"), DECL);
     write(&root1.join("foo.lua"), IMPL);
 
     let h = Htl::new().unwrap();
     let mut reg = Registry::new();
-    reg.add(TealResolver::new(&root1).unwrap());
-    reg.add(FsResolver::new(&root1).unwrap());
+    reg.add(TealResolver::new(root1.to_path_buf()).unwrap());
+    reg.add(FsResolver::new(root1.to_path_buf()).unwrap());
     reg.install(h.lua()).unwrap();
 
     assert_eq!(call_t(&h).unwrap(), "REAL");
@@ -111,12 +111,12 @@ fn a_declaration_steps_aside_for_a_lua_sibling() {
 /// declaration file and both ways of giving the name something to resolve to.
 #[test]
 fn a_declaration_nothing_answers_fails_at_require() {
-    let root1 = scratch("e");
+    let root1 = tempdir("e");
     write(&root1.join("foo.d.tl"), DECL);
 
     let h = Htl::new().unwrap();
     let mut reg = Registry::new();
-    reg.add(TealResolver::new(&root1).unwrap());
+    reg.add(TealResolver::new(root1.to_path_buf()).unwrap());
     reg.install(h.lua()).unwrap();
 
     let err = h
@@ -139,7 +139,7 @@ fn a_declaration_nothing_answers_fails_at_require() {
 /// example's `shape` should have been, and what the E message points a reader at.
 #[test]
 fn a_types_only_import_generates_no_require_and_needs_nothing() {
-    let root1 = scratch("types-only");
+    let root1 = tempdir("types-only");
     write(
         &root1.join("shape.d.tl"),
         "local record shape\n   record Point\n      x: number\n      y: number\n   end\nend\nreturn shape\n",
@@ -164,7 +164,7 @@ fn a_types_only_import_generates_no_require_and_needs_nothing() {
     // ...and at run time the name is never asked for, so an empty chain is enough.
     let h = Htl::new().unwrap();
     let mut reg = Registry::new();
-    reg.add(TealResolver::new(&root1).unwrap());
+    reg.add(TealResolver::new(root1.to_path_buf()).unwrap());
     reg.install(h.lua()).unwrap();
     let sum: f64 = h.lua().load("return require('use')").eval().unwrap();
     assert_eq!(sum, 5.0);
@@ -174,7 +174,7 @@ fn a_types_only_import_generates_no_require_and_needs_nothing() {
 /// chain stops there and the `.lua` behind it is never served.
 #[test]
 fn a_failing_tl_still_does_not_fall_through() {
-    let root1 = scratch("f");
+    let root1 = tempdir("f");
     write(
         &root1.join("foo.tl"),
         "local n: number = 'nope'\nreturn n\n",
@@ -183,8 +183,8 @@ fn a_failing_tl_still_does_not_fall_through() {
 
     let h = Htl::new().unwrap();
     let mut reg = Registry::new();
-    reg.add(TealResolver::new(&root1).unwrap());
-    reg.add(FsResolver::new(&root1).unwrap());
+    reg.add(TealResolver::new(root1.to_path_buf()).unwrap());
+    reg.add(FsResolver::new(root1.to_path_buf()).unwrap());
     reg.install(h.lua()).unwrap();
 
     let err = h
@@ -200,12 +200,12 @@ fn a_failing_tl_still_does_not_fall_through() {
 /// the Teal resolver, because the declaration that types it no longer ends the chain.
 #[test]
 fn a_native_module_may_be_registered_after_the_teal_resolver() {
-    let root1 = scratch("native");
+    let root1 = tempdir("native");
     write(&root1.join("foo.d.tl"), DECL);
 
     let h = Htl::new().unwrap();
     let mut reg = Registry::new();
-    reg.add(TealResolver::new(&root1).unwrap());
+    reg.add(TealResolver::new(root1.to_path_buf()).unwrap());
     reg.add(NativeResolver::new().add("foo", |lua| {
         let t = lua.create_table()?;
         t.set("t", lua.create_function(|_, ()| Ok("REAL"))?)?;

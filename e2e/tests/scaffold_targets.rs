@@ -63,6 +63,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
+mod common;
+
 // ---------------------------------------------------------------------------------------
 // Where things are
 // ---------------------------------------------------------------------------------------
@@ -289,10 +291,8 @@ fn one_at_a_time() -> MutexGuard<'static, ()> {
 ///
 /// It is removed at the end of a test that passed, and left where it is by one that did
 /// not — the tree a red gate was looking at is most of what there is to go on.
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("htl-e2e-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+fn tempdir(name: &str) -> common::TempDir {
+    let dir = common::tempdir("htl-e2e", name);
     println!("scaffolding into {}", dir.display());
     dir
 }
@@ -323,21 +323,21 @@ fn must_capture(cmd: &mut Command, what: &str) -> String {
     text
 }
 
-/// `htl new` in the scratch directory, which is where the generated project lands. The
+/// `htl new` in the temp directory, which is where the generated project lands. The
 /// binary is invoked from there rather than from the checkout so that nothing above it in
 /// the filesystem belongs to this repository.
 ///
 /// The patch goes in before the caller does anything with what was written, so that the
 /// first cargo to run in the project sees it whoever started it — a test here, or the CLI
 /// itself. A caller that had to remember to ask for it is a caller that forgets.
-fn htl_new(scratch: &Path, project: &str, target: &[&str]) -> PathBuf {
-    let dir = scratch.join(project);
+fn htl_new(tempdir: &Path, project: &str, target: &[&str]) -> PathBuf {
+    let dir = tempdir.join(project);
     must_run(
         Command::new(htl_bin())
             .arg("new")
             .arg(&dir)
             .args(target)
-            .current_dir(scratch),
+            .current_dir(tempdir),
         &format!("htl new {project} {}", target.join(" ")),
     );
     write_patch_config(&dir);
@@ -456,8 +456,8 @@ fn a_manifest_redirecting_its_own_pin_is_refused() {
 #[test]
 fn the_bin_target_builds_tests_and_greets() {
     let _lock = one_at_a_time();
-    let scratch = scratch("rustsample");
-    let project = htl_new(&scratch, "rustsample", &["--target", "bin"]);
+    let dir = tempdir("rustsample");
+    let project = htl_new(&dir, "rustsample", &["--target", "bin"]);
 
     assert_unpatched_pin(&project);
     must_run(&mut cargo_in(&project, &["test"]), "cargo test");
@@ -471,7 +471,7 @@ fn the_bin_target_builds_tests_and_greets() {
         "the binary greets the argument it was given:\n{out}"
     );
 
-    fs::remove_dir_all(&scratch).ok();
+    fs::remove_dir_all(&dir).ok();
 }
 
 /// The same target without a binary: the library still builds and its test still goes
@@ -479,14 +479,14 @@ fn the_bin_target_builds_tests_and_greets() {
 #[test]
 fn the_bin_library_target_has_no_entry_point_and_still_tests() {
     let _lock = one_at_a_time();
-    let scratch = scratch("libsample");
-    let project = htl_new(&scratch, "libsample", &["--target", "bin", "--lib"]);
+    let dir = tempdir("libsample");
+    let project = htl_new(&dir, "libsample", &["--target", "bin", "--lib"]);
 
     assert_no_entry_point(&project);
     assert_unpatched_pin(&project);
     must_run(&mut cargo_in(&project, &["test"]), "cargo test");
 
-    fs::remove_dir_all(&scratch).ok();
+    fs::remove_dir_all(&dir).ok();
 }
 
 /// The C ABI target, whose callers are the part nothing else here compiles: the library is
@@ -496,8 +496,8 @@ fn the_bin_library_target_has_no_entry_point_and_still_tests() {
 #[test]
 fn the_cdylib_target_builds_a_library_its_c_and_python_callers_can_load() {
     let _lock = one_at_a_time();
-    let scratch = scratch("ffisample");
-    let project = htl_new(&scratch, "ffisample", &["--target", "cdylib", "--lib"]);
+    let dir = tempdir("ffisample");
+    let project = htl_new(&dir, "ffisample", &["--target", "cdylib", "--lib"]);
     let target_dir = cargo_target_dir();
 
     assert_no_entry_point(&project);
@@ -568,7 +568,7 @@ fn the_cdylib_target_builds_a_library_its_c_and_python_callers_can_load() {
         println!("no C compiler: skipping examples/c");
     }
 
-    fs::remove_dir_all(&scratch).ok();
+    fs::remove_dir_all(&dir).ok();
 }
 
 /// The window target, the one whose host is the OS. Four things happen here that no other
@@ -581,8 +581,8 @@ fn the_cdylib_target_builds_a_library_its_c_and_python_callers_can_load() {
 #[test]
 fn the_window_target_builds_tests_and_draws_a_frame() {
     let _lock = one_at_a_time();
-    let scratch = scratch("winsample");
-    let project = htl_new(&scratch, "winsample", &["--target", "window"]);
+    let dir = tempdir("winsample");
+    let project = htl_new(&dir, "winsample", &["--target", "window"]);
 
     // Two pins here, `htl` and `htl-mq`, and [`unpatched_pin`] holds both to one rule.
     assert_unpatched_pin(&project);
@@ -651,7 +651,7 @@ fn the_window_target_builds_tests_and_draws_a_frame() {
         println!("no xvfb-run: skipping the frame run (CI's ubuntu image has it)");
     }
 
-    fs::remove_dir_all(&scratch).ok();
+    fs::remove_dir_all(&dir).ok();
 }
 
 /// A command moved onto an `xvfb-run` that will supply it a display. macroquad opens a GL

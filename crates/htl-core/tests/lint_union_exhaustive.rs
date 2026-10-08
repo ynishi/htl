@@ -4,12 +4,12 @@
 //! two variants is still measured against however many there are.
 
 use htl_core::Htl;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-union", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-union", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -19,7 +19,7 @@ fn write(path: &Path, text: &str) {
 
 /// Three `where`-discriminated records, then `body` in a file that requires them.
 fn lints_of(name: &str, body: &str) -> Vec<String> {
-    let dir = scratch(name);
+    let dir = tempdir(name);
     write(
         &dir.join("kinds.tl"),
         "local record kinds\n\

@@ -1,10 +1,10 @@
-//! What every integration test in this crate needs: a scratch directory, and the binary
+//! What every integration test in this crate needs: a temp directory, and the binary
 //! to run in it.
 //!
 //! This module is compiled into each test binary that declares `mod common;`, and anything
 //! it defines that a given binary does not use is a warning CI turns into an error. So it
-//! holds only what all of them want. Both items here qualify: every file that declares the
-//! module calls `scratch` and spawns `htl_bin`. A helper wanted by two files stays in those
+//! holds only what all of them want. The items here qualify: every file that declares the
+//! module calls `tempdir` and spawns `htl_bin`. A helper wanted by two files stays in those
 //! two files — `fmt_snapshot.rs` keeps its own copy of the snapshot block for that reason.
 //!
 //! [`write_patch_config`] is the one exception, and it carries `#[allow(dead_code)]` to be
@@ -13,27 +13,28 @@
 //! sets its variables. A copy per such file is a copy that forgets a crate when the list of
 //! them grows, and the failure it would hide only shows on a release PR.
 //!
-//! The scratch directories used to be a copy per test file, separated only by a timestamp —
-//! and the clock advances in microsecond steps, so two tests in one binary that ask for
-//! the same name land in the same directory and read each other's fixture. A counter
-//! settles it: two calls in one process never agree, whatever the clock does.
+//! `tempdir`'s directory guard, [`TempDir`], is implemented once, in
+//! `crates/htl-core/tests/common/mod.rs`, and brought in here by `#[path]`: the workspace
+//! shares test helpers by linking the one file rather than copying it. A `#[path]` `mod`
+//! item names any file on disk, crate boundary or not, so `core_common` below reaches
+//! `htl-core`'s file even though this crate's test binaries are compiled separately from
+//! `htl-core`'s. See that file's doc for what `TempDir` promises, in particular for a test
+//! that panics.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
-static NTH: AtomicU64 = AtomicU64::new(0);
+#[allow(dead_code)]
+#[path = "../../../htl-core/tests/common/mod.rs"]
+mod core_common;
+
+pub use core_common::TempDir;
 
 /// A fresh directory under the system temp dir, named for the test that asked. `prefix`
 /// separates one test binary from another (they are separate processes, so the pid does
-/// too, but the name is what a leftover directory is read by).
-pub fn scratch(prefix: &str, name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "{prefix}-{name}-{}-{}",
-        std::process::id(),
-        NTH.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// too, but the name is what a leftover directory is read by). See `core_common::tempdir`
+/// — the one place this is implemented — for what the returned [`TempDir`] promises.
+pub fn tempdir(prefix: &str, name: &str) -> TempDir {
+    core_common::tempdir(prefix, name)
 }
 
 /// The `htl` binary these tests drive: `HTL_TEST_BIN` when it is set, otherwise the one

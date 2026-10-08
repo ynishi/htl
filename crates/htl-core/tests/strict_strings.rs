@@ -91,7 +91,7 @@ fn a_second_call_is_a_no_op() {
 /// the file's own `"10" + 1` is still the checker's error, not a run-time one.
 #[test]
 fn the_checker_in_the_same_state_still_checks() {
-    let dir = common::scratch("htl-core-strict-strings", "checker");
+    let dir = common::tempdir("htl-core-strict-strings", "checker");
     let ok = dir.join("ok.tl");
     std::fs::write(
         &ok,

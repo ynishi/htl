@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-checker-path", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-checker-path", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -33,8 +33,8 @@ fn write(path: &Path, text: &str) {
 /// declaration, `a` in the upper tier against the other. With both tiers on the path the
 /// host's order decides which declaration *both* modules are typed against — one of the
 /// two is then wrong, and which one must not depend on the order of the `require`s.
-fn tiers(name: &str) -> (PathBuf, PathBuf) {
-    let base = scratch(name);
+fn tiers(name: &str) -> (common::TempDir, PathBuf, PathBuf) {
+    let base = tempdir(name);
     let tier1 = base.join("tier1");
     let tier2 = base.join("tier2");
 
@@ -58,7 +58,7 @@ fn tiers(name: &str) -> (PathBuf, PathBuf) {
         "local shared = require(\"shared\")\nlocal s: string = shared.v\nreturn { s = s }\n",
     );
 
-    (tier1, tier2)
+    (base, tier1, tier2)
 }
 
 /// The host of the issue: the order stated once, then a resolver per tier.
@@ -99,7 +99,7 @@ fn path_entries(h: &Htl) -> Vec<String> {
 fn the_host_order_decides_whichever_require_comes_first() {
     let mut outcomes = Vec::new();
     for order in [["a", "b"], ["b", "a"]] {
-        let (tier1, tier2) = tiers(&format!("{}-first", order[0]));
+        let (_base, tier1, tier2) = tiers(&format!("{}-first", order[0]));
         let h = host(&tier1, &tier2);
         let mut seen = Vec::new();
         for name in order {
@@ -136,7 +136,7 @@ fn the_host_order_decides_whichever_require_comes_first() {
 
 #[test]
 fn a_resolved_tier_neither_moves_nor_duplicates_the_host_entry() {
-    let (tier1, tier2) = tiers("entries");
+    let (_base, tier1, tier2) = tiers("entries");
     let h = host(&tier1, &tier2);
     // Whatever they answer is the previous test's subject; here it is only that both
     // resolvers have run.
@@ -166,7 +166,7 @@ fn a_resolved_tier_neither_moves_nor_duplicates_the_host_entry() {
 /// siblings through it.
 #[test]
 fn sibling_resolves_without_a_host_order() {
-    let dir = scratch("sibling");
+    let dir = tempdir("sibling");
     write(
         &dir.join("util.tl"),
         "local record util\n   n: integer\nend\nreturn util\n",
@@ -178,7 +178,7 @@ fn sibling_resolves_without_a_host_order() {
 
     let h = Htl::new().unwrap();
     let mut reg = Registry::new();
-    reg.add(TealResolver::new(&dir).unwrap());
+    reg.add(TealResolver::new(dir.to_path_buf()).unwrap());
     reg.install(h.lua()).unwrap();
 
     require(&h, "main").unwrap();

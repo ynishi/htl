@@ -6,12 +6,12 @@
 #![cfg(all(feature = "pkg", feature = "dts"))]
 
 use htl_core::testing::{RunOptions, Suite, run_tests};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-suite", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-suite", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -46,10 +46,10 @@ fn project(dir: &Path) {
 
 #[test]
 fn a_host_runs_a_projects_tests_and_reads_the_report() {
-    let dir = scratch("passes");
+    let dir = tempdir("passes");
     project(&dir);
 
-    let rep = run_tests(std::slice::from_ref(&dir), &Suite::default()).unwrap();
+    let rep = run_tests(&[dir.to_path_buf()], &Suite::default()).unwrap();
 
     assert!(rep.ok(), "{:?}", rep.failures());
     assert_eq!(rep.files.len(), 1, "one test file discovered and run");
@@ -68,7 +68,7 @@ fn a_host_runs_a_projects_tests_and_reads_the_report() {
 
 #[test]
 fn a_failing_test_is_a_failing_report_with_the_reason_in_it() {
-    let dir = scratch("fails");
+    let dir = tempdir("fails");
     project(&dir);
     write(
         &dir.join("tests").join("broken_test.tl"),
@@ -81,7 +81,7 @@ fn a_failing_test_is_a_failing_report_with_the_reason_in_it() {
          end)\n",
     );
 
-    let rep = run_tests(std::slice::from_ref(&dir), &Suite::default()).unwrap();
+    let rep = run_tests(&[dir.to_path_buf()], &Suite::default()).unwrap();
 
     assert!(!rep.ok());
     assert_eq!(rep.files_with_errors, 1);
@@ -93,7 +93,7 @@ fn a_failing_test_is_a_failing_report_with_the_reason_in_it() {
 
 #[test]
 fn the_filter_and_the_seed_are_the_flags_they_are_on_the_command_line() {
-    let dir = scratch("filter-seed");
+    let dir = tempdir("filter-seed");
     project(&dir);
 
     let suite = Suite {
@@ -104,7 +104,7 @@ fn the_filter_and_the_seed_are_the_flags_they_are_on_the_command_line() {
         },
         ..Default::default()
     };
-    let rep = run_tests(std::slice::from_ref(&dir), &suite).unwrap();
+    let rep = run_tests(&[dir.to_path_buf()], &suite).unwrap();
 
     assert!(rep.ok(), "{:?}", rep.failures());
     assert_eq!(
@@ -115,14 +115,14 @@ fn the_filter_and_the_seed_are_the_flags_they_are_on_the_command_line() {
     assert_eq!(rep.seed, 7, "the seed the caller gave, back for repeating");
 
     // Not given: drawn for the run and reported, so the run can be repeated.
-    let drawn = run_tests(&[dir], &Suite::default()).unwrap();
+    let drawn = run_tests(&[dir.to_path_buf()], &Suite::default()).unwrap();
     assert!(drawn.ok(), "{:?}", drawn.failures());
     assert_ne!(drawn.seed, 0, "a seed was drawn and said");
 }
 
 #[test]
 fn coverage_is_reported_over_the_modules_the_tests_reached() {
-    let dir = scratch("coverage");
+    let dir = tempdir("coverage");
     project(&dir);
 
     let suite = Suite {
@@ -132,7 +132,7 @@ fn coverage_is_reported_over_the_modules_the_tests_reached() {
         },
         ..Default::default()
     };
-    let rep = run_tests(&[dir], &suite).unwrap();
+    let rep = run_tests(&[dir.to_path_buf()], &suite).unwrap();
 
     assert!(rep.ok(), "{:?}", rep.failures());
     let cov = rep.coverage.expect("asked for");
@@ -151,7 +151,7 @@ fn coverage_is_reported_over_the_modules_the_tests_reached() {
 /// formatter with the same spelling — not the path as the walk was handed it.
 #[test]
 fn a_failed_check_names_its_file_one_way() {
-    let dir = scratch("check-spelled");
+    let dir = tempdir("check-spelled");
     write(&dir.join("htl.toml"), "");
     write(
         &dir.join("tests").join("x_test.tl"),

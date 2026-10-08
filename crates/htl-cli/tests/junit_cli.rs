@@ -4,13 +4,13 @@
 //! same thing the summary line does — the same cases, the same failures, the same
 //! durations — and that a message full of markup survives as data.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-junit", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-junit", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -32,8 +32,8 @@ fn htl(args: &[&str], cwd: &Path) -> (bool, String, String) {
 }
 
 /// Two passing tests and one failing one, in two files.
-fn passing_and_failing() -> PathBuf {
-    let root = scratch("mixed");
+fn passing_and_failing() -> common::TempDir {
+    let root = tempdir("mixed");
     write(
         &root.join("tests/math_test.tl"),
         "local t = require(\"htl.test\")\n\
@@ -123,7 +123,7 @@ fn the_file_duration_the_text_prints_is_the_suite_time() {
 
 #[test]
 fn a_file_that_does_not_type_check_is_a_suite_with_an_error() {
-    let root = scratch("badcheck");
+    let root = tempdir("badcheck");
     write(
         &root.join("tests/broken_test.tl"),
         "local t = require(\"htl.test\")\nlocal x: integer = \"not a number\"\n\
@@ -157,7 +157,7 @@ fn a_file_that_does_not_type_check_is_a_suite_with_an_error() {
 
 #[test]
 fn a_message_full_of_markup_survives_as_data() {
-    let root = scratch("escaping");
+    let root = tempdir("escaping");
     // `<`, `&`, both quotes, and a raised error, which carries a traceback.
     write(
         &root.join("tests/nasty_test.tl"),
@@ -190,7 +190,7 @@ fn a_message_full_of_markup_survives_as_data() {
 
 #[test]
 fn a_file_with_no_tests_is_a_suite_with_no_cases() {
-    let root = scratch("notests");
+    let root = tempdir("notests");
     // Loads the test library, so it is a test file, and registers nothing.
     write(&root.join("tests/plain_test.tl"), "require(\"htl.test\")\n");
     let out = root.join("junit.xml");
