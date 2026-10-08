@@ -276,3 +276,102 @@ fn dts_writes_a_uses_entry_under_a_module_path_and_check_accepts_it() {
     assert!(out.status.success(), "{err}");
     assert!(err.contains("0 error(s)"), "{err}");
 }
+
+/// `records = [geom::Point]` (#428): `Point`'s `#[derive(TealRecord)]` lives in
+/// `geom.rs`, a `mod geom;` declared in the same file as the `#[host_module]`. `htl dts`
+/// reads the sibling file the way the macro would and nests `Point` in `host` exactly as
+/// it would for a record in the same file (acceptance 1); a script writing `host.Point`
+/// then checks (acceptance 2). Acceptance 3 (editing `geom.rs` changes the `.d.tl` on the
+/// next `cargo build`) is a real `cargo build` twice, which the reviewer runs on a
+/// scaffolded project — this test, like the rest of this file, never compiles the Rust.
+#[test]
+fn dts_nests_a_record_named_through_a_module_path_and_check_accepts_host_dot_name() {
+    let root = scratch("module-record");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    );
+    write(&root.join("htl.toml"), "");
+    write(
+        &root.join("src/main.rs"),
+        "use htl::{TealRecord, host_module};\n\n\
+         mod geom;\n\n\
+         pub struct Host;\n\n\
+         #[host_module(name = \"host\", dts = \"types/host.d.tl\", records = [geom::Point])]\n\
+         impl Host {\n    pub fn origin(&self) -> geom::Point { todo!() }\n}\n\nfn main() {}\n",
+    );
+    write(
+        &root.join("src/geom.rs"),
+        "use htl::TealRecord;\n\n\
+         #[derive(TealRecord)]\npub struct Point { pub x: f64, pub y: f64 }\n",
+    );
+    let out = htl(&root, &["dts"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    let host = std::fs::read_to_string(root.join("types/host.d.tl")).unwrap();
+    assert_eq!(
+        host,
+        "local record host\n\
+         \x20  record Point\n      x: number\n      y: number\n   end\n\
+         \x20  origin: function(self: host): Point\n\
+         end\n\nreturn host\n"
+    );
+
+    write(
+        &root.join("src/main.tl"),
+        "local type host = require(\"host\")\n\n\
+         local h: host = nil\n\
+         local p: host.Point = h:origin()\n\
+         print(p.x, p.y)\n",
+    );
+    let out = htl(&root, &["check", "src/main.tl", "--no-cache"]);
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("0 error(s)"), "{err}");
+}
+
+/// The two refusals the module-path route adds (#428): `records = [nosuch::Point]`
+/// names no `mod` this file declares, naming the module; `records = [geom::Nosuch]`
+/// reads `geom.rs` but finds nothing by that name there, naming the file.
+#[test]
+fn dts_refuses_a_module_qualified_record_naming_the_missing_module_or_record() {
+    let root = scratch("module-record-missing");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    );
+    write(
+        &root.join("src/geom.rs"),
+        "use htl::TealRecord;\n\n\
+         #[derive(TealRecord)]\npub struct Point { pub x: f64 }\n",
+    );
+
+    write(
+        &root.join("src/main.rs"),
+        "use htl::host_module;\n\n\
+         mod geom;\n\n\
+         pub struct Host;\n\n\
+         #[host_module(name = \"host\", dts = \"types/host.d.tl\", records = [nosuch::Point])]\n\
+         impl Host {\n    pub fn origin(&self) -> geom::Point { todo!() }\n}\n\nfn main() {}\n",
+    );
+    let out = htl(&root, &["dts"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("no `mod nosuch`"), "{err}");
+
+    write(
+        &root.join("src/main.rs"),
+        "use htl::host_module;\n\n\
+         mod geom;\n\n\
+         pub struct Host;\n\n\
+         #[host_module(name = \"host\", dts = \"types/host.d.tl\", records = [geom::Nosuch])]\n\
+         impl Host {\n    pub fn origin(&self) -> geom::Point { todo!() }\n}\n\nfn main() {}\n",
+    );
+    let out = htl(&root, &["dts"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("`Nosuch` not found in"), "{err}");
+    assert!(err.contains("geom.rs"), "{err}");
+    assert!(!root.join("types/host.d.tl").exists());
+}
