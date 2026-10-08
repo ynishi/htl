@@ -77,8 +77,17 @@ not have and is not expected to.
   their Teal in a directory also named scripts, and this repository's own
   doc comments naming the reader's `scripts/` layout directory
   (crates/htl-core/src/project.rs, crates/htl/src/lib.rs).
+
+A tracked symlink is checked as the target string git stores for it (what
+`git cat-file -p` prints for a mode 120000 entry), as one line under the
+three rules above, and is never followed: a reader gets that string, not
+whatever it resolves to here, so an absolute target into a home directory is
+a machine-path finding whether or not it exists on this machine, and a link
+to a file outside the repository does not have that file's lines reported
+under the link's name.
 """
 from __future__ import annotations
+import os
 import pathlib
 import re
 import subprocess
@@ -230,10 +239,22 @@ def missing_tool_findings(line: str, root: str, recipes: set[str], files: list[s
 
 def scan_file(path: pathlib.Path, display_path: str, private_re, root, recipes, files) -> list[str]:
     out = []
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (UnicodeDecodeError, OSError):
-        return out
+    if path.is_symlink():
+        # What git publishes for a symlink is the target string (a mode 120000
+        # entry whose blob is the path), so that string is the text to check —
+        # one line — and the link is never followed: following it reads a file
+        # that is not in the published set (or nothing, when it dangles), and
+        # an absolute target that resolves on this machine is exactly the
+        # reference a reader cannot follow (#447).
+        try:
+            text = os.readlink(path)
+        except OSError:
+            return out
+    else:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            return out
     for lineno, line in enumerate(text.splitlines(), start=1):
         if private_re is not None:
             for m in private_re.finditer(line):
