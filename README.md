@@ -509,8 +509,9 @@ walked from the entries the project already declares (`main.tl`, tests, contract
 `---@required`, `---@async`, `---@noyield`) and, with `--detail`, where:
 `htl adopt: 3 of 9 features used, 4 markers in 2 files`. `applicable` — how many
 declarations the evidence in the project's own code says *could* carry a marker — is
-empty until a lint supplies it; only `---@struct`'s row has one so far (`unmarked-struct`),
-so every other row's is still empty. A report, not a gate: the exit code is always 0.
+empty until a lint supplies it; `---@struct`'s and `---@sealed`'s rows have one so far
+(`unmarked-struct`, `unmarked-sealed`), so every other row's is still empty. A report, not
+a gate: the exit code is always 0.
 [`htl::adopt`](https://docs.rs/htl/latest/htl/adopt/index.html).
 
 ## Layout of a project (`htl new`)

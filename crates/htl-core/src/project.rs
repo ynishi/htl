@@ -807,7 +807,7 @@ pub fn check_one<O: Output>(
         requires: cache::requires_json(&c),
         global_sites: cache::global_sites_json(&c),
         markers: cache::marker_sites_json(&c),
-        struct_sites: cache::struct_sites_json(&c),
+        record_sites: cache::record_sites_json(&c),
         closure_requires: cache::closure_requires_json(&c),
         // `htl check` has no use for generated Lua, nor for reading a `CheckInfo` back —
         // it replays the diagnostics above straight into the sink. `htl test` fills both in.
@@ -1127,11 +1127,11 @@ pub struct Report {
     /// is: filled from the entry on a hit and from the fresh check on a miss, so the
     /// adoption report (`htl adopt`, #304) is whole whether the run checked or replayed.
     pub markers: Vec<(PathBuf, Vec<cache::MarkerSiteJson>)>,
-    /// The construction-site census of every file the walk visits, as
+    /// The census of record sites of every file the walk visits, as
     /// [`markers`](Self::markers) is: filled from the entry on a hit and from the fresh
-    /// check on a miss, so `htl adopt`'s `---@struct` row (#304) is whole whether the
-    /// run checked or replayed.
-    pub struct_sites: Vec<(PathBuf, Vec<cache::StructSiteJson>)>,
+    /// check on a miss, so `htl adopt`'s `---@struct` and `---@sealed` rows (#304) are
+    /// whole whether the run checked or replayed.
+    pub record_sites: Vec<(PathBuf, Vec<cache::RecordSiteJson>)>,
 }
 
 impl Report {
@@ -1238,7 +1238,7 @@ pub fn check<O: Output>(
     let mut infos: Vec<(PathBuf, CheckInfo)> = Vec::with_capacity(files.len());
     let mut requires: Vec<(PathBuf, Vec<cache::RequireJson>)> = Vec::with_capacity(files.len());
     let mut markers: Vec<(PathBuf, Vec<cache::MarkerSiteJson>)> = Vec::with_capacity(files.len());
-    let mut struct_sites: Vec<(PathBuf, Vec<cache::StructSiteJson>)> =
+    let mut record_sites: Vec<(PathBuf, Vec<cache::RecordSiteJson>)> =
         Vec::with_capacity(files.len());
     let mut modules: Vec<cache::Module> = Vec::with_capacity(files.len());
     for ((f, key), hit) in files.iter().zip(&keys).zip(hits) {
@@ -1265,7 +1265,7 @@ pub fn check<O: Output>(
         n_lint += m.lints;
         requires.push((f.clone(), m.requires.clone()));
         markers.push((f.clone(), m.markers.clone()));
-        struct_sites.push((f.clone(), m.struct_sites.clone()));
+        record_sites.push((f.clone(), m.record_sites.clone()));
         infos.push((f.clone(), m.requires_only()));
         modules.push(m);
     }
@@ -1305,7 +1305,7 @@ pub fn check<O: Output>(
         replayed,
         requires,
         markers,
-        struct_sites,
+        record_sites,
     })
 }
 
@@ -1341,6 +1341,58 @@ pub struct WholeCounts {
     pub lints: usize,
 }
 
+/// The project's own module set, canonicalised -- what `htl adopt` and `htl unused`
+/// walk before narrowing their own report to the paths asked about ([`held_by_modules`],
+/// rooted at the model, with [`crate::model::Purpose::Own`] the same purpose `adopt`
+/// and `unused` use). A patched dependency is not entered under this purpose (unlike
+/// `htl check`'s own walk, [`crate::model::Purpose::Check`]), and a file outside every
+/// module root is not a module's, so neither is in the result even when `htl check`
+/// read it. Empty on any failure collecting it (an unreadable directory) -- a caller
+/// reads that as "unknown, treat as narrower", never as "an empty project".
+fn project_own_files(model: &crate::model::Project) -> HashSet<PathBuf> {
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let root = vec![model.root.clone()];
+    let skip = not_walked(Some(model), &root, crate::model::Purpose::Own);
+    crate::collect_tl_skipping(&root, &skip)
+        .and_then(|files| held_by_modules(Some(model), &root, files))
+        .map(|(files, _)| files.iter().map(|f| canon(f)).collect())
+        .unwrap_or_default()
+}
+
+/// Whether `checked` (the files a run just checked, canonicalised) covers at least
+/// `declared_in` (the files a candidate may be declared in -- [`project_own_files`]
+/// with a model, `checked` itself without one, both decided by the caller).
+/// `unmarked_structs` and `unmarked_sealeds` read every site of a record across
+/// `checked`; a walk narrower than `declared_in` can call a record "built short at no
+/// other site" or "built and cast only here" on sites it never saw, which a file
+/// outside `checked` may still hold one of. Gating on this is what keeps the two from
+/// answering a question they cannot see the whole of.
+///
+/// A *subset* test, not equality: `checked` passes once `declared_in` is all there,
+/// whether or not `checked` also holds more than that. More can only come from a
+/// patched dependency (entered by `htl check`'s own walk, not by the `Purpose::Own`
+/// walk `declared_in` is built from) or a file outside every module root named outright
+/// on the command line (`htl check src/gate.tl stray.tl`, kept by `held_by_modules`
+/// because it was asked for by name); comparing by equality would call every such run
+/// "narrower" and silence both rules on exactly the canonical whole-project invocation.
+/// Neither is reason to suppress, and neither is reason to answer for the extra file's
+/// *own* records either: a project record a patched dependency casts, or a stray file
+/// builds, still has that site counted against it (conditions 2 and 3 read every site
+/// of `checked`, not only `declared_in`'s), but the dependency's or the stray file's
+/// own declarations are never themselves candidates -- `unmarked_structs` and
+/// `unmarked_sealeds`'s own condition 4 restricts candidacy to `declared_in`, the same
+/// list `htl adopt` reports over its own `Purpose::Own` walk, which never enters either
+/// kind of extra file, so the two cannot disagree. (A patched dependency's own records
+/// could not be judged soundly here even if condition 4 let them through: this
+/// project's walk sees only this project's own uses of the dependency, not whatever an
+/// installed consumer elsewhere relies on, so the census of its sites is incomplete in
+/// a way the project's own files' never is.) So only a `checked` *narrower* than
+/// `declared_in` -- missing a file `declared_in` names -- is the case this gate exists
+/// to catch.
+fn walk_is_the_whole_project(declared_in: &HashSet<PathBuf>, checked: &HashSet<PathBuf>) -> bool {
+    !declared_in.is_empty() && declared_in.is_subset(checked)
+}
+
 /// Say, to `sink`, what the project says about itself as a whole: cycles in the require
 /// graph of `infos` (the files just checked), contract markers that could not become a
 /// contract or be published, `[imports]` entries naming no dependency, names two modules
@@ -1371,20 +1423,40 @@ pub fn project_findings<O: Output>(
             out.lints += 1;
         }
     }
-    // A record declared among the files just checked, built whole at every one of its
+    // Both rules below answer "only here" / "short nowhere else" about a record from
+    // every site of it in `infos`, but only count a record a candidate when its own
+    // file is one of `declared_in`: the project's own module set when there is a model
+    // (`project_own_files`, the same `Purpose::Own` walk `htl adopt` and `htl unused`
+    // use), or `infos` itself without one (there is no wider set for it to fall short
+    // of then). `infos` also has to cover `declared_in` -- `walk_is_the_whole_project`'s
+    // own doc says why -- or neither rule is decided at all. Computed once: both are
+    // `allow` by default, so a run that leaves them off never pays for either.
+    let checked: HashSet<PathBuf> = infos
+        .iter()
+        .map(|(f, _)| std::fs::canonicalize(f).unwrap_or_else(|_| f.clone()))
+        .collect();
+    let declared_in: HashSet<PathBuf> = match w.model {
+        Some(model) => project_own_files(model),
+        None => checked.clone(),
+    };
+    let whole_project = (w.lints.on("unmarked-struct") || w.lints.on("unmarked-sealed"))
+        && walk_is_the_whole_project(&declared_in, &checked);
+    // A record declared among the project's own files, built whole at every one of its
     // construction sites, and carrying no `---@struct` — a census of the sites
     // `struct-fields` already walks (#304), not a prediction: marking the record this
-    // names cannot make `struct-fields` say anything new on the spot.
-    if w.lints.on("unmarked-struct") {
+    // names cannot make `struct-fields` say anything new on the spot. Decided only when
+    // `infos` is the whole project (see `whole_project` above); a narrower walk reports
+    // nothing for this rule.
+    if w.lints.on("unmarked-struct") && whole_project {
         // `unmarked_structs` takes a file paired with its own census, not a
         // `CheckInfo`, so that `htl adopt` (`crate::adopt::adopt`) can call the same
         // function over the census it reads back through the cache instead of a second
         // copy of the four conditions (#304).
-        let struct_sites: Vec<(PathBuf, Vec<crate::StructSite>)> = infos
+        let record_sites: Vec<(PathBuf, Vec<crate::RecordSite>)> = infos
             .iter()
-            .map(|(f, ci)| (f.clone(), ci.struct_sites.clone()))
+            .map(|(f, ci)| (f.clone(), ci.record_sites.clone()))
             .collect();
-        let found: Vec<Diagnostic> = crate::unmarked_structs(&struct_sites)
+        let found: Vec<Diagnostic> = crate::unmarked_structs(&record_sites, &declared_in)
             .into_iter()
             .map(|c| {
                 let sites = if c.sites == 1 {
@@ -1403,6 +1475,50 @@ pub fn project_findings<O: Output>(
                         c.name
                     ),
                     Some("unmarked-struct"),
+                )
+            })
+            .collect();
+        for d in w.lints.keep(found) {
+            sink.diagnostic(&d);
+            out.lints += 1;
+        }
+    }
+    // A record declared among the project's own files, built and cast only in the file
+    // that declares it, and carrying no `---@sealed` — a census of the sites
+    // `sealed-record` already walks (#304), literals and casts alike, not a prediction:
+    // `sealed-record` with no function list treats any site inside the declaring file
+    // as allowed, so marking the record this names cannot make it say anything new on
+    // the spot. Decided only when `infos` is the whole project (`whole_project` above);
+    // a narrower walk reports nothing for this rule either.
+    if w.lints.on("unmarked-sealed") && whole_project {
+        // Same reason as `unmarked-struct` above: a file paired with its own census,
+        // not a `CheckInfo`, so that `htl adopt` can call the same function over the
+        // census it reads back through the cache instead of a second copy of the four
+        // conditions (#304).
+        let record_sites: Vec<(PathBuf, Vec<crate::RecordSite>)> = infos
+            .iter()
+            .map(|(f, ci)| (f.clone(), ci.record_sites.clone()))
+            .collect();
+        let found: Vec<Diagnostic> = crate::unmarked_sealeds(&record_sites, &declared_in)
+            .into_iter()
+            .map(|c| {
+                let sites = if c.sites == 1 {
+                    "(1 site)".to_string()
+                } else {
+                    format!("({} sites)", c.sites)
+                };
+                Diagnostic::new(
+                    Severity::Lint,
+                    display_path(&c.file),
+                    c.line,
+                    1,
+                    format!(
+                        "{} is built and cast only in its own file {sites} and carries \
+                         no ---@sealed (mark it, and sealed-record holds every other \
+                         file to it)",
+                        c.name
+                    ),
+                    Some("unmarked-sealed"),
                 )
             })
             .collect();

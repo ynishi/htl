@@ -193,7 +193,7 @@ fn the_rule_is_off_by_default() {
 
 /// The same project, checked twice with the store enabled: the second run replays every
 /// file rather than checking it, and reports the same finding -- what `requires_only`
-/// carrying `struct_sites` buys, the way it already does for `markers`.
+/// carrying `record_sites` buys, the way it already does for `markers`.
 #[test]
 fn sites_in_a_replayed_module_still_count() {
     let dir = scratch("replay");
@@ -290,7 +290,7 @@ fn an_allow_comment_naming_several_rules_silences_the_finding_too() {
 /// Two unmarked, whole-built records in two different files: `Alpha`, declared and
 /// built only in `a.tl`, and `Beta`, declared in `b.tl` and built there *and* from
 /// `a.tl` (`a.tl` requires `b.tl`, not the other way round, so there is no cycle). The
-/// walk checks `a.tl` first, so the first `StructSite` this run sees for `Beta` is the
+/// walk checks `a.tl` first, so the first `RecordSite` this run sees for `Beta` is the
 /// one built in `a.tl` -- spelled the way `a.tl`'s own require resolved `b.tl`, which
 /// need not be the string `b.tl`'s own check names itself with. The result still groups
 /// both of `Beta`'s sites under `b.tl`'s own spelling, which is what keeps the order
@@ -324,4 +324,27 @@ fn several_candidates_across_two_files_are_ordered_by_their_own_declaring_file()
     assert!(found[0].message.starts_with("Alpha "), "{found:?}");
     assert_eq!(found[1].file, dir.join("src/b.tl").display().to_string());
     assert!(found[1].message.starts_with("Beta "), "{found:?}");
+}
+
+/// A record built whole once and cast once, both in its own file: `unmarked_structs`
+/// restricts itself to `kind == "literal"` sites (#304's `unmarked-sealed` half, which
+/// reads both kinds, is what the cast belongs to), so the cast is not a construction
+/// site and the record is still a candidate with `sites == 1`, the literal alone.
+#[test]
+fn a_cast_does_not_count_toward_a_structs_construction_sites() {
+    let dir = scratch("cast");
+    write(
+        &dir.join("src/geom.tl"),
+        "local record geom\n   record Point\n      x: integer\n      y: integer\n   end\nend\n\n\
+         local p: geom.Point = { x = 1, y = 2 }\n\
+         local q = p as geom.Point\nprint(p, q)\n\nreturn geom\n",
+    );
+    let (diags, _) = check(&dir, &["src/geom.tl"], Some("unmarked-struct=warn"));
+    let found = unmarked(&diags);
+    assert_eq!(found.len(), 1, "{diags:?}");
+    assert_eq!(
+        found[0].message,
+        "Point is built whole at its one construction site and carries no ---@struct \
+         (mark it, and struct-fields holds every site to it)"
+    );
 }

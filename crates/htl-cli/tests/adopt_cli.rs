@@ -1,6 +1,6 @@
 //! `htl adopt` through the real binary: the table with no marker anywhere, the table with
 //! some, `--detail`, the replay, `--help`, the one file kind the census excludes, and the
-//! `---@struct` row's `applicable` (#304).
+//! `---@struct` and `---@sealed` rows' `applicable` (#304).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -110,6 +110,30 @@ fn two_candidates_project(name: &str) -> PathBuf {
     root
 }
 
+/// `gate.Judged` (no marker), declared in `src/gate.tl`, built once and cast once there --
+/// two sites, both in `gate.tl` itself. With `elsewhere`, `src/use.tl` adds a third site, a
+/// cast, outside the declaring file -- breaking `unmarked-sealed`'s "only in its own file"
+/// condition, so `Judged` is no longer a `---@sealed` candidate either way the marker
+/// would have mattered.
+fn sealed_candidate_project(name: &str, elsewhere: bool) -> PathBuf {
+    let root = scratch(name);
+    write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
+    write(
+        &root.join("src/gate.tl"),
+        "local record gate\n   record Judged\n      v: integer\n   end\nend\n\n\
+         local j1: gate.Judged = { v = 1 }\nlocal j2 = j1 as gate.Judged\n\
+         print(j1, j2)\n\nreturn gate\n",
+    );
+    if elsewhere {
+        write(
+            &root.join("src/use.tl"),
+            "local gate = require(\"gate\")\n\n\
+             local w: any = nil\nlocal x = w as gate.Judged\nprint(x)\n\nreturn {}\n",
+        );
+    }
+    root
+}
+
 #[test]
 fn candidates_across_two_files_are_ordered_by_their_own_declaring_file() {
     let root = two_candidates_project("ordered");
@@ -119,8 +143,8 @@ fn candidates_across_two_files_are_ordered_by_their_own_declaring_file() {
     assert_eq!(
         v["features"][0]["candidates"],
         serde_json::json!([
-            { "file": "src/a.tl", "line": 3, "name": "Alpha", "sites": 1 },
-            { "file": "src/b.tl", "line": 2, "name": "Beta", "sites": 2 },
+            { "file": "src/a.tl", "line": 3, "name": "Alpha", "sites": 1, "reason": "built whole at every site" },
+            { "file": "src/b.tl", "line": 2, "name": "Beta", "sites": 2, "reason": "built whole at every site" },
         ]),
         "{v}"
     );
@@ -130,7 +154,10 @@ fn candidates_across_two_files_are_ordered_by_their_own_declaring_file() {
 /// `-- htl: allow(unmarked-struct)` on `Point`'s own declaration line leaves it out of
 /// both `applicable` and `candidates`, the same way the comment silences the lint's own
 /// finding (#304) -- `unmarked_structs` reads no source of its own, so `adopt`
-/// has to apply the check itself, through `lint::line_is_allowed`.
+/// has to apply the check itself, through `lint::line_is_allowed`. `Point`'s two sites
+/// are both in its own file, though, and the comment names only `unmarked-struct`, so
+/// `unmarked-sealed`'s own candidate pipeline still finds it -- the `---@sealed` row's
+/// `applicable` is `1`, unmoved by a comment that is not its rule's name.
 #[test]
 fn an_allow_comment_on_the_declaration_is_not_a_candidate() {
     let root = scratch("allowed");
@@ -146,13 +173,23 @@ fn an_allow_comment_on_the_declaration_is_not_a_candidate() {
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is one JSON document");
     assert_eq!(v["features"][0]["applicable"], 0, "{v}");
     assert_eq!(v["features"][0]["candidates"], serde_json::json!([]), "{v}");
-    assert_eq!(v["summary"]["applicable"], 0);
+    assert_eq!(v["features"][2]["applicable"], 1, "{v}");
+    assert_eq!(
+        v["features"][2]["candidates"],
+        serde_json::json!([{
+            "file": "src/a.tl", "line": 1, "name": "Point", "sites": 2,
+            "reason": "built and cast only in its own file",
+        }]),
+        "{v}"
+    );
+    assert_eq!(v["summary"]["applicable"], 1);
 }
 
 /// As above, with `unmarked-struct` named among several in one list-form comment
 /// (`-- htl: allow(no-any, unmarked-struct)`) rather than alone -- `collect_allows`
 /// splits on commas, so the second name has to be read as its own, not as part of the
 /// first or swallowed by the parentheses matching only the whole list as one word.
+/// `unmarked-sealed` still finds `Point`, for the same reason as above.
 #[test]
 fn an_allow_comment_naming_several_rules_is_not_a_candidate_either() {
     let root = scratch("allowed-list");
@@ -168,7 +205,8 @@ fn an_allow_comment_naming_several_rules_is_not_a_candidate_either() {
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is one JSON document");
     assert_eq!(v["features"][0]["applicable"], 0, "{v}");
     assert_eq!(v["features"][0]["candidates"], serde_json::json!([]), "{v}");
-    assert_eq!(v["summary"]["applicable"], 0);
+    assert_eq!(v["features"][2]["applicable"], 1, "{v}");
+    assert_eq!(v["summary"]["applicable"], 1);
 }
 
 #[test]
@@ -198,15 +236,17 @@ fn a_project_with_no_marker_reports_every_feature_unused() {
 }
 
 /// The whole stderr, not a substring: both rows and the summary line are deterministic
-/// for this fixture, so there is nothing to pick out piecemeal. `---@struct`'s
-/// `applicable` is `0`, not `-`: `unmarked-struct` has run over this fixture and found no
-/// candidate (`Foo` and `Bar` are both marked already), which is a count, not an absence
-/// of one -- unlike every other row here, which still has no lint behind it at all.
+/// for this fixture, so there is nothing to pick out piecemeal. `---@struct`'s and
+/// `---@sealed`'s `applicable` are both `0`, not `-`: `unmarked-struct` and
+/// `unmarked-sealed` have both run over this fixture and found no candidate (`Foo` and
+/// `Bar` are marked `---@struct` already, and neither has a single construction or cast
+/// site for `unmarked-sealed` to count), which is a count, not an absence of one -- unlike
+/// every other row here, which still has no lint behind it at all.
 const TWO_MARKERS_PLAIN_STDERR: &str = "\
 feature          used  applicable
 ---@struct          2           0
 ---@optional        0           -
----@sealed          0           -
+---@sealed          0           0
 ---@extensible      0           -
 ---@nilable         1           -
 ---@contract        0           -
@@ -223,7 +263,7 @@ const TWO_MARKERS_DETAIL_STDERR: &str = "\
 feature          used  applicable
 ---@struct          2           0
 ---@optional        0           -
----@sealed          0           -
+---@sealed          0           0
 ---@extensible      0           -
 ---@nilable         1           -
 ---@contract        0           -
@@ -418,6 +458,7 @@ fn help_says_which_row_has_applicable() {
     let help = String::from_utf8_lossy(&out.stdout);
     assert!(help.contains("applicable"), "{help}");
     assert!(help.contains("unmarked-struct"), "{help}");
+    assert!(help.contains("unmarked-sealed"), "{help}");
 }
 
 #[test]
@@ -435,15 +476,19 @@ fn a_dtl_declaration_carrying_a_marker_does_not_move_its_row() {
     );
 }
 
-/// As [`TWO_MARKERS_PLAIN_STDERR`], but `Point` (unmarked, built whole at two sites) makes
-/// the `---@struct` row's `applicable` `1` instead of `-`; every other row is still `-`,
-/// and the summary line is unchanged (a candidate carries no marker, so it adds nothing
-/// to `used` or `markers`).
+/// As [`TWO_MARKERS_PLAIN_STDERR`], but `Point` (unmarked, built whole at two sites, both
+/// in `src/a.tl` -- its own declaring file) makes the `---@struct` row's `applicable` `1`
+/// instead of `0`, and the `---@sealed` row's `applicable` `1` too: `Point` is a
+/// candidate for both rows at once -- `unmarked-struct` because every site sets every
+/// field, `unmarked-sealed` because every site is in its own file -- and neither
+/// candidacy is evidence against the other. Every other row is still `-`, and the summary
+/// line is unchanged (a candidate carries no marker, so it adds nothing to `used` or
+/// `markers`).
 const CANDIDATE_PLAIN_STDERR: &str = "\
 feature          used  applicable
 ---@struct          2           1
 ---@optional        0           -
----@sealed          0           -
+---@sealed          0           1
 ---@extensible      0           -
 ---@nilable         1           -
 ---@contract        0           -
@@ -453,14 +498,15 @@ feature          used  applicable
 htl adopt: 2 of 9 features used, 3 markers in 2 files
 ";
 
-/// As [`CANDIDATE_PLAIN_STDERR`], with `--detail`'s four lines inserted: `Foo` and `Bar`
-/// (used sites) before `Point` (the candidate, with its site count) under `---@struct`,
-/// then `find` under `---@nilable`.
+/// As [`CANDIDATE_PLAIN_STDERR`], with `--detail`'s five lines inserted: `Foo` and `Bar`
+/// (used sites) before `Point` (the `---@struct` candidate, with its reason and site
+/// count) under `---@struct`; `Point` again, as the `---@sealed` candidate, under
+/// `---@sealed` (which has no used site of its own); then `find` under `---@nilable`.
 const CANDIDATE_DETAIL_STDERR: &str = "\
 feature          used  applicable
 ---@struct          2           1
 ---@optional        0           -
----@sealed          0           -
+---@sealed          0           1
 ---@extensible      0           -
 ---@nilable         1           -
 ---@contract        0           -
@@ -469,7 +515,8 @@ feature          used  applicable
 ---@noyield         0           -
   ---@struct      src/a.tl:3   Foo
   ---@struct      src/b.tl:10  Bar
-  ---@struct      src/a.tl:11  Point  (applicable: built whole at 2 sites)
+  ---@struct      src/a.tl:11  Point  (applicable: built whole at every site, 2 sites)
+  ---@sealed      src/a.tl:11  Point  (applicable: built and cast only in its own file, 2 sites)
   ---@nilable     src/a.tl:8   find
 htl adopt: 2 of 9 features used, 3 markers in 2 files
 ";
@@ -493,14 +540,32 @@ fn the_struct_row_counts_the_records_unmarked_struct_would_report() {
     assert_eq!(features[0]["applicable"], 1);
     assert_eq!(
         features[0]["candidates"],
-        serde_json::json!([{ "file": "src/a.tl", "line": 11, "name": "Point", "sites": 2 }]),
+        serde_json::json!([{
+            "file": "src/a.tl", "line": 11, "name": "Point", "sites": 2,
+            "reason": "built whole at every site",
+        }]),
         "{v}"
     );
-    for f in &features[1..] {
+    // `Point` is also the `---@sealed` row's own candidate (index 2): every other row,
+    // `---@sealed` excluded, still has no lint behind it at all.
+    assert_eq!(features[2]["marker"], "sealed");
+    assert_eq!(features[2]["applicable"], 1);
+    assert_eq!(
+        features[2]["candidates"],
+        serde_json::json!([{
+            "file": "src/a.tl", "line": 11, "name": "Point", "sites": 2,
+            "reason": "built and cast only in its own file",
+        }]),
+        "{v}"
+    );
+    for (i, f) in features.iter().enumerate() {
+        if i == 0 || i == 2 {
+            continue;
+        }
         assert!(f["applicable"].is_null(), "{f}");
         assert_eq!(f["candidates"], serde_json::json!([]), "{f}");
     }
-    assert_eq!(v["summary"]["applicable"], 1);
+    assert_eq!(v["summary"]["applicable"], 2);
 }
 
 #[test]
@@ -511,6 +576,10 @@ fn detail_lists_candidates_after_the_marked_declarations() {
     assert_eq!(err, CANDIDATE_DETAIL_STDERR);
 }
 
+/// `Point` built short at `p2` (`{}`, no field set) is not a `---@struct` candidate --
+/// condition 3 (every site complete) fails -- but it is still a `---@sealed` candidate:
+/// completeness is not one of that row's conditions, only location is, and both of
+/// `Point`'s sites stay in `src/a.tl`.
 #[test]
 fn a_record_built_short_at_one_site_is_not_a_candidate() {
     let root = candidate_project("short", "{}");
@@ -524,12 +593,28 @@ fn a_record_built_short_at_one_site_is_not_a_candidate() {
         struct_row, "---@struct          2           0",
         "{struct_row}"
     );
+    let sealed_row = err
+        .lines()
+        .find(|l| l.trim_start().starts_with("---@sealed"))
+        .unwrap_or_else(|| panic!("no ---@sealed row: {err}"));
+    assert_eq!(
+        sealed_row, "---@sealed          0           1",
+        "{sealed_row}"
+    );
 
     let (ok, _, detail_err) = htl(&["adopt", "--detail"], &root);
     assert!(ok, "{detail_err}");
     assert!(
-        !detail_err.contains("Point"),
-        "a record built short at one site is not a candidate: {detail_err}"
+        !detail_err
+            .lines()
+            .any(|l| l.contains("---@struct") && l.contains("Point")),
+        "a record built short at one site is not a ---@struct candidate: {detail_err}"
+    );
+    assert!(
+        detail_err
+            .lines()
+            .any(|l| l.contains("---@sealed") && l.contains("Point")),
+        "it is still a ---@sealed candidate: {detail_err}"
     );
 
     let (ok, stdout, stderr) = htl(&["adopt", "--format", "json"], &root);
@@ -537,5 +622,126 @@ fn a_record_built_short_at_one_site_is_not_a_candidate() {
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is one JSON document");
     assert_eq!(v["features"][0]["applicable"], 0);
     assert_eq!(v["features"][0]["candidates"], serde_json::json!([]), "{v}");
-    assert_eq!(v["summary"]["applicable"], 0);
+    assert_eq!(v["features"][2]["applicable"], 1);
+    assert_eq!(
+        v["features"][2]["candidates"],
+        serde_json::json!([{
+            "file": "src/a.tl", "line": 11, "name": "Point", "sites": 2,
+            "reason": "built and cast only in its own file",
+        }]),
+        "{v}"
+    );
+    assert_eq!(v["summary"]["applicable"], 1);
+}
+
+#[test]
+fn the_sealed_row_counts_the_records_unmarked_sealed_would_report() {
+    let root = sealed_candidate_project("sealed-row", false);
+    let (ok, _, err) = htl(&["adopt"], &root);
+    assert!(ok, "{err}");
+    let sealed_row = err
+        .lines()
+        .find(|l| l.trim_start().starts_with("---@sealed"))
+        .unwrap_or_else(|| panic!("no ---@sealed row: {err}"));
+    assert_eq!(
+        sealed_row, "---@sealed          0           1",
+        "{sealed_row}"
+    );
+
+    let (ok, stdout, stderr) = htl(&["adopt", "--format", "json"], &root);
+    assert!(ok, "{stderr}");
+    assert!(
+        stderr.trim().is_empty(),
+        "json mode keeps stderr silent: {stderr}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is one JSON document");
+    assert_eq!(v["features"][2]["marker"], "sealed");
+    assert_eq!(v["features"][2]["applicable"], 1, "{v}");
+    assert_eq!(
+        v["features"][2]["candidates"],
+        serde_json::json!([{
+            "file": "src/gate.tl", "line": 2, "name": "Judged", "sites": 2,
+            "reason": "built and cast only in its own file",
+        }]),
+        "{v}"
+    );
+    // `summary.applicable` sums every row that has one: `Judged`'s single literal site
+    // (`j1`, complete) also makes it a `---@struct` candidate, so the sum is both rows'
+    // `applicable` together (1 + 1), not just this row's.
+    assert_eq!(v["features"][0]["applicable"], 1, "{v}");
+    assert_eq!(v["summary"]["applicable"], 2, "{v}");
+}
+
+/// With `elsewhere`, `Judged` is cast a third time from `src/use.tl`: a site outside the
+/// declaring file breaks `unmarked-sealed`'s own condition, the same way it does for the
+/// lint itself (`crate::unmarked_sealeds`'s own tests), so the row goes back to `0`.
+#[test]
+fn a_record_cast_in_another_file_is_not_a_sealed_candidate() {
+    let root = sealed_candidate_project("sealed-elsewhere", true);
+    let (ok, _, err) = htl(&["adopt"], &root);
+    assert!(ok, "{err}");
+    let sealed_row = err
+        .lines()
+        .find(|l| l.trim_start().starts_with("---@sealed"))
+        .unwrap_or_else(|| panic!("no ---@sealed row: {err}"));
+    assert_eq!(
+        sealed_row, "---@sealed          0           0",
+        "{sealed_row}"
+    );
+
+    let (ok, stdout, stderr) = htl(&["adopt", "--format", "json"], &root);
+    assert!(ok, "{stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is one JSON document");
+    assert_eq!(v["features"][2]["applicable"], 0, "{v}");
+    assert_eq!(v["features"][2]["candidates"], serde_json::json!([]), "{v}");
+}
+
+/// The whole stderr, not a substring: `Judged`'s one literal site (`j1`) also makes it a
+/// `---@struct` candidate, so both rows carry it, each with its own reason and site
+/// count -- the `---@struct` line counts `j1` alone (a cast is not a construction site),
+/// the `---@sealed` line both `j1` and the cast `j2`.
+const SEALED_DETAIL_STDERR: &str = "\
+feature          used  applicable
+---@struct          0           1
+---@optional        0           -
+---@sealed          0           1
+---@extensible      0           -
+---@nilable         0           -
+---@contract        0           -
+---@required        0           -
+---@async           0           -
+---@noyield         0           -
+  ---@struct      src/gate.tl:2  Judged  (applicable: built whole at every site, 1 site)
+  ---@sealed      src/gate.tl:2  Judged  (applicable: built and cast only in its own file, 2 sites)
+htl adopt: 0 of 9 features used, no markers
+";
+
+#[test]
+fn detail_lists_sealed_candidates_with_their_reason() {
+    let root = sealed_candidate_project("sealed-detail", false);
+    let (ok, _, err) = htl(&["adopt", "--detail"], &root);
+    assert!(ok, "{err}");
+    assert_eq!(err, SEALED_DETAIL_STDERR);
+}
+
+/// `-- htl: allow(unmarked-sealed)` on `Judged`'s own declaration line leaves it out of
+/// both `applicable` and `candidates`, the same way the comment silences the lint's own
+/// finding (#304) -- `unmarked_sealeds` reads no source of its own, so `adopt` has to
+/// apply the check itself, through `lint::line_is_allowed`.
+#[test]
+fn an_allow_comment_on_the_declaration_is_not_a_sealed_candidate() {
+    let root = scratch("sealed-allowed");
+    write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
+    write(
+        &root.join("src/gate.tl"),
+        "local record gate\n   record Judged   -- htl: allow(unmarked-sealed)\n      \
+         v: integer\n   end\nend\n\n\
+         local j1: gate.Judged = { v = 1 }\nlocal j2 = j1 as gate.Judged\n\
+         print(j1, j2)\n\nreturn gate\n",
+    );
+    let (ok, stdout, stderr) = htl(&["adopt", "--format", "json"], &root);
+    assert!(ok, "{stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is one JSON document");
+    assert_eq!(v["features"][2]["applicable"], 0, "{v}");
+    assert_eq!(v["features"][2]["candidates"], serde_json::json!([]), "{v}");
 }

@@ -246,7 +246,8 @@ fn an_allow_comment_cannot_be_written_on_a_marker_line() {
 /// `global-redeclaration` beside the project layer's five, thirty-two with the four
 /// rules of the `async` / `await` syntax (`await-missing`, `await-outside-async`,
 /// `await-non-async`, `task-escape`), thirty-three with the fifth,
-/// `async-as-sync-callback`, and thirty-four with `type-guard`.
+/// `async-as-sync-callback`, thirty-four with `type-guard`, thirty-five with
+/// `unmarked-struct`, and thirty-six with `unmarked-sealed`.
 ///
 /// Each line is the name and the level a project that says nothing gets, so the listing
 /// also answers which rules are `allow` — which a reader used to have to turn a rule on to
@@ -278,10 +279,11 @@ fn the_listing_accounts_for_every_rule() {
             "no-any",
             "explicit-number",
             "class-record",
-            "unmarked-struct"
+            "unmarked-struct",
+            "unmarked-sealed"
         ],
-        "the three opinions, the flow rule, the library one and the record free to stay \
-         unmarked, and nothing else, is what a project does not get by default"
+        "the three opinions, the flow rule, the library one and the two records free to \
+         stay unmarked, and nothing else, is what a project does not get by default"
     );
     let deny: Vec<&str> = lines
         .iter()
@@ -320,7 +322,7 @@ fn the_listing_accounts_for_every_rule() {
     ] {
         assert!(listed.iter().any(|l| l == rule), "{rule} not in {listed:?}");
     }
-    assert_eq!(listed.len(), 35, "{listed:?}");
+    assert_eq!(listed.len(), 36, "{listed:?}");
 }
 
 /// The listing and a spec take the same names, and neither takes the two that `htl fix`

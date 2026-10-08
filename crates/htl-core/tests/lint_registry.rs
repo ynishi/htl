@@ -2,10 +2,10 @@
 //!
 //! `lint::RULES` is the one list of rule names: what `--lint` and `[lint]` accept, what
 //! `--list-lints` prints, and what both halves of htl report under. `lint.lua` still owns
-//! the *implementations* of its twelve, and that is a second list of names — the one place
-//! left where a rename could go half done, leaving a rule that nothing runs and nothing
-//! says so. This holds the two together, so that goes wrong as a failing test rather than
-//! as a lint that quietly stops firing.
+//! the *implementations* of its twenty-one, and that is a second list of names — the one
+//! place left where a rename could go half done, leaving a rule that nothing runs and
+//! nothing says so. This holds the two together, so that goes wrong as a failing test
+//! rather than as a lint that quietly stops firing.
 
 use htl_core::Htl;
 use htl_core::lint::{Level, RULES, Side, Surfaces};
@@ -52,20 +52,23 @@ fn the_registry_knows_the_rules_the_project_layer_reports_under() {
             "{rule} is reported, and advisory, unless a project says otherwise"
         );
     }
-    // `unmarked-struct` is the project layer's one `allow`: not a state a project landed
-    // in by accident, but a "could have" list a project is free to leave unmarked (its
-    // own reason, not `nil-return-unchecked`'s or `htlx-available`'s), so the rules
-    // above are no longer all of what the project layer reports under.
-    let r = RULES
-        .iter()
-        .find(|r| r.name == "unmarked-struct")
-        .unwrap_or_else(|| panic!("unmarked-struct is not in the registry"));
-    assert_eq!(r.side, Side::Rust, "unmarked-struct");
-    assert_eq!(
-        r.default,
-        Level::Allow,
-        "unmarked-struct reports a record free to stay unmarked, not an accident"
-    );
+    // `unmarked-struct` and `unmarked-sealed` are the project layer's `allow` pair: not
+    // a state a project landed in by accident, but a "could have" list a project is
+    // free to leave unmarked (its own reason, not `nil-return-unchecked`'s or
+    // `htlx-available`'s), so the rules above are no longer all of what the project
+    // layer reports under.
+    for rule in ["unmarked-struct", "unmarked-sealed"] {
+        let r = RULES
+            .iter()
+            .find(|r| r.name == rule)
+            .unwrap_or_else(|| panic!("{rule} is not in the registry"));
+        assert_eq!(r.side, Side::Rust, "{rule}");
+        assert_eq!(
+            r.default,
+            Level::Allow,
+            "{rule} reports a record free to stay unmarked, not an accident"
+        );
+    }
 }
 
 /// The third producer is the vendored Teal compiler, whose seven warning kinds are
