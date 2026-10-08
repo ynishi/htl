@@ -6,13 +6,13 @@
 //! never invalidates passes an "output is identical" test perfectly while being wrong, so
 //! most of what is below makes something change and insists on a miss.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-cache", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-cache", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -35,8 +35,8 @@ fn htl(args: &[&str], cwd: &Path) -> (bool, String, String) {
 
 /// A project that produces diagnostics: replaying an empty report proves nothing, so the
 /// fixture carries a type error and a lint alongside a module that is fine.
-fn project(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn project(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), "[check]\n");
     write(
         &root.join("src/util.tl"),
@@ -130,8 +130,8 @@ fn editing_a_checked_file_misses() {
 
 /// A project where one module requires another by name, so there is a name whose resolution
 /// can be disturbed.
-fn requires_helper(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn requires_helper(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), "[check]\n");
     write(
         &root.join("src/helper.tl"),
@@ -277,8 +277,8 @@ fn replayed(v: &serde_json::Value) -> u64 {
 
 /// Three modules: a leaf, one requiring it, and one requiring nothing. Enough to tell the
 /// two granularities apart, since only per-module can leave the third alone.
-fn three_modules(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn three_modules(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), "[check]\n");
     write(
         &root.join("src/leaf.tl"),
@@ -551,7 +551,7 @@ fn no_cache_beats_the_mode() {
 /// This is the lint most likely to quietly vanish once modules stop being checked.
 #[test]
 fn the_cycle_lint_still_fires_when_every_file_was_replayed() {
-    let root = scratch("cycle");
+    let root = tempdir("cycle");
     write(&root.join("htl.toml"), "[check]\n");
     write(
         &root.join("src/a.tl"),
@@ -591,7 +591,7 @@ fn the_cycle_lint_still_fires_when_every_file_was_replayed() {
 /// in the store.
 #[test]
 fn diagnostics_come_out_in_file_order_whatever_was_cached() {
-    let root = scratch("order");
+    let root = tempdir("order");
     write(&root.join("htl.toml"), "[check]\n");
     // Two modules that each report an error, named so the walk visits aaa before zzz.
     write(&root.join("src/aaa.tl"), "local n: string = 1\nprint(n)\n");
@@ -669,7 +669,7 @@ fn errors_of(v: &serde_json::Value) -> Vec<(String, u64, u64, String)> {
 /// into it stayed hidden until `--no-cache`.
 #[test]
 fn editing_a_declaration_two_requires_away_rechecks_the_module_that_reads_it() {
-    let root = scratch("closure");
+    let root = tempdir("closure");
     write(&root.join("htl.toml"), "[check]\n");
     two_requires_away(&root, "types/host.d.tl", "src");
 
@@ -715,7 +715,7 @@ fn editing_a_declaration_two_requires_away_rechecks_the_module_that_reads_it() {
 /// (line 9), and `global-redeclaration` read the two as two declarations.
 #[test]
 fn shifting_a_declaration_two_requires_away_reports_no_redeclaration() {
-    let root = scratch("closure-lines");
+    let root = tempdir("closure-lines");
     write(&root.join("htl.toml"), "[layout]\nsource = \".\"\n");
     two_requires_away(&root, "host.d.tl", ".");
 
@@ -747,7 +747,7 @@ fn shifting_a_declaration_two_requires_away_reports_no_redeclaration() {
 /// same question.
 #[test]
 fn a_module_appearing_under_a_name_a_required_module_requires_misses() {
-    let root = scratch("closure-appear");
+    let root = tempdir("closure-appear");
     write(&root.join("htl.toml"), "[check]\n");
     write(
         &root.join("src/leaf.tl"),
@@ -798,7 +798,7 @@ fn check_flat(root: &Path, args: &[&str]) -> serde_json::Value {
 /// `--no-cache` passes, and, after `gone` changed, instead of the error that tree has.
 #[test]
 fn a_module_appearing_under_a_name_a_required_module_could_not_resolve_misses() {
-    let root = scratch("closure-unresolved");
+    let root = tempdir("closure-unresolved");
     write(&root.join("htl.toml"), "[layout]\nsource = \".\"\n");
     write(&root.join("mid.tl"), GONE_MID_TL);
     write(&root.join("top.tl"), GONE_TOP_TL);

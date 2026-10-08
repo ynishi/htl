@@ -1,13 +1,13 @@
 //! `htl bundle info` through the real binary: what a bundle records, printed without
 //! running it, as text and as JSON; format 1 bundles; source payloads; not a bundle.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-bundle-info", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-bundle-info", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -29,8 +29,8 @@ fn htl(args: &[&str], cwd: &Path) -> (bool, String, String) {
 }
 
 /// main -> util (.tl); main also requires `host`, declared only by a `.d.tl`.
-fn project(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn project(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(
         &root.join("src/main.tl"),
         "local util = require(\"util\")\nlocal host = require(\"host\")\n\
@@ -137,7 +137,7 @@ fn a_source_bundle_binds_to_no_lua() {
 
 #[test]
 fn a_format_1_bundle_says_the_fingerprint_is_absent() {
-    let root = scratch("v1");
+    let root = tempdir("v1");
     let mut v1 = b"HTLB\x01".to_vec();
     let put = |buf: &mut Vec<u8>, b: &[u8]| {
         buf.extend_from_slice(&(b.len() as u32).to_le_bytes());
@@ -165,7 +165,7 @@ fn a_format_1_bundle_says_the_fingerprint_is_absent() {
 
 #[test]
 fn not_a_bundle_is_refused() {
-    let root = scratch("notabundle");
+    let root = tempdir("notabundle");
     std::fs::write(root.join("main.lua"), "return 1\n").unwrap();
     let (ok, _, stderr) = htl(&["bundle", "info", "main.lua"], &root);
     assert!(!ok);
@@ -183,7 +183,7 @@ fn not_a_bundle_is_refused() {
 /// is all this file had, holds equally either way.
 #[test]
 fn a_source_payload_is_terminated_lua_counted_to_the_byte() {
-    let root = scratch("source-bytes");
+    let root = tempdir("source-bytes");
     write(
         &root.join("src/mod1.tl"),
         "local record M\n   x: integer\nend\n\nreturn M\n",
@@ -228,7 +228,7 @@ fn a_source_payload_is_terminated_lua_counted_to_the_byte() {
 /// not under its stem alone.
 #[test]
 fn a_nested_entry_is_named_by_its_path_under_the_source_root() {
-    let root = scratch("nested-entry");
+    let root = tempdir("nested-entry");
     write(&root.join("htl.toml"), "");
     write(&root.join("src/app/main.tl"), "print(\"hi\")\n");
     let (ok, _, stderr) = htl(&["build", "src/app/main.tl", "-o", "app.hb"], &root);
@@ -243,7 +243,7 @@ fn a_nested_entry_is_named_by_its_path_under_the_source_root() {
 /// records no host module for it.
 #[test]
 fn a_type_only_import_leaves_no_host_row() {
-    let root = scratch("types-only");
+    let root = tempdir("types-only");
     write(
         &root.join("src/main.tl"),
         "local type shape = require(\"shape\")\nlocal p: shape.Point = { x = 1, y = 2 }\nprint(p.x + p.y)\n",

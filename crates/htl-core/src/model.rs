@@ -1537,13 +1537,11 @@ fn display_under(dir: &Path, root: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core_common;
 
-    /// A fresh directory for one test, removed first so a rerun starts clean.
-    fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("htl-model-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A fresh directory for one test, removed when the returned guard drops.
+    fn tempdir(tag: &str) -> core_common::TempDir {
+        core_common::tempdir("htl-model", tag)
     }
 
     fn write(path: &Path, text: &str) {
@@ -1557,7 +1555,7 @@ mod tests {
 
     #[test]
     fn own_module_names_by_path_under_its_roots() {
-        let root = scratch("own");
+        let root = tempdir("own");
         write(&root.join(CONFIG_NAME), "");
         write(&root.join("src/util.tl"), "");
         write(&root.join("src/game/init.tl"), "");
@@ -1590,7 +1588,7 @@ mod tests {
 
     #[test]
     fn a_crates_declarations_are_its_own_module_and_keep_their_name() {
-        let root = scratch("crate");
+        let root = tempdir("crate");
         write(
             &root.join("types/htl-mq").join(crate::DEP_TYPES_NOTE),
             "crate = \"htl-mq\"\nversion = \"0.2.0\"\nfiles = [\"mq.d.tl\"]\n",
@@ -1649,7 +1647,7 @@ mod tests {
 
     #[test]
     fn patched_and_vendored_dependencies_come_from_the_manifest() {
-        let root = scratch("deps");
+        let root = tempdir("deps");
         write(
             &root.join(pkg::MANIFEST_NAME),
             "[package]\nname = \"game\"\nversion = \"0.1.0\"\n\n\
@@ -1679,7 +1677,7 @@ mod tests {
 
     #[test]
     fn check_paths_are_external_modules_and_missing_ones_are_none() {
-        let root = scratch("ext");
+        let root = tempdir("ext");
         write(&root.join("vendor/json.tl"), "");
         let cfg = HtlConfig::parse("[check]\npaths = [\"vendor\", \"nowhere\"]\n").unwrap();
         let p = Project::load(&root, cfg).unwrap();
@@ -1728,7 +1726,7 @@ mod tests {
 
     #[test]
     fn a_walk_skips_a_dependency_s_whole_copy_and_a_patch_only_when_not_checking() {
-        let root = scratch("walk");
+        let root = tempdir("walk");
         write(
             &root.join(pkg::MANIFEST_NAME),
             "[package]\nname = \"game\"\nversion = \"0.1.0\"\n\n\
@@ -1752,7 +1750,7 @@ mod tests {
 
     #[test]
     fn a_name_two_modules_implement_is_a_conflict_and_a_declaration_is_not() {
-        let root = scratch("conflict");
+        let root = tempdir("conflict");
         write(
             &root.join(pkg::MANIFEST_NAME),
             "[package]\nname = \"game\"\nversion = \"0.1.0\"\n",
@@ -1797,7 +1795,7 @@ mod tests {
 
     #[test]
     fn a_host_module_in_the_crate_around_the_project_is_provided_by_it() {
-        let root = scratch("host-module");
+        let root = tempdir("host-module");
         write(&root.join(CONFIG_NAME), "");
         host_crate(&root);
         let p = Project::load(&root, HtlConfig::default()).unwrap();
@@ -1815,7 +1813,7 @@ mod tests {
 
     #[test]
     fn build_host_names_a_provided_module_and_a_host_module_outranks_it() {
-        let root = scratch("build-host");
+        let root = tempdir("build-host");
         let cfg = HtlConfig::parse("[build]\nhost = [\"game\", \"host\"]\n").unwrap();
         let p = Project::load(&root, cfg.clone()).unwrap();
         assert_eq!(p.provides("game"), Some(Provider::Build));
@@ -1832,7 +1830,7 @@ mod tests {
 
     #[test]
     fn a_project_with_no_cargo_package_has_no_host_modules() {
-        let root = scratch("no-crate");
+        let root = tempdir("no-crate");
         write(&root.join(CONFIG_NAME), "");
         // A `#[host_module]` in a file that belongs to no Cargo package registers nothing.
         write(
@@ -1849,7 +1847,7 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn std_modules_are_provided_by_the_binary() {
-        let root = scratch("std");
+        let root = tempdir("std");
         let p = Project::load(&root, HtlConfig::default()).unwrap();
         assert_eq!(p.provides("std.json"), Some(Provider::Std));
         assert_eq!(p.provides("std"), Some(Provider::Std));
@@ -1858,7 +1856,7 @@ mod tests {
 
     #[test]
     fn discover_refuses_two_roots() {
-        let root = scratch("two-roots");
+        let root = tempdir("two-roots");
         write(
             &root.join(pkg::MANIFEST_NAME),
             "[package]\nname = \"p\"\nversion = \"0.1.0\"\n",
@@ -1867,7 +1865,7 @@ mod tests {
         let err = Project::discover(&root.join("sub")).unwrap_err();
         assert!(err.to_string().contains("different project roots"), "{err}");
 
-        let flat = scratch("one-root");
+        let flat = tempdir("one-root");
         write(&flat.join(CONFIG_NAME), "");
         let p = Project::discover(&flat).unwrap().unwrap();
         assert_eq!(canon(&p.root), canon(&flat));

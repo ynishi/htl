@@ -3,13 +3,13 @@
 //! `HTL_LINTS` carries into `include_tl!`) silences one for a run. What a level does to a
 //! run's verdict is `lint_levels.rs`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-lint-flags", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-lint-flags", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -30,8 +30,8 @@ fn htl(args: &[&str], cwd: &Path) -> (String, String) {
 }
 
 /// One file, one cast the checker cannot stand behind.
-fn project(name: &str) -> PathBuf {
-    let dir = scratch(name);
+fn project(name: &str) -> common::TempDir {
+    let dir = tempdir(name);
     // A flat project: the files sit beside the manifest.
     write(&dir.join("htl.toml"), "[layout]\nsource = \".\"\n");
     write(
@@ -58,7 +58,7 @@ fn listed(stdout: &str) -> Vec<&str> {
 
 #[test]
 fn list_lints_names_the_enum_boundary_rules() {
-    let dir = scratch("list");
+    let dir = tempdir("list");
     let (stdout, _) = htl(&["check", "--list-lints"], &dir);
     let rules = listed(&stdout);
     assert!(rules.contains(&"enum-cast"), "{stdout}");
@@ -67,7 +67,7 @@ fn list_lints_names_the_enum_boundary_rules() {
 
 #[test]
 fn list_lints_names_the_sealed_record_rule() {
-    let dir = scratch("list-sealed");
+    let dir = tempdir("list-sealed");
     let (stdout, _) = htl(&["check", "--list-lints"], &dir);
     assert!(listed(&stdout).contains(&"sealed-record"), "{stdout}");
 }

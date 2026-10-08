@@ -4,11 +4,11 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-async-syntax", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-async-syntax", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -45,8 +45,8 @@ end
 print(await both())
 ";
 
-fn project(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn project(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), "[lang]\nasync = true\n");
     write(&root.join("main.tl"), PROGRAM);
     root
@@ -82,7 +82,7 @@ fn a_program_with_the_keywords_checks_runs_formats_and_generates_line_for_line()
 /// refused at the Teal line and column.
 #[test]
 fn awaiting_a_task_into_the_wrong_type_is_a_check_error_at_the_teal_position() {
-    let root = scratch("wrong");
+    let root = tempdir("wrong");
     write(&root.join("htl.toml"), "[lang]\nasync = true\n");
     write(
         &root.join("main.tl"),
@@ -106,7 +106,7 @@ print(await f())
 /// Without `[lang] async`, `async` and `await` are the names they are in Teal.
 #[test]
 fn without_the_setting_the_words_are_names() {
-    let root = scratch("off");
+    let root = tempdir("off");
     write(&root.join("htl.toml"), "[fmt]\nindent = 3\n");
     write(
         &root.join("main.tl"),
@@ -164,7 +164,7 @@ print(await pair(\"/a\", \"/b\"), plain(), await leak())
 /// them with their levels.
 #[test]
 fn the_four_rules_are_reported_by_name_and_replayed_from_the_cache() {
-    let root = scratch("rules");
+    let root = tempdir("rules");
     write(&root.join("htl.toml"), "[lang]\nasync = true\n");
     write(&root.join("types/http.d.tl"), HTTP);
     write(&root.join("src/main.tl"), RULES);
@@ -229,7 +229,7 @@ end
 /// the walk that resolves `await`'s operand). It checks clean and runs.
 #[test]
 fn await_in_an_if_then_body_checks_and_runs() {
-    let root = scratch("if-then-body");
+    let root = tempdir("if-then-body");
     write(
         &root.join("htl.toml"),
         "[layout]\nsource = \"src\"\n\n[lang]\nasync = true\n",
@@ -324,7 +324,7 @@ print(table.concat(parts, \",\"))
 /// for line.
 #[test]
 fn await_works_in_every_part_of_an_if_and_inside_an_async_function() {
-    let root = scratch("if-everywhere");
+    let root = tempdir("if-everywhere");
     write(&root.join("htl.toml"), "[lang]\nasync = true\n");
     write(&root.join("main.tl"), IF_EVERYWHERE_PROGRAM);
     let (ok, _, err) = htl(&["check", "main.tl"], &root);
@@ -353,7 +353,7 @@ fn await_works_in_every_part_of_an_if_and_inside_an_async_function() {
 /// statement-level await moves, an awaited expression does not.
 #[test]
 fn fmt_check_does_not_move_a_statement_level_await_that_opens_a_block() {
-    let root = scratch("await-opens-block");
+    let root = tempdir("await-opens-block");
     write(&root.join("htl.toml"), "[lang]\nasync = true\n");
     write(
         &root.join("main.tl"),
@@ -440,7 +440,7 @@ end
 /// node) are included too, to show those never moved either way.
 #[test]
 fn an_argument_count_error_moves_to_the_keyword_only_for_a_statement_level_await() {
-    let root = scratch("await-argument-count-position");
+    let root = tempdir("await-argument-count-position");
     write(&root.join("htl.toml"), "[lang]\nasync = true\n");
     write(
         &root.join("main.tl"),
@@ -514,7 +514,7 @@ return { g = g }
 /// an `if` was indexed, so the operand was not found.
 #[test]
 fn an_async_local_awaited_in_an_if_condition_checks_and_runs() {
-    let root = scratch("async-local-if-condition");
+    let root = tempdir("async-local-if-condition");
     write(&root.join("htl.toml"), "[lang]\nasync = true\n");
     write(
         &root.join("main.tl"),
@@ -541,7 +541,7 @@ end
 /// task to be recognised as one at all, rather than rejected as "not an async local".
 #[test]
 fn an_async_local_declared_and_awaited_inside_an_if_body_checks_and_runs() {
-    let root = scratch("async-local-in-if-body");
+    let root = tempdir("async-local-in-if-body");
     write(&root.join("htl.toml"), "[lang]\nasync = true\n");
     write(
         &root.join("main.tl"),
@@ -568,7 +568,7 @@ end
 /// all, and the call awaiting it is itself inside the same `if` body.
 #[test]
 fn an_async_local_function_declared_inside_an_if_body_checks_and_runs() {
-    let root = scratch("async-local-function-in-if-body");
+    let root = tempdir("async-local-function-in-if-body");
     write(&root.join("htl.toml"), "[lang]\nasync = true\n");
     write(
         &root.join("main.tl"),
@@ -604,7 +604,7 @@ const APPLIES_TO_A_CALL_MESSAGE: &str = "syntax error: 'await' applies to a call
 /// must not also make it accept an operand it would otherwise reject.
 #[test]
 fn await_on_a_non_call_inside_an_if_reports_the_same_error_as_outside_one() {
-    let root = scratch("not-a-call");
+    let root = tempdir("not-a-call");
     write(&root.join("htl.toml"), "[lang]\nasync = true\n");
 
     write(
@@ -714,7 +714,7 @@ return { same_line = same_line, next_line = next_line, local_on_line = local_on_
 /// here is of an async function, so `await-missing` stays silent for all of them. (#430)
 #[test]
 fn await_missing_is_silent_when_the_callees_type_shares_the_declaration_line() {
-    let root = scratch("same-line-decl");
+    let root = tempdir("same-line-decl");
     write(&root.join("htl.toml"), "[lang]\nasync = true\n");
     write(&root.join("src/main.tl"), SAME_LINE_DECLARATIONS_PROGRAM);
     let (ok, _, err) = htl(&["check", "src"], &root);
@@ -728,7 +728,7 @@ fn await_missing_is_silent_when_the_callees_type_shares_the_declaration_line() {
 /// `caller`). (#430)
 #[test]
 fn await_missing_still_fires_whether_the_call_shares_the_declaration_line_or_not() {
-    let root = scratch("same-line-and-diff-line-call");
+    let root = tempdir("same-line-and-diff-line-call");
     write(&root.join("htl.toml"), "[lang]\nasync = true\n");
     write(
         &root.join("main.tl"),
@@ -764,7 +764,7 @@ print(await caller())
 /// line with someone else's `async function` -- is `on_async_line`, above.) (#430)
 #[test]
 fn await_missing_still_fires_for_an_async_value_sharing_a_line_with_another_async_function() {
-    let root = scratch("async-value-shares-line");
+    let root = tempdir("async-value-shares-line");
     write(&root.join("htl.toml"), "[lang]\nasync = true\n");
     write(
         &root.join("main.tl"),
@@ -793,7 +793,7 @@ print(await caller())
 /// does, so the lint must name `b` and not `a`. (#430)
 #[test]
 fn await_missing_fires_for_global_async_function_and_only_names_the_async_one_sharing_a_line() {
-    let root = scratch("global-and-shared-line");
+    let root = tempdir("global-and-shared-line");
     write(&root.join("htl.toml"), "[lang]\nasync = true\n");
     write(
         &root.join("main.tl"),
@@ -833,7 +833,7 @@ return http
 /// `marker_on` (the `---@async` reader) is untouched by this fix. (#430)
 #[test]
 fn await_missing_still_fires_for_a_dtl_method_marked_async() {
-    let root = scratch("dtl-marker-still-fires");
+    let root = tempdir("dtl-marker-still-fires");
     write(&root.join("htl.toml"), "[lang]\nasync = true\n");
     write(&root.join("types/http.d.tl"), DTL_ASYNC_METHOD_HTTP);
     write(
@@ -914,7 +914,7 @@ print(await f())
 /// `async` / `local t = g(1)` written flat as a block's *first*.
 #[test]
 fn fmt_reindents_or_leaves_alone_a_split_await_or_async_local_keyword_line() {
-    let root = scratch("await-keyword-line");
+    let root = tempdir("await-keyword-line");
     write(&root.join("htl.toml"), "[lang]\nasync = true\n");
 
     write(

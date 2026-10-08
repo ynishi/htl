@@ -62,11 +62,10 @@ const MAIN: &str = include_tl!("tests/fixtures/task_channels/main.tl");
 
 // ---------------------------------------------------------------- helpers
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("htl-task-channels-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+mod common;
+
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-task-channels", name)
 }
 
 fn write(dir: &Path, name: &str, text: &str) -> PathBuf {
@@ -89,7 +88,7 @@ fn checker(dir: &Path, lang_async: bool) -> Htl {
 /// The errors of checking `src` (written as `main.tl` in a fresh directory, beside the
 /// generated `daemon.d.tl`).
 fn errors_of(name: &str, src: &str) -> Vec<String> {
-    let dir = scratch(name);
+    let dir = tempdir(name);
     write(&dir, "daemon.d.tl", Daemon::DECL);
     let main = write(&dir, "main.tl", src);
     checker(&dir, false).check(&main).unwrap().errors
@@ -390,7 +389,7 @@ fn misusing_a_host_channels_element_type_is_a_check_error() {
 /// calls with it are not.
 #[test]
 fn await_missing_reports_the_waits_written_without_await() {
-    let dir = scratch("await-missing");
+    let dir = tempdir("await-missing");
     write(&dir, "daemon.d.tl", Daemon::DECL);
     let main = write(
         &dir,

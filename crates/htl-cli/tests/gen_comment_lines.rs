@@ -10,13 +10,13 @@
 //! last line of code is inserted or removed, so the line numbers a run-time error reports
 //! are the `.tl`'s, and a module whose comments now reach the Lua runs and tests as it did.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-gen-comment-lines", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-gen-comment-lines", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -81,7 +81,7 @@ return M
 
 #[test]
 fn htl_gen_keeps_each_comment_only_line_at_its_line_and_drops_trailing_and_block_comments() {
-    let root = scratch("doc");
+    let root = tempdir("doc");
     write(&root.join("doc2.tl"), DOC);
     let (ok, out, err) = htl(&["gen", "doc2.tl"], &root);
     assert!(ok, "gen emits a module that checks:\n{out}{err}");
@@ -93,7 +93,7 @@ fn htl_gen_keeps_each_comment_only_line_at_its_line_and_drops_trailing_and_block
 /// generator writes those lines verbatim, so the rule has no empty line to copy into.
 #[test]
 fn a_dash_dash_line_inside_a_long_string_is_left_as_the_string_wrote_it() {
-    let root = scratch("long-string");
+    let root = tempdir("long-string");
     let src = "local s = [[\n-- not a comment\n   -- nor this\n]]\n\n-- a comment\nprint(s)\n";
     write(&root.join("s.tl"), src);
     let (ok, out, err) = htl(&["gen", "s.tl"], &root);
@@ -105,7 +105,7 @@ fn a_dash_dash_line_inside_a_long_string_is_left_as_the_string_wrote_it() {
 /// behaves: `M.inc(1)` is 2.
 #[test]
 fn a_module_whose_comment_lines_are_kept_still_passes_its_test() {
-    let root = scratch("test");
+    let root = tempdir("test");
     write(&root.join("htl.toml"), "[check]\n");
     write(&root.join("src/doc2.tl"), DOC);
     write(
@@ -122,7 +122,7 @@ fn a_module_whose_comment_lines_are_kept_still_passes_its_test() {
 /// reported at line 5.
 #[test]
 fn an_error_below_comment_lines_is_reported_at_its_own_line() {
-    let root = scratch("run");
+    let root = tempdir("run");
     write(
         &root.join("boom.tl"),
         "--- raises on purpose\nlocal function boom(): nil\n   -- a comment above the raise\n\
@@ -165,7 +165,7 @@ return M
 
 #[test]
 fn a_dash_dash_line_inside_a_block_comment_stays_empty_and_the_doc_after_return_is_the_last_line() {
-    let root = scratch("block-and-tail");
+    let root = tempdir("block-and-tail");
     write(&root.join("doc5.tl"), BLOCK_AND_TAIL);
     let (ok, out, err) = htl(&["gen", "doc5.tl"], &root);
     assert!(ok, "gen emits a module that checks:\n{out}{err}");
@@ -177,7 +177,7 @@ fn a_dash_dash_line_inside_a_block_comment_stays_empty_and_the_doc_after_return_
 /// nothing follows the doc.
 #[test]
 fn a_file_whose_tail_is_doc_after_an_empty_line_ends_with_that_doc() {
-    let root = scratch("tail");
+    let root = tempdir("tail");
     let src =
         "local record M\nend\nfunction M.f(): integer\n   return 1\nend\nreturn M\n\n--- tail\n";
     write(&root.join("m.tl"), src);
@@ -193,7 +193,7 @@ fn a_file_whose_tail_is_doc_after_an_empty_line_ends_with_that_doc() {
 /// with the doc, not with the empty lines the source had after it.
 #[test]
 fn empty_lines_after_the_last_trailing_comment_are_dropped() {
-    let root = scratch("tail-blank");
+    let root = tempdir("tail-blank");
     let src = "local x = 1\nprint(x)\n\n-- tail\n\n\n";
     write(&root.join("t.tl"), src);
     let (ok, out, err) = htl(&["gen", "t.tl"], &root);
@@ -205,7 +205,7 @@ fn empty_lines_after_the_last_trailing_comment_are_dropped() {
 /// `--` line inside it stays empty like every other line of the block.
 #[test]
 fn a_dash_dash_line_inside_a_levelled_long_comment_stays_empty() {
-    let root = scratch("levelled");
+    let root = tempdir("levelled");
     let src =
         "--[==[ levelled\n-- x\n]] still inside\n-- y\n]==]\n-- after\nlocal x = 1\nprint(x)\n";
     write(&root.join("l.tl"), src);
@@ -218,7 +218,7 @@ fn a_dash_dash_line_inside_a_levelled_long_comment_stays_empty() {
 /// a bracket inside a short string opens nothing.
 #[test]
 fn a_block_comment_closed_on_its_own_line_and_a_bracket_in_a_short_string_open_nothing() {
-    let root = scratch("same-line");
+    let root = tempdir("same-line");
     let src = "local s = \"--[[\" --[[ closed ]] .. \"[[\"\n-- kept\nprint(s)\n";
     write(&root.join("o.tl"), src);
     let (ok, out, err) = htl(&["gen", "o.tl"], &root);
@@ -231,7 +231,7 @@ fn a_block_comment_closed_on_its_own_line_and_a_bracket_in_a_short_string_open_n
 /// trailing doc line, is reported at line 12.
 #[test]
 fn an_error_between_doc_lines_and_trailing_doc_is_reported_at_its_own_line() {
-    let root = scratch("run-tail");
+    let root = tempdir("run-tail");
     write(
         &root.join("boom.tl"),
         "--- a script\nlocal function boom(): nil\n   -- comment\n   print(\"--[[\")\nend\n\n\n\n\

@@ -1942,10 +1942,10 @@ impl Cache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core_common;
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("htl-core-cache-{name}-{}", std::process::id()));
+    fn tempdir(name: &str) -> core_common::TempDir {
+        let dir = core_common::tempdir("htl-core-cache", name);
         std::fs::create_dir_all(dir.join("src")).unwrap();
         dir
     }
@@ -1955,7 +1955,7 @@ mod tests {
     /// entry keeps the binary in its stamp, as it always did.
     #[test]
     fn a_module_entry_is_served_whatever_binary_wrote_it() {
-        let root = scratch("portable");
+        let root = tempdir("portable");
         let file = root.join("src/m.tl");
         std::fs::write(&file, "return {}\n").unwrap();
         let cache = Cache::open(&root, Options::default()).unwrap();

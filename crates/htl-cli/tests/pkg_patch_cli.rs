@@ -6,13 +6,13 @@
 //! `htl fix` do not rewrite it and `htl test` does not run the dependency's suite as the
 //! project's.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-pkgpatch", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-pkgpatch", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -56,8 +56,8 @@ fn git(cwd: &Path, args: &[&str]) -> String {
 /// A project that already holds a patched dependency, written out rather than fetched: the
 /// manifest names the directory, and the copy has a source, a test of its own and a file
 /// that is not formatted the way `htl fmt` would write it.
-fn patched_project(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn patched_project(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(
         &root.join("mlua-pkg.toml"),
         "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[deps.mathx]\n\
@@ -109,7 +109,7 @@ fn json_carries_the_total_and_the_patched_part_of_it() {
 /// The split is news only where there is something to split.
 #[test]
 fn a_project_without_a_patch_prints_the_line_it_always_did() {
-    let root = scratch("unpatched");
+    let root = tempdir("unpatched");
     write(
         &root.join("mlua-pkg.toml"),
         "[package]\nname = \"p\"\nversion = \"0.1.0\"\n",
@@ -196,7 +196,7 @@ fn test_finds_nothing_when_the_only_suite_is_the_dependencys() {
 /// committed into this project.
 #[test]
 fn patch_reports_where_the_copy_is() {
-    let dep = scratch("remote");
+    let dep = tempdir("remote");
     write(&dep.join("src/mathx.tl"), "return {}\n");
     write(&dep.join("README.md"), "# mathx\n");
     write(
@@ -209,7 +209,7 @@ fn patch_reports_where_the_copy_is() {
     git(&dep, &["commit", "-qm", "mathx"]);
     let sha = git(&dep, &["rev-parse", "HEAD"]);
 
-    let root = scratch("take");
+    let root = tempdir("take");
     write(
         &root.join("mlua-pkg.toml"),
         &format!(

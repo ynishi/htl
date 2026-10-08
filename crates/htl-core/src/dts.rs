@@ -2361,6 +2361,7 @@ pub fn regenerate_host_decls(manifest_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core_common;
 
     fn item(src: &str) -> Item {
         syn::parse_str(src).unwrap()
@@ -3164,8 +3165,7 @@ mod tests {
     /// write is the macro's, parameter attributes and all.
     #[test]
     fn htl_dts_writes_the_same_noyield_lines_as_the_macro() {
-        let dir = std::env::temp_dir().join(format!("htl-dts-noyield-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = core_common::tempdir("htl-dts-noyield", "default");
         std::fs::create_dir_all(dir.join("src")).unwrap();
         let lib = dir.join("src/lib.rs");
         std::fs::write(&lib, CALLBACKS).unwrap();
@@ -3180,7 +3180,6 @@ mod tests {
                 generated[0].text
             );
         }
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn host_impl_err(src: &str) -> String {
@@ -3390,8 +3389,7 @@ mod tests {
     /// `include_str!` (acceptance 3).
     #[test]
     fn a_module_qualified_record_resolves_to_the_sibling_file_byte_identically() {
-        let dir = std::env::temp_dir().join(format!("htl-dts-geom-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = core_common::tempdir("htl-dts-geom", "default");
         std::fs::create_dir_all(dir.join("src")).unwrap();
         let lib = dir.join("src/lib.rs");
         std::fs::write(
@@ -3439,8 +3437,6 @@ mod tests {
             "{:?}",
             hd.record_files
         );
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// `records = [geom::Nosuch]`, `geom.rs` exists and is read, but has nothing named
@@ -3448,8 +3444,7 @@ mod tests {
     /// record in that file").
     #[test]
     fn a_record_missing_from_the_modules_sibling_file_names_the_file() {
-        let dir = std::env::temp_dir().join(format!("htl-dts-geom-missing-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = core_common::tempdir("htl-dts-geom-missing", "default");
         std::fs::create_dir_all(dir.join("src")).unwrap();
         let lib = dir.join("src/lib.rs");
         std::fs::write(
@@ -3495,8 +3490,6 @@ mod tests {
             e.contains(crate::diagnostic::display_path(&geom).as_str()),
             "{e}"
         );
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// #428: `#[path]` redirects where `mod geom;` reads from; `records` does not
@@ -3645,8 +3638,7 @@ mod tests {
     /// never touched, confirmed by its field not showing up.
     #[test]
     fn a_mod_in_a_non_root_file_resolves_beneath_its_own_stem_not_beside_it() {
-        let dir = std::env::temp_dir().join(format!("htl-dts-hostio-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = core_common::tempdir("htl-dts-hostio", "default");
         std::fs::create_dir_all(dir.join("src/hostio")).unwrap();
         let hostio = dir.join("src/hostio.rs");
         std::fs::write(
@@ -3697,8 +3689,6 @@ mod tests {
             "{:?}",
             hd.record_files
         );
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// #428: `tests` / `examples` / `benches` are crate-root directories only when their
@@ -3708,8 +3698,7 @@ mod tests {
     /// own stem (`src/tests/helpers/geom.rs`), not beside it (`src/tests/geom.rs`).
     #[test]
     fn mod_base_dir_treats_tests_as_a_root_only_beside_cargo_toml() {
-        let dir = std::env::temp_dir().join(format!("htl-dts-tests-dir-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = core_common::tempdir("htl-dts-tests-dir", "default");
         std::fs::create_dir_all(dir.join("src/tests")).unwrap();
         std::fs::create_dir_all(dir.join("tests")).unwrap();
         std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
@@ -3723,16 +3712,13 @@ mod tests {
         // At the package root: `tests`'s own parent is `dir`, which holds `Cargo.toml` —
         // a real integration-test root, so its `mod geom;` sits beside it.
         assert_eq!(mod_base_dir(&dir.join("tests/other.rs")), dir.join("tests"));
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// #428: two entries naming the same module read and parse its file once — the
     /// second entry is a cache hit, so `record_files` holds the path once, not twice.
     #[test]
     fn two_entries_naming_the_same_module_read_its_file_once() {
-        let dir = std::env::temp_dir().join(format!("htl-dts-geom-dedup-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = core_common::tempdir("htl-dts-geom-dedup", "default");
         std::fs::create_dir_all(dir.join("src")).unwrap();
         let lib = dir.join("src/lib.rs");
         std::fs::write(
@@ -3766,8 +3752,6 @@ mod tests {
         let attrs = parse_host_module_attr(&imp.attrs).unwrap().unwrap();
         let hd = host_decl(imp, attrs, Some(&file.items), Some(&lib)).unwrap();
         assert_eq!(hd.record_files.len(), 1, "{:?}", hd.record_files);
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// `#[htl::host_module(..)]` is the same attribute as `#[host_module(..)]` after
@@ -3785,9 +3769,7 @@ mod tests {
                 "#[htl::host_module(name = \"host\", dts = \"src/host.d.tl\")]",
             ),
         ] {
-            let dir = std::env::temp_dir()
-                .join(format!("htl-dts-attr-path-{tag}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
+            let dir = core_common::tempdir("htl-dts-attr-path", tag);
             std::fs::create_dir_all(dir.join("src")).unwrap();
             let lib = dir.join("src/lib.rs");
             std::fs::write(
@@ -3806,7 +3788,6 @@ mod tests {
                 "{tag}: {}",
                 generated[0].text
             );
-            std::fs::remove_dir_all(&dir).unwrap();
         }
     }
 
@@ -4023,8 +4004,7 @@ mod tests {
     /// scan touched records too, this would come back overwritten.
     #[test]
     fn regenerate_host_decls_writes_host_modules_but_leaves_records_alone() {
-        let dir = std::env::temp_dir().join(format!("htl-dts-regen-kind-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = core_common::tempdir("htl-dts-regen-kind", "default");
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(
             dir.join("src/lib.rs"),
@@ -4058,8 +4038,6 @@ mod tests {
             seeded,
             "a record's .d.tl must not be touched by this scan"
         );
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// S2 of #429's review: a file this cannot parse — a fixture deliberately holding
@@ -4068,8 +4046,7 @@ mod tests {
     /// nothing about it (it has no error channel to report through).
     #[test]
     fn regenerate_host_decls_skips_an_unparsable_file_and_still_writes_the_rest() {
-        let dir = std::env::temp_dir().join(format!("htl-dts-regen-bad-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = core_common::tempdir("htl-dts-regen-bad", "default");
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::create_dir_all(dir.join("tests")).unwrap();
         std::fs::write(
@@ -4098,8 +4075,6 @@ mod tests {
                 .contains("ping"),
             "the valid file's host module should still have been written"
         );
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// S3: two scans of an unchanged tree agree; adding a file (even with no content
@@ -4107,8 +4082,7 @@ mod tests {
     /// is what tells `regenerate_crate`'s cache to redo the write pass.
     #[test]
     fn scan_fingerprint_changes_when_a_file_is_added() {
-        let dir = std::env::temp_dir().join(format!("htl-dts-fingerprint-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = core_common::tempdir("htl-dts-fingerprint", "default");
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
 
@@ -4118,7 +4092,5 @@ mod tests {
         std::fs::write(dir.join("src/extra.rs"), "pub fn g() {}\n").unwrap();
         let second = scan_fingerprint(&dir);
         assert_ne!(first, second, "a file was added");
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -4,12 +4,12 @@
 use htl_core::Htl;
 use htl_core::pkg::TealResolver;
 use mlua_pkg::Registry;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-expect", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-expect", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -17,8 +17,8 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
-fn setup() -> (PathBuf, Htl) {
-    let dir = scratch("mods");
+fn setup() -> (common::TempDir, Htl) {
+    let dir = tempdir("mods");
     write(
         &dir.join("defs.tl"),
         "local record defs\n   record Mod\n      name: string\n      hp: integer\n   end\nend\nreturn defs\n",
@@ -35,7 +35,11 @@ fn setup() -> (PathBuf, Htl) {
 
     let h = Htl::new().unwrap();
     let mut reg = Registry::new();
-    reg.add(TealResolver::new(&dir).unwrap().expect_type("defs.Mod"));
+    reg.add(
+        TealResolver::new(dir.to_path_buf())
+            .unwrap()
+            .expect_type("defs.Mod"),
+    );
     reg.install(h.lua()).unwrap();
     (dir, h)
 }
@@ -67,8 +71,8 @@ fn nonconforming_mod_is_rejected_at_require() {
     );
 }
 
-fn setup_strict() -> (PathBuf, Htl) {
-    let dir = scratch("strict");
+fn setup_strict() -> (common::TempDir, Htl) {
+    let dir = tempdir("strict");
     write(
         &dir.join("defs.tl"),
         "local record defs\n   record Mod\n      name: string\n      hp: integer\n      monsters: {string}\n   end\nend\nreturn defs\n",
@@ -81,7 +85,7 @@ fn setup_strict() -> (PathBuf, Htl) {
     let h = Htl::new().unwrap();
     let mut reg = Registry::new();
     reg.add(
-        TealResolver::new(&dir)
+        TealResolver::new(dir.to_path_buf())
             .unwrap()
             .expect_type("defs.Mod")
             .require_all_fields(),
@@ -91,8 +95,8 @@ fn setup_strict() -> (PathBuf, Htl) {
 }
 
 /// `require_fields(names)`: the same tree, held to a core rather than to everything.
-fn setup_named(names: &[&str]) -> (PathBuf, Htl) {
-    let dir = scratch("named");
+fn setup_named(names: &[&str]) -> (common::TempDir, Htl) {
+    let dir = tempdir("named");
     write(
         &dir.join("defs.tl"),
         "local record defs\n   record Mod\n      name: string\n      hp: integer\n      monsters: {string}\n   end\nend\nreturn defs\n",
@@ -105,7 +109,7 @@ fn setup_named(names: &[&str]) -> (PathBuf, Htl) {
     let h = Htl::new().unwrap();
     let mut reg = Registry::new();
     reg.add(
-        TealResolver::new(&dir)
+        TealResolver::new(dir.to_path_buf())
             .unwrap()
             .expect_type("defs.Mod")
             .require_fields(names.iter().copied()),

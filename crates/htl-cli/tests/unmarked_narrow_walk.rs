@@ -19,13 +19,13 @@
 //! this gate at all (it answers `true` unconditionally there, by design: with no model
 //! there is no wider module set for the files given to fall short of).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-narrow-walk", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-narrow-walk", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -50,8 +50,8 @@ fn check(root: &Path, targets: &[&str], lint: &str) -> (bool, String, String) {
 
 /// `gate.Only` (unmarked), declared and built once in `src/gate.tl`; cast once from
 /// `src/main.tl`, a site the rule has to miss for a walk that never checks that file.
-fn sealed_project(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn sealed_project(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
     write(
         &root.join("src/gate.tl"),
@@ -68,8 +68,8 @@ fn sealed_project(name: &str) -> PathBuf {
 
 /// `gate.Only` (unmarked), built whole once in `src/gate.tl`; built short a second time
 /// (no `v` set) from `src/main.tl`, a site the rule has to miss the same way.
-fn struct_project(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn struct_project(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
     write(
         &root.join("src/gate.tl"),
@@ -139,7 +139,7 @@ fn a_narrow_walk_does_not_report_a_struct_candidate_the_unwalked_files_use() {
 /// whole project.
 #[test]
 fn a_directory_walk_that_is_the_whole_project_still_reports_a_genuine_candidate() {
-    let root = scratch("sealed-whole-one-file");
+    let root = tempdir("sealed-whole-one-file");
     write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
     write(
         &root.join("src/gate.tl"),
@@ -168,8 +168,8 @@ fn a_directory_walk_that_is_the_whole_project_still_reports_a_genuine_candidate(
 /// still count against a project record (`Only`'s own census includes none here, so
 /// this fixture does not exercise that half), but the extra file's own declarations do
 /// not become candidates merely because `htl check` read them.
-fn patched_sealed_project(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn patched_sealed_project(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(
         &root.join("mlua-pkg.toml"),
         "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[deps.mathx]\n\
@@ -259,7 +259,7 @@ fn a_patched_dependencys_own_record_is_not_a_candidate() {
 /// reports, the same reason a patched dependency's extra files do not narrow the walk.
 #[test]
 fn a_file_outside_every_module_root_named_outright_does_not_narrow_the_walk() {
-    let root = scratch("sealed-stray");
+    let root = tempdir("sealed-stray");
     write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
     write(
         &root.join("src/gate.tl"),
@@ -284,7 +284,7 @@ fn a_file_outside_every_module_root_named_outright_does_not_narrow_the_walk() {
 /// not the project's). `gate.Only` still reports.
 #[test]
 fn a_stray_file_named_outright_is_not_a_candidate_itself() {
-    let root = scratch("sealed-stray-own-record");
+    let root = tempdir("sealed-stray-own-record");
     write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
     write(
         &root.join("src/gate.tl"),

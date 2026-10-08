@@ -6,11 +6,11 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-run", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-run", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -35,7 +35,7 @@ fn htl(args: &[&str], cwd: &Path) -> (std::process::ExitStatus, String, String) 
 /// creates itself, and `arg`, work as they did under the plain call.
 #[test]
 fn a_program_that_finishes_prints_what_it_printed_and_exits_zero() {
-    let root = scratch("finishes");
+    let root = tempdir("finishes");
     write(
         &root.join("main.tl"),
         "print(\"one\")\n\
@@ -54,7 +54,7 @@ fn a_program_that_finishes_prints_what_it_printed_and_exits_zero() {
 /// a raise, with the error on stderr and nothing about the executor in it.
 #[test]
 fn a_program_that_raises_exits_one_with_the_error_and_no_executor_frames() {
-    let root = scratch("raises");
+    let root = tempdir("raises");
     write(
         &root.join("main.tl"),
         "local function inner() error(\"boom\") end\ninner()\n",
@@ -75,7 +75,7 @@ fn a_program_that_raises_exits_one_with_the_error_and_no_executor_frames() {
 #[cfg(unix)]
 #[test]
 fn ctrl_c_cancels_the_program_and_exits_130() {
-    let root = scratch("ctrl-c");
+    let root = tempdir("ctrl-c");
     write(
         &root.join("main.tl"),
         "print(\"started\")\n\
@@ -114,7 +114,7 @@ fn ctrl_c_cancels_the_program_and_exits_130() {
 /// checks clean against the bundled declaration.
 #[test]
 fn a_program_that_spawns_tasks_checks_clean_and_prints_what_they_returned() {
-    let root = scratch("tasks");
+    let root = tempdir("tasks");
     write(
         &root.join("main.tl"),
         "local task = require(\"htl.task\")\n\
@@ -140,7 +140,7 @@ fn a_program_that_spawns_tasks_checks_clean_and_prints_what_they_returned() {
 /// function on `htl.task`.
 #[test]
 fn a_program_that_selects_over_channels_and_timers_checks_clean_and_runs() {
-    let root = scratch("select");
+    let root = tempdir("select");
     write(
         &root.join("main.tl"),
         "local task = require(\"htl.task\")\n\
@@ -189,7 +189,7 @@ fn a_program_that_selects_over_channels_and_timers_checks_clean_and_runs() {
 /// refused by `htl check` at the Teal line and column, before anything runs.
 #[test]
 fn awaiting_a_task_of_the_wrong_type_is_a_check_error_at_the_teal_position() {
-    let root = scratch("task-type");
+    let root = tempdir("task-type");
     write(
         &root.join("main.tl"),
         "local task = require(\"htl.task\")\n\

@@ -1,12 +1,12 @@
 //! `htl check --format json` / `htl test --format json` through the real binary.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-json", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-json", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -27,8 +27,8 @@ fn htl(args: &[&str], cwd: &Path) -> (bool, String, String) {
     )
 }
 
-fn project() -> PathBuf {
-    let root = scratch("proj");
+fn project() -> common::TempDir {
+    let root = tempdir("proj");
     // What makes the directory a project whose `src/` its tests read.
     write(&root.join("htl.toml"), "");
     write(

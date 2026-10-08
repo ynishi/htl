@@ -10,14 +10,14 @@
 //! reading.
 
 use htl_core::Htl;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
 const RULE: &str = "htlx-available";
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-htlx-available", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-htlx-available", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -28,8 +28,8 @@ fn write(path: &Path, text: &str) {
 /// A project directory and a `main.tl` in it. `htlx` is not put on the path: what the rule
 /// reads is the dependency list the state was told about ([`Htl::set_deps`]), and a file
 /// that does not `require` the module type-checks without it.
-fn project(name: &str, body: &str) -> PathBuf {
-    let dir = scratch(name);
+fn project(name: &str, body: &str) -> common::TempDir {
+    let dir = tempdir(name);
     write(&dir.join("main.tl"), body);
     dir
 }

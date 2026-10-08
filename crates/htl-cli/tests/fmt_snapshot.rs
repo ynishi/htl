@@ -18,7 +18,7 @@
 //! of them is a warning that CI treats as an error, so a helper moves there when most of
 //! them want it, not when the second one does.
 //!
-//! The fixture is copied into a scratch directory before it is formatted. `htl fmt` writes
+//! The fixture is copied into a temp directory before it is formatted. `htl fmt` writes
 //! in place, so running it on the checkout would leave the fixture formatted and every
 //! subsequent run would compare the formatter against its own previous output.
 
@@ -99,7 +99,7 @@ fn assert_snapshot(case: &str, got: &str) {
 /// that formatting is a fixed point: without it a rule that alternated between two layouts
 /// would still match a snapshot blessed from one of them.
 fn assert_formats(case: &str) {
-    let dir = common::scratch("htl-cli-fmt", case);
+    let dir = common::tempdir("htl-cli-fmt", case);
     let file = dir.join(format!("{case}.tl"));
     std::fs::copy(fixture(&format!("{case}.tl")), &file).unwrap();
 

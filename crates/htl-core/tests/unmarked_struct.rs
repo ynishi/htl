@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-unmarked-struct", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-unmarked-struct", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -69,7 +69,7 @@ fn geom_and_use(dir: &Path, use_literal: &str) {
 
 #[test]
 fn a_record_built_whole_at_every_site_is_reported_at_its_declaration() {
-    let dir = scratch("whole");
+    let dir = tempdir("whole");
     geom_and_use(&dir, "{ x = 3, y = 4 }");
     let (diags, _) = check(
         &dir,
@@ -97,7 +97,7 @@ fn a_record_built_whole_at_every_site_is_reported_at_its_declaration() {
 /// and `struct-fields` is silent too, the record being unmarked.
 #[test]
 fn a_record_built_short_at_one_site_is_not_reported() {
-    let dir = scratch("short");
+    let dir = tempdir("short");
     geom_and_use(&dir, "{ x = 3 }");
     let (diags, _) = check(
         &dir,
@@ -120,7 +120,7 @@ fn a_record_built_short_at_one_site_is_not_reported() {
 /// says anything.
 #[test]
 fn a_marked_record_is_not_reported() {
-    let dir = scratch("marked");
+    let dir = tempdir("marked");
     write(
         &dir.join("src/geom.tl"),
         "local record geom\n   ---@struct\n   record Point\n      x: integer\n      y: integer\n   end\nend\n\n\
@@ -141,7 +141,7 @@ fn a_marked_record_is_not_reported() {
 /// `Point` declared and unmarked, nobody builds it: nothing to report either way.
 #[test]
 fn a_record_with_no_construction_site_is_not_reported() {
-    let dir = scratch("none");
+    let dir = tempdir("none");
     write(
         &dir.join("src/geom.tl"),
         "local record geom\n   record Point\n      x: integer\n      y: integer\n   end\nend\n\nreturn geom\n",
@@ -154,7 +154,7 @@ fn a_record_with_no_construction_site_is_not_reported() {
 /// `t` itself, which is not a declared one -- no site, so nothing to report.
 #[test]
 fn an_inferred_literal_is_not_a_declared_record() {
-    let dir = scratch("inferred");
+    let dir = tempdir("inferred");
     write(
         &dir.join("src/plain.tl"),
         "local t = { a = 1 }\nprint(t)\nreturn {}\n",
@@ -168,7 +168,7 @@ fn an_inferred_literal_is_not_a_declared_record() {
 /// to mark.
 #[test]
 fn a_record_declared_outside_the_walk_is_not_reported() {
-    let dir = scratch("outside");
+    let dir = tempdir("outside");
     write(
         &dir.join("src/thing.d.tl"),
         "local record Thing\n   x: integer\n   y: integer\nend\nreturn Thing\n",
@@ -185,7 +185,7 @@ fn a_record_declared_outside_the_walk_is_not_reported() {
 /// case 1 builds is not reported.
 #[test]
 fn the_rule_is_off_by_default() {
-    let dir = scratch("default");
+    let dir = tempdir("default");
     geom_and_use(&dir, "{ x = 3, y = 4 }");
     let (diags, _) = check(&dir, &["src/geom.tl", "src/use.tl"], None);
     assert!(unmarked(&diags).is_empty(), "{diags:?}");
@@ -196,7 +196,7 @@ fn the_rule_is_off_by_default() {
 /// carrying `record_sites` buys, the way it already does for `markers`.
 #[test]
 fn sites_in_a_replayed_module_still_count() {
-    let dir = scratch("replay");
+    let dir = tempdir("replay");
     geom_and_use(&dir, "{ x = 3, y = 4 }");
     let files = ["src/geom.tl", "src/use.tl"];
 
@@ -221,7 +221,7 @@ fn sites_in_a_replayed_module_still_count() {
 /// carries (`Box<string>` / `Box<integer>`).
 #[test]
 fn a_generic_record_is_reported_at_its_declaration_by_its_bare_name() {
-    let dir = scratch("generic");
+    let dir = tempdir("generic");
     write(
         &dir.join("src/box.tl"),
         "local record Box<T>\n   v: T\n   n: integer\nend\n\n\
@@ -247,7 +247,7 @@ fn a_generic_record_is_reported_at_its_declaration_by_its_bare_name() {
 /// `Lints::keep` -- case 1's fixture, with the comment added.
 #[test]
 fn an_allow_comment_on_the_declaration_silences_the_finding() {
-    let dir = scratch("allowed");
+    let dir = tempdir("allowed");
     write(
         &dir.join("src/geom.tl"),
         "local record geom\n   record Point   -- htl: allow(unmarked-struct)\n      x: integer\n      y: integer\n   end\nend\n\n\
@@ -269,7 +269,7 @@ fn an_allow_comment_on_the_declaration_silences_the_finding() {
 /// (`-- htl: allow(no-any, unmarked-struct)`) rather than alone.
 #[test]
 fn an_allow_comment_naming_several_rules_silences_the_finding_too() {
-    let dir = scratch("allowed-list");
+    let dir = tempdir("allowed-list");
     write(
         &dir.join("src/geom.tl"),
         "local record geom\n   record Point   -- htl: allow(no-any, unmarked-struct)\n      x: integer\n      y: integer\n   end\nend\n\n\
@@ -299,7 +299,7 @@ fn an_allow_comment_naming_several_rules_silences_the_finding_too() {
 /// spelling sorted where.
 #[test]
 fn several_candidates_across_two_files_are_ordered_by_their_own_declaring_file() {
-    let dir = scratch("several");
+    let dir = tempdir("several");
     write(
         &dir.join("src/a.tl"),
         "local b = require(\"b\")\n\n\
@@ -332,7 +332,7 @@ fn several_candidates_across_two_files_are_ordered_by_their_own_declaring_file()
 /// site and the record is still a candidate with `sites == 1`, the literal alone.
 #[test]
 fn a_cast_does_not_count_toward_a_structs_construction_sites() {
-    let dir = scratch("cast");
+    let dir = tempdir("cast");
     write(
         &dir.join("src/geom.tl"),
         "local record geom\n   record Point\n      x: integer\n      y: integer\n   end\nend\n\n\

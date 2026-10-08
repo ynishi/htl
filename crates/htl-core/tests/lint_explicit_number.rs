@@ -2,12 +2,12 @@
 //! that is *later* assigned a number expression. Plain integer counters are not reported.
 
 use htl_core::Htl;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-explnum", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-explnum", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -42,14 +42,14 @@ const SRC: &str = "local total = 0\n\
 
 #[test]
 fn off_by_default() {
-    let dir = scratch("default");
+    let dir = tempdir("default");
     write(&dir.join("n.tl"), SRC);
     assert!(lints_of(&dir, "n.tl", None).is_empty());
 }
 
 #[test]
 fn flags_integer_locals_that_later_meet_a_number() {
-    let dir = scratch("on");
+    let dir = tempdir("on");
     write(&dir.join("n.tl"), SRC);
     let lints = lints_of(&dir, "n.tl", Some("+explicit-number"));
     let hit = |name: &str| {
@@ -81,7 +81,7 @@ fn flags_integer_locals_that_later_meet_a_number() {
 
 #[test]
 fn allow_comment_silences_it() {
-    let dir = scratch("allow");
+    let dir = tempdir("allow");
     write(
         &dir.join("n.tl"),
         "local total = 0 -- htl: allow(explicit-number)\ntotal = total + 1.5\nprint(total)\n",

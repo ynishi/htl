@@ -2,13 +2,13 @@
 //! judge on errors alone — one predicate (`htl_core::verdict`), and the difference is one
 //! named policy (`Policy::ERRORS_ONLY`), not a command that never asked (#316).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-build-verdict", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-build-verdict", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -31,8 +31,8 @@ fn htl(args: &[&str], cwd: &Path) -> (bool, String, String) {
 
 /// A project whose entry has one `nil-index` lint and prints `ran`. `toml` is its
 /// `htl.toml`.
-fn project(name: &str, toml: &str) -> PathBuf {
-    let root = scratch(name);
+fn project(name: &str, toml: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), toml);
     write(
         &root.join("mlua-pkg.toml"),

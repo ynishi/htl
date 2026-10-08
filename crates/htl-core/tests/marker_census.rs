@@ -3,12 +3,12 @@
 //! one more broadly. Step 1 is the counting; nothing here reads `applicable` yet.
 
 use htl_core::{Htl, MarkerSite};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-marker-census", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-marker-census", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -40,7 +40,7 @@ fn site(marker: &str, kind: &str, line: usize, name: &str) -> MarkerSite {
 /// answers about `errors` alone.
 #[test]
 fn a_file_carrying_each_of_the_nine_markers_once_is_counted_exactly() {
-    let dir = scratch("nine");
+    let dir = tempdir("nine");
     write(
         &dir.join("nine.tl"),
         "local record R1   ---@contract\n   a: string   ---@required\nend\n\n\
@@ -75,7 +75,7 @@ fn a_file_carrying_each_of_the_nine_markers_once_is_counted_exactly() {
 /// entries at the record's own line.
 #[test]
 fn two_markers_on_the_line_above_give_two_entries_at_the_same_line() {
-    let dir = scratch("two-above");
+    let dir = tempdir("two-above");
     write(
         &dir.join("two.tl"),
         "---@struct ---@sealed\nlocal record Foo\nend\nreturn Foo\n",
@@ -96,7 +96,7 @@ fn two_markers_on_the_line_above_give_two_entries_at_the_same_line() {
 /// qualified by the record that holds it.
 #[test]
 fn a_nested_record_is_counted_under_its_qualified_name() {
-    let dir = scratch("nested");
+    let dir = tempdir("nested");
     write(
         &dir.join("nested.tl"),
         "local record Outer\n   ---@struct\n   record Inner\n      x: string\n   end\nend\nreturn Outer\n",
@@ -118,7 +118,7 @@ fn a_nested_record_is_counted_under_its_qualified_name() {
 /// `Outer.x` never carries. Only `Inner.x`'s own entry is counted.
 #[test]
 fn a_nested_records_field_is_not_credited_to_the_outer_field_of_the_same_name() {
-    let dir = scratch("collide");
+    let dir = tempdir("collide");
     write(
         &dir.join("collide.tl"),
         "local record Outer\n   x: integer\n   record Inner\n      x: integer   ---@optional\n   end\nend\nreturn Outer\n",
@@ -136,7 +136,7 @@ fn a_nested_records_field_is_not_credited_to_the_outer_field_of_the_same_name() 
 /// same way either spelling, and `Q`'s own `x` is still not overwritten by `Inner`'s `x`.
 #[test]
 fn a_nested_type_alias_records_field_is_not_credited_to_the_outer_field_of_the_same_name() {
-    let dir = scratch("collide-alias");
+    let dir = tempdir("collide-alias");
     write(
         &dir.join("collide_alias.tl"),
         "local record Q\n   x: integer\n   type Inner = record\n      x: integer   ---@optional\n   end\nend\nreturn Q\n",
@@ -161,7 +161,7 @@ fn a_nested_type_alias_records_field_is_not_credited_to_the_outer_field_of_the_s
 /// last field, carries a marker, and it is still found.
 #[test]
 fn fields_after_a_one_line_nested_record_enum_or_keyword_named_field_are_still_counted() {
-    let dir = scratch("one-liners");
+    let dir = tempdir("one-liners");
     write(
         &dir.join("one_liners.tl"),
         "local record R\n   record Empty end\n   enum Color \"red\" \"blue\" end\n   record: integer\n   z: integer   ---@optional\nend\nreturn R\n",
@@ -187,7 +187,7 @@ fn fields_after_a_one_line_nested_record_enum_or_keyword_named_field_are_still_c
 /// here at all.
 #[test]
 fn a_nested_generic_record_and_a_generic_function_field_are_counted() {
-    let dir = scratch("generic-nested");
+    let dir = tempdir("generic-nested");
     write(
         &dir.join("generic_nested.tl"),
         "local record N\n   record Box<T>   ---@struct\n      v: T\n   end\n   cb: function<T>(T)   ---@nilable\nend\nreturn N\n",
@@ -211,7 +211,7 @@ fn a_nested_generic_record_and_a_generic_function_field_are_counted() {
 /// on the same declaration a second time, as `kind = "field"`.
 #[test]
 fn a_module_function_is_counted_once_as_a_function() {
-    let dir = scratch("module-fn");
+    let dir = tempdir("module-fn");
     write(
         &dir.join("module_fn.tl"),
         "local record M\nend\n\n\
@@ -235,7 +235,7 @@ fn a_module_function_is_counted_once_as_a_function() {
 /// a `record_function` the AST walk also counts.
 #[test]
 fn a_function_typed_field_declared_in_the_body_is_a_field() {
-    let dir = scratch("field-fn");
+    let dir = tempdir("field-fn");
     write(
         &dir.join("field_fn.tl"),
         "local record M\n   cb: function(string)   ---@nilable\nend\nreturn M\n",
@@ -253,7 +253,7 @@ fn a_function_typed_field_declared_in_the_body_is_a_field() {
 /// way `struct_spec` does, so a generic record's own markers are still counted.
 #[test]
 fn a_generic_record_carrying_a_marker_is_counted() {
-    let dir = scratch("generic");
+    let dir = tempdir("generic");
     write(
         &dir.join("generic.tl"),
         "local record G<T>   ---@struct\n   v: T\nend\nreturn {}\n",
@@ -273,7 +273,7 @@ fn a_generic_record_carrying_a_marker_is_counted() {
 /// regardless.
 #[test]
 fn two_declarations_on_one_line_are_ordered_by_name() {
-    let dir = scratch("tie");
+    let dir = tempdir("tie");
     write(
         &dir.join("tie.tl"),
         "---@nilable\nlocal function b() end local function a() end\nreturn {}\n",
@@ -295,7 +295,7 @@ fn two_declarations_on_one_line_are_ordered_by_name() {
 /// declaration instead.
 #[test]
 fn a_noyield_marker_on_a_function_declaration_is_counted() {
-    let dir = scratch("noyield-fn");
+    let dir = tempdir("noyield-fn");
     write(
         &dir.join("noyield_fn.tl"),
         "---@noyield(gate)\nlocal function f(): string\n   return \"x\"\nend\nreturn {}\n",
@@ -311,7 +311,7 @@ fn a_noyield_marker_on_a_function_declaration_is_counted() {
 /// No marker anywhere, so nothing to count.
 #[test]
 fn an_unmarked_file_gives_an_empty_census() {
-    let dir = scratch("unmarked");
+    let dir = tempdir("unmarked");
     write(&dir.join("plain.tl"), "local record Foo\nend\nreturn Foo\n");
     assert!(markers_of(&dir, "plain.tl").is_empty());
 }
@@ -320,7 +320,7 @@ fn an_unmarked_file_gives_an_empty_census() {
 /// own markers are not the project's authors' writing: the census excludes it.
 #[test]
 fn a_dtl_file_gives_an_empty_census_even_with_markers_written() {
-    let dir = scratch("dtl");
+    let dir = tempdir("dtl");
     write(
         &dir.join("lib.d.tl"),
         "---@async\nlocal function f(): string\n   return \"x\"\nend\nreturn f\n",
@@ -332,7 +332,7 @@ fn a_dtl_file_gives_an_empty_census_even_with_markers_written() {
 /// line itself or the one line directly above, so this is not read as the declaration's.
 #[test]
 fn a_marker_two_lines_above_its_declaration_is_not_counted() {
-    let dir = scratch("too-far");
+    let dir = tempdir("too-far");
     write(
         &dir.join("far.tl"),
         "---@struct\n\nlocal record Foo\nend\nreturn Foo\n",
@@ -349,13 +349,13 @@ fn a_replayed_module_carries_the_census_its_check_produced() {
     use htl_core::cache;
     use htl_core::project;
 
-    let dir = scratch("replay");
+    let dir = tempdir("replay");
     let file = dir.join("lib.tl");
     write(
         &file,
         "---@async\nlocal function f(): string\n   return \"x\"\nend\nreturn f\n",
     );
-    let paths = [dir.clone()];
+    let paths = [dir.to_path_buf()];
     let config = None;
     let opts = |cache: cache::Options| project::Options {
         paths: &paths,
@@ -403,7 +403,7 @@ fn a_replayed_module_carries_the_census_its_check_produced() {
 /// `A.ix` and `B.ix` from being credited with a marker neither record wrote.
 #[test]
 fn an_interface_field_is_not_counted_for_the_records_that_implement_it() {
-    let dir = scratch("iface-copy");
+    let dir = tempdir("iface-copy");
     write(
         &dir.join("iface_copy.tl"),
         "local interface I\n   ix: integer   ---@optional\nend\n\n\
@@ -422,7 +422,7 @@ fn an_interface_field_is_not_counted_for_the_records_that_implement_it() {
 /// actually on `c.tl`'s line 3 -- is counted.
 #[test]
 fn a_field_copied_from_another_files_interface_is_not_read_against_this_files_lines() {
-    let dir = scratch("iface-cross-file");
+    let dir = tempdir("iface-cross-file");
     write(
         &dir.join("shape.tl"),
         "local interface Named\n\n   label: string\nend\nreturn { Named = Named }\n",
@@ -446,7 +446,7 @@ fn a_field_copied_from_another_files_interface_is_not_read_against_this_files_li
 /// record's own declaration is counted, the interface's copy is not.
 #[test]
 fn a_records_own_fields_beside_an_interface_are_still_counted() {
-    let dir = scratch("iface-own-field");
+    let dir = tempdir("iface-own-field");
     write(
         &dir.join("iface_own.tl"),
         "local interface I\n   ix: integer   ---@optional\nend\n\n\
@@ -467,7 +467,7 @@ fn a_records_own_fields_beside_an_interface_are_still_counted() {
 /// record ... end`.
 #[test]
 fn a_global_records_field_is_still_counted() {
-    let dir = scratch("global-record");
+    let dir = tempdir("global-record");
     write(
         &dir.join("global_record.tl"),
         "global record G\n   v: integer   ---@optional\nend\n\nreturn {}\n",
@@ -486,7 +486,7 @@ fn a_global_records_field_is_still_counted() {
 /// not act on. Not counted at all.
 #[test]
 fn a_field_whose_type_wraps_to_the_next_line_is_not_counted() {
-    let dir = scratch("wrapped-field");
+    let dir = tempdir("wrapped-field");
     write(
         &dir.join("wrapped.tl"),
         "local record R\n   multi:\n   integer   ---@optional\nend\n\nreturn R\n",
@@ -500,7 +500,7 @@ fn a_field_whose_type_wraps_to_the_next_line_is_not_counted() {
 /// Only the record's own `---@struct` is counted.
 #[test]
 fn a_field_the_struct_lint_cannot_read_is_not_counted() {
-    let dir = scratch("quoted-key");
+    let dir = tempdir("quoted-key");
     write(
         &dir.join("quoted.tl"),
         "local record Q   ---@struct\n   [\"quoted key\"]: integer   ---@optional\nend\nreturn Q\n",
@@ -522,7 +522,7 @@ fn a_field_the_struct_lint_cannot_read_is_not_counted() {
 /// declared in the other order leave `id`'s own line (5) just as reachable.
 #[test]
 fn a_field_shadowed_by_a_later_nested_fields_name_is_counted() {
-    let after = scratch("shadow-nested-after");
+    let after = tempdir("shadow-nested-after");
     write(
         &after.join("only_id.tl"),
         "local record OnlyId\n   id: integer   ---@optional\n   record Sub\n      id: string\n   end\nend\nreturn OnlyId\n",
@@ -534,7 +534,7 @@ fn a_field_shadowed_by_a_later_nested_fields_name_is_counted() {
         "{markers:#?}"
     );
 
-    let before = scratch("shadow-nested-before");
+    let before = tempdir("shadow-nested-before");
     write(
         &before.join("id_after.tl"),
         "local record IdAfter\n   record Sub\n      id: string\n   end\n   id: integer   ---@optional\nend\nreturn IdAfter\n",
@@ -556,7 +556,7 @@ fn a_field_shadowed_by_a_later_nested_fields_name_is_counted() {
 /// plain field is not.
 #[test]
 fn a_wrapped_function_fields_marker_is_read_at_the_types_line() {
-    let dir = scratch("wrapped-function-field");
+    let dir = tempdir("wrapped-function-field");
     write(
         &dir.join("wrapped_fn.tl"),
         "local record W\n   cb:\n   function(): integer   ---@nilable\nend\nreturn W\n",

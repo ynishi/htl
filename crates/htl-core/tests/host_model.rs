@@ -15,12 +15,12 @@ use htl_core::Htl;
 use htl_core::model::{HostDir, Project, View};
 use htl_core::pkg::TealResolver;
 use mlua_pkg::Registry;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-host-model", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-host-model", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -62,7 +62,7 @@ fn loads(h: &Htl, name: &str) -> Result<(), String> {
 #[test]
 fn a_deeper_file_in_a_package_is_not_the_package_name_to_either_side() {
     // P1: `pkgs/a/b/a/b.tl` is `a.b.a.b` — package `a`, file `b/a/b.tl` — and not `a.b`.
-    let root = scratch("p1");
+    let root = tempdir("p1");
     write(&root.join("pkgs/a/b/a/b.tl"), "return { n = 1 }\n");
     write(
         &root.join("scripts/main.tl"),
@@ -102,7 +102,7 @@ fn a_deeper_file_in_a_package_is_not_the_package_name_to_either_side() {
 #[test]
 fn a_crates_declaration_is_the_name_the_crate_wrote_it_under_on_both_sides() {
     // P2 and P3: `types/htl-mq/mq.d.tl` is `mq`, and `htl-mq.mq` is nothing.
-    let root = scratch("p2");
+    let root = tempdir("p2");
     write(&root.join("types/htl-mq/.htl-dts"), "");
     write(
         &root.join("types/htl-mq/mq.d.tl"),
@@ -147,7 +147,7 @@ fn a_crates_declaration_is_the_name_the_crate_wrote_it_under_on_both_sides() {
 
 #[test]
 fn a_module_at_the_top_and_a_flat_package_resolve_the_same_in_check_and_run() {
-    let root = scratch("flat");
+    let root = tempdir("flat");
     write(
         &root.join("mods/mathx/mathx.tl"),
         "local sub = require(\"mathx.sub\")\nreturn { n = sub.n * 2 }\n",
@@ -184,7 +184,7 @@ fn a_module_at_the_top_and_a_flat_package_resolve_the_same_in_check_and_run() {
 
 #[test]
 fn a_name_two_served_directories_implement_is_an_error_to_both() {
-    let root = scratch("two");
+    let root = tempdir("two");
     write(&root.join("scripts/mathx.tl"), "return { n = 1 }\n");
     write(&root.join("mods/mathx/init.tl"), "return { n = 2 }\n");
     write(
@@ -216,7 +216,7 @@ fn a_name_two_served_directories_implement_is_an_error_to_both() {
 
 #[test]
 fn a_file_added_after_the_host_started_is_found_at_the_next_require() {
-    let root = scratch("later");
+    let root = tempdir("later");
     write(&root.join("scripts/main.tl"), "return { n = 1 }\n");
     let project = Project::for_host(&root, &[HostDir::Modules("scripts".into())]);
     let h = host(&project);
@@ -238,7 +238,7 @@ fn a_file_added_after_the_host_started_is_found_at_the_next_require() {
 /// check; the check's own `require` is what finds the new name outside it.
 #[test]
 fn a_known_module_requiring_a_file_added_later_checks_against_it() {
-    let root = scratch("known");
+    let root = tempdir("known");
     write(
         &root.join("scripts/known.tl"),
         "local helper = require(\"helper\")\nreturn { n = helper.n + 1 }\n",

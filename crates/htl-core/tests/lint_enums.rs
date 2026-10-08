@@ -2,12 +2,12 @@
 //! not only top-level `local enum` declarations in the same file.
 
 use htl_core::Htl;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-lint", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-lint", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -25,7 +25,7 @@ fn lints_of(dir: &Path, file: &str) -> Vec<String> {
 
 #[test]
 fn enum_nested_in_record_is_covered() {
-    let dir = scratch("nested");
+    let dir = tempdir("nested");
     write(
         &dir.join("game.tl"),
         "local record game\n   enum Command\n      \"move\"\n      \"wait\"\n      \"quit\"\n   end\nend\n\n\
@@ -43,7 +43,7 @@ fn enum_nested_in_record_is_covered() {
 
 #[test]
 fn enum_from_required_module_is_covered() {
-    let dir = scratch("required");
+    let dir = tempdir("required");
     write(
         &dir.join("defs.tl"),
         "local record defs\n   enum Behavior\n      \"chase\"\n      \"wander\"\n      \"flee\"\n   end\nend\nreturn defs\n",
@@ -64,7 +64,7 @@ fn enum_from_required_module_is_covered() {
 /// `if c == "quit" then ... return end` is a guard, not a dispatch: no lint.
 #[test]
 fn single_branch_guard_is_not_flagged() {
-    let dir = scratch("guard");
+    let dir = tempdir("guard");
     write(
         &dir.join("game.tl"),
         "local record game\n   enum Command\n      \"move\"\n      \"wait\"\n      \"quit\"\n   end\n   enum State\n      \"dead\"\n      \"playing\"\n      \"won\"\n   end\nend\n\n\
@@ -82,7 +82,7 @@ fn single_branch_guard_is_not_flagged() {
 /// happens to contain the literals: a chain over `Command` must name Command, never State.
 #[test]
 fn subject_type_decides_the_enum() {
-    let dir = scratch("subject");
+    let dir = tempdir("subject");
     write(
         &dir.join("game.tl"),
         "local record game\n   enum Command\n      \"move\"\n      \"wait\"\n      \"quit\"\n   end\n   enum State\n      \"dead\"\n      \"playing\"\n      \"won\"\n      \"quit\"\n   end\n   record W\n      state: State\n   end\nend\n\n\
@@ -109,7 +109,7 @@ fn subject_type_decides_the_enum() {
 /// A chain over a non-enum (string) subject is never an exhaustiveness question.
 #[test]
 fn string_subject_is_not_flagged() {
-    let dir = scratch("string");
+    let dir = tempdir("string");
     write(
         &dir.join("s.tl"),
         "local enum Kind\n   \"a\"\n   \"b\"\n   \"c\"\nend\n\nlocal function f(s: string): integer\n   if s == \"a\" then\n      return 1\n   elseif s == \"b\" then\n      return 2\n   end\n   return 0\nend\n\nprint(f(\"a\"))\n",
@@ -125,7 +125,7 @@ fn string_subject_is_not_flagged() {
 /// The same chain as the last statement of its block (no fallthrough) is still flagged.
 #[test]
 fn all_return_chain_with_fallthrough_is_exhaustive() {
-    let dir = scratch("fallthrough");
+    let dir = tempdir("fallthrough");
     write(
         &dir.join("e.tl"),
         "local enum Slot\n   \"weapon\"\n   \"armor\"\n   \"ring\"\nend\n\n\
@@ -148,7 +148,7 @@ fn all_return_chain_with_fallthrough_is_exhaustive() {
 
 #[test]
 fn exhaustive_chain_stays_quiet() {
-    let dir = scratch("quiet");
+    let dir = tempdir("quiet");
     write(
         &dir.join("defs.tl"),
         "local record defs\n   enum Behavior\n      \"chase\"\n      \"flee\"\n   end\nend\nreturn defs\n",

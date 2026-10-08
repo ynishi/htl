@@ -1,7 +1,7 @@
 //! `htl check --explain <rule>`: a rule's explanation, reachable by the name a finding
 //! prints; every rule `--list-lints` names has one.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
@@ -20,13 +20,13 @@ fn htl(args: &[&str], cwd: &Path) -> (bool, i32, String, String) {
     )
 }
 
-fn scratch() -> PathBuf {
-    common::scratch("htl-explain", "cwd")
+fn tempdir() -> common::TempDir {
+    common::tempdir("htl-explain", "cwd")
 }
 
 #[test]
 fn a_rule_is_explained_by_the_name_a_finding_prints() {
-    let (ok, code, stdout, stderr) = htl(&["check", "--explain", "union-exhaustive"], &scratch());
+    let (ok, code, stdout, stderr) = htl(&["check", "--explain", "union-exhaustive"], &tempdir());
     assert!(ok, "{stderr}");
     assert_eq!(code, 0);
     assert!(
@@ -40,7 +40,7 @@ fn a_rule_is_explained_by_the_name_a_finding_prints() {
 
 #[test]
 fn an_unknown_rule_is_refused_on_stderr_with_exit_2() {
-    let (ok, code, stdout, stderr) = htl(&["check", "--explain", "no-such-rule"], &scratch());
+    let (ok, code, stdout, stderr) = htl(&["check", "--explain", "no-such-rule"], &tempdir());
     assert!(!ok);
     assert_eq!(code, 2);
     assert_eq!(stderr, "unknown lint rule: no-such-rule\n");
@@ -49,20 +49,20 @@ fn an_unknown_rule_is_refused_on_stderr_with_exit_2() {
 
 #[test]
 fn a_fix_class_is_not_a_lint_and_is_refused() {
-    let (_, code, _, stderr) = htl(&["check", "--explain", "forward-ref"], &scratch());
+    let (_, code, _, stderr) = htl(&["check", "--explain", "forward-ref"], &tempdir());
     assert_eq!(code, 2, "{stderr}");
 }
 
 #[test]
 fn every_rule_the_listing_names_is_explained() {
-    let (ok, _, stdout, stderr) = htl(&["check", "--list-lints"], &scratch());
+    let (ok, _, stdout, stderr) = htl(&["check", "--list-lints"], &tempdir());
     assert!(ok, "{stderr}");
     let mut n = 0;
     for line in stdout.lines() {
         let Some(name) = line.split_whitespace().next() else {
             continue;
         };
-        let (ok, _, out, stderr) = htl(&["check", "--explain", name], &scratch());
+        let (ok, _, out, stderr) = htl(&["check", "--explain", name], &tempdir());
         assert!(ok, "{name}: {stderr}");
         assert!(
             out.starts_with(&format!("{name}  (default: ")),
@@ -82,7 +82,7 @@ fn write(path: &Path, text: &str) {
 /// summary; a clean run and a json run do not.
 #[test]
 fn a_run_with_findings_names_the_flag_once_per_rule_before_the_summary() {
-    let root = common::scratch("htl-explain", "hint");
+    let root = common::tempdir("htl-explain", "hint");
     write(&root.join("htl.toml"), "[lint]\nstrict = false\n");
     // Two rules: a lint (`no-global`) and one of the compiler's kinds (`tl:unused`), the
     // global twice so that "once per rule" is tested rather than "once per finding".

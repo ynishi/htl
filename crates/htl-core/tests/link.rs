@@ -4,12 +4,12 @@
 use htl_core::Htl;
 use htl_core::bundle::{Bundle, Kind};
 use htl_core::link::{LinkOptions, link};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-link", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-link", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -18,8 +18,8 @@ fn write(path: &Path, text: &str) {
 }
 
 /// entry -> util (.tl) -> mathx (vendored .lua); entry also requires `host` (.d.tl only)
-fn project(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn project(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(
         &root.join("src/main.tl"),
         "local util = require(\"util\")\nlocal host = require(\"host\")\nlocal unused = require(\"unused\")\n\
@@ -176,7 +176,7 @@ fn type_error_withholds_the_bundle() {
 /// was handed it.
 #[test]
 fn a_type_error_names_its_file_one_way() {
-    let root = scratch("typeerr-spelled");
+    let root = tempdir("typeerr-spelled");
     write(
         &root.join("src/main.tl"),
         "local x: integer = \"no\"\nprint(x)\n",
@@ -204,7 +204,7 @@ fn a_type_error_names_its_file_one_way() {
 /// say the same thing.
 #[test]
 fn a_file_that_does_not_generate_names_itself_one_way() {
-    let root = scratch("genfail");
+    let root = tempdir("genfail");
     write(&root.join("src/main.tl"), "return 1\n");
     std::fs::create_dir_all(root.join("src/sub")).unwrap();
     let h = checker(&root);
@@ -396,7 +396,7 @@ fn declaration_steps_aside_for_a_bundled_module() {
 /// what the entry used to be called.
 #[test]
 fn an_init_entry_is_named_after_its_directory() {
-    let root = scratch("init-entry");
+    let root = tempdir("init-entry");
     write(
         &root.join("src/pkg/init.tl"),
         "local helper = require(\"pkg.helper\")\nreturn { x = helper.one() }\n",
@@ -646,8 +646,8 @@ fn version_1_bundles_still_decode() {
 
 /// A record of types imported with `local type`: the generator erases the statement, so
 /// the name is never required at run time and the bundle needs nothing from the host.
-fn types_only_project(name: &str, main: &str) -> PathBuf {
-    let root = scratch(name);
+fn types_only_project(name: &str, main: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("src/main.tl"), main);
     write(
         &root.join("src/shape.d.tl"),

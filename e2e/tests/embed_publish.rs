@@ -29,6 +29,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
+mod common;
+
 /// The root of this workspace: this crate sits directly under it.
 fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
@@ -88,10 +90,8 @@ fn htl_bin() -> &'static Path {
 
 /// A fresh directory under the system temp dir, outside the checkout so the CLI runs
 /// against the project's configuration and not this repository's.
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("htl-e2e-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+fn tempdir(name: &str) -> common::TempDir {
+    let dir = common::tempdir("htl-e2e", name);
     println!("scaffolding into {}", dir.display());
     dir
 }
@@ -114,7 +114,7 @@ fn htl(args: &[&str], cwd: &Path) -> String {
     text
 }
 
-/// git with an identity of its own: the scratch repository is not the person's, and a
+/// git with an identity of its own: the tempdir repository is not the person's, and a
 /// machine with no `user.email` configured must still be able to run this. A repository
 /// is what makes `cargo package` list the tracked files — and so what keeps the
 /// gitignored `.htl/` out of the tarball, which is the situation under test.
@@ -155,7 +155,7 @@ fn patch_args() -> Vec<String> {
     args
 }
 
-/// A cargo invocation in the scratch project, with the `CARGO_*` environment of the test
+/// A cargo invocation in the tempdir project, with the `CARGO_*` environment of the test
 /// run stripped so the project's own configuration is what cargo reads. `CARGO_HOME` and
 /// `CARGO_TARGET_DIR` stay: the first says where the registry is, the second is honoured
 /// by the caller, which passes `--target-dir` after the subcommand (it is not a global
@@ -198,7 +198,7 @@ return embedpub
 
 #[test]
 fn a_crate_with_a_patched_dependency_packages_and_verifies_with_nothing_written_by_hand() {
-    let root = scratch("embed-publish");
+    let root = tempdir("embed-publish");
     htl(&["new", "embedpub", "--embed"], &root);
     let project = root.join("embedpub");
 

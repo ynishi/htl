@@ -11,13 +11,13 @@
 //! than the comparison. The comparison itself, and what a malformed requirement does to
 //! parsing, are in `htl-core`'s `tests/config.rs`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-toolchain", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-toolchain", name)
 }
 
 fn htl(args: &[&str], cwd: &Path) -> (bool, String) {
@@ -55,8 +55,8 @@ fn violated_req() -> String {
 }
 
 /// A project with one module that checks clean, and whatever `htl.toml` the caller wants.
-fn project(name: &str, toml: &str) -> PathBuf {
-    let root = scratch(name);
+fn project(name: &str, toml: &str) -> common::TempDir {
+    let root = tempdir(name);
     std::fs::write(root.join("htl.toml"), toml).unwrap();
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(
@@ -194,7 +194,7 @@ fn a_malformed_requirement_is_a_config_error() {
 /// that half.
 #[test]
 fn a_scaffolded_project_checks_with_the_cli_that_wrote_it() {
-    let root = scratch("scaffold-roundtrip");
+    let root = tempdir("scaffold-roundtrip");
     let (ok, err) = htl(&["new", "sample"], &root);
     assert!(ok, "htl new failed:\n{err}");
     let dir = root.join("sample");
@@ -217,7 +217,7 @@ const SPLIT: &str = "the crate and the CLI are meant to move together";
 
 /// A project of the shape above with a `Cargo.toml` around it: a Rust host whose Teal is
 /// checked by this binary. `dep` is the right-hand side of the `htl = ` line.
-fn host_project(name: &str, dep: &str) -> PathBuf {
+fn host_project(name: &str, dep: &str) -> common::TempDir {
     let root = project(name, "[fmt]\nindent = 3\n");
     std::fs::write(
         root.join("Cargo.toml"),

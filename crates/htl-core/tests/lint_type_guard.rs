@@ -5,12 +5,12 @@
 
 use htl_core::Htl;
 use htl_core::fix::{FixOptions, fix_file};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-type-guard", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-type-guard", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -75,7 +75,7 @@ const NARROW: &str = "local function beat_of(meta: any): string\n\
 // 1
 #[test]
 fn a_table_guard_on_any_is_reported_beside_the_index_error() {
-    let dir = scratch("narrow");
+    let dir = tempdir("narrow");
     write(&dir.join("narrow.tl"), NARROW);
     let ci = checker(&dir, "").check(&dir.join("narrow.tl")).unwrap();
     let hits = of_rule(&ci.lints);
@@ -94,7 +94,7 @@ fn a_table_guard_on_any_is_reported_beside_the_index_error() {
 // 2
 #[test]
 fn after_the_fix_the_snippet_checks_and_generates_the_guard_it_was_written_with() {
-    let dir = scratch("narrow-fix");
+    let dir = tempdir("narrow-fix");
     write(&dir.join("narrow.tl"), NARROW);
     assert_eq!(fix_until_still(&dir, "narrow.tl"), 2);
     let text = std::fs::read_to_string(dir.join("narrow.tl")).unwrap();
@@ -129,7 +129,7 @@ fn after_the_fix_the_snippet_checks_and_generates_the_guard_it_was_written_with(
 // 3
 #[test]
 fn the_fix_drops_the_cast_the_guard_made_redundant() {
-    let dir = scratch("cast");
+    let dir = tempdir("cast");
     write(
         &dir.join("cast.tl"),
         "local function value(repo: any): string\n\
@@ -168,7 +168,7 @@ fn the_fix_drops_the_cast_the_guard_made_redundant() {
 /// A cast is kept where the narrowing does not reach: past an assignment to the variable.
 #[test]
 fn a_cast_after_the_variable_is_reassigned_stays() {
-    let dir = scratch("reassign");
+    let dir = tempdir("reassign");
     write(
         &dir.join("r.tl"),
         "local function f(x: any): any\n\
@@ -188,7 +188,7 @@ fn a_cast_after_the_variable_is_reassigned_stays() {
 // 4
 #[test]
 fn a_union_with_one_member_the_tag_selects_gets_that_member() {
-    let dir = scratch("union");
+    let dir = tempdir("union");
     write(
         &dir.join("u.tl"),
         "local record R\n   a: string\nend\n\
@@ -223,7 +223,7 @@ fn a_union_with_one_member_the_tag_selects_gets_that_member() {
 // 5
 #[test]
 fn fields_functions_typed_tables_and_ambiguous_unions_are_quiet() {
-    let dir = scratch("quiet");
+    let dir = tempdir("quiet");
     write(
         &dir.join("q.tl"),
         "local record R\n   a: string\nend\n\
@@ -243,7 +243,7 @@ fn fields_functions_typed_tables_and_ambiguous_unions_are_quiet() {
 
 #[test]
 fn allow_comment_and_spec_silence_it() {
-    let dir = scratch("allow");
+    let dir = tempdir("allow");
     write(
         &dir.join("a.tl"),
         "local function f(x: any): boolean\n\

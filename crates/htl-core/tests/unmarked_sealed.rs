@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-unmarked-sealed", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-unmarked-sealed", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -69,7 +69,7 @@ fn gate_file(dir: &Path, marker: &str) {
 
 #[test]
 fn a_record_built_twice_and_cast_once_in_its_own_file_is_reported_at_its_declaration() {
-    let dir = scratch("three-sites");
+    let dir = tempdir("three-sites");
     gate_file(&dir, "");
     let (diags, _) = check(&dir, &["src/gate.tl"], Some("unmarked-sealed=warn"));
     for d in &diags {
@@ -93,7 +93,7 @@ fn a_record_built_twice_and_cast_once_in_its_own_file_is_reported_at_its_declara
 /// file, so the record is no longer built and cast only where it is declared.
 #[test]
 fn a_literal_site_in_another_file_is_not_reported() {
-    let dir = scratch("literal-elsewhere");
+    let dir = tempdir("literal-elsewhere");
     gate_file(&dir, "");
     write(
         &dir.join("src/use.tl"),
@@ -112,7 +112,7 @@ fn a_literal_site_in_another_file_is_not_reported() {
 /// one is the other way to break condition 3 too.
 #[test]
 fn a_cast_site_in_another_file_is_not_reported_either() {
-    let dir = scratch("cast-elsewhere");
+    let dir = tempdir("cast-elsewhere");
     gate_file(&dir, "");
     write(
         &dir.join("src/use.tl"),
@@ -131,7 +131,7 @@ fn a_cast_site_in_another_file_is_not_reported_either() {
 /// already carries the marker, so there is nothing to suggest.
 #[test]
 fn a_sealed_record_is_not_reported() {
-    let dir = scratch("marked");
+    let dir = tempdir("marked");
     gate_file(&dir, "   ---@sealed");
     let (diags, _) = check(&dir, &["src/gate.tl"], Some("unmarked-sealed=warn"));
     assert!(sealed(&diags).is_empty(), "{diags:?}");
@@ -140,7 +140,7 @@ fn a_sealed_record_is_not_reported() {
 /// As above, `---@sealed(gate.judge)`: a named marker is still a marker.
 #[test]
 fn a_sealed_record_with_a_function_list_is_not_reported() {
-    let dir = scratch("marked-named");
+    let dir = tempdir("marked-named");
     gate_file(&dir, "   ---@sealed(gate.judge)");
     let (diags, _) = check(&dir, &["src/gate.tl"], Some("unmarked-sealed=warn"));
     assert!(sealed(&diags).is_empty(), "{diags:?}");
@@ -150,7 +150,7 @@ fn a_sealed_record_with_a_function_list_is_not_reported() {
 /// way.
 #[test]
 fn a_record_with_no_site_is_not_reported() {
-    let dir = scratch("no-site");
+    let dir = tempdir("no-site");
     write(
         &dir.join("src/gate.tl"),
         "local record gate\n   record Judged\n      verdict: string\n      at: integer\n   \
@@ -165,7 +165,7 @@ fn a_record_with_no_site_is_not_reported() {
 /// declaring file, so the record is still a candidate.
 #[test]
 fn a_cast_literal_in_the_declaring_file_counts_as_its_one_site() {
-    let dir = scratch("cast-literal");
+    let dir = tempdir("cast-literal");
     write(
         &dir.join("src/gate.tl"),
         "local record gate\n   record Judged\n      verdict: string\n      at: integer\n   \
@@ -186,7 +186,7 @@ fn a_cast_literal_in_the_declaring_file_counts_as_its_one_site() {
 /// case 1 builds is not reported.
 #[test]
 fn the_rule_is_off_by_default() {
-    let dir = scratch("default");
+    let dir = tempdir("default");
     gate_file(&dir, "");
     let (diags, _) = check(&dir, &["src/gate.tl"], None);
     assert!(sealed(&diags).is_empty(), "{diags:?}");
@@ -198,7 +198,7 @@ fn the_rule_is_off_by_default() {
 /// `unmarked-struct`.
 #[test]
 fn sites_in_a_replayed_module_still_count() {
-    let dir = scratch("replay");
+    let dir = tempdir("replay");
     gate_file(&dir, "");
     let files = ["src/gate.tl"];
 
@@ -222,7 +222,7 @@ fn sites_in_a_replayed_module_still_count() {
 /// through `Lints::keep` -- case 1's fixture, with the comment added.
 #[test]
 fn an_allow_comment_on_the_declaration_silences_the_finding() {
-    let dir = scratch("allowed");
+    let dir = tempdir("allowed");
     gate_file(&dir, "   -- htl: allow(unmarked-sealed)");
     let (diags, _) = check(&dir, &["src/gate.tl"], Some("unmarked-sealed=warn"));
     assert!(sealed(&diags).is_empty(), "{diags:?}");
@@ -242,7 +242,7 @@ fn an_allow_comment_on_the_declaration_silences_the_finding() {
 /// `unmarked_struct.rs`'s own outside-the-walk fixture uses.)
 #[test]
 fn a_record_declared_outside_the_walk_is_not_reported() {
-    let dir = scratch("outside");
+    let dir = tempdir("outside");
     write(
         &dir.join("src/x.d.tl"),
         "local record Judged\n   verdict: string\n   at: integer\nend\nreturn Judged\n",

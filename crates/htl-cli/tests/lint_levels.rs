@@ -10,13 +10,13 @@
 //! `deny` is reported and fails `htl check`. The project below trips two rules at once, so
 //! each test is a run in which they are set differently and the exit code is the answer.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-lint-levels", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-lint-levels", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -40,8 +40,8 @@ fn htl(args: &[&str], cwd: &Path) -> (i32, String) {
 /// One file with three findings and no error: a `nil-index` lint, an `any` the `no-any`
 /// rule would report if it were asked to, and an unused local the Teal compiler warns
 /// about under `tl:unused`.
-fn project(name: &str, htl_toml: &str) -> PathBuf {
-    let root = scratch(name);
+fn project(name: &str, htl_toml: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), htl_toml);
     write(
         &root.join("src/rows.tl"),
@@ -227,7 +227,7 @@ fn the_old_keys_are_refused_with_the_replacement() {
 /// with the level a project that says nothing gets.
 #[test]
 fn the_listing_says_each_rules_default_level() {
-    let dir = scratch("listing");
+    let dir = tempdir("listing");
     let out = Command::new(common::htl_bin())
         .args(["check", "--list-lints"])
         .current_dir(&dir)

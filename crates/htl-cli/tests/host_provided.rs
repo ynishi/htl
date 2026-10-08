@@ -13,13 +13,13 @@
 //! The same state in a file that belongs to no project is `host_module_shadow.rs`'s: no
 //! model, so the `host-module-shadowed` lint.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-host-provided", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-host-provided", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -70,8 +70,8 @@ const HOST_DTL: &str =
 const MAIN_TL: &str = "local host = require(\"host\")\nprint(host:greet(\"x\"))\n";
 
 /// A project around a host crate that registers `host`, typed by its declaration.
-fn host_project(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn host_project(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), "");
     write(&root.join("Cargo.toml"), MANIFEST);
     write(&root.join("src/lib.rs"), LIB_RS);
@@ -218,7 +218,7 @@ fn a_host_module_with_no_declaration_is_reported_once() {
 /// the error says which of the two the model read.
 #[test]
 fn a_file_under_a_build_host_name_is_an_error() {
-    let root = scratch("build-host");
+    let root = tempdir("build-host");
     write(&root.join("htl.toml"), "[build]\nhost = [\"game\"]\n");
     write(
         &root.join("src/game.d.tl"),
@@ -415,8 +415,8 @@ const HTTP_DTL: &str =
 
 /// A project with no host crate and no `[build] host`, whose `src/main.tl` requires
 /// `socket.http`, declared by `decl` (a path under the project) and implemented by nothing.
-fn declared_project(name: &str, decl: &str) -> PathBuf {
-    let root = scratch(name);
+fn declared_project(name: &str, decl: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), "");
     write(&root.join(decl), HTTP_DTL);
     write(

@@ -6,13 +6,13 @@
 //! anyone wrote down, so the `duplicate-declaration` lint says which one was read and
 //! which one was not.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-decl", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-decl", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -56,7 +56,7 @@ const USE: &str = "local xlib = require(\"xlib\")\nprint(xlib.connect(\"h\"))\n"
 /// hand-written one under `types/`. Both are on the path; one is read.
 #[test]
 fn two_declarations_of_one_module_are_reported() {
-    let root = scratch("two-decls");
+    let root = tempdir("two-decls");
     write(&root.join("htl.toml"), "[check]\npaths = [\"sdk\"]\n");
     write(&root.join("types/xlib.d.tl"), DECL);
     write(&root.join("sdk/xlib.d.tl"), DECL);
@@ -78,7 +78,7 @@ fn two_declarations_of_one_module_are_reported() {
 /// between declarations never comes up: nothing to report.
 #[test]
 fn a_source_alongside_a_declaration_is_not_a_collision() {
-    let root = scratch("source-wins");
+    let root = tempdir("source-wins");
     write(&root.join("htl.toml"), "[check]\npaths = [\"sdk\"]\n");
     write(
         &root.join("types/xlib.d.tl"),
@@ -100,7 +100,7 @@ fn a_source_alongside_a_declaration_is_not_a_collision() {
 /// One declaration, reachable once. The lint has nothing to say, and says nothing.
 #[test]
 fn a_single_declaration_is_silent() {
-    let root = scratch("single");
+    let root = tempdir("single");
     write(&root.join("htl.toml"), "[lint]\n");
     write(&root.join("types/xlib.d.tl"), DECL);
     write(&root.join("src/use.tl"), USE);

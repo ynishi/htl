@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-link-cache", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-link-cache", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -19,8 +19,8 @@ fn write(path: &Path, text: &str) {
 }
 
 /// main -> b -> c, all typed.
-fn project(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn project(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(
         &root.join("src/main.tl"),
         "local b = require(\"b\")\nprint(b.two())\n",

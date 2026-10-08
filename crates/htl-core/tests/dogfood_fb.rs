@@ -2,12 +2,12 @@
 //! filesystems, run-time-only requires, and user-facing error text.
 
 use htl_core::{Htl, user_message};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-fb", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-fb", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -19,7 +19,7 @@ fn write(path: &Path, text: &str) {
 /// file itself; the error must say so instead of a bare "no type information".
 #[test]
 fn self_require_on_case_insensitive_fs_is_explained() {
-    let dir = scratch("selfreq");
+    let dir = tempdir("selfreq");
     write(
         &dir.join("Site.tl"),
         "local site = require(\"site\")\nlocal c: site.Config = {}\nprint(c)\n",
@@ -47,7 +47,7 @@ fn self_require_on_case_insensitive_fs_is_explained() {
 /// declaration, the run resolves the real file. No dynamic require, no `any`.
 #[test]
 fn runtime_provided_module_is_declared_by_a_dts() {
-    let sdk = scratch("sdk");
+    let sdk = tempdir("sdk");
     write(
         &sdk.join("tsk.tl"),
         "local record tsk\n   record Tasks\n      name: string\n   end\nend\nreturn tsk\n",
@@ -70,12 +70,12 @@ fn runtime_provided_module_is_declared_by_a_dts() {
     let code = code.unwrap();
 
     // Run time (user's project): the real Tasks.tl is served by a resolver rooted there.
-    let project = scratch("project");
+    let project = tempdir("project");
     write(&project.join("Tasks.tl"), "return { name = \"build\" }\n");
     let rt = Htl::new().unwrap();
     let mut reg = mlua_pkg::Registry::new();
     reg.add(
-        htl_core::pkg::TealResolver::new(&project)
+        htl_core::pkg::TealResolver::new(project.to_path_buf())
             .unwrap()
             .expect_type("tsk.Tasks"),
     );
@@ -89,7 +89,7 @@ fn runtime_provided_module_is_declared_by_a_dts() {
 /// hides that the multi-value call in last position is what expanded. Name it.
 #[test]
 fn multi_value_call_in_last_argument_is_explained() {
-    let dir = scratch("arity");
+    let dir = tempdir("arity");
     write(
         &dir.join("m_test.tl"),
         "local t = require(\"htl.test\")\n\
@@ -138,7 +138,7 @@ fn multi_value_call_in_last_argument_is_explained() {
 /// htl names the later definition and hands over the record declaration line.
 #[test]
 fn forward_reference_gets_the_declaration_line() {
-    let dir = scratch("fwd");
+    let dir = tempdir("fwd");
     write(
         &dir.join("world.tl"),
         "local record world\n   record W\n      hp: integer\n   end\nend\n\n\
@@ -195,7 +195,7 @@ fn forward_reference_gets_the_declaration_line() {
 /// it holds now is that the module case survives and the ordinary one is left to Teal.
 #[test]
 fn shadowing_a_required_module_is_named_as_such() {
-    let dir = scratch("shadow-mod");
+    let dir = tempdir("shadow-mod");
     write(
         &dir.join("bestiary.tl"),
         "local record bestiary\nend\nfunction bestiary.note()\nend\nreturn bestiary\n",
@@ -283,7 +283,7 @@ fn user_message_strips_traceback_and_unwraps_host_errors() {
 /// follow-on error goes away with the cause.
 #[test]
 fn where_as_a_record_bodys_first_field_is_explained() {
-    let dir = scratch("where-first");
+    let dir = tempdir("where-first");
     let file = dir.join("FindArgs.tl");
     write(
         &file,
@@ -307,7 +307,7 @@ fn where_as_a_record_bodys_first_field_is_explained() {
 /// body" would contradict this.
 #[test]
 fn where_after_the_first_field_type_checks() {
-    let dir = scratch("where-second");
+    let dir = tempdir("where-second");
     let file = dir.join("FindArgs.tl");
     write(
         &file,
@@ -322,7 +322,7 @@ fn where_after_the_first_field_type_checks() {
 /// loop's bracketed-string-literal branch takes any name, first line included.
 #[test]
 fn quoted_where_as_the_first_field_type_checks() {
-    let dir = scratch("where-quoted");
+    let dir = tempdir("where-quoted");
     let file = dir.join("FindArgs.tl");
     write(
         &file,
@@ -338,7 +338,7 @@ fn quoted_where_as_the_first_field_type_checks() {
 /// parse failure that rewrite does not cure never gets it.
 #[test]
 fn an_unrelated_first_field_syntax_error_is_untouched() {
-    let dir = scratch("where-unrelated");
+    let dir = tempdir("where-unrelated");
     let file = dir.join("FindArgs.tl");
     write(
         &file,
@@ -381,7 +381,7 @@ fn declared_matchers(record: &str) -> Vec<String> {
 /// it so anything matching on that keeps matching.
 #[test]
 fn an_unknown_matcher_names_the_matchers() {
-    let dir = scratch("matchers");
+    let dir = tempdir("matchers");
     let file = dir.join("m_test.tl");
     write(
         &file,
@@ -411,7 +411,7 @@ fn an_unknown_matcher_names_the_matchers() {
 /// `Expect2` declares one matcher, so one is what it lists.
 #[test]
 fn the_two_value_expect_lists_its_own_matcher() {
-    let dir = scratch("matchers2");
+    let dir = tempdir("matchers2");
     let file = dir.join("m2_test.tl");
     write(
         &file,
@@ -439,7 +439,7 @@ fn the_two_value_expect_lists_its_own_matcher() {
 /// resolved to, so a project with an `Expect` of its own is not told about these.
 #[test]
 fn a_valid_matcher_and_a_foreign_record_get_no_matcher_list() {
-    let dir = scratch("matchers-quiet");
+    let dir = tempdir("matchers-quiet");
     let h = Htl::new().unwrap();
     h.install_test_lib().unwrap();
     h.add_path(&dir).unwrap();

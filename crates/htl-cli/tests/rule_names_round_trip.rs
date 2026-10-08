@@ -11,13 +11,13 @@
 //! three ways — `--lint`, a key of `[lint.rules]` in `htl.toml`, and `-- htl: allow(...)`
 //! on the line the finding points at.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-rule-names", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-rule-names", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -125,8 +125,8 @@ const DECL: &str = "local record xlib\n   connect: function(string): boolean\nen
 
 /// A contract nothing under its directory satisfies, and — with a crate around it and no
 /// `contract_resolvers(` in its sources — a contract the host does not enforce.
-fn contract_project(name: &str, with_crate: bool) -> PathBuf {
-    let root = scratch(name);
+fn contract_project(name: &str, with_crate: bool) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), "[[contract]]\ndir = \"mods\"\n");
     write(
         &root.join("src/defs.tl"),
@@ -143,7 +143,7 @@ fn contract_project(name: &str, with_crate: bool) -> PathBuf {
 
 #[test]
 fn require_cycle_comes_back() {
-    let root = scratch("cycle");
+    let root = tempdir("cycle");
     write(
         &root.join("src/a.tl"),
         "local b = require(\"b\")\nreturn { b = b }\n",
@@ -161,7 +161,7 @@ fn require_cycle_comes_back() {
 
 #[test]
 fn duplicate_declaration_comes_back() {
-    let root = scratch("duplicate");
+    let root = tempdir("duplicate");
     write(&root.join("htl.toml"), "[check]\npaths = [\"sdk\"]\n");
     write(&root.join("types/xlib.d.tl"), DECL);
     write(&root.join("sdk/xlib.d.tl"), DECL);
@@ -174,7 +174,7 @@ fn duplicate_declaration_comes_back() {
 
 #[test]
 fn host_module_shadowed_comes_back() {
-    let root = scratch("shadowed");
+    let root = tempdir("shadowed");
     write(&root.join("Cargo.toml"), MANIFEST);
     write(
         &root.join("src/lib.rs"),
@@ -254,7 +254,7 @@ fn an_allow_comment_cannot_be_written_on_a_marker_line() {
 /// find out.
 #[test]
 fn the_listing_accounts_for_every_rule() {
-    let dir = scratch("listing");
+    let dir = tempdir("listing");
     let out = Command::new(common::htl_bin())
         .args(["check", "--list-lints"])
         .current_dir(&dir)
@@ -332,7 +332,7 @@ fn the_listing_accounts_for_every_rule() {
 /// spelling that does not exist.
 #[test]
 fn the_listing_does_not_name_what_only_a_fix_takes() {
-    let dir = scratch("surfaces");
+    let dir = tempdir("surfaces");
     write(&dir.join("htl.toml"), "");
     write(&dir.join("src/a.tl"), "return {}\n");
     let listing = Command::new(common::htl_bin())
@@ -362,7 +362,7 @@ fn the_listing_does_not_name_what_only_a_fix_takes() {
 /// A name that is not a rule is still refused, and says which word it did not know.
 #[test]
 fn an_unknown_name_is_still_an_error() {
-    let dir = scratch("unknown");
+    let dir = tempdir("unknown");
     write(&dir.join("htl.toml"), "");
     write(&dir.join("src/a.tl"), "return {}\n");
     let out = Command::new(common::htl_bin())

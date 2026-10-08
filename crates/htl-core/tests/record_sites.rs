@@ -6,12 +6,12 @@
 //! sibling for the construction- and cast-site half.
 
 use htl_core::{Htl, RecordSite};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-record-sites", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-record-sites", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -59,7 +59,7 @@ fn site(
 /// its own `complete` and `marked`.
 #[test]
 fn a_whole_a_short_an_untyped_and_a_marked_literal() {
-    let dir = scratch("four");
+    let dir = tempdir("four");
     write(
         &dir.join("sites.tl"),
         "local record Whole\n   x: integer\n   y: integer\nend\n\n\
@@ -89,7 +89,7 @@ fn a_whole_a_short_an_untyped_and_a_marked_literal() {
 /// literal, or any other, sets everything.
 #[test]
 fn a_record_with_no_data_field_is_never_complete() {
-    let dir = scratch("empty");
+    let dir = tempdir("empty");
     write(
         &dir.join("empty.tl"),
         "local record Empty\nend\n\nlocal e: Empty = {}\nprint(e)\nreturn {}\n",
@@ -109,7 +109,7 @@ fn a_record_with_no_data_field_is_never_complete() {
 /// `unknown field` type error getting there first.
 #[test]
 fn a_stray_key_does_not_make_a_site_incomplete() {
-    let dir = scratch("stray");
+    let dir = tempdir("stray");
     write(
         &dir.join("stray.tl"),
         "local record R   ---@extensible\n   a: string\nend\n\n\
@@ -126,7 +126,7 @@ fn a_stray_key_does_not_make_a_site_incomplete() {
 /// No table literal anywhere: an empty census, like the marker one.
 #[test]
 fn a_record_with_no_construction_site_gives_an_empty_census() {
-    let dir = scratch("none");
+    let dir = tempdir("none");
     write(
         &dir.join("none.tl"),
         "local record R\n   a: string\nend\nreturn { R = R }\n",
@@ -140,7 +140,7 @@ fn a_record_with_no_construction_site_gives_an_empty_census() {
 /// site at all has to look for that bare name rather than the full generic spelling.
 #[test]
 fn a_generic_record_is_named_by_its_bare_name() {
-    let dir = scratch("generic");
+    let dir = tempdir("generic");
     write(
         &dir.join("box.tl"),
         "local record Box<T>\n   v: T\n   n: integer\nend\n\n\
@@ -162,7 +162,7 @@ fn a_generic_record_is_named_by_its_bare_name() {
 /// lines (`source_lines(cache, t.file)`), where the bare name is all that is ever there.
 #[test]
 fn a_module_qualified_generic_site_is_named_by_its_bare_name() {
-    let dir = scratch("qualified-generic");
+    let dir = tempdir("qualified-generic");
     write(
         &dir.join("geom.tl"),
         "local record geom\n   record Box<T>\n      v: T\n      n: integer\n   end\nend\n\nreturn geom\n",
@@ -184,7 +184,7 @@ fn a_module_qualified_generic_site_is_named_by_its_bare_name() {
 /// file either.
 #[test]
 fn a_dtl_file_gives_an_empty_census() {
-    let dir = scratch("dtl");
+    let dir = tempdir("dtl");
     write(
         &dir.join("lib.d.tl"),
         "global record R\n   a: string\nend\n",
@@ -196,7 +196,7 @@ fn a_dtl_file_gives_an_empty_census() {
 /// no field at all so it is never `complete`.
 #[test]
 fn an_as_cast_is_a_cast_site() {
-    let dir = scratch("cast");
+    let dir = tempdir("cast");
     write(
         &dir.join("cast.tl"),
         "local record R\n   x: integer\nend\n\n\
@@ -215,7 +215,7 @@ fn an_as_cast_is_a_cast_site() {
 /// is not one -- the `as` node is the one and only site, a cast of `R`.
 #[test]
 fn a_cast_literal_gives_one_cast_site_and_no_literal_site() {
-    let dir = scratch("cast-literal");
+    let dir = tempdir("cast-literal");
     write(
         &dir.join("cast.tl"),
         "local record R\n   x: integer\nend\n\n\
@@ -232,7 +232,7 @@ fn a_cast_literal_gives_one_cast_site_and_no_literal_site() {
 /// A literal of a record marked `---@sealed` (no function list) is `sealed = true`.
 #[test]
 fn a_sealed_records_literal_is_sealed() {
-    let dir = scratch("sealed");
+    let dir = tempdir("sealed");
     write(
         &dir.join("sealed.tl"),
         "local record R   ---@sealed\n   x: integer\nend\n\n\
@@ -250,7 +250,7 @@ fn a_sealed_records_literal_is_sealed() {
 /// function list, so a named marker is `sealed = true` too.
 #[test]
 fn a_sealed_record_with_a_function_list_is_sealed_too() {
-    let dir = scratch("sealed-named");
+    let dir = tempdir("sealed-named");
     write(
         &dir.join("sealed.tl"),
         "local record R   ---@sealed(gate.judge)\n   x: integer\nend\n\n\
@@ -276,7 +276,7 @@ fn a_sealed_record_with_a_function_list_is_sealed_too() {
 /// sort together by position.
 #[test]
 fn every_cast_shape_in_one_file() {
-    let dir = scratch("combo");
+    let dir = tempdir("combo");
     write(
         &dir.join("combo.tl"),
         "local record gate\n   record Judged\n      v: integer\n   end\n\n   record Box<T>\n      item: T\n   end\n\n   record Other\n      w: integer\n   end\nend\n\nlocal type J = gate.Judged\n\nlocal function f(j: gate.Judged)\n   print(j)\nend\n\nlocal x: any = nil\nf(x as gate.Judged)\n\nlocal lit = { j = x as J }\nprint(lit)\n\nlocal b = x as gate.Box<string>\n\nlocal function make(): gate.Judged\n   return x as gate.Judged\nend\nprint(make())\n\nlocal a = x as any\nlocal u = x as (gate.Other | string)\nprint(a, u)\n\nlocal y: gate.Judged = { v = 1 }\nif y is gate.Judged then print(y) end\n\nreturn gate\n",

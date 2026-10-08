@@ -11,13 +11,13 @@
 //! terminator, so an unterminated source used to produce an unterminated string, and only
 //! `htl gen` hid it.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-gen-newline", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-gen-newline", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -54,7 +54,7 @@ fn assert_one_terminator(what: &str, text: &str) {
 
 #[test]
 fn the_file_written_by_o_ends_with_one_newline() {
-    let root = scratch("out-file");
+    let root = tempdir("out-file");
     write(&root.join("nonl.tl"), UNTERMINATED);
     let (ok, out, err) = htl(&["gen", "nonl.tl", "-o", "nonl.lua"], &root);
     assert!(ok, "gen emits a module that checks:\n{out}{err}");
@@ -67,7 +67,7 @@ fn the_file_written_by_o_ends_with_one_newline() {
 /// normalized anywhere but in `cmd_gen`.
 #[test]
 fn the_text_printed_on_stdout_ends_with_one_newline() {
-    let root = scratch("stdout");
+    let root = tempdir("stdout");
     write(&root.join("nonl.tl"), UNTERMINATED);
     let (ok, out, err) = htl(&["gen", "nonl.tl"], &root);
     assert!(ok, "gen emits a module that checks:\n{out}{err}");
@@ -81,7 +81,7 @@ fn the_text_printed_on_stdout_ends_with_one_newline() {
 /// carried through from the input.
 #[test]
 fn a_terminated_source_and_an_unterminated_one_generate_the_same_bytes() {
-    let root = scratch("same-bytes");
+    let root = tempdir("same-bytes");
     write(&root.join("nonl.tl"), UNTERMINATED);
     write(&root.join("nl.tl"), &format!("{UNTERMINATED}\n"));
     let (ok_a, without, err_a) = htl(&["gen", "nonl.tl"], &root);

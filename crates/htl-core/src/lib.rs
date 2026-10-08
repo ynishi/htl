@@ -3595,6 +3595,21 @@ pub fn collect_tl_skipping(paths: &[PathBuf], skip: &[PathBuf]) -> Result<Vec<Pa
     Ok(out)
 }
 
+/// The temp-directory guard this crate's unit tests share (the integration tests'
+/// copy, `tests/common/mod.rs`, brought in by `#[path]` rather than duplicated): declared
+/// once at the crate root, rather than once per file that needs it, so `dts.rs` /
+/// `dep_dts.rs` / `model.rs` / `model/resolver.rs` / `cache.rs` / `batteries.rs` and this
+/// file's own `mod tests` reach it as `crate::core_common` — a private item at the crate
+/// root is visible to every module the crate has. Declared at the crate root rather than
+/// nested inside a `mod tests` for the same reason `htl-macros` does: a `#[path]` on an
+/// item of an *inline* module resolves relative to a directory named for that module that
+/// does not exist on disk, and the OS refuses to resolve a `..` through a directory it
+/// cannot open.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/common/mod.rs"]
+mod core_common;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3675,9 +3690,7 @@ mod tests {
     /// `true`, and leaves no sibling temp file behind.
     #[test]
     fn write_if_changed_writes_new_content_and_leaves_no_temp_file() {
-        let dir = std::env::temp_dir().join(format!("htl-core-wic-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = core_common::tempdir("htl-core-wic", "default");
         let path = dir.join("out.d.tl");
 
         assert!(write_if_changed(&path, "first\n").unwrap());
@@ -3692,8 +3705,6 @@ mod tests {
             vec![std::ffi::OsString::from("out.d.tl")],
             "{siblings:?}"
         );
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Unchanged content is still a no-op: no write, no temp file, and the mtime is left
@@ -3701,16 +3712,12 @@ mod tests {
     /// only does after reading the existing content back and finding it equal).
     #[test]
     fn write_if_changed_is_a_no_op_when_the_content_already_matches() {
-        let dir = std::env::temp_dir().join(format!("htl-core-wic-noop-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = core_common::tempdir("htl-core-wic", "noop");
         let path = dir.join("out.d.tl");
 
         assert!(write_if_changed(&path, "same\n").unwrap());
         assert!(!write_if_changed(&path, "same\n").unwrap());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "same\n");
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Two writers of the same target in quick succession — the shape `regenerate_crate`
@@ -3724,9 +3731,7 @@ mod tests {
     /// each individual call has.
     #[test]
     fn write_if_changed_never_leaves_a_half_written_file() {
-        let dir = std::env::temp_dir().join(format!("htl-core-wic-race-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = core_common::tempdir("htl-core-wic", "race");
         let path = dir.join("out.d.tl");
 
         write_if_changed(&path, "aaaa\n").unwrap();
@@ -3736,7 +3741,5 @@ mod tests {
             text == "aaaa\n" || text == "bbbbbb\n",
             "never a mix of the two: {text:?}"
         );
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

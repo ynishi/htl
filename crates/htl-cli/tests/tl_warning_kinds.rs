@@ -12,13 +12,13 @@
 //! the name is in the JSON, and the name comes back — from `--lint`, from `[lint.rules]`
 //! and from an allow comment at the site.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-tl-warnings", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-tl-warnings", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -40,8 +40,8 @@ const SRC: &str = "local dep = require(\"dep\")\nlocal record m\nend\n\n\
                    print(string.rep(s, 2), dep)\n   return 1\nend\n\nprint(dep.note())\n\
                    return m\n";
 
-fn project(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn project(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), "[lint]\n");
     write(
         &root.join("src/dep.tl"),

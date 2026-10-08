@@ -13,12 +13,12 @@
 //! each environment that requires the module, is what these cases pin now.
 
 use htl_core::Htl;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-store-globals", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-store-globals", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -80,8 +80,8 @@ return m{n}
 
 /// A tree of `n` modules under `lib/`, each requiring the one declaration module. `decl`
 /// is written where a project of that shape would put it.
-fn tree(name: &str, decl_at: &str, decl: &str, n: u32) -> PathBuf {
-    let root = scratch(name);
+fn tree(name: &str, decl_at: &str, decl: &str, n: u32) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join(decl_at), decl);
     for i in 1..=n {
         write(&root.join(format!("lib/m{i}/init.tl")), &member(i));
@@ -174,7 +174,7 @@ fn a_global_declared_in_an_ordinary_module_reaches_every_file_that_requires_it()
 /// instances of one declaration, and the call was an error naming the same line twice.
 #[test]
 fn a_record_a_global_declaring_file_declares_is_one_type_in_every_requirer() {
-    let root = scratch("record-dtl");
+    let root = tempdir("record-dtl");
     write(
         &root.join("types/host_ev.d.tl"),
         "global record Ev\n   kind: string\nend\n",
@@ -206,7 +206,7 @@ fn a_record_a_global_declaring_file_declares_is_one_type_in_every_requirer() {
 /// the file declaring it was walked once per requirer.
 #[test]
 fn a_record_declared_beside_a_global_is_one_type_in_every_requirer() {
-    let root = scratch("record-tl");
+    let root = tempdir("record-tl");
     write(
         &root.join("lib/modx/init.tl"),
         "global knl: {string:any}\nlocal record SessionX\n   id: function(SessionX): string\nend\n\
@@ -241,7 +241,7 @@ fn a_record_declared_beside_a_global_is_one_type_in_every_requirer() {
 /// "walked again".
 #[test]
 fn a_module_that_declares_no_global_is_still_served_from_the_store() {
-    let root = scratch("no-global");
+    let root = tempdir("no-global");
     let util = root.join("lib/util.tl");
     write(
         &util,
@@ -295,8 +295,8 @@ fn errors_of_last(root: &Path, decl_dir: &str, order: &[&str]) -> Vec<String> {
 /// travel with `modx` — everything a module's requires declare, transitively, is what a
 /// `require` of it delivers. Without that, `midx` and `topx` were told `unknown variable`
 /// exactly when `modx` had been checked before them.
-fn chain_tree(name: &str) -> PathBuf {
-    let root = scratch(name);
+fn chain_tree(name: &str) -> common::TempDir {
+    let root = tempdir(name);
     write(&root.join("types/host_v.d.tl"), "global VERSION: string\n");
     write(
         &root.join("lib/modx/init.tl"),
@@ -327,7 +327,7 @@ fn a_global_travels_the_require_chain_to_a_file_that_never_requires_its_declarat
 /// on the chain holds the one instance the single walk produced.
 #[test]
 fn a_global_record_travels_the_require_chain_as_one_instance() {
-    let root = scratch("chain-record");
+    let root = tempdir("chain-record");
     write(
         &root.join("types/host_ev.d.tl"),
         "global record Ev\n   kind: string\nend\n",

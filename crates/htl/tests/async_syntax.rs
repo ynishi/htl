@@ -9,11 +9,10 @@ use htl::Htl;
 use htl::config::LangConfig;
 use std::path::{Path, PathBuf};
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("htl-async-syntax-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+mod common;
+
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-async-syntax", name)
 }
 
 fn write(dir: &Path, name: &str, text: &str) -> PathBuf {
@@ -57,7 +56,7 @@ print(await both(), await more())
 /// keywords were on, and no line is added or removed.
 #[test]
 fn gen_keeps_every_line_and_rewrites_the_four_forms_in_place() {
-    let dir = scratch("gen");
+    let dir = tempdir("gen");
     let file = write(&dir, "main.tl", PROGRAM);
     let h = checker(&dir, true);
     let (code, c) = h.gen_lua(&file).unwrap();
@@ -95,7 +94,7 @@ print(both(), more())
 /// into a `string` is refused at the Teal position.
 #[test]
 fn an_awaited_task_has_the_type_of_its_expression() {
-    let dir = scratch("check");
+    let dir = tempdir("check");
     let file = write(
         &dir,
         "main.tl",
@@ -122,7 +121,7 @@ print(await f())
 /// a field, a method, a key, a function so named, a variable so named.
 #[test]
 fn the_words_stay_names_after_a_dot_or_before_a_definition() {
-    let dir = scratch("names");
+    let dir = tempdir("names");
     let file = write(
         &dir,
         "main.tl",
@@ -154,7 +153,7 @@ print(go())
 /// did, and a file using them as keywords is a syntax error, as it is for Teal.
 #[test]
 fn off_the_words_are_names_and_the_keywords_are_syntax_errors() {
-    let dir = scratch("off");
+    let dir = tempdir("off");
     let names = write(
         &dir,
         "names.tl",
@@ -177,7 +176,7 @@ print(f(3))
 /// One name per `async local`: a task holds one value.
 #[test]
 fn an_async_local_with_two_names_is_refused_with_the_rule() {
-    let dir = scratch("two");
+    let dir = tempdir("two");
     let file = write(
         &dir,
         "main.tl",
@@ -205,7 +204,7 @@ print(await f())
 /// the generated Lua is the function without the word.
 #[test]
 fn async_marks_record_and_anonymous_functions() {
-    let dir = scratch("forms");
+    let dir = tempdir("forms");
     let file = write(
         &dir,
         "main.tl",
@@ -233,7 +232,7 @@ print(await M.f(1), h:await())
 /// generated Lua is the Teal's.
 #[test]
 fn a_runtime_error_in_an_awaited_call_names_the_teal_line() {
-    let dir = scratch("boom");
+    let dir = tempdir("boom");
     let file = write(
         &dir,
         "main.tl",

@@ -4,12 +4,12 @@
 use htl_core::config::{HtlConfig, check_toolchain, join_specs};
 use htl_core::pkg::TealResolver as Resolver;
 use htl_core::{BuildTarget, Htl, contract_enforcement_lints, contract_lints};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-core-config", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-core-config", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -42,15 +42,15 @@ fn contract_module(module: &str, dir: &str) -> String {
 
 /// Project with `htl.toml`, `src/defs.tl` and three mods: conforming, wrong field
 /// type, and one that leaves a required field out.
-fn project(name: &str) -> (PathBuf, HtlConfig) {
+fn project(name: &str) -> (common::TempDir, HtlConfig) {
     project_declaring_at(name, "src/defs.tl", CONTRACT_TOML)
 }
 
 /// The same project, with the contract type wherever the caller puts it: `decl` is the
 /// path to write it to (relative to the root), and `toml` the whole `htl.toml`, so a
 /// caller can point `[check] paths` at wherever it put the declaration.
-fn project_declaring_at(name: &str, decl: &str, toml: &str) -> (PathBuf, HtlConfig) {
-    let root = scratch(name);
+fn project_declaring_at(name: &str, decl: &str, toml: &str) -> (common::TempDir, HtlConfig) {
+    let root = tempdir(name);
     write(&root.join("htl.toml"), toml);
     write(&root.join(decl), &defs_src([REQUIRED, REQUIRED]));
     write(
@@ -285,7 +285,7 @@ fn a_build_target_is_named_and_a_name_that_is_not_one_is_refused() {
 
 #[test]
 fn find_walks_up_from_a_file() {
-    let root = scratch("find");
+    let root = tempdir("find");
     write(&root.join("htl.toml"), "[fmt]\nindent = 4\n");
     write(&root.join("src").join("deep").join("x.tl"), "return 1\n");
     let (path, cfg) = HtlConfig::find(&root.join("src/deep/x.tl"))
@@ -293,7 +293,7 @@ fn find_walks_up_from_a_file() {
         .unwrap();
     assert!(path.ends_with("htl.toml"));
     assert_eq!(cfg.fmt.indent, Some(4));
-    let none = HtlConfig::find(&scratch("find-none")).unwrap();
+    let none = HtlConfig::find(&tempdir("find-none")).unwrap();
     assert!(none.is_none());
 }
 
@@ -303,7 +303,7 @@ fn find_walks_up_from_a_file() {
 /// an expansion reaching into the copy opens a second `.htl/` inside the project (#267).
 #[test]
 fn a_patch_directory_is_not_a_project_of_its_own() {
-    let root = scratch("find-patched");
+    let root = tempdir("find-patched");
     write(&root.join("htl.toml"), "[fmt]\nindent = 4\n");
     write(
         &root.join("mlua-pkg.toml"),
@@ -336,7 +336,7 @@ fn a_patch_directory_is_not_a_project_of_its_own() {
 
     // A dependency checked out on its own, with nothing above declaring it, is its own
     // project: the rule is "inside a patch directory", not "has a manifest above".
-    let alone = scratch("find-alone");
+    let alone = tempdir("find-alone");
     write(&alone.join("htl.toml"), "[fmt]\nindent = 8\n");
     write(&alone.join("src/mathx.tl"), "return 1\n");
     let (path, cfg) = HtlConfig::find(&alone.join("src/mathx.tl"))
@@ -600,7 +600,8 @@ fn enforced_by_naming_nothing_is_reported() {
 #[test]
 fn enforced_by_takes_an_absolute_path() {
     let (root, _) = project("enforced-abs");
-    let elsewhere = scratch("enforced-abs-target").join("validate.lua");
+    let elsewhere_dir = tempdir("enforced-abs-target");
+    let elsewhere = elsewhere_dir.join("validate.lua");
     write(&elsewhere, "return function() end\n");
     let cfg_path = root.join("htl.toml");
     write(
@@ -619,7 +620,7 @@ fn enforced_by_takes_an_absolute_path() {
 /// One contract's `enforced_by` does not answer for another.
 #[test]
 fn enforced_by_is_per_contract() {
-    let root = scratch("enforced-two");
+    let root = tempdir("enforced-two");
     write(
         &root.join("htl.toml"),
         "[[contract]]\ndir = \"mods\"\nenforced_by = \"validate.lua\"\n\n\
@@ -682,7 +683,7 @@ fn contract_lint_reads_annotated_cast_and_field_assignment_forms() {
 /// for a project that has a single contract to inherit.
 #[test]
 fn contract_glob_dir_and_module_filter() {
-    let root = scratch("glob");
+    let root = tempdir("glob");
     write(&root.join("htl.toml"), "[lint]\n");
     write(
         &root.join("src/defs.tl"),
@@ -772,7 +773,7 @@ fn contract_glob_dir_and_module_filter() {
 
 #[test]
 fn check_paths_make_host_supplied_modules_visible() {
-    let root = scratch("paths");
+    let root = tempdir("paths");
     write(&root.join("htl.toml"), "[check]\npaths = [\"sdk\"]\n");
     write(
         &root.join("sdk/Tasks.tl"),
@@ -785,7 +786,7 @@ fn check_paths_make_host_supplied_modules_visible() {
     let (_, cfg) = HtlConfig::find(&root).unwrap().unwrap();
     assert_eq!(
         cfg.search_paths(&root),
-        vec![root.clone(), root.join("src"), root.join("sdk")]
+        vec![root.to_path_buf(), root.join("src"), root.join("sdk")]
     );
 
     let bare = Htl::new().unwrap();
@@ -813,7 +814,7 @@ fn check_paths_make_host_supplied_modules_visible() {
 /// same module name elsewhere on the path still wins over the declaration there.
 #[test]
 fn types_dir_is_searched_by_default() {
-    let root = scratch("types");
+    let root = tempdir("types");
     write(&root.join("htl.toml"), "[lint]\n");
     write(
         &root.join("types/xlib.d.tl"),
@@ -826,7 +827,7 @@ fn types_dir_is_searched_by_default() {
     let (_, cfg) = HtlConfig::find(&root).unwrap().unwrap();
     assert_eq!(
         cfg.search_paths(&root),
-        vec![root.clone(), root.join("src"), root.join("types")]
+        vec![root.to_path_buf(), root.join("src"), root.join("types")]
     );
 
     let h = Htl::new().unwrap();
@@ -856,7 +857,7 @@ fn types_dir_is_searched_by_default() {
 /// gets the search order it got before the section existed.
 #[test]
 fn the_layout_defaults_are_the_constants_they_replaced() {
-    let root = scratch("layout-default");
+    let root = tempdir("layout-default");
     write(&root.join("htl.toml"), "[lint]\n");
     for d in ["src", "types"] {
         std::fs::create_dir_all(root.join(d)).unwrap();
@@ -866,7 +867,7 @@ fn the_layout_defaults_are_the_constants_they_replaced() {
     assert_eq!(cfg.layout.types, "types");
     assert_eq!(
         cfg.search_paths(&root),
-        vec![root.clone(), root.join("src"), root.join("types")]
+        vec![root.to_path_buf(), root.join("src"), root.join("types")]
     );
 }
 
@@ -875,7 +876,7 @@ fn the_layout_defaults_are_the_constants_they_replaced() {
 /// top to bottom.
 #[test]
 fn the_layout_names_the_directories_that_are_searched() {
-    let root = scratch("layout-named");
+    let root = tempdir("layout-named");
     write(
         &root.join("htl.toml"),
         "[layout]\nsource = \"lua\"\ntypes = \"decl\"\n",
@@ -891,7 +892,7 @@ fn the_layout_names_the_directories_that_are_searched() {
     let (_, cfg) = HtlConfig::find(&root).unwrap().unwrap();
     assert_eq!(
         cfg.search_paths(&root),
-        vec![root.clone(), root.join("lua"), root.join("decl")]
+        vec![root.to_path_buf(), root.join("lua"), root.join("decl")]
     );
 
     let h = Htl::new().unwrap();
@@ -912,7 +913,7 @@ fn the_layout_names_the_directories_that_are_searched() {
 /// comparison downstream.
 #[test]
 fn a_flat_project_names_the_root_once() {
-    let root = scratch("layout-flat");
+    let root = tempdir("layout-flat");
     write(&root.join("htl.toml"), "[layout]\nsource = \".\"\n");
     write(
         &root.join("xlib.tl"),
@@ -921,7 +922,7 @@ fn a_flat_project_names_the_root_once() {
     let (_, cfg) = HtlConfig::find(&root).unwrap().unwrap();
     assert_eq!(
         cfg.search_paths(&root),
-        vec![root.clone()],
+        vec![root.to_path_buf()],
         "one entry for one directory"
     );
 }
@@ -982,7 +983,7 @@ fn a_directory_that_is_both_the_project_s_and_not_is_refused_when_the_file_is_pa
 /// order is invisible until neither is a source.
 #[test]
 fn the_search_order_is_the_one_search_paths_states() {
-    let root = scratch("search-order");
+    let root = tempdir("search-order");
     write(&root.join("htl.toml"), "[check]\npaths = [\"sdk\"]\n");
     // The same module declared three times, each saying something different about the
     // return type of `connect`, so the error names the one that was read.
@@ -1000,7 +1001,7 @@ fn the_search_order_is_the_one_search_paths_states() {
     assert_eq!(
         cfg.search_paths(&root),
         vec![
-            root.clone(),
+            root.to_path_buf(),
             root.join("src"),
             root.join("types"),
             root.join("sdk")
@@ -1019,7 +1020,7 @@ fn the_search_order_is_the_one_search_paths_states() {
 
 #[test]
 fn source_beats_a_stale_declaration_wherever_it_sits_on_the_path() {
-    let root = scratch("stale-decl");
+    let root = tempdir("stale-decl");
     write(&root.join("htl.toml"), "[check]\npaths = [\"mods\"]\n");
     // The source gained `items`; the declaration the host wrote last run has not.
     write(
@@ -1062,7 +1063,7 @@ fn source_beats_a_stale_declaration_wherever_it_sits_on_the_path() {
 
 #[test]
 fn declaration_steps_aside_for_a_preloaded_host_module() {
-    let root = scratch("preload");
+    let root = tempdir("preload");
     write(
         &root.join("mods/host.d.tl"),
         "local record host\n   twice: function(integer): integer\nend\nreturn host\n",
@@ -1510,7 +1511,7 @@ fn a_contract_declared_in_types_is_not_republished() {
 /// so those are two modules, each held to the record its own directory is under.
 #[test]
 fn a_published_declaration_is_not_a_second_claimant() {
-    let root = scratch("two-contracts");
+    let root = tempdir("two-contracts");
     write(
         &root.join("htl.toml"),
         "[[contract]]\ndir = \"mods_a\"\n\n[[contract]]\ndir = \"mods_b\"\n",
@@ -1552,7 +1553,7 @@ fn a_published_declaration_is_not_a_second_claimant() {
 /// would have to be the one enforced there — and the report names both sources.
 #[test]
 fn two_records_claiming_one_directory_are_reported_with_both_sources() {
-    let root = scratch("two-claims");
+    let root = tempdir("two-claims");
     write(&root.join("htl.toml"), CONTRACT_TOML);
     write(&root.join("src/p1/init.tl"), &contract_module("p1", "mods"));
     write(&root.join("src/p2/init.tl"), &contract_module("p2", "mods"));
@@ -1581,7 +1582,7 @@ fn two_records_claiming_one_directory_are_reported_with_both_sources() {
 /// every run.
 #[test]
 fn two_contracts_in_one_module_publish_it_once() {
-    let root = scratch("two-in-one");
+    let root = tempdir("two-in-one");
     write(&root.join("htl.toml"), "[[contract]]\ndir = \"mods_a\"\n");
     write(
         &root.join("src/defs.tl"),

@@ -4,13 +4,13 @@
 //! htl links now. The test that says so is the one that runs with an empty `PATH`: if a
 //! child process were still involved, there would be nothing to spawn.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 mod common;
 
-fn scratch(name: &str) -> PathBuf {
-    common::scratch("htl-cli-pkg", name)
+fn tempdir(name: &str) -> common::TempDir {
+    common::tempdir("htl-cli-pkg", name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -57,8 +57,11 @@ fn git(cwd: &Path, args: &[&str]) -> String {
 const DECL: &str = "local record mathx\n   twice: function(n: number): number\nend\nreturn mathx\n";
 
 /// A dependency as a repository on disk, and a project depending on it at that commit.
-fn project(name: &str) -> PathBuf {
-    let dep = scratch(&format!("{name}-remote"));
+/// Returns the dependency's own guard alongside the project's: `root`'s manifest names
+/// `dep` by a `file://` path, so a caller that dropped it early would see `htl pkg
+/// install` fail to clone a repository that had just been removed out from under it.
+fn project(name: &str) -> (common::TempDir, common::TempDir) {
+    let dep = tempdir(&format!("{name}-remote"));
     write(
         &dep.join("src/mathx.tl"),
         "return { twice = function(n: number): number return n * 2 end }\n",
@@ -69,7 +72,7 @@ fn project(name: &str) -> PathBuf {
     git(&dep, &["commit", "-qm", "mathx"]);
     let sha = git(&dep, &["rev-parse", "HEAD"]);
 
-    let root = scratch(name);
+    let root = tempdir(name);
     write(
         &root.join("mlua-pkg.toml"),
         &format!(
@@ -78,12 +81,12 @@ fn project(name: &str) -> PathBuf {
             dep.display()
         ),
     );
-    root
+    (dep, root)
 }
 
 #[test]
 fn install_runs_without_mlua_pkg_on_path_and_says_what_it_did() {
-    let root = project("install");
+    let (_dep, root) = project("install");
     let (ok, _, err) = htl(&["pkg", "install"], &root);
     assert!(ok, "{err}");
     assert!(err.contains("install mathx"), "{err}");
@@ -102,7 +105,7 @@ fn install_runs_without_mlua_pkg_on_path_and_says_what_it_did() {
 /// found`.
 #[test]
 fn an_installed_dependency_is_required_at_its_entry() {
-    let root = project("entry");
+    let (_dep, root) = project("entry");
     write(
         &root.join("src/main.tl"),
         "local mathx = require(\"mathx\")\nprint(mathx.twice(21))\n",
@@ -137,7 +140,7 @@ fn an_installed_dependency_is_required_at_its_entry() {
 /// of the entry's probes for that reason.
 #[test]
 fn a_check_cached_before_the_install_is_not_replayed_after_it() {
-    let root = project("entry-cache");
+    let (_dep, root) = project("entry-cache");
     write(
         &root.join("src/main.tl"),
         "local mathx = require(\"mathx\")\nprint(mathx.twice(21))\n",
@@ -156,7 +159,7 @@ fn a_check_cached_before_the_install_is_not_replayed_after_it() {
 /// did not write them gets them from the first command that reads the path — no reinstall.
 #[test]
 fn a_project_installed_without_entry_links_gets_them_on_the_next_check() {
-    let root = project("entry-upgrade");
+    let (_dep, root) = project("entry-upgrade");
     write(
         &root.join("src/main.tl"),
         "local mathx = require(\"mathx\")\nprint(mathx.twice(21))\n",
@@ -171,7 +174,7 @@ fn a_project_installed_without_entry_links_gets_them_on_the_next_check() {
 
 #[test]
 fn clean_reports_the_cache_it_swept() {
-    let root = project("clean");
+    let (_dep, root) = project("clean");
     let (ok, _, err) = htl(&["pkg", "clean"], &root);
     assert!(ok, "{err}");
     assert!(err.contains("no lockfile"), "{err}");
@@ -184,7 +187,7 @@ fn clean_reports_the_cache_it_swept() {
 
 #[test]
 fn add_writes_the_entry_and_says_what_to_run_next() {
-    let root = project("add");
+    let (_dep, root) = project("add");
     let (ok, _, err) = htl(
         &[
             "pkg",
@@ -207,7 +210,7 @@ fn add_writes_the_entry_and_says_what_to_run_next() {
 /// why rather than reporting an empty run.
 #[test]
 fn update_says_what_it_left_alone() {
-    let root = project("update");
+    let (_dep, root) = project("update");
     let (ok, _, err) = htl(&["pkg", "update", "--dry-run"], &root);
     assert!(ok, "{err}");
     assert!(err.contains("skip    mathx"), "{err}");
@@ -222,7 +225,7 @@ fn update_says_what_it_left_alone() {
 /// for it, so htl says where.
 #[test]
 fn a_project_that_is_not_there_is_named() {
-    let root = scratch("bare");
+    let root = tempdir("bare");
     let (ok, _, err) = htl(&["pkg", "install"], &root);
     assert!(!ok, "{err}");
     assert!(err.contains("mlua-pkg.toml"), "{err}");
@@ -231,7 +234,7 @@ fn a_project_that_is_not_there_is_named() {
 
 #[test]
 fn pkg_help_lists_the_verbs() {
-    let root = scratch("help");
+    let root = tempdir("help");
     let (ok, out, err) = htl(&["pkg", "--help"], &root);
     assert!(ok, "{err}");
     for verb in ["install", "add", "update", "clean", "patch"] {
@@ -244,7 +247,7 @@ fn pkg_help_lists_the_verbs() {
 /// directory, it would give the project a second root.
 #[test]
 fn add_below_the_root_writes_the_manifest_at_the_root() {
-    let root = scratch("add-below-root");
+    let root = tempdir("add-below-root");
     write(&root.join("htl.toml"), "");
     std::fs::create_dir_all(root.join("src")).unwrap();
     let (ok, _, err) = htl(
@@ -268,7 +271,7 @@ fn add_below_the_root_writes_the_manifest_at_the_root() {
 /// as the commands that already built the model from `mlua-pkg.toml`.
 #[test]
 fn two_manifests_naming_two_roots_are_refused_by_check() {
-    let root = scratch("two-roots");
+    let root = tempdir("two-roots");
     write(
         &root.join("mlua-pkg.toml"),
         "[package]\nname = \"p\"\nversion = \"0.1.0\"\n",

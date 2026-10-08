@@ -24,6 +24,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
+mod common;
+
 /// The root of this workspace: this crate sits directly under it.
 fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
@@ -85,10 +87,8 @@ fn htl_bin() -> &'static Path {
 /// A fresh directory under the system temp dir, outside the checkout so the CLI runs
 /// against the project's configuration and not this repository's. Removed when the test
 /// passes, left for reading when it does not.
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("htl-e2e-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+fn tempdir(name: &str) -> common::TempDir {
+    let dir = common::tempdir("htl-e2e", name);
     println!("scaffolding into {}", dir.display());
     dir
 }
@@ -137,7 +137,7 @@ end)
 
 #[test]
 fn the_scaffolds_htlx_dependency_installs_checks_and_tests_against_this_htl() {
-    let root = scratch("htlx-consumer");
+    let root = tempdir("htlx-consumer");
     let checkout = format!("path:{}", workspace_root().display());
     htl(&["new", "x-consumer", "--htl", &checkout], &root);
     let project = root.join("x-consumer");
@@ -229,7 +229,7 @@ return x_bin
 /// pinned to this checkout and nothing patched in.
 #[test]
 fn the_scaffolds_htlx_dependency_is_in_the_binary_a_bin_project_builds() {
-    let root = scratch("htlx-in-binary");
+    let root = tempdir("htlx-in-binary");
     let checkout = format!("path:{}", workspace_root().display());
     htl(
         &["new", "x-bin", "--target", "bin", "--htl", &checkout],
