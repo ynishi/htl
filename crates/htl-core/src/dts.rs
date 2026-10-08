@@ -106,6 +106,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 use syn::punctuated::Punctuated;
 use syn::{
     Attribute, Expr, FnArg, GenericArgument, ImplItem, Item, ItemEnum, ItemImpl, ItemStruct, Lit,
@@ -2005,7 +2006,23 @@ pub fn host_decl(
 
 // ---------------------------------------------------------------- file scanning (`htl dts`)
 
-/// One `.d.tl` derived from a Rust source file.
+/// Which Rust shape a [`Generated`] came from — the filter [`regenerate_host_decls`]
+/// uses to skip everything except a `#[host_module]`'s own `.d.tl` (S1 of #429's review:
+/// a `#[derive(TealRecord)]` sees `#[cfg]`-stripped input the same way the derive itself
+/// does, so rewriting a record from the raw source without that stripping can write a
+/// *different* declaration than the one the `#[cfg]`'d derive would — the #429 class,
+/// moved to records, if the crate-wide scan touched records too).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeneratedKind {
+    /// `#[host_module(dts = ..)]`.
+    HostModule,
+    /// `#[derive(TealRecord)]` / `#[teal(dts = ..)]`.
+    Record,
+    /// `#[c_export(header = ..)]`.
+    CHeader,
+}
+
+/// One `.d.tl` (or C header) derived from a Rust source file.
 #[derive(Debug, Clone)]
 pub struct Generated {
     /// Absolute output path (`<manifest_dir>/<dts>`).
@@ -2019,6 +2036,8 @@ pub struct Generated {
     /// `host_module <module>`, or `RecordDecl::what` (`record <Name>` / `enum <Name>` /
     /// `type <Name>`), for reporting.
     pub what: String,
+    /// Which Rust shape this came from — see [`GeneratedKind`].
+    pub kind: GeneratedKind,
 }
 
 fn walk_items<'a>(items: &'a [Item], out: &mut Vec<&'a Item>) {
@@ -2051,6 +2070,7 @@ pub fn scan_rust_file(path: &Path, manifest_dir: &Path) -> Result<Vec<Generated>
                             text: hd.decl.clone(),
                             source: path.to_path_buf(),
                             what: format!("host_module {}", hd.module),
+                            kind: GeneratedKind::HostModule,
                         });
                     }
                 }
@@ -2069,6 +2089,7 @@ pub fn scan_rust_file(path: &Path, manifest_dir: &Path) -> Result<Vec<Generated>
                             text: plan.header(),
                             source: path.to_path_buf(),
                             what: format!("c_export {}", plan.prefix),
+                            kind: GeneratedKind::CHeader,
                         });
                     }
                 }
@@ -2083,6 +2104,7 @@ pub fn scan_rust_file(path: &Path, manifest_dir: &Path) -> Result<Vec<Generated>
                         text: rd.decl.clone(),
                         source: path.to_path_buf(),
                         what: rd.what(),
+                        kind: GeneratedKind::Record,
                     });
                 }
             }
@@ -2091,6 +2113,11 @@ pub fn scan_rust_file(path: &Path, manifest_dir: &Path) -> Result<Vec<Generated>
     }
     Ok(out)
 }
+
+/// Where [`host_module_names`], [`generate_crate_to`], [`scan_fingerprint`] and
+/// [`regenerate_host_decls`] all look, so the four cannot drift into scanning different
+/// trees of the same crate.
+const SCAN_SUBDIRS: [&str; 4] = ["src", "examples", "tests", "benches"];
 
 /// Every module name a `#[host_module]` under this crate root registers, whether or not
 /// it also asks for a `.d.tl`. The name is the attribute's `name = ".."`, or the impl
@@ -2104,7 +2131,7 @@ pub fn scan_rust_file(path: &Path, manifest_dir: &Path) -> Result<Vec<Generated>
 /// contributes nothing — `htl dts` is where either of those is an error worth reporting.
 pub fn host_module_names(manifest_dir: &Path) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for sub in ["src", "examples", "tests", "benches"] {
+    for sub in SCAN_SUBDIRS {
         let dir = manifest_dir.join(sub);
         if !dir.is_dir() {
             continue;
@@ -2187,9 +2214,16 @@ pub fn generate_crate(manifest_dir: &Path) -> Result<Vec<(PathBuf, bool)>, Strin
 
 /// [`generate_crate`], writing only when `write` is set; without it each pair says whether
 /// the file would change.
+///
+/// The walk is `src/`, `examples/`, `tests/`, `benches/` under `manifest_dir`, not under
+/// whatever crate a file inside one of them happens to belong to: a fixture crate nested
+/// under `tests/<fixture>/` with its own `Cargo.toml` (a trybuild-style project, say) is
+/// still scanned relative to the *outer* manifest dir, the same as `htl dts` does today —
+/// a `dts = ".."` inside that fixture resolves against the outer root, not the fixture's
+/// own, because this walk never looks for a nested `Cargo.toml` to retarget against.
 pub fn generate_crate_to(manifest_dir: &Path, write: bool) -> Result<Vec<(PathBuf, bool)>, String> {
     let mut results = Vec::new();
-    for sub in ["src", "examples", "tests", "benches"] {
+    for sub in SCAN_SUBDIRS {
         let dir = manifest_dir.join(sub);
         if !dir.is_dir() {
             continue;
@@ -2208,6 +2242,120 @@ pub fn generate_crate_to(manifest_dir: &Path, write: bool) -> Result<Vec<(PathBu
         }
     }
     Ok(results)
+}
+
+/// How many `.rs` files `SCAN_SUBDIRS` holds and the newest modification time among
+/// them, as of one `fs::metadata` per file — no `read_to_string`, no `syn`. Two calls
+/// that answer the same pair have seen the same set of files with the same content as
+/// far as an editor saving one of them can tell apart (an mtime granularity collision
+/// aside, which only means a cache might refresh one write-cycle later than it had to,
+/// never earlier): a file added, removed or rewritten moves the count or the newest time,
+/// which is what [`regenerate_host_decls`]'s caller re-runs the scan on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScanFingerprint {
+    files: usize,
+    newest: Option<SystemTime>,
+}
+
+/// [`ScanFingerprint`] of `manifest_dir`'s `SCAN_SUBDIRS`, a stat walk rather than a
+/// read-and-parse one: cheap enough to run on every `include_tl!` / `include_bundle!`
+/// expansion so that the caller — `regenerate_crate` in `htl-macros` — knows whether to
+/// redo the write pass without needing a result from a previous run in the same process.
+/// That matters because "one process compiles one crate" is not true of every caller: an
+/// IDE's proc-macro server (rust-analyzer's `proc-macro-srv`, say) loads this dylib once
+/// and serves every crate of the workspace, for the whole editing session, from inside
+/// it — a cached "already regenerated" flag would never refresh there, and a crate's
+/// `.d.tl`s would go stale after the first edit to a `#[host_module]` and stay stale
+/// until the IDE restarts.
+pub fn scan_fingerprint(manifest_dir: &Path) -> ScanFingerprint {
+    let mut files = 0usize;
+    let mut newest: Option<SystemTime> = None;
+    for sub in SCAN_SUBDIRS {
+        let dir = manifest_dir.join(sub);
+        if !dir.is_dir() {
+            continue;
+        }
+        for e in walkdir::WalkDir::new(&dir).into_iter().flatten() {
+            let p = e.path();
+            if !p.is_file() || p.extension().and_then(|s| s.to_str()) != Some("rs") {
+                continue;
+            }
+            files += 1;
+            if let Ok(meta) = e.metadata()
+                && let Ok(modified) = meta.modified()
+            {
+                newest = Some(match newest {
+                    Some(prev) if prev >= modified => prev,
+                    _ => modified,
+                });
+            }
+        }
+    }
+    ScanFingerprint { files, newest }
+}
+
+/// Writes every `#[host_module]`'s `.d.tl` it can read, parse and write, from the Rust
+/// source — [`scan_rust_file`] filtered to [`GeneratedKind::HostModule`] (S1: not
+/// records, whose own derive sees `#[cfg]`-stripped input in a way this raw-source scan
+/// cannot reproduce, and not C headers, which `#[host_module]`'s own expansion does not
+/// also write on every expansion the way it does its `.d.tl`).
+///
+/// Best-effort and silent (S2): a file this cannot read, cannot parse (an unparsable
+/// fixture under `tests/` — a trybuild case deliberately testing invalid syntax, say, or
+/// one written for a newer Rust edition than this `syn` parses), or whose attributes
+/// `scan_rust_file` refuses, is skipped rather than failing every `include_tl!` of a
+/// crate that never compiles that file; so is a `.d.tl` this cannot write (a read-only
+/// directory, a path a sibling process is also writing to — made safe to race with by
+/// [`crate::write_if_changed`]'s atomic rename, not by skipping, but a failure past that
+/// is still skipped here). Nothing it skips is unreported: the file's own compilation —
+/// that `#[host_module]`'s real expansion, or rustc parsing a file this cannot — reports
+/// the same error at its own site, which is the error a developer is looking at code to
+/// fix, not one surfaced from behind an unrelated `include_tl!` of some other file.
+///
+/// A `#[cfg]`-disabled `mod` holding a `#[host_module]` is still a file under one of
+/// `SCAN_SUBDIRS`, and this scan — like `htl dts` — does not evaluate `#[cfg]` on a
+/// `mod` item any more than on anything else inside the file it parses, so that module's
+/// `.d.tl` is written (and an `include_tl!` elsewhere checks cleanly against it) even
+/// though the module is not compiled into this build. That `require` then fails at run
+/// time naming the missing module, the same as a module no `.d.tl` was ever written for;
+/// this is not a correctness hole the scan introduces, since `#[host_module]`'s own
+/// expansion would refuse to run under the same `#[cfg]` either way.
+///
+/// The prefilter is `host_module_names`'s: a file read but not handed to `syn` unless its
+/// text contains the literal substring `host_module`, so a crate with no host modules at
+/// all — most files of most crates — pays one `read_to_string` and nothing else.
+pub fn regenerate_host_decls(manifest_dir: &Path) {
+    for sub in SCAN_SUBDIRS {
+        let dir = manifest_dir.join(sub);
+        if !dir.is_dir() {
+            continue;
+        }
+        for e in walkdir::WalkDir::new(&dir)
+            .sort_by_file_name()
+            .into_iter()
+            .flatten()
+        {
+            let p = e.path();
+            if !p.is_file() || p.extension().and_then(|s| s.to_str()) != Some("rs") {
+                continue;
+            }
+            let Ok(src) = std::fs::read_to_string(p) else {
+                continue;
+            };
+            if !src.contains("host_module") {
+                continue;
+            }
+            let Ok(entries) = scan_rust_file(p, manifest_dir) else {
+                continue;
+            };
+            for g in entries {
+                if g.kind != GeneratedKind::HostModule {
+                    continue;
+                }
+                let _ = crate::write_if_changed(&g.target, &g.text);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3865,5 +4013,112 @@ mod tests {
         assert_eq!(m.params.len(), 1);
         assert_eq!(m.params[0].name, "n");
         assert!(m.lua_param.is_some());
+    }
+
+    /// S1 of #429's review: `regenerate_host_decls` writes a `#[host_module]`'s `.d.tl`
+    /// but leaves a `#[derive(TealRecord)]`'s alone, even though `scan_rust_file` can see
+    /// both in the same file. Seeded with a record `.d.tl` that does not match what a
+    /// raw-source rescan of the file would produce (standing in for the derive's own
+    /// `#[cfg]`-aware write, which this scan cannot reproduce from text alone) — if the
+    /// scan touched records too, this would come back overwritten.
+    #[test]
+    fn regenerate_host_decls_writes_host_modules_but_leaves_records_alone() {
+        let dir = std::env::temp_dir().join(format!("htl-dts-regen-kind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("src/lib.rs"),
+            "use htl::host_module;\n\
+             pub struct Host;\n\
+             #[host_module(name = \"host\", dts = \"src/host.d.tl\")]\n\
+             impl Host {\n\
+             \x20   pub fn ping(&self) -> i64 { 1 }\n\
+             }\n\
+             #[derive(htl::TealRecord)]\n\
+             #[teal(dts = \"src/point.d.tl\")]\n\
+             pub struct Point { pub x: f64 }\n",
+        )
+        .unwrap();
+        // Stands in for whatever the derive itself last wrote under some `#[cfg]`; a
+        // plain rescan of the source above would not produce this text.
+        let seeded =
+            "local record Point\n   x: number\n   from_cfg: boolean\nend\n\nreturn Point\n";
+        std::fs::write(dir.join("src/point.d.tl"), seeded).unwrap();
+
+        regenerate_host_decls(&dir);
+
+        assert!(
+            std::fs::read_to_string(dir.join("src/host.d.tl"))
+                .unwrap()
+                .contains("ping"),
+            "the host module's own .d.tl should have been written"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("src/point.d.tl")).unwrap(),
+            seeded,
+            "a record's .d.tl must not be touched by this scan"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// S2 of #429's review: a file this cannot parse — a fixture deliberately holding
+    /// invalid syntax, the way a trybuild case might — does not stop the rest of the
+    /// crate's host modules from being written, and `regenerate_host_decls` reports
+    /// nothing about it (it has no error channel to report through).
+    #[test]
+    fn regenerate_host_decls_skips_an_unparsable_file_and_still_writes_the_rest() {
+        let dir = std::env::temp_dir().join(format!("htl-dts-regen-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(
+            dir.join("src/lib.rs"),
+            "use htl::host_module;\n\
+             pub struct Host;\n\
+             #[host_module(name = \"host\", dts = \"src/host.d.tl\")]\n\
+             impl Host {\n\
+             \x20   pub fn ping(&self) -> i64 { 1 }\n\
+             }\n",
+        )
+        .unwrap();
+        // Unparsable, but contains the `host_module` substring so the prefilter still
+        // hands it to `syn` — which is exactly the file this is meant to survive.
+        std::fs::write(
+            dir.join("tests/broken.rs"),
+            "#[host_module此 not even close to valid Rust (",
+        )
+        .unwrap();
+
+        regenerate_host_decls(&dir);
+
+        assert!(
+            std::fs::read_to_string(dir.join("src/host.d.tl"))
+                .unwrap()
+                .contains("ping"),
+            "the valid file's host module should still have been written"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// S3: two scans of an unchanged tree agree; adding a file (even with no content
+    /// relevant to any `#[host_module]`) changes the count half of the fingerprint, which
+    /// is what tells `regenerate_crate`'s cache to redo the write pass.
+    #[test]
+    fn scan_fingerprint_changes_when_a_file_is_added() {
+        let dir = std::env::temp_dir().join(format!("htl-dts-fingerprint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
+
+        let first = scan_fingerprint(&dir);
+        assert_eq!(first, scan_fingerprint(&dir), "unchanged tree, same answer");
+
+        std::fs::write(dir.join("src/extra.rs"), "pub fn g() {}\n").unwrap();
+        let second = scan_fingerprint(&dir);
+        assert_ne!(first, second, "a file was added");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

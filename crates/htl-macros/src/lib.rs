@@ -18,6 +18,22 @@
 //! Declaration text (`.d.tl`) comes from `htl_core::dts`, the same code `htl dts` runs
 //! from the CLI, so the files can also be produced before any `cargo build`.
 //!
+//! Before checking, `include_tl!` / `include_tl_bytes!` / `include_bundle!` run the
+//! host-module half of that same scan over the whole crate and rewrite every one the
+//! scan can see (`regenerate_crate`), so a build sees each one current whichever of two
+//! `#[host_module]`s — or a `#[host_module]` and this scan — rustc happens to expand
+//! first. Without it, that order follows the crate's `mod` declarations, and a module
+//! declared after the one doing the `include_tl!` was checked against yesterday's
+//! declaration (#429). What the scan cannot see, because it reads `#[host_module(..)]`
+//! literally rather than evaluating Rust: the attribute written as
+//! `#[cfg_attr(.., host_module(..))]`, an impl a `macro_rules!` produces rather than one
+//! written out, an item reached only through `include!`, a module whose `#[path]` leaves
+//! `src/` / `examples/` / `tests/` / `benches/`, and the attribute under another name
+//! through `use htl::host_module as something_else`. Each of those is `#[host_module]`'s
+//! own expansion's to write, exactly as before this scan existed — this only widens
+//! *when* a declaration it can see lands, never what it writes, and never what it cannot
+//! see.
+//!
 //! The macros run the checker — htl-core and the vendored Lua that hosts `tl` — inside
 //! the proc macro, under `[profile.dev.build-override]`, whose default `opt-level = 0`
 //! makes a `cargo build` that touches a `.tl` about three times slower than the
@@ -33,7 +49,9 @@ use proc_macro::TokenStream;
 use proc_macro2::Literal;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use syn::punctuated::Punctuated;
 use syn::{
     Item, ItemEnum, ItemImpl, ItemStruct, LitStr, Meta, Token, parse::Parser, parse_macro_input,
@@ -41,6 +59,16 @@ use syn::{
 
 // ------------------------------------------------------------------ include_tl!
 
+/// `include_tl!("path.tl")` -> `&'static str`: the Lua `tl` (the vendored Teal checker)
+/// generates from `path.tl`, relative to `CARGO_MANIFEST_DIR`, Teal-checked at build time
+/// against the project's model and the crate's `#[host_module]`s. Before checking, it
+/// regenerates every `#[host_module]`'s `.d.tl` it can see from the Rust source
+/// (`regenerate_crate`), so the `#[host_module]` it checks against does not have to be
+/// declared before this in the crate's `mod` order — in the same file or another one
+/// (#429). A Teal type error, or a warning/lint the project's policy denies, becomes a
+/// `compile_error!` at this macro's call site; every `.tl` the check reads is
+/// `include_str!`-tracked, so an edit anywhere in the closure rebuilds. See the module
+/// doc for the lint policy and for what the regeneration cannot see.
 #[proc_macro]
 pub fn include_tl(input: TokenStream) -> TokenStream {
     let lit = parse_macro_input!(input as LitStr);
@@ -50,6 +78,9 @@ pub fn include_tl(input: TokenStream) -> TokenStream {
     }
 }
 
+/// [`include_tl!`], embedding stripped Lua 5.4 bytecode as `&'static [u8]` instead of the
+/// generated source — the same check, the same `.d.tl` regeneration, and the same
+/// tracking.
 #[proc_macro]
 pub fn include_tl_bytes(input: TokenStream) -> TokenStream {
     let lit = parse_macro_input!(input as LitStr);
@@ -75,6 +106,9 @@ pub fn include_tl_bytes(input: TokenStream) -> TokenStream {
 /// restate a `#[host_module]` of this crate, which is the one list the model reads it from.
 /// Every linked file and every declaration the checker read is `include_bytes!`-tracked,
 /// so an edit rebuilds and a Teal type error is a compile error, like `include_tl!`.
+/// Before checking, also like `include_tl!`, it regenerates every `#[host_module]`'s
+/// `.d.tl` it can see from the Rust source, so a host module does not have to be
+/// declared before the entry this links in the crate's `mod` order (#429).
 /// `payload` is `"bytecode"` (default, stripped; `debug = true` keeps line info) or
 /// `"source"` (generated Lua: for a big-endian target, a Lua with non-default number
 /// types, or a bundle that must outlive a Lua upgrade; bytecode already loads on every
@@ -246,7 +280,9 @@ fn explain_cache(tag: &str, cached: usize, of: usize) {
 }
 
 fn expand_bundle(args: &BundleArgs) -> Result<TokenStream, String> {
-    let out = resolve_bundle(&manifest_dir()?, &args.entry, &args.opts)?;
+    let manifest_dir = manifest_dir()?;
+    regenerate_crate(&manifest_dir);
+    let out = resolve_bundle(&manifest_dir, &args.entry, &args.opts)?;
     explain_cache("include_bundle!", out.cached.0, out.cached.1);
     let lit = Literal::byte_string(&out.bytes);
     let inputs = out.inputs;
@@ -286,6 +322,57 @@ fn manifest_dir() -> Result<PathBuf, String> {
     std::env::var("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)
         .map_err(|_| "CARGO_MANIFEST_DIR is not set".to_string())
+}
+
+/// Rewrites every `#[host_module]`'s `.d.tl` the scan can see, from the Rust source —
+/// [`dts::regenerate_host_decls`], the host-only half of the scan `htl dts` runs — before
+/// `expand_include` / `expand_bundle` check a `.tl` against one of them (#429, see the
+/// module doc). Records are deliberately not rewritten here (S1 of the review that found
+/// this): `#[derive(TealRecord)]` sees `#[cfg]`-stripped input the way rustc always
+/// expands a derive, but a crate-wide scan of the raw `.rs` text does not evaluate
+/// `#[cfg]` on a field any more than on anything else, so a record with a
+/// `#[cfg(feature = ..)]` field would get two different declarations written in the same
+/// build depending on which of this scan and the derive's own expansion ran last — #429's
+/// class of bug, moved from host modules to records, had this not stayed host-only.
+///
+/// Best-effort and silent: [`dts::regenerate_host_decls`] skips whatever it cannot read,
+/// parse or write rather than failing, and never returns an error, so neither does this —
+/// an unparsable fixture under `tests/`, or a `.d.tl` directory this cannot write to, is
+/// that file's own problem to report when *it* is compiled, not a reason to fail every
+/// `include_tl!` of a lib that never touches it. See that function's doc for why this is
+/// safe to leave silent.
+///
+/// A change to `src/hostio.rs` needs no extra tracking to make `include_tl!` re-expand:
+/// rustc re-expands every proc macro on every recompile of the crate using it, and
+/// `hostio.rs` is already a source file of that same crate, so cargo already rebuilds on
+/// a change to it. `htl check` / `htl dts` are unaffected either way — they run their own
+/// scan already, and never read a `.d.tl` off disk to get here.
+///
+/// Re-running the write pass on every expansion would make a filesystem walk (plus one
+/// `read_to_string` per `.rs` file, to the `host_module`-substring prefilter) part of
+/// every `include_tl!` / `include_bundle!`, so this instead caches, by manifest dir, the
+/// [`dts::ScanFingerprint`] (a file count and a newest mtime — a stat walk, no reads) the
+/// write pass last saw, and only redoes the write pass when a fresh stat walk disagrees
+/// with that. "One process compiles one crate" is not the reason for the cache key: it
+/// is false under a long-lived proc-macro server (rust-analyzer's `proc-macro-srv` loads
+/// this dylib once and serves every crate of the workspace, for the whole editing
+/// session, from inside it), which is exactly why the fingerprint is re-checked on every
+/// call rather than trusted forever once computed — a single `OnceLock<bool>` would never
+/// refresh there, and a crate's `.d.tl`s would go stale after the first edit and stay
+/// stale until the IDE restarted. The dir-keyed map is what lets that one long-lived
+/// process hold one fingerprint per crate rather than one for whichever crate asked last.
+fn regenerate_crate(manifest_dir: &Path) {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, dts::ScanFingerprint>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let current = dts::scan_fingerprint(manifest_dir);
+    if cache.get(manifest_dir) == Some(&current) {
+        return;
+    }
+    dts::regenerate_host_decls(manifest_dir);
+    cache.insert(manifest_dir.to_path_buf(), current);
 }
 
 /// What `include_tl!` / `include_tl_bytes!` embed, computed without proc-macro types so
@@ -579,7 +666,9 @@ fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Includ
 }
 
 fn expand_include(rel: &str, bytes: bool) -> Result<TokenStream, String> {
-    let inc = resolve_include(&manifest_dir()?, rel, bytes)?;
+    let manifest_dir = manifest_dir()?;
+    regenerate_crate(&manifest_dir);
+    let inc = resolve_include(&manifest_dir, rel, bytes)?;
     explain_cache("include_tl!", usize::from(inc.cached), 1);
     let main_abs = inc.main_abs;
     let deps = inc.deps;

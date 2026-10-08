@@ -167,8 +167,10 @@ impl Http {
     }
 }
 
-// The `.d.tl` above is written when `#[host_module]` expands, which happens before
-// `include_tl!` below is expanded (same file, source order).
+// `include_tl!` below regenerates every `#[host_module]`'s `.d.tl` in this crate from
+// the Rust source before checking against it (the same scan `htl dts` runs), so it does
+// not depend on `#[host_module]` having already expanded above it — in this file, or,
+// when the two are in different files, in `mod` order (#429).
 const MAIN: &str = include_tl!("scripts/main.tl");
 const UTIL: &[u8] = include_tl_bytes!("scripts/util.tl");
 
