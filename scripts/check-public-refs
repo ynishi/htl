@@ -23,7 +23,7 @@ Output is one line per finding, `path:line: <kind>: <reference>`, nothing
 when there is nothing to report, and the exit code is 1 if any finding was
 printed, 0 otherwise.
 
-Three kinds of finding, and nothing else — a rule that flagged every
+Four kinds of finding, and nothing else — a rule that flagged every
 repo-relative path that does not exist was tried and rejected: it reported
 941 lines on `main`, because htl's own docs name paths in the *reader's*
 project (`src/main.tl`, `types/`, `mise.toml`), which this repository does
@@ -77,10 +77,22 @@ not have and is not expected to.
   their Teal in a directory also named scripts, and this repository's own
   doc comments naming the reader's `scripts/` layout directory
   (crates/htl-core/src/project.rs, crates/htl/src/lib.rs).
+- **outside-link**: a tracked symlink whose target, resolved lexically
+  against the link's own directory (`.` and `..` folded, nothing on disk
+  consulted), is not under the repository root: `../workspace/draft.md`
+  from the root, `../../etc/hosts`, or an absolute path that is not into
+  this checkout. Such a link materialises to a path beside the author's
+  checkout, which exists there and nowhere else. A relative target that
+  stays inside (`docs/x -> ../README.md`) is not reported. When the target
+  is a machine-path as well (`/Users/<name>/private`), that is the more
+  specific diagnosis and this kind stays quiet for it. Symlinks only: a
+  `../` in prose has no directory to resolve against, and htl's docs name
+  paths in the reader's own project on purpose.
 
 A tracked symlink is checked as the target string git stores for it (what
 `git cat-file -p` prints for a mode 120000 entry), as one line under the
-three rules above, and is never followed: a reader gets that string, not
+first three rules above and then as a target under the fourth, and is
+never followed: a reader gets that string, not
 whatever it resolves to here, so an absolute target into a home directory is
 a machine-path finding whether or not it exists on this machine, and a link
 to a file outside the repository does not have that file's lines reported
@@ -89,6 +101,7 @@ under the link's name.
 from __future__ import annotations
 import os
 import pathlib
+import posixpath
 import re
 import subprocess
 import sys
@@ -237,6 +250,23 @@ def missing_tool_findings(line: str, root: str, recipes: set[str], files: list[s
     return findings
 
 
+def outside_link_findings(target: str, link_rel: str, root: str) -> list[str]:
+    """`target` is a symlink's target string, `link_rel` the link's path
+    relative to the repository root (posix). Lexical only: `.` and `..` are
+    folded, nothing on disk is consulted, and a different spelling of the
+    root (through a symlinked parent) is not recognised as the root."""
+    if machine_path_findings(target):
+        return []  # one link, one diagnosis: machine-path is the more specific one
+    if target.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", target):
+        norm = posixpath.normpath(target.replace("\\", "/"))
+        root_posix = root.replace("\\", "/").rstrip("/")
+        inside = norm == root_posix or norm.startswith(root_posix + "/")
+    else:
+        norm = posixpath.normpath(posixpath.join(posixpath.dirname(link_rel), target))
+        inside = norm != ".." and not norm.startswith("../")
+    return [] if inside else [target]
+
+
 def scan_file(path: pathlib.Path, display_path: str, private_re, root, recipes, files) -> list[str]:
     out = []
     if path.is_symlink():
@@ -264,6 +294,10 @@ def scan_file(path: pathlib.Path, display_path: str, private_re, root, recipes, 
             out.append(f"{display_path}:{lineno}: machine-path: {ref}")
         for ref in missing_tool_findings(line, root, recipes, files):
             out.append(f"{display_path}:{lineno}: missing-tool: {ref}")
+    if path.is_symlink():
+        link_rel = os.path.relpath(os.path.abspath(path), root).replace(os.sep, "/")
+        for ref in outside_link_findings(text, link_rel, root):
+            out.append(f"{display_path}:1: outside-link: {ref}")
     return out
 
 
