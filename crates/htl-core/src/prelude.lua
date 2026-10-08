@@ -330,8 +330,10 @@ end
 -- and the same fields in declaration order carrying the type each is written with.
 -- A source scan: the record's fields are the `name: type` lines between the declaration
 -- and the `end` that closes it, which is the first `end` indented no deeper than the
--- declaration itself. The map answers "is this one marked `---@optional`"; the order and
--- the type are what a fix spells at a construction site, and neither survives the
+-- declaration itself -- the scan starts at the line after `y`, so a field written on the
+-- declaration's own line is not among them. The map answers "is this one marked
+-- `---@optional`"; the order and the type are what a fix spells at a construction site,
+-- and neither survives the
 -- checker's own view of the record (`t.fields` is a hash, and a type there is a resolved
 -- object rather than the words the author wrote).
 local function field_lines(lines, y)
@@ -2199,6 +2201,89 @@ local function declared_globals(result)
    return names
 end
 
+-- The project's own census of its nine markers: what `htl adopt` (#304) counts to say how
+-- much of a project already writes a marker before offering to add one more broadly. One
+-- entry per (marker, declaration) -- a declaration carrying two markers gives two entries,
+-- and a marker already counted at a line is not read again from it (deduped by
+-- `(marker, y, name)` before the sort) -- as
+-- `{ marker = <name>, kind = "record" | "field" | "function", y = <line>,
+-- name = <declaration name> }`, ordered by `y`, then `marker`, then `name`, then `kind`
+-- (`table.sort` is unstable, and the first two alone still tie when a marker line covers
+-- two declarations on one line).
+--
+-- A record declaration (`struct`, `sealed`, `extensible`, `contract`) is a `local_type` /
+-- `global_type` whose `newtype.def.typename` is `"record"` -- unwrapped of a `typedecl`
+-- (`.def`) and a generic's wrapper (`local record G<T>`, `.t`) first -- found wherever a
+-- `local_type` / `global_type` statement appears, and nested -- a field whose own type is
+-- a record is a declaration too, the way
+-- `record_meta_walk` (lint.lua, `class-record`) descends into one. A function declaration
+-- (`nilable`, `async`, `noyield`) is every `local_function` / `global_function` /
+-- `record_function`, found the way `H.executable_ranges` below does, and additionally a
+-- record field whose own type is a function *and* is not one of those -- a function
+-- declared as `function M.f()` / `function M:f()` is a `record_function` too, already
+-- counted by the walk, and the checker marks the field it adds for one with
+-- `is_record_function` (tl.lua) precisely so this census does not have to tell the two
+-- apart by scanning the body: it reads the flag instead (the declaration-range rule below
+-- already puts such a field outside it on its own -- the function sits after the record's
+-- own `end` -- so the flag is redundant with that check, and kept anyway because it says
+-- the same thing without relying on a line comparison to say it).
+--
+-- A record field (`optional`, `required`) is read at its own type's position -- the
+-- parser stamps every type node with the line of the syntax that produced it (`a_type`,
+-- tl.lua), so a field's type carries the field's own line (`record_marker_sites`'s own
+-- comment on `fy` says which of a field's type and its unwrapped inner type that line is
+-- read from, and why one inline shape needs the inner one) -- but it is counted only when
+-- that position is the record's *own* declaration, which takes all of:
+--
+--   1. its type's file (`inner.f or ft.f`) is the file being checked -- `same_file`, the
+--      way `sealed_spec` above compares a declaring file to the one being read;
+--   2. its line falls inside the range of the `local_type` / `global_type` statement
+--      that declares it, at any statement level, whose range nested records inherit: the
+--      `newtype` node's `y` to its `yend`, which `verify_end` (tl.lua) stamps on it for
+--      `local record X ... end`, `global record X ... end` and `local type X = record
+--      ... end` alike. A nested record's own fields are held to the range of the
+--      declaring statement that holds them, carried down through the recursion rather
+--      than recomputed at each nesting level -- a nested record is itself a field of the
+--      body that holds it, and this rule applies to it as a field too;
+--   3. it is not a same-file interface's field copied in by `expand_interfaces`
+--      (tl.lua) -- `add_interface_fields` keeps the interface's own `f`/`y`/`x` on the
+--      copy, so a field whose `(f, y, x)` matches the same-named field of an interface in
+--      `t.interface_list` is that interface's declaration, not this record's. Resolved the
+--      way `collect_interfaces` reaches it: a nominal entry's `.resolved` (or
+--      `.found.def`) is the interface's own checked type, cached by the time a check has
+--      run. Rule 2 alone already excludes an interface declared as its own separate
+--      statement -- its field sits outside the implementing record's range -- this rule
+--      is for the one shape that is not: an interface declared *inside* the same
+--      declaring statement's body as the record that `is` it, where both share one range.
+--
+--   4. A field whose name and type disagree on which line they are read from -- `multi:`
+--      on one line, its type (and any trailing marker) on the next -- is not counted
+--      either: `struct_spec` reads a field's marker from its *name*'s line (`field_lines`,
+--      above), this would read it from the type's, and a marker only one of the two would
+--      see is not one the census can claim a lint acts on. `field_lines(lines, y)`, read
+--      once per record (`y` is the record's own line, the same one `field_lines` is
+--      already keyed by), answers which line a field's name is on; a field this census
+--      would otherwise count, whose name's line disagrees with it or whose name
+--      `field_lines` has no line for at all -- a quoted key (`["quoted key"]: integer`),
+--      or a field written on the record's own declaration line (`field_lines` reads from
+--      the line after it) -- is dropped either way: `struct_spec` cannot read a marker on
+--      a field it cannot find a `name:` line for, so the census does not claim one either.
+-- `field_lines` scans every `name:` line in the record's body, nested bodies included, and
+-- keeps the last match -- so a field whose name a later *nested* record's own field of the
+-- same name shadows is held to that nested field's line instead of its own, and is dropped
+-- by the same check: not a limitation of this census, but one it inherits from the
+-- function `struct_spec` reads too. Two shapes beside these are never counted at all, because
+-- no lint reads a marker on either: a metamethod (`meta_fields`, `metamethod __call: ...`)
+-- and a poly field (`typename == "poly"`, two declarations of one name as `f:
+-- function(...)`, where which of the two a marker belongs to is not decidable from the
+-- type alone).
+--
+-- Defined below, after `FN_KINDS` and `function_name`, which it shares with
+-- `H.executable_ranges`; forward-declared here so `H.check` can call it. `.d.tl` gives an
+-- empty census: `htl dts` writes `---@async` / `---@noyield` into a declaration itself,
+-- and this counts what the project's own authors wrote.
+local marker_sites
+
 -- Checked-module store, shared by every fresh env in this state. A fresh env per file
 -- exists so that module *names* resolve under that file's own search path and never
 -- leak from another directory; the store keeps that guarantee by seeding an env only
@@ -2446,10 +2531,16 @@ function H.check(filename, env, opts)
    -- The text the lints read, kept on the result so `H.gen` reuses it for comment lines
    -- instead of reading the file a second time.
    local src
+   -- `htl adopt`'s input (#304); empty when the lint pass below is skipped (there is no
+   -- `src` to read it from then) and for a `.d.tl` (`marker_sites` excludes it itself).
+   local markers = {}
    if opts.lints ~= false and result.ast and #(result.syntax_errors or {}) == 0 then
       local fd = io.open(filename, "rb")
       if fd then src = fd:read("a"); fd:close() end
       if src then
+         local lines = {}
+         for l in (src .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = l end
+         markers = marker_sites(result, filename, lines)
          local t1 = os.clock()
          local enums = checked_enums(result, env)
          prof("enums", filename, t1)
@@ -2517,7 +2608,7 @@ function H.check(filename, env, opts)
    return { ok = #errors == 0, errors = errors, error_fixes = error_fixes, warnings = warnings, deps = deps,
       lints = lints, lint_fixes = lint_fixes, requires = requires, dependency_errors = dep_errors,
       error_items = error_items, warning_items = warning_items, lint_items = lint_items,
-      global_sites = global_sites, closure_requires = closure_requires,
+      global_sites = global_sites, closure_requires = closure_requires, markers = markers,
       syntax_errors = #(result.syntax_errors or {}), result = result, src = src }
 end
 
@@ -2941,6 +3032,238 @@ local function function_name(n)
    local owner = owner_name(n.fn_owner)
    if not owner then return base end
    return owner .. (n.is_method and ":" or ".") .. base
+end
+
+local RECORD_MARKERS = { "struct", "sealed", "extensible", "contract" }
+local FIELD_MARKERS = { "optional", "required" }
+local FUNCTION_MARKERS = { "nilable", "async", "noyield" }
+
+-- The field's own position, unwrapped the same way `record_marker_sites` unwraps `t`
+-- itself (a `typedecl`'s `.def`, then a generic's `.t`) -- see its own comment on `fy` for
+-- why the inner type's position, not the field's own, is the one that is read. `nil` when
+-- `ft` is not a table or carries no line at all (defensive, as `fy == nil` is there).
+local function field_pos(ft)
+   if type(ft) ~= "table" then return nil end
+   local inner = ft.def or ft
+   if inner.typename == "generic" then inner = inner.t end
+   local fy = inner.y or ft.y
+   if not fy then return nil end
+   return { f = inner.f or ft.f, y = fy, x = inner.x or ft.x }
+end
+
+-- Every field position an interface in `t.interface_list` declares, keyed by name --
+-- `expand_interfaces` (tl.lua) copies these straight into `t.fields`, keeping the
+-- interface's own `f`/`y`/`x` on the copy (`add_interface_fields`), so a field of `t`
+-- whose position is in here is that interface's declaration, not `t`'s own. Resolved the
+-- way `collect_interfaces` reaches an interface from a nominal in the list: `.resolved` --
+-- or, failing that, `.found.def` -- is the interface's own checked type, both set once the
+-- checker has resolved the nominal, which by the time a file is done checking it always
+-- has. An entry of `interface_list` that is not a nominal (an array interface's element
+-- type) contributes no named field and is skipped.
+local function interface_field_positions(t)
+   local positions = {}
+   for _, iface in ipairs(t.interface_list or {}) do
+      if iface.typename == "nominal" then
+         local ri = iface.resolved or (iface.found and iface.found.def)
+         if type(ri) == "table" then
+            for fname, ift in pairs(ri.fields or {}) do
+               local p = field_pos(ift)
+               if p then
+                  positions[fname] = positions[fname] or {}
+                  positions[fname][#positions[fname] + 1] = p
+               end
+            end
+         end
+      end
+   end
+   return positions
+end
+
+-- Whether `p` (the field's own position in `t`) is one of `positions[fname]` -- an
+-- interface's copy, by `(f, y, x)`, the one shape a line-range check cannot tell apart
+-- from the record's own field (an interface declared inside the same declaring
+-- statement's body as the record that `is` it).
+local function copied_from_interface(positions, fname, p)
+   for _, ip in ipairs(positions[fname] or {}) do
+      if ip.f == p.f and ip.y == p.y and ip.x == p.x then return true end
+   end
+   return false
+end
+
+-- The record and field entries of `marker_sites`, for the record type `t` (a `def`,
+-- already unwrapped of its `typedecl`, or still wrapped -- both are handed the same way
+-- the nested fields below are) declared at `name`, whose own node (for the `node.y`
+-- fallback) is `node`. `filename` is the file being checked, and `decl_y`/`decl_yend` are
+-- the `y`/`yend` of the `newtype` node of the `local_type` / `global_type` statement that
+-- declares it, at any statement level, whose range nested records inherit -- carried down
+-- through the recursion unchanged, never recomputed from a nested `t`'s own position, so a
+-- field is held to the declaring statement's range and not to whichever nesting level
+-- happens to hold it. Recurses into a field whose own type
+-- is itself a record, the way `record_meta_walk` (lint.lua) does for `class-record`;
+-- `seen` is shared across the whole file the way its `seen` is shared across one `walk`.
+local function record_marker_sites(t, name, node, lines, sites, seen, depth, filename, decl_y, decl_yend)
+   if type(t) ~= "table" or seen[t] or depth > 12 then return end
+   seen[t] = true
+   if t.def then
+      record_marker_sites(t.def, name, node, lines, sites, seen, depth + 1, filename, decl_y, decl_yend)
+      return
+   end
+   -- `local record G<T>` wraps the record in a "generic" type (`t.t` the record itself,
+   -- `t.typeargs` the `<T>` list) the same way a `typedecl` wraps one in `t.def` above;
+   -- unwrap it before reading `t.typename`, or it reads `"generic"`, never `"record"`, and
+   -- a generic record's own markers go uncounted.
+   if t.typename == "generic" then
+      record_marker_sites(t.t, name, node, lines, sites, seen, depth + 1, filename, decl_y, decl_yend)
+      return
+   end
+   if t.typename ~= "record" then return end
+   local y = t.y or node.y
+   for _, marker in ipairs(RECORD_MARKERS) do
+      if marker_on(lines, y, marker) then
+         sites[#sites + 1] = { marker = marker, kind = "record", y = y, name = name }
+      end
+   end
+   -- `field_lines(lines, y)` keyed by name, read once for every field below rather than
+   -- per field: `struct_spec` reads a field's marker from its *name*'s line, and a field
+   -- whose name and type are not on the same line (`multi:` on one, its type on the next)
+   -- is read from a different line by this function than by that one. Counting it here
+   -- anyway would claim a marker `struct_spec` cannot see.
+   local name_lines = field_lines(lines, y)
+   local iface_positions = interface_field_positions(t)
+   for fname, ft in pairs(t.fields or {}) do
+      if type(ft) == "table" then
+         -- The same unwrap as `t` above (a `typedecl`'s `.def`, then a generic's `.t`):
+         -- a nested `record Box<T>` or a `function<T>(T)` field is wrapped the same way
+         -- the record itself can be, so `ft.typename` is read after unwrapping, not
+         -- before -- reading it unwrapped is what finds both.
+         local inner = ft.def or ft
+         if inner.typename == "generic" then inner = inner.t end
+         -- `inner`'s own position, not `ft`'s: for a plain field, a nested `record` / a
+         -- `type X = record`, or a `function M.f()` mirror, the two agree (both are
+         -- stamped at parse time, at the position the field's own syntax starts on). They
+         -- disagree for an inline `function<T>(...)` field type: `parse_function_type`
+         -- (tl.lua) wraps it in a `"generic"` whose own `y` the parser stamps *after*
+         -- parsing the whole signature, from whatever token happens to follow it in the
+         -- stream (the next field's name, or the record's closing `end` when the marker's
+         -- comment is the last thing on the line) -- not from where the field starts.
+         -- `inner.y`, read after unwrapping that `"generic"`, is the `function` node's own
+         -- `y`, stamped at the front of `parse_function_type` before any of that -- the
+         -- field's own line, every time. Every field type a checked body hands this
+         -- function carries one or the other; the `fy == nil` guard below is defensive
+         -- rather than reachable in practice.
+         local fy = inner.y or ft.y
+         if fy then
+            local ff = inner.f or ft.f
+            local fx = inner.x or ft.x
+            local name_line = name_lines[fname]
+            -- The record's own declaration: its type's file is the one being checked, its
+            -- line is inside the declaring statement's own range, and it is not a
+            -- same-file interface's field copied in. A nested record or a `function M.f()`
+            -- mirror has no `name:` line of its own (`field_lines` matches a bare
+            -- identifier before a colon, not a `record` / `type` keyword), so `name_line`
+            -- is `nil` for those and this alone does not exclude them -- the field-marker
+            -- check below is the one that also requires the name's line, since those two
+            -- shapes are not read through it. See the doc comment above `local
+            -- marker_sites` for why each of these is needed.
+            local own = same_file(ff, filename)
+               and decl_y ~= nil and decl_yend ~= nil and decl_y <= fy and fy <= decl_yend
+               and not copied_from_interface(iface_positions, fname, { f = ff, y = fy, x = fx })
+               and not (name_line and name_line ~= fy)
+            if own then
+               -- A quoted key (`["quoted key"]: ...`) or any other field `field_lines` has
+               -- no `name:` line for at all (`name_line == nil`) is not read by
+               -- `struct_spec` either, so the field-marker loop -- the one that claims a
+               -- marker a lint reads this way -- requires the name's line to agree, not
+               -- merely not disagree.
+               if name_line == fy then
+                  for _, marker in ipairs(FIELD_MARKERS) do
+                     if marker_on(lines, fy, marker) then
+                        sites[#sites + 1] = { marker = marker, kind = "field", y = fy, name = name .. "." .. fname }
+                     end
+                  end
+               end
+               if inner.typename == "record" then
+                  record_marker_sites(ft, name .. "." .. fname, node, lines, sites, seen, depth + 1, filename, decl_y, decl_yend)
+               elseif inner.typename == "function" and not inner.is_record_function then
+                  -- `is_record_function` (tl.lua, set where a `function M.f()` / `function
+                  -- M:f()` statement builds the field it adds to `M`): that declaration is
+                  -- a `record_function`, already counted once by the AST walk in
+                  -- `marker_sites` below, as `kind = "function"`. A function-typed field
+                  -- the body itself declares (`cb: function(string)`) carries no such
+                  -- flag, and is read here as a field instead.
+                  for _, marker in ipairs(FUNCTION_MARKERS) do
+                     if marker_on(lines, fy, marker) then
+                        sites[#sites + 1] = { marker = marker, kind = "field", y = fy, name = name .. "." .. fname }
+                     end
+                  end
+               end
+            end
+         end
+      end
+   end
+end
+
+-- See the doc comment above its forward declaration (`local marker_sites`, a few hundred
+-- lines above `H.check`). A plain pre-order walk of the file's own AST -- `result.ast`,
+-- already parsed for `H.check` -- skipping into a node's type fields exactly where
+-- `H.executable_ranges` and `lint.lua`'s `walk` do (`newtype` among them: a record's body
+-- is read by `record_marker_sites` instead, once, from the declaration that holds it).
+function marker_sites(result, filename, lines)
+   local sites = {}
+   if tostring(filename):sub(-5) == ".d.tl" or not lines then return sites end
+   local seen_nodes, seen_types = {}, {}
+   local function go(n)
+      if type(n) ~= "table" or seen_nodes[n] then return end
+      seen_nodes[n] = true
+      if type(n.kind) == "string" then
+         if FN_KINDS[n.kind] and n.y then
+            local name = function_name(n)
+            if name then
+               for _, marker in ipairs(FUNCTION_MARKERS) do
+                  if marker_on(lines, n.y, marker) then
+                     sites[#sites + 1] = { marker = marker, kind = "function", y = n.y, name = name }
+                  end
+               end
+            end
+         elseif (n.kind == "local_type" or n.kind == "global_type") and n.value and n.value.newtype then
+            record_marker_sites(
+               n.value.newtype, n.var and n.var.tk or "?", n, lines, sites, seen_types, 0,
+               filename, n.value.y, n.value.yend
+            )
+         end
+      end
+      for i = 1, #n do
+         if type(n[i]) == "table" then go(n[i]) end
+      end
+      for k, v in pairs(n) do
+         if type(k) ~= "number" and k ~= "if_parent" and k ~= "type" and k ~= "newtype"
+            and k ~= "decltuple" and k ~= "expected" and type(v) == "table" then
+            go(v)
+         end
+      end
+   end
+   for _, node in ipairs(result.ast or {}) do go(node) end
+   -- Deduped on `(marker, y, name)`: one marker on one line counts once per declaration,
+   -- regardless of how many of the branches above a given site could otherwise be reached
+   -- through.
+   local seen_site, deduped = {}, {}
+   for _, s in ipairs(sites) do
+      local key = s.marker .. "\0" .. s.y .. "\0" .. s.name
+      if not seen_site[key] then
+         seen_site[key] = true
+         deduped[#deduped + 1] = s
+      end
+   end
+   -- `table.sort` is unstable, and `(y, marker)` ties happen -- two declarations on one
+   -- line under one marker line, say -- so the order within a tie is sorted too, by name
+   -- then kind, rather than left to however this run happened to walk the AST.
+   table.sort(deduped, function(a, b)
+      if a.y ~= b.y then return a.y < b.y end
+      if a.marker ~= b.marker then return a.marker < b.marker end
+      if a.name ~= b.name then return a.name < b.name end
+      return a.kind < b.kind
+   end)
+   return deduped
 end
 
 function H.executable_ranges(filename)

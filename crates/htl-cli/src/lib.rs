@@ -12,10 +12,10 @@ pub mod report;
 mod scaffold;
 
 /// Output format of every command that has `--format`. One enum, so its help must be
-/// true of all of them: `check` / `test` / `fix` / `unused` print their JSON document on
-/// stdout and nothing on stderr, and their text form on stderr only, so the two never
-/// mix; `cache status` / `bundle info` / `resolve` are reports rather than runs, so both
-/// of their forms go to stdout. The exit code is the same in either form.
+/// true of all of them: `check` / `test` / `fix` / `unused` / `adopt` print their JSON
+/// document on stdout and nothing on stderr, and their text form on stderr only, so the
+/// two never mix; `cache status` / `bundle info` / `resolve` are reports rather than runs,
+/// so both of their forms go to stdout. The exit code is the same in either form.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
 enum Format {
     /// Human-readable lines
@@ -367,7 +367,7 @@ Examples:
     ///
     /// Each declaration is reported as `wrote`, `unchanged`, or `not written`, one line
     /// each. The commands that generate before they work (`check` / `run` / `test` /
-    /// `build` / `fix` / `unused` / `resolve` / `gen`) do the same job first and print only
+    /// `build` / `fix` / `unused` / `adopt` / `resolve` / `gen`) do the same job first and print only
     /// what moved, prefixed `dts:` — `dts: wrote …`, `dts: not written: …`, `dts: left in
     /// place: …` — and never an `unchanged` line; a dependency's declarations land under
     /// `types/<crate>/` from every one of them. The exit code is about `not written` and
@@ -565,6 +565,40 @@ Examples:
         #[arg(long)]
         exit_non_zero_on_unused: bool,
         /// Build the graph from a fresh check even if a cached one is available, and
+        /// store none
+        #[arg(long)]
+        no_cache: bool,
+        /// Say why the cache was not used, and what this run did with it
+        #[arg(long)]
+        explain_cache: bool,
+    },
+    /// Report how many declarations carry each of htl's nine markers, and where
+    ///
+    /// `applicable` is how many declarations a lint has found the evidence to call
+    /// candidates for a marker — none does yet, so every row's `applicable` is empty (`-`)
+    /// in this release, not `0`: a feature with no evidence counted is a different claim
+    /// from a feature nothing is applicable to, and this command does not guess between
+    /// them. It is a report, not a gate: the exit code is always 0. README, "Adoption":
+    /// https://github.com/ynishi/htl#adoption-htl-adopt
+    #[command(after_long_help = "\
+Examples:
+  htl adopt                      which of htl's nine markers this project writes, and how much
+  htl adopt --detail             the same, plus every marked declaration's file, line and name
+  htl adopt --format json        the same report as one JSON document
+")]
+    Adopt {
+        /// What to report on (default: the working directory). The walk behind the
+        /// census is always the whole project, so the check resolves and replays as
+        /// usual; the counts are of the files under the paths given here.
+        paths: Vec<PathBuf>,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+        /// List every marked declaration under the table, file:line and name, grouped by
+        /// feature; the plain form prints the table alone
+        #[arg(long)]
+        detail: bool,
+        /// Build the census from a fresh check even if a cached one is available, and
         /// store none
         #[arg(long)]
         no_cache: bool,
@@ -848,6 +882,21 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
             UnusedFlags {
                 json: format == Format::Json,
                 fail_on_unused: exit_non_zero_on_unused,
+                use_cache: !no_cache,
+                explain: explain_cache,
+            },
+        ),
+        Cmd::Adopt {
+            paths,
+            format,
+            detail,
+            no_cache,
+            explain_cache,
+        } => cmd_adopt(
+            &paths,
+            AdoptFlags {
+                json: format == Format::Json,
+                detail,
                 use_cache: !no_cache,
                 explain: explain_cache,
             },
@@ -1541,6 +1590,16 @@ struct UnusedFlags {
     /// Exit 1 when anything was reported. Off by default: "unused" is a question about
     /// intent, so CI opts in rather than out.
     fail_on_unused: bool,
+    use_cache: bool,
+    explain: bool,
+}
+
+/// What `htl adopt` was asked for, beyond the paths.
+struct AdoptFlags {
+    json: bool,
+    /// List every marked declaration under the table; the plain form prints the table
+    /// alone.
+    detail: bool,
     use_cache: bool,
     explain: bool,
 }
@@ -2611,6 +2670,127 @@ fn cmd_unused(paths: &[PathBuf], flags: UnusedFlags) -> Result<ExitCode> {
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// Report how many declarations carry each of htl's nine markers, and where.
+///
+/// The census is the check's — `htl check` already read every marker by position while
+/// checking a file, exactly as the lints it drives do — so this is that census folded into
+/// the nine features (`htl::adopt`). What is left here is the flags, the table, and the
+/// exit code, which never moves: a report, not a gate.
+fn cmd_adopt(paths: &[PathBuf], flags: AdoptFlags) -> Result<ExitCode> {
+    let AdoptFlags {
+        json,
+        detail,
+        use_cache,
+        explain,
+    } = flags;
+    let paths = if paths.is_empty() {
+        vec![PathBuf::from(".")]
+    } else {
+        paths.to_vec()
+    };
+    let cfg = load_config(&paths[0])?;
+    // A `.d.tl` written from Rust source is an input to the check the census comes from,
+    // exactly as it is for `htl check` and `htl unused`.
+    auto_dts(&paths[0])?;
+    let model = project::model_of(&cfg, &paths[0])?;
+    let rep = htl::adopt::adopt(&htl::adopt::Options {
+        paths: &paths,
+        config: &cfg,
+        model: model.as_ref(),
+        cache: project::cache_options(use_cache, None, &cfg, explain),
+    })?;
+    if json {
+        report::emit(&rep)?;
+    } else {
+        print_adopt(&rep, detail);
+    }
+    // Always 0: `htl adopt` reports what the project has adopted, and does not judge it
+    // (the module doc says why — a threshold invites marking records to move the number).
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The marker column's width, in both the table and `--detail`'s lines: the longest of
+/// htl's nine, `---@extensible`, plus two spaces.
+fn adopt_marker_width() -> usize {
+    htl::adopt::FEATURES
+        .iter()
+        .map(|m| format!("---@{m}").len())
+        .max()
+        .unwrap_or(0)
+        + 2
+}
+
+/// The table, `--detail`'s lines when asked for, and the summary line — the text form of
+/// an [`htl::adopt::Report`].
+fn print_adopt(rep: &htl::adopt::Report, detail: bool) {
+    let width = adopt_marker_width();
+    eprintln!(
+        "{:<width$} {:>4}  {:>10}",
+        "feature",
+        "used",
+        "applicable",
+        width = width
+    );
+    for f in &rep.features {
+        let applicable = match f.applicable {
+            Some(n) => n.to_string(),
+            None => "-".to_string(),
+        };
+        eprintln!(
+            "{:<width$} {:>4}  {:>10}",
+            format!("---@{}", f.marker),
+            f.used,
+            applicable,
+            width = width
+        );
+    }
+    if detail {
+        // Padded to the longest `file:line` of every site about to be printed, not per
+        // feature: one column, so the names line up down the whole list.
+        let line_width = rep
+            .features
+            .iter()
+            .flat_map(|f| f.sites.iter())
+            .map(|s| format!("{}:{}", s.file.display(), s.line).len())
+            .max()
+            .unwrap_or(0);
+        for f in &rep.features {
+            for s in &f.sites {
+                eprintln!(
+                    "  {:<width$}{:<line_width$}  {}",
+                    format!("---@{}", f.marker),
+                    format!("{}:{}", s.file.display(), s.line),
+                    s.name,
+                    width = width,
+                    line_width = line_width
+                );
+            }
+        }
+    }
+    let s = &rep.summary;
+    if s.check_errors > 0 {
+        eprintln!(
+            "htl adopt: {} error(s) in the project's check (htl check says which); a file \
+             with a syntax error contributes no markers",
+            s.check_errors
+        );
+    }
+    if s.markers == 0 {
+        eprintln!(
+            "htl adopt: {} of {} features used, no markers",
+            s.used, s.features
+        );
+    } else {
+        eprintln!(
+            "htl adopt: {} of {} features used, {} in {}",
+            s.used,
+            s.features,
+            count(s.markers, "marker", "markers"),
+            count(s.files, "file", "files"),
+        );
+    }
 }
 
 /// Say which file a module name resolves to, and what that hides.
