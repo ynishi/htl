@@ -807,6 +807,7 @@ pub fn check_one<O: Output>(
         requires: cache::requires_json(&c),
         global_sites: cache::global_sites_json(&c),
         markers: cache::marker_sites_json(&c),
+        struct_sites: cache::struct_sites_json(&c),
         closure_requires: cache::closure_requires_json(&c),
         // `htl check` has no use for generated Lua, nor for reading a `CheckInfo` back —
         // it replays the diagnostics above straight into the sink. `htl test` fills both in.
@@ -1126,6 +1127,11 @@ pub struct Report {
     /// is: filled from the entry on a hit and from the fresh check on a miss, so the
     /// adoption report (`htl adopt`, #304) is whole whether the run checked or replayed.
     pub markers: Vec<(PathBuf, Vec<cache::MarkerSiteJson>)>,
+    /// The construction-site census of every file the walk visits, as
+    /// [`markers`](Self::markers) is: filled from the entry on a hit and from the fresh
+    /// check on a miss, so `htl adopt`'s `---@struct` row (#304) is whole whether the
+    /// run checked or replayed.
+    pub struct_sites: Vec<(PathBuf, Vec<cache::StructSiteJson>)>,
 }
 
 impl Report {
@@ -1232,6 +1238,8 @@ pub fn check<O: Output>(
     let mut infos: Vec<(PathBuf, CheckInfo)> = Vec::with_capacity(files.len());
     let mut requires: Vec<(PathBuf, Vec<cache::RequireJson>)> = Vec::with_capacity(files.len());
     let mut markers: Vec<(PathBuf, Vec<cache::MarkerSiteJson>)> = Vec::with_capacity(files.len());
+    let mut struct_sites: Vec<(PathBuf, Vec<cache::StructSiteJson>)> =
+        Vec::with_capacity(files.len());
     let mut modules: Vec<cache::Module> = Vec::with_capacity(files.len());
     for ((f, key), hit) in files.iter().zip(&keys).zip(hits) {
         let m = match hit {
@@ -1257,6 +1265,7 @@ pub fn check<O: Output>(
         n_lint += m.lints;
         requires.push((f.clone(), m.requires.clone()));
         markers.push((f.clone(), m.markers.clone()));
+        struct_sites.push((f.clone(), m.struct_sites.clone()));
         infos.push((f.clone(), m.requires_only()));
         modules.push(m);
     }
@@ -1296,6 +1305,7 @@ pub fn check<O: Output>(
         replayed,
         requires,
         markers,
+        struct_sites,
     })
 }
 
@@ -1357,6 +1367,46 @@ pub fn project_findings<O: Output>(
     // count.
     if w.lints.on("global-redeclaration") {
         for d in w.lints.keep(crate::global_redeclarations(infos)) {
+            sink.diagnostic(&d);
+            out.lints += 1;
+        }
+    }
+    // A record declared among the files just checked, built whole at every one of its
+    // construction sites, and carrying no `---@struct` — a census of the sites
+    // `struct-fields` already walks (#304), not a prediction: marking the record this
+    // names cannot make `struct-fields` say anything new on the spot.
+    if w.lints.on("unmarked-struct") {
+        // `unmarked_structs` takes a file paired with its own census, not a
+        // `CheckInfo`, so that `htl adopt` (`crate::adopt::adopt`) can call the same
+        // function over the census it reads back through the cache instead of a second
+        // copy of the four conditions (#304).
+        let struct_sites: Vec<(PathBuf, Vec<crate::StructSite>)> = infos
+            .iter()
+            .map(|(f, ci)| (f.clone(), ci.struct_sites.clone()))
+            .collect();
+        let found: Vec<Diagnostic> = crate::unmarked_structs(&struct_sites)
+            .into_iter()
+            .map(|c| {
+                let sites = if c.sites == 1 {
+                    "at its one construction site".to_string()
+                } else {
+                    format!("at all {} construction sites", c.sites)
+                };
+                Diagnostic::new(
+                    Severity::Lint,
+                    display_path(&c.file),
+                    c.line,
+                    1,
+                    format!(
+                        "{} is built whole {sites} and carries no ---@struct (mark it, \
+                         and struct-fields holds every site to it)",
+                        c.name
+                    ),
+                    Some("unmarked-struct"),
+                )
+            })
+            .collect();
+        for d in w.lints.keep(found) {
             sink.diagnostic(&d);
             out.lints += 1;
         }

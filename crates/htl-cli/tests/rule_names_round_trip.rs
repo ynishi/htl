@@ -277,9 +277,11 @@ fn the_listing_accounts_for_every_rule() {
             "htlx-available",
             "no-any",
             "explicit-number",
-            "class-record"
+            "class-record",
+            "unmarked-struct"
         ],
-        "the three opinions, the flow rule and the library one, and nothing else, is what a project does not get by default"
+        "the three opinions, the flow rule, the library one and the record free to stay \
+         unmarked, and nothing else, is what a project does not get by default"
     );
     let deny: Vec<&str> = lines
         .iter()
@@ -318,7 +320,7 @@ fn the_listing_accounts_for_every_rule() {
     ] {
         assert!(listed.iter().any(|l| l == rule), "{rule} not in {listed:?}");
     }
-    assert_eq!(listed.len(), 34, "{listed:?}");
+    assert_eq!(listed.len(), 35, "{listed:?}");
 }
 
 /// The listing and a spec take the same names, and neither takes the two that `htl fix`

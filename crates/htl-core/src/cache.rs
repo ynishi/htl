@@ -109,12 +109,18 @@ use crate::{CheckInfo, DependencyError, Fix, RequireSite};
 /// field, and a replay of one would give `htl adopt` nothing for a file the run did not
 /// check.
 ///
+/// 13: an entry now also carries the module's construction-site census
+/// ([`Module::struct_sites`], [`CheckInfoJson::struct_sites`]) — `unmarked-struct`'s input
+/// and `htl adopt`'s `---@struct` row (#304). An entry of 12 has no such field, and
+/// `unmarked_structs` reads every file of the walk, replayed ones included, the same
+/// reason `markers` and `global_sites` carry through a replay.
+///
 /// A change to the Lua a `module` entry carries needs no bump: the stamp's `checker` is a
 /// hash of `prelude.lua` among the rest ([`crate::checker_identity`]), so a generator that
 /// emits different text is a different checker and every warm entry misses on its own.
 /// What this number is for is a change to the shape of what is stored — a field, a key, a
 /// meaning — which the hash cannot see.
-const FORMAT: u32 = 12;
+const FORMAT: u32 = 13;
 
 /// Where the store lives under the project root. Generated, and `htl init` puts `.htl/` in
 /// `.gitignore` — one line for the cache and the installed deps beside it, both
@@ -419,6 +425,13 @@ pub struct Module {
     /// existed.
     #[serde(default)]
     pub markers: Vec<MarkerSiteJson>,
+    /// The construction-site census the check found in the file
+    /// ([`CheckInfo::struct_sites`]), kept for the same reason `markers` is: a run
+    /// replayed from the cache still feeds `unmarked_structs` and `htl adopt`'s
+    /// `---@struct` row (#304), and the module that carries them is all a replay has.
+    /// Absent in entries written before the field existed.
+    #[serde(default)]
+    pub struct_sites: Vec<StructSiteJson>,
     /// The names each member of the require closure required — its require sites, resolved
     /// or not ([`CheckInfo::closure_requires`]): the questions below the module that the
     /// probe asks again, each from the member that asked it. `deps` says the files read are unchanged;
@@ -494,6 +507,11 @@ pub struct CheckInfoJson {
     /// existed.
     #[serde(default)]
     pub markers: Vec<MarkerSiteJson>,
+    /// [`CheckInfo::struct_sites`], so the test runner's report of a replayed module
+    /// carries the same construction-site census a fresh check would. Absent in entries
+    /// written before the field existed.
+    #[serde(default)]
+    pub struct_sites: Vec<StructSiteJson>,
     /// [`CheckInfo::closure_requires`], so the check a replayed module hands back is the
     /// whole of what the fresh one said.
     #[serde(default)]
@@ -538,6 +556,29 @@ pub struct MarkerSiteJson {
     pub line: usize,
     /// The declaration's name.
     pub name: String,
+}
+
+/// One [`crate::StructSite`] as an entry stores it.
+///
+/// `PartialEq`, for the same reason `MarkerSiteJson` carries it: a replayed module's
+/// census is compared against a fresh check's
+/// (`crates/htl-core/tests/struct_sites.rs`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct StructSiteJson {
+    /// [`crate::StructSite::record_file`].
+    pub record_file: String,
+    /// [`crate::StructSite::record_line`].
+    pub record_line: usize,
+    /// [`crate::StructSite::record_name`].
+    pub record_name: String,
+    /// [`crate::StructSite::marked`].
+    pub marked: bool,
+    /// [`crate::StructSite::line`].
+    pub line: usize,
+    /// [`crate::StructSite::col`].
+    pub col: usize,
+    /// [`crate::StructSite::complete`].
+    pub complete: bool,
 }
 
 /// A [`crate::Diagnostic`]'s parts as an entry stores them: the position, the rule and the
@@ -624,6 +665,7 @@ impl CheckInfoJson {
                 .collect(),
             global_sites: global_sites_json(c),
             markers: marker_sites_json(c),
+            struct_sites: struct_sites_json(c),
             closure_requires: closure_requires_json(c),
         }
     }
@@ -671,6 +713,7 @@ impl CheckInfoJson {
                 .collect(),
             global_sites: global_sites_from_json(&self.global_sites),
             markers: marker_sites_from_json(&self.markers),
+            struct_sites: struct_sites_from_json(&self.struct_sites),
             closure_requires: closure_requires_from_json(&self.closure_requires),
         }
     }
@@ -731,6 +774,22 @@ pub fn marker_sites_json(c: &CheckInfo) -> Vec<MarkerSiteJson> {
         .collect()
 }
 
+/// [`CheckInfo::struct_sites`] in the shape an entry stores.
+pub fn struct_sites_json(c: &CheckInfo) -> Vec<StructSiteJson> {
+    c.struct_sites
+        .iter()
+        .map(|s| StructSiteJson {
+            record_file: s.record_file.clone(),
+            record_line: s.record_line,
+            record_name: s.record_name.clone(),
+            marked: s.marked,
+            line: s.line,
+            col: s.col,
+            complete: s.complete,
+        })
+        .collect()
+}
+
 /// [`CheckInfo::closure_requires`] in the shape an entry stores.
 pub fn closure_requires_json(c: &CheckInfo) -> Vec<ClosureRequireJson> {
     c.closure_requires
@@ -773,6 +832,21 @@ fn marker_sites_from_json(sites: &[MarkerSiteJson]) -> Vec<crate::MarkerSite> {
         .collect()
 }
 
+fn struct_sites_from_json(sites: &[StructSiteJson]) -> Vec<crate::StructSite> {
+    sites
+        .iter()
+        .map(|s| crate::StructSite {
+            record_file: s.record_file.clone(),
+            record_line: s.record_line,
+            record_name: s.record_name.clone(),
+            marked: s.marked,
+            line: s.line,
+            col: s.col,
+            complete: s.complete,
+        })
+        .collect()
+}
+
 fn requires_from_json(requires: &[RequireJson]) -> Vec<RequireSite> {
     requires
         .iter()
@@ -793,13 +867,17 @@ impl Module {
     /// that closes through a module nobody edited is still a cycle — so a replayed module
     /// has to produce something that lint can read. `global_redeclarations` reads the
     /// sites the same way, and the error texts, for the one error of the checker's it
-    /// defers to; the recorded diagnostics give those back. Everything is already printed
-    /// by then, and nothing downstream looks at the other fields.
+    /// defers to; the recorded diagnostics give those back. `unmarked_structs` reads
+    /// `struct_sites` the same way again: a record's construction sites are typically in
+    /// files other than its own declaration, so a project-level census that skipped a
+    /// replayed module would silently lose every site that module built. Everything is
+    /// already printed by then, and nothing downstream looks at the other fields.
     pub fn requires_only(&self) -> CheckInfo {
         CheckInfo {
             deps: self.deps.iter().map(PathBuf::from).collect(),
             requires: requires_from_json(&self.requires),
             global_sites: global_sites_from_json(&self.global_sites),
+            struct_sites: struct_sites_from_json(&self.struct_sites),
             closure_requires: closure_requires_from_json(&self.closure_requires),
             errors: self
                 .diagnostics
@@ -823,6 +901,7 @@ impl Module {
             requires: requires_json(c),
             global_sites: global_sites_json(c),
             markers: marker_sites_json(c),
+            struct_sites: struct_sites_json(c),
             closure_requires: closure_requires_json(c),
             code: Some(code),
             check: Some(CheckInfoJson::from_check(c)),
@@ -1875,6 +1954,7 @@ mod tests {
             requires: Vec::new(),
             global_sites: Vec::new(),
             markers: Vec::new(),
+            struct_sites: Vec::new(),
             closure_requires: Vec::new(),
             code: Some("return {}".into()),
             check: Some(CheckInfoJson::default()),

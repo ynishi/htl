@@ -449,12 +449,12 @@ local function is_method_statement(line, name)
    return line:match("^%s*function%s+[%w_.]+[.:]" .. escape_pattern(name) .. "%f[^%w_]") ~= nil
 end
 
--- What `struct_at` returns for a position that holds a `---@struct` record:
--- { name = "MonsterDef", required = { id = true, hp = true },
---   fields = { { name = "id", type = "string" }, { name = "hp", type = "integer" } } }.
--- A field is required unless marked `---@optional`: the default is mandatory, which is
--- the opposite of `---@contract`'s (optional unless `---@required`; see contract.rs),
--- because this record is one the program builds itself and that one arrives from outside.
+-- The data fields a record's own body adds: every name in `t.fields` that is neither a
+-- nested type declaration nor a method, with no marker read at all -- the half of
+-- `struct_spec` (below) that `struct_sites` (below `H.check`'s census) needs too, since
+-- telling a literal that sets everything from one that does not is the same question
+-- with the marker gate lifted. The two used to read `t.fields` the same way, word for
+-- word; this is that reading, kept once.
 --
 -- `t.fields[name]` is a `TypeReport` id (`TypeReporter:get_typenum`, vendor/tl.lua), not
 -- the checker's own type table -- `report.types[id]` is what dereferences it, to a `ti`
@@ -466,12 +466,12 @@ end
 -- read a position at all), so a *primitive* field's `ti` carries no position of its own
 -- regardless of where it is written. The id tells apart a type from a value, and a
 -- function from a record, both without needing one; reading *which* line a value field
--- is declared on, needed for all three (optional or required, and the fix's own text),
+-- is declared on, needed for a caller's optional/required split and the fix's own text,
 -- falls to the same text scan (`field_lines`, above) this file already reads the marker
 -- through for everything else, kept nesting-safe by indentation rather than by name.
 --
 -- `t.fields` holds more than the data fields a literal is asked to set, and two kinds
--- are skipped outright, neither `required` nor `declared`. A nested type declaration (a
+-- are skipped outright, neither in `declared` here. A nested type declaration (a
 -- `record` / `enum` / `interface` written in the body, or a `type X = ...` alias) is a
 -- type, not a value a literal sets -- a reader finds its name among `decl_names`
 -- (`field_lines`'s second return, above), the declaration lines the scan itself can
@@ -494,32 +494,33 @@ end
 -- apart by `is_method_statement` (above), which reads the field's own line for the one
 -- shape a statement's own position actually has. A method statement is recognised on
 -- that one line, the line its own position names -- a name wrapped to the next
--- (`function M.` / `   wrapped()`) is not read as one, and stays required. A function
--- *field* the body itself writes (`go: function(...)`) is in `at` (below), under its own
--- name, and is not either of these; it stays required unless marked, a value like any
--- other.
+-- (`function M.` / `   wrapped()`) is not read as one, and stays in `declared`. A
+-- function *field* the body itself writes (`go: function(...)`) is in `at` (below),
+-- under its own name, and is not either of these; it belongs to `declared` like any
+-- other field.
 --
--- What is left without an entry at all -- neither a type nor a method -- is `declared`
--- and `required`, with no marker read for it: the `TypeReport` carries no position for a
--- copied primitive field any more than for one written here (above), and the
--- interface's own declaration -- the one place its marker could be read -- is text this
--- record's own body does not contain.
-local function struct_spec(cache, report, t)
+-- What is left without an entry at all -- neither a type nor a method -- is `declared`,
+-- with no marker read for it: the `TypeReport` carries no position for a copied
+-- primitive field any more than for one written here (above), and the interface's own
+-- declaration -- the one place its marker could be read -- is text this record's own
+-- body does not contain.
+--
+-- Returns nil only when `t.file` cannot be read (the file moved or was deleted since the
+-- checker ran); otherwise `{ lines, order, at, declared }` -- `lines` and `order` so a
+-- caller does not re-read the file or re-scan the declaration, `at` (`name_lines(order)`)
+-- so a caller that needs a field's own marker (`struct_spec`'s optional split) knows
+-- which line to read it from.
+local function record_fields(cache, report, t)
    local lines = source_lines(cache, t.file)
    if not lines then return nil end
-   if not has_marker(lines, t.y, "struct") then return nil end
    local order, decl_names = field_lines(lines, t.y)
    local at = name_lines(order)
-   local required, declared, any = {}, {}, false
+   local declared = {}
    for name, fid in pairs(t.fields or {}) do
       if decl_names[name] then
-         -- A type: neither declared nor required.
+         -- A type: not a field.
       elseif at[name] then
          declared[name] = true
-         if not has_marker(lines, at[name], "optional") then
-            required[name] = true
-            any = true
-         end
       else
          local f = report.types[fid]
          local is_type = type(f) == "table" and (f.fields ~= nil or f.enums ~= nil)
@@ -527,9 +528,41 @@ local function struct_spec(cache, report, t)
             and same_file(f.file, t.file) and is_method_statement(lines[f.y], name)
          if not is_type and not is_method then
             declared[name] = true
+         end
+      end
+   end
+   return { lines = lines, order = order, at = at, declared = declared }
+end
+
+-- What `struct_at` returns for a position that holds a `---@struct` record:
+-- { name = "MonsterDef", required = { id = true, hp = true },
+--   fields = { { name = "id", type = "string" }, { name = "hp", type = "integer" } } }.
+-- A field is required unless marked `---@optional`: the default is mandatory, which is
+-- the opposite of `---@contract`'s (optional unless `---@required`; see contract.rs),
+-- because this record is one the program builds itself and that one arrives from outside.
+--
+-- The data side -- which fields there are at all, and which line each is declared on --
+-- is `record_fields` (above), shared with the census. What this adds is the marker gate
+-- (nil when the record carries no `---@struct` at all) and, for each declared field, the
+-- `---@optional` split that only this rule reads: a field with its own line in `at` is
+-- required unless that line carries the marker; a field with no entry there -- copied in
+-- from an interface -- has no line of its own this record's body contains a marker on,
+-- and stays required unconditionally, as it always has.
+local function struct_spec(cache, report, t)
+   local rf = record_fields(cache, report, t)
+   if not rf then return nil end
+   local lines = rf.lines
+   if not has_marker(lines, t.y, "struct") then return nil end
+   local required, any = {}, false
+   for name in pairs(rf.declared) do
+      if rf.at[name] then
+         if not has_marker(lines, rf.at[name], "optional") then
             required[name] = true
             any = true
          end
+      else
+         required[name] = true
+         any = true
       end
    end
    if not any then return nil end
@@ -538,7 +571,7 @@ local function struct_spec(cache, report, t)
    -- `field_lines` has no entry for (copied from an interface) is left out here; the
    -- message still names it.
    local fields, seen = {}, {}
-   for _, f in ipairs(order) do
+   for _, f in ipairs(rf.order) do
       if required[f.name] and not seen[f.name] then
          seen[f.name] = true
          fields[#fields + 1] = f
@@ -546,7 +579,7 @@ local function struct_spec(cache, report, t)
    end
    -- `declared` as well as `required`: a key the literal sets that the record does not
    -- declare is how a misspelling looks from here, and the optional fields are declared.
-   return { name = t.str or "record", required = required, declared = declared, fields = fields }
+   return { name = t.str or "record", required = required, declared = rf.declared, fields = fields }
 end
 
 -- Resolver for the `struct-fields` lint: the `---@struct` record being built at (y, x),
@@ -992,11 +1025,23 @@ local function extensible_declared(cache, t)
    return declared
 end
 
+-- `name = 1` parses as a string key whose `tk` is quoted; `["name"] = 1` reaches the
+-- checker the same way. `conststr` is what the checker itself keys the field by.
+--
+-- Reads `result.ast`, the checker's own tree -- already folded past the parser, which is
+-- why a bare identifier key shows up here as `"string"` rather than its own kind.
+-- `lint_struct_fields` (lint.lua) answers the same question (a literal's key, by name)
+-- over a syntax-only `tl.parse` of the same source instead (see the note on `L.run`),
+-- where that folding has not happened yet -- a bare identifier is still its own node
+-- there (`"identifier"`, `tk` unquoted), so its own reader is `item.key.kind == "string"`
+-- -> `unquote(tk)`, `"identifier"` -> `tk`, two branches rather than this file's two.
+-- Both answer one question (`name = v` and `["name"] = v` resolve to `name`; a
+-- non-constant key is a type error, so neither tree need read one), each over the tree
+-- its own caller already has -- not shared, because sharing would mean handing one of
+-- the two a tree shape it does not walk.
 local function literal_key(item)
    local key = item.key
    if type(key) ~= "table" then return nil end
-   -- `name = 1` parses as a string key whose `tk` is quoted; `["name"] = 1` reaches the
-   -- checker the same way. `conststr` is what the checker itself keys the field by.
    if key.conststr then return key.conststr end
    if key.kind == "string" and type(key.tk) == "string" then return key.tk:sub(2, -2) end
    return nil
@@ -2448,6 +2493,60 @@ end
 -- and this counts what the project's own authors wrote.
 local marker_sites
 
+-- The census `unmarked-struct` and, from it, `htl adopt`'s `---@struct` row read
+-- (#304): every table literal in this file built as a *declared* record, whether
+-- that record carries `---@struct` or not and whether the literal sets every field or
+-- not -- the decision each rule makes from that is the caller's, not this walk's.
+--
+-- Declared, to exclude the one shape `t.fields`/`t.file`/`t.y` cannot tell apart from a
+-- real one: the checker infers a record type for a bare `{ a = 1 }` with nowhere to
+-- declare it, and that inferred type is positioned at the literal itself -- `t.file` is
+-- this file, `t.y` the literal's own line, `t.str` the literal word `"record"`. A real
+-- declaration's line is read back (`source_lines`, as every marker reader here does) and
+-- has to contain the keyword `record` with this type's own name after it (`record Point`,
+-- `global record Point is Comparable`), or be a `type Name = record` line -- the two
+-- spellings `field_lines` (above) already parses a nested one by. An inferred record's
+-- own "declaration" is the literal's source line, which names no type at all, so neither
+-- pattern matches it except by coincidence (a local happening to be named `record`) --
+-- the risk this file already accepts for `has_marker`'s own text match. `interface` is
+-- not read here: a literal is never built as one (Teal has no interface literal), so the
+-- shape this guards against does not arise for it. A generic's `t.str` carries its own
+-- arguments (`"Box<T>"` for `record Box<T>`), which a declaration line spells only up to
+-- the `<` -- the bare name (the leading run of identifier characters) is read off `t.str`
+-- once, below, and used for both this match and `record_name`.
+--
+-- `marked`: `has_marker(dlines, t.y, "struct")` on the *declaring* file's lines -- the
+-- same read `struct_spec` makes, so a record this walk calls marked is one `struct_at`
+-- already treats as one.
+--
+-- `complete`: the literal sets every name `record_fields` (above) calls `declared` for
+-- this record -- the data side of `struct_spec`, with no marker gate and no `---@optional`
+-- split, which is exactly what deciding "built whole" from needs: a field marked
+-- `---@optional` left out is still a field this literal did not set. A record whose
+-- `declared` is empty is `complete = false` regardless of what the literal sets --
+-- nothing to set is not evidence that this literal, or any other, sets everything, so an
+-- empty record built as `{}` at every site would otherwise make every site `complete` and
+-- the record a false positive for `unmarked_structs` (the Rust-side function this feeds,
+-- `lib.rs`) to report. A key the literal sets that `declared` does not name (a stray, in
+-- `struct-fields`' own vocabulary) does not count against `complete`: that is a question
+-- for `struct-fields` to raise once the record is marked, not for this census to judge
+-- before it is.
+--
+-- One entry per literal, not deduplicated across literals the way `marker_sites`
+-- dedupes across branches that can reach one site twice -- a pre-order walk reaches each
+-- `literal_table` node exactly once, so the only dedupe worth doing is on position, for
+-- the same reason `marker_sites`' is: insurance against a shape this walk does not
+-- expect reaching one node by two paths. Sorted by `(y, x)`, the position a literal's own
+-- `report` call elsewhere in this file already sorts findings by.
+--
+-- `H.check` computes this under the same gate `markers` is computed under (the lint pass
+-- ran, and the file produced an AST) and returns it as `struct_sites`; whether the *whole
+-- project's* decision ("every site of this record") holds is answered in Rust, over every
+-- file's census together, because a record's sites live in files other than its own
+-- declaration. `.d.tl` gives an empty census, like `marker_sites`: no literal is built in
+-- a declaration file either.
+local struct_sites
+
 -- Checked-module store, shared by every fresh env in this state. A fresh env per file
 -- exists so that module *names* resolve under that file's own search path and never
 -- leak from another directory; the store keeps that guarantee by seeding an env only
@@ -2698,6 +2797,9 @@ function H.check(filename, env, opts)
    -- `htl adopt`'s input (#304); empty when the lint pass below is skipped (there is no
    -- `src` to read it from then) and for a `.d.tl` (`marker_sites` excludes it itself).
    local markers = {}
+   -- `unmarked-struct`'s input, and (#304) `htl adopt`'s `---@struct` row: same gate
+   -- and the same reason as `markers` above.
+   local struct_sites_found = {}
    if opts.lints ~= false and result.ast and #(result.syntax_errors or {}) == 0 then
       local fd = io.open(filename, "rb")
       if fd then src = fd:read("a"); fd:close() end
@@ -2705,6 +2807,7 @@ function H.check(filename, env, opts)
          local lines = {}
          for l in (src .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = l end
          markers = marker_sites(result, filename, lines)
+         struct_sites_found = struct_sites(result, filename, lines, {})
          local t1 = os.clock()
          local enums = checked_enums(result, env)
          prof("enums", filename, t1)
@@ -2773,6 +2876,7 @@ function H.check(filename, env, opts)
       lints = lints, lint_fixes = lint_fixes, requires = requires, dependency_errors = dep_errors,
       error_items = error_items, warning_items = warning_items, lint_items = lint_items,
       global_sites = global_sites, closure_requires = closure_requires, markers = markers,
+      struct_sites = struct_sites_found,
       syntax_errors = #(result.syntax_errors or {}), result = result, src = src }
 end
 
@@ -3426,6 +3530,105 @@ function marker_sites(result, filename, lines)
       if a.marker ~= b.marker then return a.marker < b.marker end
       if a.name ~= b.name then return a.name < b.name end
       return a.kind < b.kind
+   end)
+   return deduped
+end
+
+-- Whether `line` -- the line `source_lines` reads back at a type's own `t.y` -- is a
+-- declaration of a record named `name`: `record <name>` (`local`/`global` prefix, or
+-- none, for a nested one) with `record` before the name somewhere on the line, or a
+-- `type <name> = record` alias of one. See the doc comment above `local struct_sites`
+-- for why this is what tells a declared record apart from the checker's own inferred one.
+local function declares_record(line, name)
+   if not line then return false end
+   local esc = escape_pattern(name)
+   if line:match("%f[%w_]record%f[%W].-%f[%w_]" .. esc .. "%f[%W]") then return true end
+   if line:match("%f[%w_]type%f[%W]%s+" .. esc .. "%s*=%s*record%f[%W]") then return true end
+   return false
+end
+
+-- See the doc comment above its forward declaration (`local struct_sites`, beside
+-- `marker_sites`). A pre-order walk of `result.ast`, the same shape `marker_sites` above
+-- walks it with (same skip keys), collecting every `literal_table` node rather than
+-- every marked declaration. `cache` is the source-lines cache `source_lines` reads and
+-- fills -- the caller's, as `struct_resolver`'s own is, so that a run checking several
+-- literals built against one declaring file reads that file once.
+function struct_sites(result, filename, lines, cache)
+   local sites = {}
+   if tostring(filename):sub(-5) == ".d.tl" or not lines then return sites end
+   local ok, report = pcall(tl.get_types, result)
+   if not ok or type(report) ~= "table" then return sites end
+   local by_pos = report.by_pos and report.by_pos[filename]
+   if not by_pos then return sites end
+   cache = cache or {}
+   local function deref(id, depth)
+      local t = report.types[id]
+      if t and t.ref and depth < 8 then return deref(t.ref, depth + 1) end
+      return t
+   end
+   local seen_nodes = {}
+   local function go(n)
+      if type(n) ~= "table" or seen_nodes[n] then return end
+      seen_nodes[n] = true
+      if n.kind == "literal_table" and n.y and n.x then
+         local id = by_pos[n.y] and by_pos[n.y][n.x]
+         local t = id and deref(id, 0)
+         if t and t.fields and t.file and t.y then
+            local dlines = source_lines(cache, t.file)
+            local decl = dlines and dlines[t.y]
+            -- `t.str` carries a generic's own arguments (`"Box<T>"` for `record
+            -- Box<T>`) -- the bare name, the leading run of identifier characters, is
+            -- what a declaration line actually spells before the `<`, and what a
+            -- reader of `record_name` elsewhere (the lint's message, `htl adopt`'s
+            -- candidate list) wants to see rather than the generic signature.
+            local name = (t.str or ""):match("^[%w_]+") or "record"
+            if decl and declares_record(decl, name) then
+               local rf = record_fields(cache, report, t)
+               local declared = rf and rf.declared or {}
+               local present, any_declared, complete = {}, false, true
+               for _, item in ipairs(n) do
+                  if type(item) == "table" and item.key then
+                     local key = literal_key(item)
+                     if key then present[key] = true end
+                  end
+               end
+               for fname in pairs(declared) do
+                  any_declared = true
+                  if not present[fname] then complete = false end
+               end
+               if not any_declared then complete = false end
+               sites[#sites + 1] = {
+                  record = { file = t.file, line = t.y, name = name },
+                  marked = has_marker(dlines, t.y, "struct"),
+                  y = n.y,
+                  x = n.x,
+                  complete = complete,
+               }
+            end
+         end
+      end
+      for i = 1, #n do
+         if type(n[i]) == "table" then go(n[i]) end
+      end
+      for k, v in pairs(n) do
+         if type(k) ~= "number" and k ~= "if_parent" and k ~= "type" and k ~= "newtype"
+            and k ~= "decltuple" and k ~= "expected" and type(v) == "table" then
+            go(v)
+         end
+      end
+   end
+   for _, node in ipairs(result.ast or {}) do go(node) end
+   local seen_site, deduped = {}, {}
+   for _, s in ipairs(sites) do
+      local key = s.y .. "\0" .. s.x
+      if not seen_site[key] then
+         seen_site[key] = true
+         deduped[#deduped + 1] = s
+      end
+   end
+   table.sort(deduped, function(a, b)
+      if a.y ~= b.y then return a.y < b.y end
+      return a.x < b.x
    end)
    return deduped
 end

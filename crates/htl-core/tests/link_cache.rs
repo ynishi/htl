@@ -167,6 +167,7 @@ fn a_check_entry_without_code_is_not_a_hit() {
         requires: Vec::new(),
         global_sites: Vec::new(),
         markers: Vec::new(),
+        struct_sites: Vec::new(),
         closure_requires: Vec::new(),
         code: None,
         check: None,
