@@ -47,8 +47,10 @@
 //! | `htl::task::Request<Req, Resp>` as a channel's element | `task.Request<Req, Resp>` | a value Teal answers once with `req:reply(v)` |
 //!
 //! A data-carrying enum is declared nested in the host module (`records = [Shape]`),
-//! where its variant records are reachable as `host.Shape_Circle` for `is`; `uses =
-//! [Name]` imports a type from another module with `local type Name = require("Name")`,
+//! where its variant records are reachable as `host.Shape_Circle` for `is`; a record
+//! declared in another module nests the same way, named by that module's path one level
+//! deep, `records = [geom::Point]` for a `mod geom;` declared in the `#[host_module]`'s
+//! own file ([`RecordRef`]) — `uses = [Name]` imports a type from another module instead,
 //! a bare entry's local name and module path being the same word. `uses = [name =
 //! "module.path"]` (an entry written `ident = "string"`) lets them differ: `local type
 //! name = require("module.path")`, which is what a type whose module is not its own name
@@ -101,6 +103,7 @@
 //!   `Function` / `Option<Function>` field of a struct, which says how the host calls it
 //!   rather than how it is spelled; anything else in a field's `#[teal(..)]` is refused.
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use syn::punctuated::Punctuated;
@@ -441,6 +444,36 @@ impl Use {
     }
 }
 
+/// One `records = [..]` entry. A bare path (`records = [Point]`) is `RecordRef { module:
+/// None, name: "Point" }`: the record is looked for among the `#[host_module]`'s own
+/// file's items, as it always was. A two-segment path (`records = [geom::Point]`) is
+/// `RecordRef { module: Some("geom"), name: "Point" }`: `geom` names a `mod geom;` (or
+/// `pub mod geom;`) declared in that same file, and `Point` is looked for in its
+/// contents — inline (`mod geom { .. }`) or, when the module has none of its own, in the
+/// file Rust would compile `mod geom;` from: next to the `#[host_module]`'s own file when
+/// that file is a crate root, or, for any other file, in a directory named after that
+/// file's own stem (`src/hostio.rs`'s `mod geom;` is `src/hostio/geom.rs`, not
+/// `src/geom.rs`; see `mod_base_dir` for exactly which files and directories count as a
+/// crate root). This does not know about a `[lib] path` override or another custom crate
+/// root in `Cargo.toml`, nor about a `#[cfg_attr(.., path = "..")]` (only a plain
+/// `#[path = ".."]` is read, and even that is refused rather than followed); of two
+/// `#[cfg]`-alternated `mod geom` declarations in the same file, the first is the one
+/// read; in every one of these cases `mod geom;` could resolve — or already resolves —
+/// somewhere this does not predict. A path longer than two segments is refused where
+/// `records` is parsed (`record_list`): one module level is resolved, no deeper, and no
+/// re-export is followed — the path names the module the record is declared in, not
+/// wherever it is re-exported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordRef {
+    /// `Some("geom")` for `records = [geom::Point]`; `None` for a bare `records =
+    /// [Point]`.
+    pub module: Option<String>,
+    /// The record's Rust name (`records = [geom::Point]` and `records = [Point]` both
+    /// name it `Point`; nothing about the nested declaration's own name changes with
+    /// where it was found).
+    pub name: String,
+}
+
 /// `#[teal(...)]` / `#[host_module(...)]` arguments.
 #[derive(Debug, Clone, Default)]
 pub struct TealAttrs {
@@ -472,9 +505,11 @@ pub struct TealAttrs {
     /// *different* module while the declaration also needs `htl.task` is refused, naming
     /// both. See [`Use`].
     pub uses: Vec<Use>,
-    /// `#[derive(TealRecord)]` types (structs and enums in the same source file) nested
-    /// inside the module record.
-    pub records: Vec<String>,
+    /// `#[derive(TealRecord)]` types nested inside the module record: a bare entry
+    /// (`records = [Point]`) in the same source file, a module-qualified one
+    /// (`records = [geom::Point]`) in a `mod geom;` declared in that file. See
+    /// [`RecordRef`].
+    pub records: Vec<RecordRef>,
     /// How `Result<T, E>` returns reach Lua: `"raise"` (default; `Err` becomes a Lua
     /// error) or `"return"` (`T, string` / `boolean, string` in the `io.open` style).
     pub errors: Option<String>,
@@ -497,18 +532,73 @@ fn lit_str(l: &Lit) -> Result<String, String> {
     }
 }
 
-fn type_list(arr: &syn::ExprArray, key: &str) -> Result<Vec<String>, String> {
+/// `records = [Point, geom::Light]`: a one-segment path is a bare [`RecordRef`] (the
+/// record lives in the `#[host_module]`'s own file, as it always did); a two-segment
+/// path names a `mod` declared in that file and the record inside it
+/// (`resolve_module_items`). Anything longer is refused: `records` resolves one module
+/// level, no deeper. Every leading `self::` is stripped first (`self::Point` is `Point`,
+/// `self::self::Point` is still `Point` — each just repeats "this module", which is what
+/// a bare entry already means) before anything else is read off the path. A leading `::`
+/// (`::geom::Point` — in the 2018+ path grammar, a crate rather than a local item) and
+/// `crate::` / `super::` are refused outright, naming the two forms `records` does
+/// accept, rather than either read as a module literally named `crate` or `super` (there
+/// is no such `mod`, so that read would only fail later with a worse message) or ignored
+/// silently (a leading `::` changes nothing about which segments remain, so without this
+/// check it would resolve exactly like the same path without it).
+fn record_list(arr: &syn::ExprArray) -> Result<Vec<RecordRef>, String> {
+    let expected = "`records` names a record directly (`Record`), or through one module level (`module::Record`)";
     let mut out = Vec::new();
     for e in &arr.elems {
         match e {
-            Expr::Path(p) => out.push(
-                p.path
+            Expr::Path(p) => {
+                let full: Vec<String> = p
+                    .path
                     .segments
-                    .last()
+                    .iter()
                     .map(|s| s.ident.to_string())
-                    .unwrap_or_default(),
-            ),
-            _ => return Err(format!("`{key}` expects a list of type names")),
+                    .collect();
+                if p.path.leading_colon.is_some() {
+                    return Err(format!(
+                        "{expected}; `::{}` names an external crate (a leading `::`), not a \
+                         module declared in this file",
+                        full.join("::")
+                    ));
+                }
+                let mut segs = full.clone();
+                while segs.first().map(String::as_str) == Some("self") {
+                    segs.remove(0);
+                }
+                if matches!(
+                    segs.first().map(String::as_str),
+                    Some("crate") | Some("super")
+                ) {
+                    return Err(format!("{expected}; `{}` is neither", full.join("::")));
+                }
+                match segs.len() {
+                    0 => return Err(format!("{expected}; `{}` is neither", full.join("::"))),
+                    1 => out.push(RecordRef {
+                        module: None,
+                        name: segs.into_iter().next().unwrap_or_default(),
+                    }),
+                    2 => {
+                        let mut segs = segs.into_iter();
+                        let module = segs.next().unwrap_or_default();
+                        let name = segs.next().unwrap_or_default();
+                        out.push(RecordRef {
+                            module: Some(module),
+                            name,
+                        })
+                    }
+                    n => {
+                        return Err(format!(
+                            "{expected}; `{}` is {} levels deep",
+                            full.join("::"),
+                            n - 1
+                        ));
+                    }
+                }
+            }
+            _ => return Err("`records` expects a list of type names".to_string()),
         }
     }
     Ok(out)
@@ -615,7 +705,7 @@ pub fn parse_attr_metas(metas: impl IntoIterator<Item = Meta>) -> Result<TealAtt
             }
             ("dts", Expr::Lit(l)) => out.dts = Some(lit_str(&l.lit)?),
             ("uses", Expr::Array(arr)) => out.uses = use_list(arr)?,
-            ("records", Expr::Array(arr)) => out.records = type_list(arr, "records")?,
+            ("records", Expr::Array(arr)) => out.records = record_list(arr)?,
             ("errors", Expr::Lit(l)) => {
                 let v = lit_str(&l.lit)?;
                 if v != "raise" && v != "return" {
@@ -1240,19 +1330,198 @@ pub fn find_item<'a>(items: &'a [Item], name: &str) -> Option<&'a Item> {
     None
 }
 
+/// Find a struct or enum named `name` directly among `items`, without recursing into any
+/// nested `mod`. Unlike [`find_item`] (which a bare `records = [Point]` entry still
+/// uses, unchanged): a module-qualified entry (`records = [geom::Point]`) names `geom`
+/// *and* `Point`, so it resolves to the record `geom` declares itself, not to one some
+/// further nesting inside `geom` happens to reach by the same name
+/// (`mod geom { mod deeper { struct Point; } }` is not `geom::Point`).
+fn find_item_direct<'a>(items: &'a [Item], name: &str) -> Option<&'a Item> {
+    items.iter().find(|it| match it {
+        Item::Struct(s) => s.ident == name,
+        Item::Enum(e) => e.ident == name,
+        _ => false,
+    })
+}
+
+/// A `records` entry's `Item`, already found — nested under its Rust name (`records =
+/// [X]` names the item, and the host's signatures say `X` too), refusing a
+/// `#[teal(name = ..)]` on it: that could satisfy neither (`Self` inside the item would
+/// already have been mapped to the rename), so it is refused rather than half-applied.
 /// `uses` is the host's — a nested record's field types resolve against the `uses` the
 /// host module itself declared, not against anything the nested item might declare of
 /// its own, so `task::Job` nested beside a host's `uses = [task = ".."]` crosses the same
 /// way whichever `#[host_module]` method also returns it. A `#[teal(uses = ..)]` on the
 /// nested item itself writes no import line of its own either way: only the host
 /// module's `uses_header` is ever emitted, once, at the top of the file.
+fn nested_item_decl(it: &Item, name: &str, uses: &[Use]) -> Result<String, String> {
+    let (attrs, ident) = record_attrs(it)?;
+    let renamed = attrs.name.clone().unwrap_or(ident);
+    if attrs.name.is_some() {
+        return Err(format!(
+            "host_module: `{name}` is nested through `records` and cannot be renamed \
+             (`#[teal(name = \"{renamed}\")]`); to declare it as `{renamed}`, give it a \
+             `.d.tl` of its own (`#[teal(dts = ..)]`) and import it with `uses = [{renamed}]`"
+        ));
+    }
+    let kind = record_kind(it, &renamed, attrs.rename_all, uses)?;
+    Ok(kind_decl(name, &kind, "   "))
+}
+
+/// The directory `mod module;` in `file` resolves against. Rust treats four kinds of file
+/// as a crate (or crate-like) root, each the place its own submodules live next to: a
+/// file literally named `lib.rs`, `main.rs` or `mod.rs`; a file directly under
+/// `src/bin/` (each a binary crate root of its own); or a file directly under a
+/// crate-root `tests/`, `examples/` or `benches/` (each an integration test / example /
+/// benchmark crate root of its own) — *crate-root* meaning the directory holding it is a
+/// sibling of the package's `Cargo.toml`, which is what tells `src/tests/helpers.rs`'s
+/// `tests` (nested under `src/`, nowhere near `Cargo.toml`) from a real `tests/` at the
+/// package root: the first is a plain submodule of `src/hostio.rs`'s kind, not a crate
+/// root, even though the directory is spelled the same way. Any other file — `src/
+/// hostio.rs` say — is a non-root module, and *its* submodules live in a directory named
+/// after its own stem next to it: `src/hostio.rs`'s `mod geom;` is `src/hostio/geom.rs`,
+/// not `src/geom.rs`; `src/tests/helpers.rs`'s is `src/tests/helpers/geom.rs` for the
+/// same reason. This knows nothing of a `[lib] path` override or another custom crate
+/// root in `Cargo.toml`, either of which could move a crate root somewhere these rules do
+/// not predict.
+fn mod_base_dir(file: &Path) -> PathBuf {
+    let dir = file
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let is_root_name = matches!(
+        file.file_name().and_then(|s| s.to_str()),
+        Some("mod.rs" | "lib.rs" | "main.rs")
+    );
+    let dir_name = dir.file_name().and_then(|s| s.to_str());
+    // `src/bin/` is always under `src/` by convention; a nested `bin` dir elsewhere (a
+    // non-root module's own `bin` submodule, say) is not a crate root.
+    let in_src_bin = dir_name == Some("bin")
+        && dir
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            == Some("src");
+    // `tests` / `examples` / `benches` are crate roots only at the package root — a
+    // directory of the same name nested deeper (`src/tests/`) is a plain submodule
+    // directory, told apart by whether ITS parent holds the package's `Cargo.toml`.
+    let in_package_root_dir = matches!(dir_name, Some("tests" | "examples" | "benches"))
+        && dir.parent().is_some_and(|p| p.join("Cargo.toml").is_file());
+    if is_root_name || in_src_bin || in_package_root_dir {
+        return dir.to_path_buf();
+    }
+    match file.file_stem().and_then(|s| s.to_str()) {
+        Some(stem) if !stem.is_empty() => dir.join(stem),
+        _ => dir.to_path_buf(),
+    }
+}
+
+/// `records = [module::..]`: the items `module` declares — inline (`mod module { .. }`,
+/// nothing further to read) or, for `mod module;` with no body of its own, read from the
+/// module's file ([`mod_base_dir`]) — and, when a file was read, its path in both forms a
+/// caller needs: as read (what a message names it by, through `display_path`, never
+/// canonicalized — a message says what was tried, not a resolved form of it) and
+/// canonicalized where possible, for the caller to track with an `include_str!`
+/// ([`HostDecl::record_files`]). Refuses a `#[path = ".."]` on `mod module`: `records`
+/// follows the module Rust would resolve `mod module;` to on its own, not wherever
+/// `#[path]` points it instead, and reading the wrong file silently (or refusing to find
+/// anything there) would be worse than refusing the attribute outright. `name` is only
+/// for the messages — which record a caller was after when this module needed resolving
+/// — the caller may resolve more than one record out of the same module, and each should
+/// read this once (see `nested_record_decls`'s cache).
+/// A module's items, resolved by [`resolve_module_items`], and — when a file was read
+/// for it — that file's path in both forms a caller needs: as read (`.0`, for messages)
+/// and canonicalized where possible (`.1`, for `record_files`'s `include_str!`).
+type ModuleItems = (Vec<Item>, Option<(PathBuf, PathBuf)>);
+
+fn resolve_module_items(
+    items: &[Item],
+    current_file: Option<&Path>,
+    module: &str,
+    name: &str,
+) -> Result<ModuleItems, String> {
+    let m = items
+        .iter()
+        .find_map(|it| match it {
+            Item::Mod(m) if m.ident == module => Some(m),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            format!(
+                "host_module: no `mod {module}` in this file (`records = [{module}::{name}]` \
+                 names a module declared in the same file as the host)"
+            )
+        })?;
+    if m.attrs.iter().any(|a| a.path().is_ident("path")) {
+        return Err(format!(
+            "host_module: `#[path]` on `mod {module}` is not followed by `records`"
+        ));
+    }
+    if let Some((_, inner)) = &m.content {
+        return Ok((inner.clone(), None));
+    }
+    let current_file = current_file.ok_or_else(|| {
+        format!(
+            "host_module: `records = [{module}::{name}]` needs the current file's path to \
+             find `mod {module}`'s file (unavailable in this expansion)"
+        )
+    })?;
+    let base = mod_base_dir(current_file);
+    let candidates = [
+        base.join(format!("{module}.rs")),
+        base.join(module).join("mod.rs"),
+    ];
+    let path = candidates
+        .iter()
+        .find(|p| p.is_file())
+        .ok_or_else(|| {
+            format!(
+                "host_module: no file for `mod {module};` (tried {} and {})",
+                crate::diagnostic::display_path(&candidates[0]),
+                crate::diagnostic::display_path(&candidates[1]),
+            )
+        })?
+        .clone();
+    let src = std::fs::read_to_string(&path).map_err(|e| {
+        format!(
+            "host_module: reading {}: {e}",
+            crate::diagnostic::display_path(&path)
+        )
+    })?;
+    let file = syn::parse_file(&src).map_err(|e| {
+        format!(
+            "host_module: parsing {}: {e}",
+            crate::diagnostic::display_path(&path)
+        )
+    })?;
+    // `canonicalize` resolves symlinks (and so matches whatever path a reader later
+    // compares this one against, the #424 class), but needs the file to exist; the
+    // `is_file()` check just above makes that likely, not certain (another process could
+    // remove it in between), so a failure falls back to `std::path::absolute` — lexical,
+    // not touching the filesystem again, so it cannot fail the same way — rather than
+    // risking a path relative to some other process's cwd reaching `include_str!`. Either
+    // way `path` itself — what was actually tried, not a resolved form of it — is kept
+    // for messages.
+    let tracked = std::fs::canonicalize(&path)
+        .or_else(|_| std::path::absolute(&path))
+        .unwrap_or_else(|_| path.clone());
+    Ok((file.items, Some((path, tracked))))
+}
+
+/// Every `records = [..]` entry's nested declaration, in order, and every file a
+/// module-qualified one read (for [`HostDecl::record_files`]) — empty when every entry is
+/// bare, the same as before module-qualified entries existed. Two entries naming the same
+/// module (`records = [geom::Point, geom::Size]`) read and parse it once: `modules`
+/// caches [`resolve_module_items`]'s result by module name, and only a cache miss adds to
+/// `record_files`.
 fn nested_record_decls(
-    names: &[String],
+    records: &[RecordRef],
     file_items: Option<&[Item]>,
+    file_path: Option<&Path>,
     uses: &[Use],
-) -> Result<Vec<String>, String> {
-    if names.is_empty() {
-        return Ok(Vec::new());
+) -> Result<(Vec<String>, Vec<PathBuf>), String> {
+    if records.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
     }
     let items = file_items.ok_or_else(|| {
         "host_module: `records` needs the source file (unavailable in this expansion); \
@@ -1260,30 +1529,49 @@ fn nested_record_decls(
             .to_string()
     })?;
     let mut out = Vec::new();
-    for name in names {
-        let it = find_item(items, name).ok_or_else(|| {
-            format!(
-                "host_module: `{name}` not found in this file (records must live in the same file; \
-                 use `uses` for records from other modules)"
-            )
-        })?;
-        // The nested name is the Rust one: `records = [X]` names the item, and the
-        // host's signatures say `X` too. A `#[teal(name = ..)]` rename could satisfy
-        // neither — and `Self` inside the item would already have been mapped to the
-        // rename — so it is refused rather than half-applied.
-        let (attrs, ident) = record_attrs(it)?;
-        let renamed = attrs.name.clone().unwrap_or(ident);
-        if attrs.name.is_some() {
-            return Err(format!(
-                "host_module: `{name}` is nested through `records` and cannot be renamed \
-                 (`#[teal(name = \"{renamed}\")]`); to declare it as `{renamed}`, give it a \
-                 `.d.tl` of its own (`#[teal(dts = ..)]`) and import it with `uses = [{renamed}]`"
-            ));
-        }
-        let kind = record_kind(it, &renamed, attrs.rename_all, uses)?;
-        out.push(kind_decl(name, &kind, "   "));
+    let mut record_files = Vec::new();
+    let mut modules: HashMap<String, ModuleItems> = HashMap::new();
+    for r in records {
+        let it = match &r.module {
+            None => find_item(items, &r.name).cloned().ok_or_else(|| {
+                format!(
+                    "host_module: `{}` not found in this file; a record in another module is \
+                     named `records = [<module>::{}]` (a `mod <module>;` declared in this \
+                     file), or `uses = [{}]` to import it on its own (`host.{}` becomes `{}` \
+                     from its own module, so every `.tl` that wrote `host.{}` has to be \
+                     rewritten)",
+                    r.name, r.name, r.name, r.name, r.name, r.name
+                )
+            })?,
+            Some(module) => {
+                let resolved = match modules.entry(module.clone()) {
+                    std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        let got = resolve_module_items(items, file_path, module, &r.name)?;
+                        if let Some((_, tracked)) = &got.1 {
+                            record_files.push(tracked.clone());
+                        }
+                        e.insert(got)
+                    }
+                };
+                find_item_direct(&resolved.0, &r.name)
+                    .cloned()
+                    .ok_or_else(|| match &resolved.1 {
+                        Some((read, _tracked)) => format!(
+                            "host_module: `{}` not found in {}",
+                            r.name,
+                            crate::diagnostic::display_path(read)
+                        ),
+                        None => format!(
+                            "host_module: `{}` not found in `mod {module}` in this file",
+                            r.name
+                        ),
+                    })?
+            }
+        };
+        out.push(nested_item_decl(&it, &r.name, uses)?);
     }
-    Ok(out)
+    Ok((out, record_files))
 }
 
 // ---------------------------------------------------------------- host modules
@@ -1457,14 +1745,25 @@ pub struct HostDecl {
     /// How an `Err` reaches Lua — raised, or returned beside the value. Decided once for
     /// the block rather than per method, so a module does not mix the two conventions.
     pub err_mode: ErrMode,
+    /// Absolute paths of every file read to resolve a module-qualified `records =
+    /// [module::Name]` entry — empty unless `records` named one. The macro tracks each
+    /// with `const _: &str = include_str!(..)`, the same way it tracks `htl.toml` and a
+    /// `.tl` dependency, so editing one of these files expands the macro again; `htl dts`
+    /// (no build to track) leaves this unread.
+    pub record_files: Vec<PathBuf>,
 }
 
 /// Declaration + wrapper plan for a `#[host_module]` impl block. `file_items` (the
-/// enclosing file's items) is only needed when `records = [...]` is used.
+/// enclosing file's items) and `file_path` (that file's own path) are only needed when
+/// `records = [...]` is used — `file_path` only when one of its entries is
+/// module-qualified (`records = [geom::Point]`), to find the file Rust compiles `mod
+/// geom;` from. Both come from the same place: the macro's `current_file()` at expansion
+/// time, `htl dts`'s `scan_rust_file` outside one.
 pub fn host_decl(
     imp: &ItemImpl,
     attrs: TealAttrs,
     file_items: Option<&[Item]>,
+    file_path: Option<&Path>,
 ) -> Result<HostDecl, String> {
     let type_name = match &*imp.self_ty {
         Type::Path(p) => p
@@ -1485,7 +1784,9 @@ pub fn host_decl(
     };
 
     let mut body = format!("local record {module}\n");
-    for r in nested_record_decls(&attrs.records, file_items, &attrs.uses)? {
+    let (nested, record_files) =
+        nested_record_decls(&attrs.records, file_items, file_path, &attrs.uses)?;
+    for r in nested {
         body.push_str(&r);
     }
 
@@ -1698,6 +1999,7 @@ pub fn host_decl(
         methods,
         attrs,
         err_mode,
+        record_files,
     })
 }
 
@@ -1742,7 +2044,7 @@ pub fn scan_rust_file(path: &Path, manifest_dir: &Path) -> Result<Vec<Generated>
         match it {
             Item::Impl(imp) => {
                 if let Some(attrs) = parse_host_module_attr(&imp.attrs)? {
-                    let hd = host_decl(imp, attrs, Some(&file.items))?;
+                    let hd = host_decl(imp, attrs, Some(&file.items), Some(path))?;
                     if let Some(dts) = &hd.attrs.dts {
                         out.push(Generated {
                             target: manifest_dir.join(dts),
@@ -1759,7 +2061,7 @@ pub fn scan_rust_file(path: &Path, manifest_dir: &Path) -> Result<Vec<Generated>
                 if let Some(attrs) = crate::cexport::parse_c_export_attr(&imp.attrs)?
                     && attrs.header.is_some()
                 {
-                    let hd = host_decl(imp, TealAttrs::default(), Some(&file.items))?;
+                    let hd = host_decl(imp, TealAttrs::default(), Some(&file.items), Some(path))?;
                     let plan = crate::cexport::plan(&hd, imp, attrs)?;
                     if let Some(header) = &plan.header_path {
                         out.push(Generated {
@@ -2398,7 +2700,7 @@ mod tests {
             })
             .unwrap();
         let attrs = parse_host_module_attr(&imp.attrs).unwrap().unwrap();
-        host_decl(imp, attrs, Some(&file.items))
+        host_decl(imp, attrs, Some(&file.items), None)
     }
 
     /// `htl::task`'s channels and requests are declared as `htl.task`'s types, and the
@@ -2522,7 +2824,7 @@ mod tests {
             })
             .unwrap();
         let attrs = parse_host_module_attr(&imp.attrs).unwrap().unwrap();
-        let hd = host_decl(imp, attrs, Some(&file.items)).unwrap();
+        let hd = host_decl(imp, attrs, Some(&file.items), None).unwrap();
         assert_eq!(
             hd.decl,
             "local record host\n\
@@ -2562,7 +2864,7 @@ mod tests {
             })
             .unwrap();
         let attrs = parse_host_module_attr(&imp.attrs).unwrap().unwrap();
-        host_decl(imp, attrs, Some(&file.items)).unwrap()
+        host_decl(imp, attrs, Some(&file.items), None).unwrap()
     }
 
     /// An `Option<T>` parameter is what the caller may leave out, and `name?: T` is how
@@ -2744,7 +3046,7 @@ mod tests {
             })
             .unwrap();
         let attrs = parse_host_module_attr(&imp.attrs).unwrap().unwrap();
-        match host_decl(imp, attrs, Some(&file.items)) {
+        match host_decl(imp, attrs, Some(&file.items), None) {
             Ok(hd) => panic!("accepted: {}", hd.decl),
             Err(e) => e,
         }
@@ -2842,7 +3144,7 @@ mod tests {
             })
             .unwrap();
         let attrs = parse_host_module_attr(&imp.attrs).unwrap().unwrap();
-        let e = match host_decl(imp, attrs, Some(&file.items)) {
+        let e = match host_decl(imp, attrs, Some(&file.items), None) {
             Ok(hd) => panic!("rename accepted: {}", hd.decl),
             Err(e) => e,
         };
@@ -2851,6 +3153,473 @@ mod tests {
                 && e.contains("uses = [Pt]"),
             "{e}"
         );
+    }
+
+    /// `records` resolves a record directly, or through one module level
+    /// (`module::Record`); a path one level deeper is refused where it is parsed, not
+    /// wherever it would have been resolved (#428).
+    #[test]
+    fn records_resolves_one_module_level_a_deeper_path_is_refused() {
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] #[teal(records = [a::b::C])] pub struct R { pub x: i64 }",
+        ))
+        .unwrap_err();
+        assert!(e.contains("one module level"), "{e}");
+        assert!(e.contains("`a::b::C`"), "{e}");
+    }
+
+    /// `records = [{name}]` with nothing by that name in the file: the message no longer
+    /// says a record must live in the same file (#428) — it says how to name one from a
+    /// `mod` declared there (`records = [<module>::{name}]`), and what the `uses` route
+    /// changes on the Teal side if the record is imported as a module of its own instead.
+    #[test]
+    fn a_bare_record_not_found_names_the_module_route_and_what_uses_changes() {
+        let e = host_impl_err(
+            "pub struct Host;\n\
+             #[host_module(name = \"host\", records = [Point])]\n\
+             impl Host {\n    pub fn origin(&self) -> i64 { 0 }\n}\n",
+        );
+        assert!(e.contains("`Point` not found in this file"), "{e}");
+        assert!(e.contains("records = [<module>::Point]"), "{e}");
+        assert!(e.contains("mod <module>;"), "{e}");
+        assert!(e.contains("uses = [Point]"), "{e}");
+        assert!(
+            e.contains("`host.Point` becomes `Point` from its own module"),
+            "{e}"
+        );
+    }
+
+    /// `records = [nosuch::Point]` with no `mod nosuch` anywhere in the file: refused
+    /// naming the module, not the record (#428 acceptance: "no such `mod` in the file").
+    #[test]
+    fn a_records_entry_naming_a_module_that_is_not_declared_is_refused() {
+        let e = host_impl_err(
+            "pub struct Host;\n\
+             #[host_module(name = \"host\", records = [nosuch::Point])]\n\
+             impl Host {\n    pub fn origin(&self) -> i64 { 0 }\n}\n",
+        );
+        assert!(e.contains("no `mod nosuch`"), "{e}");
+        assert!(e.contains("records = [nosuch::Point]"), "{e}");
+    }
+
+    /// `records = [geom::Point]`, `geom` declared inline (`mod geom { .. }`, no sibling
+    /// file): resolved directly from the file already in hand, byte-identical to the
+    /// same-file form, and nothing is added to `record_files` — there is no second file
+    /// to track.
+    #[test]
+    fn a_module_qualified_record_in_an_inline_mod_needs_no_sibling_file() {
+        let file: syn::File = syn::parse_str(
+            "mod geom {\n    #[derive(TealRecord)] pub struct Point { pub x: f64 }\n}\n\
+             pub struct Host;\n\
+             #[host_module(name = \"host\", records = [geom::Point])]\n\
+             impl Host {\n    pub fn origin(&self) -> geom::Point { todo!() }\n}\n",
+        )
+        .unwrap();
+        let imp = file
+            .items
+            .iter()
+            .find_map(|i| match i {
+                Item::Impl(imp) => Some(imp),
+                _ => None,
+            })
+            .unwrap();
+        let attrs = parse_host_module_attr(&imp.attrs).unwrap().unwrap();
+        let hd = host_decl(imp, attrs, Some(&file.items), None).unwrap();
+        assert!(hd.record_files.is_empty(), "{:?}", hd.record_files);
+        let same_file = host_impl(
+            "#[derive(TealRecord)] pub struct Point { pub x: f64 }\n\
+             pub struct Host;\n\
+             #[host_module(name = \"host\", records = [Point])]\n\
+             impl Host {\n    pub fn origin(&self) -> Point { todo!() }\n}\n",
+        );
+        assert_eq!(hd.decl, same_file.decl);
+    }
+
+    /// `records = [geom::Point]`, `geom` a `mod geom;` with no body of its own: read from
+    /// the sibling `geom.rs` next to the `#[host_module]`'s own file, the nested
+    /// declaration byte-identical to the same-file form (#428 acceptance 1), and the
+    /// sibling's absolute path collected in `record_files` for the macro to track with
+    /// `include_str!` (acceptance 3).
+    #[test]
+    fn a_module_qualified_record_resolves_to_the_sibling_file_byte_identically() {
+        let dir = std::env::temp_dir().join(format!("htl-dts-geom-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let lib = dir.join("src/lib.rs");
+        std::fs::write(
+            &lib,
+            "mod geom;\n\
+             pub struct Host;\n\
+             #[host_module(name = \"host\", records = [geom::Point])]\n\
+             impl Host {\n    pub fn origin(&self) -> geom::Point { todo!() }\n}\n",
+        )
+        .unwrap();
+        let geom = dir.join("src/geom.rs");
+        std::fs::write(
+            &geom,
+            "#[derive(TealRecord)] pub struct Point { pub x: f64 }\n",
+        )
+        .unwrap();
+
+        let src = std::fs::read_to_string(&lib).unwrap();
+        let file: syn::File = syn::parse_str(&src).unwrap();
+        let imp = file
+            .items
+            .iter()
+            .find_map(|i| match i {
+                Item::Impl(imp) => Some(imp),
+                _ => None,
+            })
+            .unwrap();
+        let attrs = parse_host_module_attr(&imp.attrs).unwrap().unwrap();
+        let hd = host_decl(imp, attrs, Some(&file.items), Some(&lib)).unwrap();
+
+        let same_file = host_impl(
+            "#[derive(TealRecord)] pub struct Point { pub x: f64 }\n\
+             pub struct Host;\n\
+             #[host_module(name = \"host\", records = [Point])]\n\
+             impl Host {\n    pub fn origin(&self) -> Point { todo!() }\n}\n",
+        );
+        assert_eq!(
+            hd.decl, same_file.decl,
+            "\n{}\n--\n{}",
+            hd.decl, same_file.decl
+        );
+        assert_eq!(
+            hd.record_files,
+            vec![std::fs::canonicalize(&geom).unwrap()],
+            "{:?}",
+            hd.record_files
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `records = [geom::Nosuch]`, `geom.rs` exists and is read, but has nothing named
+    /// `Nosuch`: refused naming the file that was looked in (#428 acceptance: "no such
+    /// record in that file").
+    #[test]
+    fn a_record_missing_from_the_modules_sibling_file_names_the_file() {
+        let dir = std::env::temp_dir().join(format!("htl-dts-geom-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let lib = dir.join("src/lib.rs");
+        std::fs::write(
+            &lib,
+            "mod geom;\n\
+             pub struct Host;\n\
+             #[host_module(name = \"host\", records = [geom::Nosuch])]\n\
+             impl Host {\n    pub fn origin(&self) -> i64 { 0 }\n}\n",
+        )
+        .unwrap();
+        let geom = dir.join("src/geom.rs");
+        std::fs::write(
+            &geom,
+            "#[derive(TealRecord)] pub struct Point { pub x: f64 }\n",
+        )
+        .unwrap();
+
+        let src = std::fs::read_to_string(&lib).unwrap();
+        let file: syn::File = syn::parse_str(&src).unwrap();
+        let imp = file
+            .items
+            .iter()
+            .find_map(|i| match i {
+                Item::Impl(imp) => Some(imp),
+                _ => None,
+            })
+            .unwrap();
+        let attrs = parse_host_module_attr(&imp.attrs).unwrap().unwrap();
+        let e = match host_decl(imp, attrs, Some(&file.items), Some(&lib)) {
+            Ok(hd) => panic!("accepted: {}", hd.decl),
+            Err(e) => e,
+        };
+        assert!(e.contains("`Nosuch` not found in"), "{e}");
+        // Compared to `display_path` of `geom` as this test constructed it (the same
+        // join `resolve_module_items` itself does, never canonicalized) — not to
+        // `geom.canonicalize()`. The message names the path as read; canonicalizing it
+        // is what `record_files` does, for a different reader (`include_str!`), and
+        // asserting the message against that form instead would desync the moment the
+        // two legitimately differ (a symlinked temp dir, the #424 class) — a `contains`
+        // check could still pass by coincidence there (one of the two paths a substring
+        // of the other) without the comparison being the right one.
+        assert!(
+            e.contains(crate::diagnostic::display_path(&geom).as_str()),
+            "{e}"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// #428: `#[path]` redirects where `mod geom;` reads from; `records` does not
+    /// follow it (reading the wrong file silently, or refusing to find anything there,
+    /// would both be worse than refusing the attribute outright).
+    #[test]
+    fn a_path_attribute_on_the_named_mod_is_refused() {
+        let e = host_impl_err(
+            "#[path = \"other.rs\"]\n\
+             mod geom;\n\
+             pub struct Host;\n\
+             #[host_module(name = \"host\", records = [geom::Point])]\n\
+             impl Host {\n    pub fn origin(&self) -> i64 { 0 }\n}\n",
+        );
+        assert!(e.contains("`#[path]` on `mod geom`"), "{e}");
+        assert!(e.contains("not followed by `records`"), "{e}");
+    }
+
+    /// #428: `self::Point` names the same record a bare `records = [Point]` does —
+    /// `self` just says "this module" — so the two resolve byte-identically.
+    #[test]
+    fn a_self_prefixed_bare_path_resolves_like_a_bare_one() {
+        let self_prefixed = host_impl(
+            "#[derive(TealRecord)] pub struct Point { pub x: f64 }\n\
+             pub struct Host;\n\
+             #[host_module(name = \"host\", records = [self::Point])]\n\
+             impl Host {\n    pub fn origin(&self) -> Point { todo!() }\n}\n",
+        );
+        let bare = host_impl(
+            "#[derive(TealRecord)] pub struct Point { pub x: f64 }\n\
+             pub struct Host;\n\
+             #[host_module(name = \"host\", records = [Point])]\n\
+             impl Host {\n    pub fn origin(&self) -> Point { todo!() }\n}\n",
+        );
+        assert_eq!(self_prefixed.decl, bare.decl);
+    }
+
+    /// #428: `self::geom::Point` names the same record `geom::Point` does.
+    #[test]
+    fn a_self_prefixed_module_path_resolves_the_module() {
+        let file: syn::File = syn::parse_str(
+            "mod geom {\n    #[derive(TealRecord)] pub struct Point { pub x: f64 }\n}\n\
+             pub struct Host;\n\
+             #[host_module(name = \"host\", records = [self::geom::Point])]\n\
+             impl Host {\n    pub fn origin(&self) -> geom::Point { todo!() }\n}\n",
+        )
+        .unwrap();
+        let imp = file
+            .items
+            .iter()
+            .find_map(|i| match i {
+                Item::Impl(imp) => Some(imp),
+                _ => None,
+            })
+            .unwrap();
+        let attrs = parse_host_module_attr(&imp.attrs).unwrap().unwrap();
+        let hd = host_decl(imp, attrs, Some(&file.items), None).unwrap();
+        assert!(
+            hd.decl
+                .contains("   record Point\n      x: number\n   end\n"),
+            "{}",
+            hd.decl
+        );
+    }
+
+    /// #428: `crate::Point` and `super::Point` are refused by name (there is no `mod
+    /// crate` or `mod super` to find — refusing early, naming the two forms `records`
+    /// does accept, reads better than failing later as "no `mod crate`").
+    #[test]
+    fn records_refuses_crate_and_super_prefixes() {
+        for bad in ["crate::Point", "super::Point"] {
+            let e = record_decl(&item(&format!(
+                "#[derive(TealRecord)] #[teal(records = [{bad}])] pub struct R {{ pub x: i64 }}"
+            )))
+            .unwrap_err();
+            assert!(
+                e.contains("directly") && e.contains("module::Record"),
+                "{bad}: {e}"
+            );
+            assert!(e.contains(bad), "{bad}: {e}");
+        }
+    }
+
+    /// #428: every leading `self::` is stripped, not just the first — `self::self::Point`
+    /// is `Point`, the same as a single `self::Point` or a bare `Point`, rather than
+    /// `RecordRef { module: Some("self"), name: "Point" }` (which would fail later as "no
+    /// `mod self`", a worse message for a path that named nothing but repeats of "this
+    /// module").
+    #[test]
+    fn every_leading_self_is_stripped() {
+        let doubled = host_impl(
+            "#[derive(TealRecord)] pub struct Point { pub x: f64 }\n\
+             pub struct Host;\n\
+             #[host_module(name = \"host\", records = [self::self::Point])]\n\
+             impl Host {\n    pub fn origin(&self) -> Point { todo!() }\n}\n",
+        );
+        let bare = host_impl(
+            "#[derive(TealRecord)] pub struct Point { pub x: f64 }\n\
+             pub struct Host;\n\
+             #[host_module(name = \"host\", records = [Point])]\n\
+             impl Host {\n    pub fn origin(&self) -> Point { todo!() }\n}\n",
+        );
+        assert_eq!(doubled.decl, bare.decl);
+    }
+
+    /// #428: a leading `::` (`::geom::Point`) is refused rather than silently ignored — in
+    /// the 2018+ path grammar it names an external crate, not a module declared in this
+    /// file, and `records` only ever reads the segments after it, which look identical to
+    /// the same path without the `::` and so would otherwise resolve exactly the same way.
+    #[test]
+    fn records_refuses_a_leading_double_colon() {
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] #[teal(records = [::geom::Point])] pub struct R { pub x: i64 }",
+        ))
+        .unwrap_err();
+        assert!(
+            e.contains("directly") && e.contains("module::Record"),
+            "{e}"
+        );
+        assert!(
+            e.contains("::geom::Point") && e.contains("external crate"),
+            "{e}"
+        );
+    }
+
+    /// #428: `geom::Point` resolves to the record `mod geom` declares directly, not to
+    /// one reached through further nesting inside it — `find_item` (which a bare
+    /// `records = [Point]` entry still uses) recurses into inline modules, so without
+    /// `find_item_direct` this would have matched `deeper`'s `Point` too.
+    #[test]
+    fn a_module_qualified_record_does_not_match_one_nested_deeper_inside_the_module() {
+        let e = host_impl_err(
+            "mod geom {\n    \
+             mod deeper {\n        #[derive(TealRecord)] pub struct Point { pub x: f64 }\n    }\n\
+             }\n\
+             pub struct Host;\n\
+             #[host_module(name = \"host\", records = [geom::Point])]\n\
+             impl Host {\n    pub fn origin(&self) -> i64 { 0 }\n}\n",
+        );
+        assert!(e.contains("`Point` not found in `mod geom`"), "{e}");
+    }
+
+    /// #428: a non-root file's `mod geom;` is `<its own stem>/geom.rs`, not
+    /// `geom.rs` beside it — `src/hostio.rs` reads `src/hostio/geom.rs`, and a decoy
+    /// `src/geom.rs` (what a same-directory-always rule would have read instead) is
+    /// never touched, confirmed by its field not showing up.
+    #[test]
+    fn a_mod_in_a_non_root_file_resolves_beneath_its_own_stem_not_beside_it() {
+        let dir = std::env::temp_dir().join(format!("htl-dts-hostio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/hostio")).unwrap();
+        let hostio = dir.join("src/hostio.rs");
+        std::fs::write(
+            &hostio,
+            "mod geom;\n\
+             pub struct Host;\n\
+             #[host_module(name = \"host\", records = [geom::Point])]\n\
+             impl Host {\n    pub fn origin(&self) -> geom::Point { todo!() }\n}\n",
+        )
+        .unwrap();
+        // The decoy a same-directory-always rule would have read instead.
+        std::fs::write(
+            dir.join("src/geom.rs"),
+            "#[derive(TealRecord)] pub struct Point { pub decoy: bool }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("src/hostio/geom.rs"),
+            "#[derive(TealRecord)] pub struct Point { pub x: f64 }\n",
+        )
+        .unwrap();
+
+        let src = std::fs::read_to_string(&hostio).unwrap();
+        let file: syn::File = syn::parse_str(&src).unwrap();
+        let imp = file
+            .items
+            .iter()
+            .find_map(|i| match i {
+                Item::Impl(imp) => Some(imp),
+                _ => None,
+            })
+            .unwrap();
+        let attrs = parse_host_module_attr(&imp.attrs).unwrap().unwrap();
+        let hd = host_decl(imp, attrs, Some(&file.items), Some(&hostio)).unwrap();
+        assert!(
+            hd.decl.contains("record Point\n      x: number\n   end\n"),
+            "{}",
+            hd.decl
+        );
+        assert!(!hd.decl.contains("decoy"), "{}", hd.decl);
+        assert_eq!(
+            hd.record_files,
+            vec![
+                std::fs::canonicalize(dir.join("src/hostio/geom.rs")).unwrap_or_else(|_| {
+                    std::path::absolute(dir.join("src/hostio/geom.rs")).unwrap()
+                })
+            ],
+            "{:?}",
+            hd.record_files
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// #428: `tests` / `examples` / `benches` are crate-root directories only when their
+    /// own parent holds the package's `Cargo.toml` — `src/tests/helpers.rs` (`tests`
+    /// nested under `src/`, nowhere near `Cargo.toml`) is a plain non-root module like
+    /// any other, not a `tests/` integration-test root, so its `mod geom;` is beneath its
+    /// own stem (`src/tests/helpers/geom.rs`), not beside it (`src/tests/geom.rs`).
+    #[test]
+    fn mod_base_dir_treats_tests_as_a_root_only_beside_cargo_toml() {
+        let dir = std::env::temp_dir().join(format!("htl-dts-tests-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/tests")).unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
+
+        // Nested under `src/`: `src` itself holds no `Cargo.toml`, so `src/tests/` is a
+        // plain module directory, not an integration-test crate root.
+        assert_eq!(
+            mod_base_dir(&dir.join("src/tests/helpers.rs")),
+            dir.join("src/tests/helpers")
+        );
+        // At the package root: `tests`'s own parent is `dir`, which holds `Cargo.toml` —
+        // a real integration-test root, so its `mod geom;` sits beside it.
+        assert_eq!(mod_base_dir(&dir.join("tests/other.rs")), dir.join("tests"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// #428: two entries naming the same module read and parse its file once — the
+    /// second entry is a cache hit, so `record_files` holds the path once, not twice.
+    #[test]
+    fn two_entries_naming_the_same_module_read_its_file_once() {
+        let dir = std::env::temp_dir().join(format!("htl-dts-geom-dedup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let lib = dir.join("src/lib.rs");
+        std::fs::write(
+            &lib,
+            "mod geom;\n\
+             pub struct Host;\n\
+             #[host_module(name = \"host\", records = [geom::Point, geom::Size])]\n\
+             impl Host {\n    \
+             pub fn origin(&self) -> geom::Point { todo!() }\n    \
+             pub fn unit(&self) -> geom::Size { todo!() }\n\
+             }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("src/geom.rs"),
+            "#[derive(TealRecord)] pub struct Point { pub x: f64 }\n\
+             #[derive(TealRecord)] pub struct Size { pub w: f64 }\n",
+        )
+        .unwrap();
+
+        let src = std::fs::read_to_string(&lib).unwrap();
+        let file: syn::File = syn::parse_str(&src).unwrap();
+        let imp = file
+            .items
+            .iter()
+            .find_map(|i| match i {
+                Item::Impl(imp) => Some(imp),
+                _ => None,
+            })
+            .unwrap();
+        let attrs = parse_host_module_attr(&imp.attrs).unwrap().unwrap();
+        let hd = host_decl(imp, attrs, Some(&file.items), Some(&lib)).unwrap();
+        assert_eq!(hd.record_files.len(), 1, "{:?}", hd.record_files);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// `#[htl::host_module(..)]` is the same attribute as `#[host_module(..)]` after

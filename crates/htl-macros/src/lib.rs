@@ -924,7 +924,16 @@ fn union_from(en: &ItemEnum, name: &str, variants: &[dts::UnionVariant]) -> Toke
 /// qualified by that same name (`name::Type`) crosses, as `name.Type`, ahead of any other
 /// rule — a qualified type with no matching `uses` entry crosses under its own last
 /// segment, same as a bare one. Nested `#[derive(TealRecord)]` types come in via
-/// `records = [..]`. `Result<T, E>` returns raise a Lua error on `Err` by default; with
+/// `records = [..]` — a bare name (`records = [Point]`) for one declared in this same
+/// file, or a module path one level deep (`records = [geom::Point]`) for one in a `mod
+/// geom;` declared here, read from the file Rust compiles it from: next to this file when
+/// it is a crate root (`lib.rs` / `main.rs` / `mod.rs`, or a file directly under
+/// `src/bin/`, `tests/`, `examples/` or `benches/`), otherwise in a directory named after
+/// this file's own stem (not a `[lib] path` override or another custom crate root). Either
+/// way the record nests as `host.Point`; `uses = [Point]` instead gives it a module of its own
+/// (`local type Point = require("Point")`), so it is `Point` rather than `host.Point`,
+/// and every `.tl` that wrote `host.Point` has to be rewritten to match. `Result<T, E>`
+/// returns raise a Lua error on `Err` by default; with
 /// `errors = "return"` on the attribute they come back Lua-style (`v, nil` / `nil, err`),
 /// so `local ok, err = store:write(name, text)` needs no `pcall`. A parameter that may
 /// see a value from outside checked Teal is a `Strict<T>` (`htl::teal::Strict`).
@@ -1068,11 +1077,36 @@ pub fn host_module(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// Items of the file this macro is expanding in (needed for `records = [...]`).
-fn current_file_items() -> Option<Vec<syn::Item>> {
+/// The file this macro is expanding in: its items (needed for `records = [...]`) and its
+/// own path (needed when one of those entries is module-qualified, `records =
+/// [geom::Point]`, to find the module's file — [`dts::host_decl`]). `None` when the span
+/// carries no local file (outside a real expansion: some IDE tooling, `cargo
+/// expand`-style tools that lose it).
+fn current_file() -> Option<(Vec<syn::Item>, PathBuf)> {
     let file = proc_macro::Span::call_site().local_file()?;
     let src = std::fs::read_to_string(&file).ok()?;
-    syn::parse_file(&src).ok().map(|f| f.items)
+    let items = syn::parse_file(&src).ok()?.items;
+    Some((items, file))
+}
+
+/// A file read to resolve a `records = [module::Name]` entry, tracked with
+/// `include_str!` on its absolute path, the same way `settings_tracked` tracks
+/// `htl.toml`. Usually redundant: `geom.rs` is a source of this crate already (rustc
+/// parses it to compile `mod geom;` at all), so it is already in the dep-info cargo
+/// rebuilds from, and the macro re-expands on every recompile regardless — the belt is
+/// for the one case that is not redundant (`mod geom;` behind a `#[cfg]` this build does
+/// not take, so rustc never parses `geom.rs` on its own) and for keeping one rule
+/// (`include_str!` every file this macro reads beyond the token stream it was handed)
+/// rather than two. Pure (no `proc_macro` types), so it is unit-tested the same way
+/// `settings_tracked` is.
+fn record_files_tracked(files: &[PathBuf]) -> TokenStream2 {
+    let files: Vec<String> = files
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    quote! {
+        #( const _: &str = include_str!(#files); )*
+    }
 }
 
 fn expand_host_module(
@@ -1080,12 +1114,16 @@ fn expand_host_module(
     imp: &ItemImpl,
 ) -> Result<TokenStream, String> {
     let attrs = dts::parse_attr_metas(metas)?;
-    let file_items = if attrs.records.is_empty() {
-        None
+    let (file_items, file_path) = if attrs.records.is_empty() {
+        (None, None)
     } else {
-        current_file_items()
+        match current_file() {
+            Some((items, path)) => (Some(items), Some(path)),
+            None => (None, None),
+        }
     };
-    let hd = dts::host_decl(imp, attrs, file_items.as_deref())?;
+    let hd = dts::host_decl(imp, attrs, file_items.as_deref(), file_path.as_deref())?;
+    let record_files_tracked = record_files_tracked(&hd.record_files);
     if let Some(d) = &hd.attrs.dts {
         write_dts(d, &hd.decl)?;
     }
@@ -1230,6 +1268,7 @@ fn expand_host_module(
 
     Ok(quote! {
         #imp
+        #record_files_tracked
         impl ::htl::mlua::UserData for #self_ty {
             fn add_methods<M: ::htl::mlua::UserDataMethods<Self>>(m: &mut M) {
                 #( #registrations )*
@@ -1297,7 +1336,7 @@ fn expand_c_export(
                 .into(),
         );
     }
-    let hd = dts::host_decl(imp, dts::TealAttrs::default(), None)?;
+    let hd = dts::host_decl(imp, dts::TealAttrs::default(), None, None)?;
     let plan = htl_core::cexport::plan(&hd, imp, attrs)?;
     let header = plan.header();
     if let Some(path) = &plan.header_path {
@@ -2081,6 +2120,26 @@ return M
                 .is_none()
         );
         assert!(!settings_tracked(None).to_string().contains("include_str"));
+    }
+
+    /// A `records = [module::Name]` entry's file is already tracked as a module of the
+    /// crate in the ordinary case (rustc parses it for `mod geom;` to compile the crate
+    /// at all); `record_files_tracked` emits the same `include_str!` tracking
+    /// `settings_tracked` emits for `htl.toml` regardless, as a belt for the `#[cfg]`-ed
+    /// out case and to keep one rule rather than two (#428). No files: nothing to track,
+    /// the same as `settings_tracked(None)`.
+    #[test]
+    fn record_files_are_tracked_with_include_str() {
+        let geom = PathBuf::from("/abs/src/geom.rs");
+        let tokens = record_files_tracked(std::slice::from_ref(&geom)).to_string();
+        assert!(tokens.contains("include_str !"), "{tokens}");
+        assert!(tokens.contains(geom.to_str().unwrap()), "{tokens}");
+
+        assert!(
+            !record_files_tracked(&[])
+                .to_string()
+                .contains("include_str")
+        );
     }
 
     /// `HTL_LINT` on top of the file: `warn` lets a `deny` through, `deny` fails a `warn`,

@@ -737,7 +737,7 @@ mod tests {
     /// Build the plan for one `impl` block written as source.
     fn planned(src: &str) -> Result<CPlan, String> {
         let imp: ItemImpl = syn::parse_str(src).expect("parses as an impl block");
-        let hd = host_decl(&imp, TealAttrs::default(), None)?;
+        let hd = host_decl(&imp, TealAttrs::default(), None, None)?;
         plan(&hd, &imp, CAttrs::default())
     }
 

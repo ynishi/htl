@@ -94,7 +94,7 @@ fn union_exhaustive_counts_the_variants_of_a_renamed_union() {
         })
         .unwrap();
     let attrs = dts::parse_host_module_attr(&imp.attrs).unwrap().unwrap();
-    let hd = dts::host_decl(imp, attrs, Some(&file.items)).unwrap();
+    let hd = dts::host_decl(imp, attrs, Some(&file.items), None).unwrap();
     assert!(
         hd.decl.contains("where self.kind == \"needs_work\""),
         "{}",
@@ -137,7 +137,7 @@ fn union_exhaustive_sees_a_derived_union() {
         })
         .unwrap();
     let attrs = dts::parse_host_module_attr(&imp.attrs).unwrap().unwrap();
-    let hd = dts::host_decl(imp, attrs, Some(&file.items)).unwrap();
+    let hd = dts::host_decl(imp, attrs, Some(&file.items), None).unwrap();
     write(&dir.join("host.d.tl"), &hd.decl);
     write(
         &dir.join("use.tl"),
