@@ -319,12 +319,9 @@ print(table.concat(parts, \",\"))
 /// One case for each row of the issue's table: `await` in an `if`'s condition, `then`
 /// body, `elseif` body and `else` body; an `if` body inside an async function; and an
 /// awaited method call in an `if` body. Each one checks clean, the run shows the branch
-/// that executed, and `gen` writes line for line.
-///
-/// `fmt --check` is not asserted here: `htl fmt` currently re-indents a statement-level
-/// `await <call>` (such as `await task.after(1):wait()` below) one level shallower than
-/// it should be, regardless of whether it is inside an `if` — a separate, pre-existing
-/// defect, not something this fix changes.
+/// that executed, `fmt --check` has nothing to change (including the statement-level
+/// `await task.after(1):wait()` that opens `h`'s `if` body — #435), and `gen` writes line
+/// for line.
 #[test]
 fn await_works_in_every_part_of_an_if_and_inside_an_async_function() {
     let root = scratch("if-everywhere");
@@ -336,12 +333,179 @@ fn await_works_in_every_part_of_an_if_and_inside_an_async_function() {
     let (ok, out, err) = htl(&["run", "main.tl"], &root);
     assert!(ok, "{err}");
     assert_eq!(out, "cond,then:1,elseif:1,else:1,nested:1,method:2\n");
+    let (ok, _, err) = htl(&["fmt", "--check", "main.tl"], &root);
+    assert!(ok, "the file is already in its formatted shape: {err}");
+    assert!(err.contains("0 would change"), "{err}");
     let (ok, out, err) = htl(&["gen", "main.tl"], &root);
     assert!(ok, "{err}");
     assert_eq!(
         out.lines().count(),
         IF_EVERYWHERE_PROGRAM.lines().count(),
         "{out}"
+    );
+}
+
+/// #435: `htl fmt` moved a statement-level `await <call>` one indent level left when it
+/// was the first statement of a block — `if`, `while`, directly under an `async
+/// function`'s body — because the block's own position came from the call's token, not
+/// the keyword's. One case per block kind, each with a plain call and a method call, plus
+/// `local v = await f()` in the same three places staying put (acceptance 1-3): a
+/// statement-level await moves, an awaited expression does not.
+#[test]
+fn fmt_check_does_not_move_a_statement_level_await_that_opens_a_block() {
+    let root = scratch("await-opens-block");
+    write(&root.join("htl.toml"), "[lang]\nasync = true\n");
+    write(
+        &root.join("main.tl"),
+        "local task = require(\"htl.task\")
+
+local async function plain(): integer
+   return 1
+end
+
+local async function h(): integer
+   while true do
+      await task.after(1):wait()
+      return 2
+   end
+   return 0
+end
+
+local async function while_plain(): integer
+   while true do
+      await plain()
+      return 2
+   end
+   return 0
+end
+
+local async function if_plain(x: integer): integer
+   if x == 1 then
+      await plain()
+      return 2
+   end
+   return 0
+end
+
+local async function if_method(x: integer): integer
+   if x == 1 then
+      await task.after(1):wait()
+      return 2
+   end
+   return 0
+end
+
+local async function fn_plain(): integer
+   await plain()
+   return 2
+end
+
+local async function fn_method(): integer
+   await task.after(1):wait()
+   return 2
+end
+
+local async function assigned(x: integer): integer
+   local v = await plain()
+   if x == 1 then
+      local w = await plain()
+      return v + w
+   end
+   while true do
+      local t = await plain()
+      return v + t
+   end
+   return 0
+end
+",
+    );
+    let (ok, _, err) = htl(&["check", "main.tl"], &root);
+    assert!(ok, "{err}");
+    assert!(err.contains("0 error(s)"), "{err}");
+    let (ok, _, err) = htl(&["fmt", "--check", "main.tl"], &root);
+    assert!(ok, "the file is already in its formatted shape: {err}");
+    assert!(err.contains("0 would change"), "{err}");
+}
+
+/// #435, acceptance 4: a diagnostic on an awaited line keeps its position after the fix,
+/// except the one the fix means to move. `f` takes one argument; `await f()` is called
+/// with none, once as a block's first statement and once as its second, and the "wrong
+/// number of arguments" error moves to the `await` keyword's column both times (`start_at`
+/// touches the node itself regardless of which statement position it is, and only
+/// additionally repairs the block's own position when it is the first — the comment in
+/// `prelude.lua` says so). The same call as `local v = await f()` is not a statement —
+/// there is no block position to repair, so its error stays at the call's `(`, as does an
+/// ordinary, unawaited `p(1)`'s: neither is touched by this fix at all. The
+/// `await-non-async` lint (`htl_await_at`) and the argument-type error (the argument's own
+/// node) are included too, to show those never moved either way.
+#[test]
+fn an_argument_count_error_moves_to_the_keyword_only_for_a_statement_level_await() {
+    let root = scratch("await-argument-count-position");
+    write(&root.join("htl.toml"), "[lang]\nasync = true\n");
+    write(
+        &root.join("main.tl"),
+        "local async function f(n: integer): integer
+   return n
+end
+local function s(): integer
+   return 1
+end
+local function p(a: integer, b: integer): integer
+   return a + b
+end
+local async function g(x: integer): integer
+   if x == 1 then
+      await f(\"x\")
+      return 1
+   end
+   if x == 2 then
+      await s()
+      return 2
+   end
+   if x == 3 then
+      await f()
+      await f()
+      return 3
+   end
+   local v = await f()
+   return v
+end
+p(1)
+
+return { g = g }
+",
+    );
+    let (ok, _, err) = htl(&["check", "main.tl"], &root);
+    assert!(!ok);
+    // `await-non-async`: still at the keyword, via `htl_await_at` — unrelated to this fix.
+    assert!(
+        err.contains("main.tl:16:7:") && err.contains("[htl await-non-async]"),
+        "{err}"
+    );
+    // The argument type error: still at the argument, never the call — unrelated to this fix.
+    assert!(
+        err.contains("main.tl:12:15:") && err.contains("expected integer"),
+        "{err}"
+    );
+    // `await f()` as the `if` body's first statement: moved to the keyword's column.
+    assert!(
+        err.contains("main.tl:20:7: wrong number of arguments (given 0, expects 1)"),
+        "{err}"
+    );
+    // The same body's second statement: also moved, same as the comment in prelude.lua says.
+    assert!(
+        err.contains("main.tl:21:7: wrong number of arguments (given 0, expects 1)"),
+        "{err}"
+    );
+    // `local v = await f()`: an expression, not a statement — stays at the call's `(`.
+    assert!(
+        err.contains("main.tl:24:21: wrong number of arguments (given 0, expects 1)"),
+        "{err}"
+    );
+    // An ordinary, unawaited call: never touched by this fix, stays at its own `(`.
+    assert!(
+        err.contains("main.tl:27:2: wrong number of arguments (given 1, expects 2)"),
+        "{err}"
     );
 }
 

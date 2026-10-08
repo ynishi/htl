@@ -1739,6 +1739,22 @@ local function apply_async_marks(ast, marks, errs, filename)
          elseif target.kind == "op" and target.op.op == "@funcall" then
             target.htl_awaited = true
             target.htl_await_at = { y = m.y, x = m.x }
+            -- Only when the call is itself a statement: `start_at` moves the node's `x`
+            -- to the keyword's, same as `async local` / `async function`, so a
+            -- statement-level `await f()` that opens a block is indented like every
+            -- other statement (fmt.lua's `opener_pos` finds `then` / `do`, not `await`
+            -- itself). An awaited call inside a declaration, a condition, a `return`, an
+            -- argument list is never a block's first statement either way, so there is no
+            -- block position to repair there and its own position is left as the parser
+            -- put it. The statement form does have a visible side effect: a checker error
+            -- that attaches to the call node (`wrong number of arguments`, say) now names
+            -- the keyword's column rather than the call's `(`, the same place such an
+            -- error already points to under `async local` / `async function` — the
+            -- statement begins at the keyword, so that is where a diagnostic on it points.
+            local slot = parents[target]
+            if slot and slot.parent and slot.parent.kind == "statements" then
+               start_at(target, m.x)
+            end
          elseif target.kind == "paren" then
             err(m, "syntax error: 'await (..)': put 'await' inside the parentheses, before the call")
          else
