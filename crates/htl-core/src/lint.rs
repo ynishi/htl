@@ -6,7 +6,7 @@
 //! written` and `left in place` lines are not: they are the command reporting on the
 //! declarations it was asked to write, carry no rule name, and are in no listing here.
 //! Twenty-one of them are
-//! implemented in `lint.lua`, seven in the project layer and seven by the vendored Teal
+//! implemented in `lint.lua`, eight in the project layer and seven by the vendored Teal
 //! compiler, and that difference used to decide what a project could say about them: the
 //! registry was `L.DEFAULT` in `lint.lua`, so `--lint` and `[lint]` knew the thirteen and
 //! answered `unknown lint rule: contract` to a name htl had just printed.
@@ -15,8 +15,8 @@
 //! could read it there. The Lua side keeps no defaults of its own any more: it is handed
 //! the resolved selection ([`Htl::select_lints`](crate::Htl::select_lints)), so the names a
 //! project may write and the names that run cannot drift apart. What `lint.lua` still owns
-//! is the *implementation* of its fifteen — `tests/lint_registry.rs` holds that list to this
-//! one, so a rule renamed on one side fails a test rather than going quietly silent.
+//! is the *implementation* of its twenty-one — `tests/lint_registry.rs` holds that list to
+//! this one, so a rule renamed on one side fails a test rather than going quietly silent.
 //!
 //! Whether a rule is on and how much it matters are one question here, answered by a
 //! [`Level`]: `allow` is not reported, `warn` is reported, `deny` is reported and fails the
@@ -77,7 +77,8 @@
 //! | `contract-unenforced` | warn | a contract the host never builds resolvers for, so it is documentation rather than a run-time guarantee. Say where the enforcement lives with `[[contract]] enforced_by` when the scan cannot see it |
 //! | `require-cycle` | warn | a loop in the require graph of the files `htl check <dir>` just checked, e.g. `a.tl -> b.tl -> a.tl`. Teal types the back edge as an opaque circular require, so without this the symptom is "cannot index" somewhere else. The graph is the one that runs: a `local type x = require("x")` the generator erases is no edge, so two files importing each other's records for annotations alone are not a loop |
 //! | `global-redeclaration` | warn | one global name declared at two sites — a site being the file, line and column of the declared name — among everything the run's files brought into scope through their requires. Two `.d.tl` each declaring `global VERSION: string` is the case: the checker keeps the first it walks and says nothing about the second when the types agree, and nothing else did. Reported once per name, at the later site, naming the earlier, whether or not the types agree: the checker's own `cannot redeclare global with a different type` is raised only where one environment walks both declarations, which depends on the walk order, and this does not. The sites ride on each check ([`crate::CheckInfo::global_sites`]), so a declaration file, which the walk never visits, and a run replayed from the cache both count |
-//! | `unmarked-struct` | allow | a record declared among the files `htl check <dir>` just checked, built whole at every one of its construction sites — at least one, and every one already setting every field the record's own body declares — that carries no `---@struct`. A census of the sites `struct-fields` already walks, not a prediction: marking the record this names cannot make `struct-fields` report anything new on the spot. Off by default because what it reports is not an accident but a record the project is free to leave unmarked (#304); a project that wants the "could have" list enforced in CI, with a file and a line, raises it. A record built short at even one site, and one with no construction site at all, are not reported either way |
+//! | `unmarked-struct` | allow | a record declared in one of the project's own files (not a dependency's, patched or not, nor a `.d.tl`), built whole at every one of its construction sites — at least one, and every one already setting every field the record's own body declares — that carries no `---@struct`. A census of the sites `struct-fields` already walks, not a prediction: marking the record this names cannot make `struct-fields` report anything new on the spot. Off by default because what it reports is not an accident but a record the project is free to leave unmarked (#304); a project that wants the "could have" list enforced in CI, with a file and a line, raises it. A record built short at even one site, and one with no construction site at all, are not reported either way |
+//! | `unmarked-sealed` | allow | a record declared in one of the project's own files (not a dependency's, patched or not, nor a `.d.tl`), built and cast only in the file that declares it — at least one site, literal or cast, every one of them there — that carries no `---@sealed`. A census of the sites `sealed-record` already walks, not a prediction: `sealed-record` with no function list treats any site inside the declaring file as allowed, so marking the record this names cannot make it report anything new on the spot. Off by default for the same reason `unmarked-struct` is (#304). A record built or cast in any other file, and one with no site at all, are not reported either way |
 //!
 //! The table says what each rule catches. Why it exists, what the fix is and the judgment
 //! call where there is one is the rule's explanation ([`Rule::explain`], the text in
@@ -396,7 +397,7 @@ impl Rule {
     }
 }
 
-/// Every rule there is. The first thirty-four are the lint surface, in the order
+/// Every rule there is. The first thirty-six are the lint surface, in the order
 /// `htl check --list-lints` prints them: the file-level rules first, in the order
 /// `lint.lua` runs them, then the ones the project layer asks once the files have been
 /// checked, then the warning kinds the vendored Teal compiler reports for itself. The last
@@ -486,6 +487,10 @@ pub const RULES: &[Rule] = &[
     // unmarked-struct" — as Rust's own convention for lint names asks (issue #304, RFC
     // 344).
     Rule::allow("unmarked-struct", Side::Rust, explain::UNMARKED_STRUCT),
+    // `allow`, for the same reason `unmarked-struct` just above is, over the other half
+    // of the census `sealed-record` walks: a "could have" list for `---@sealed` rather
+    // than `---@struct`, and a project's to leave unmarked.
+    Rule::allow("unmarked-sealed", Side::Rust, explain::UNMARKED_SEALED),
     // Teal's warning kinds, kept in the compiler's own vocabulary behind a `tl:` prefix.
     // The prefix is not decoration. `unused` already means something else here — `htl
     // unused` reports modules nothing requires, not locals nothing reads — and these seven
@@ -684,7 +689,7 @@ impl Selection {
     }
 
     /// The rules of one side and whether each is on, for a consumer that has to be handed
-    /// the selection rather than ask about it — `lint.lua`, which runs its fifteen from a
+    /// the selection rather than ask about it — `lint.lua`, which runs its twenty-one from a
     /// table. Fix classes are not among them: no producer produces one, so there is
     /// nothing to tell a producer about them.
     ///
@@ -798,8 +803,8 @@ fn names_allow(allows: &AllowedLines, line: usize, rule: &str) -> bool {
 /// [`Lints::keep`] honours for a project-layer finding, read fresh rather than through a
 /// [`Lints`]' cache. `htl adopt` (`crate::adopt::adopt`) is the caller this is for: it
 /// has no run-wide [`Lints`] of its own (it is a report, not a check) and asks this once
-/// per `---@struct` candidate rather than once per finding of a run, so a record a
-/// project has silenced `unmarked-struct` for does not still count toward `applicable`
+/// per marker candidate rather than once per finding of a run, so a record a project has
+/// silenced a rule like `unmarked-struct` for does not still count toward `applicable`
 /// (#304) — the lint and the count read one definition of "allowed", through
 /// `names_allow` (private; this file's own), not two.
 pub fn line_is_allowed(file: &Path, line: usize, rule: &str) -> bool {
@@ -1228,10 +1233,10 @@ run replayed from the cache both count. Declare the name once, in the module tha
 it, and require that module."#;
 
     /// `unmarked-struct`.
-    pub const UNMARKED_STRUCT: &str = r#"A record declared in one of the files `htl check <dir>` just walked — not a dependency's
-`.d.tl`, not a file outside the walk, which is not the project's to mark — that has at
-least one construction site, where every one of them already sets every field the
-record's own body declares, and the record carries no `---@struct`.
+    pub const UNMARKED_STRUCT: &str = r#"A record declared in one of the project's own files — not a dependency's, patched or
+not, and not a `.d.tl` — that has at least one construction site, where every one of
+them already sets every field the record's own body declares, and the record carries
+no `---@struct`.
 
 A census of the sites `struct-fields` already walks, not a prediction: every site is
 already built whole, so marking the record this names cannot make `struct-fields` report
@@ -1249,7 +1254,34 @@ enforced in CI, with a file and a line.
 Not reported: a record built short at even one site (not evidence either way — marking
 it would only start `struct-fields` reporting that one site, a decision for the record's
 author, not this rule's), and a record with no construction site at all — nothing built
-is not evidence that everything would be."#;
+is not evidence that everything would be. Decided only when `htl check` walks the whole
+project; a narrower walk cannot know the sites it did not see, and says nothing rather
+than guess from the ones it did."#;
+
+    /// `unmarked-sealed`.
+    pub const UNMARKED_SEALED: &str = r#"A record declared in one of the project's own files — not a dependency's, patched or
+not, and not a `.d.tl` — that has at least one site, a table literal or an `as` cast,
+every one of them in the file that declares the record, and the record carries no
+`---@sealed`.
+
+A census of the sites `sealed-record` already walks, literals and casts alike, not a
+prediction: `sealed-record` with no function list treats any site inside the declaring
+file as allowed, so marking the record this names cannot make it report anything new on
+the spot — the opposite of a rule that argues with correct code. `htl adopt`'s
+`---@sealed` row counts the same list.
+
+`allow` by default, for the same reason `unmarked-struct` is: what this reports is not a
+defect at all, a "could have" list which `htl adopt` shows either way and a project is
+free to leave unmarked. The name is chosen to read that way — "allow unmarked-sealed" —
+as Rust's own convention for lint names asks (RFC 344). Raise the level to `warn` to have
+the list enforced in CI, with a file and a line.
+
+Not reported: a record built or cast in any other file (evidence against, not neutral —
+marking it `---@sealed` would make `sealed-record` report that very site, so the record
+is not free to be marked as it stands), a record with no site at all, and a record
+already marked `---@sealed`. Decided only when `htl check` walks the whole project; a
+narrower walk cannot know the sites it did not see, and says nothing rather than guess
+from the ones it did."#;
 
     /// `tl:unknown`.
     pub const TL_UNKNOWN: &str = r#"Teal's own warning: a variable the checker cannot resolve.
@@ -1333,8 +1365,8 @@ mod tests {
     /// an opinion, but a flow rule whose false positives are the cases where something did
     /// check and it could not tell. `htlx-available` for a third: the code it reports is
     /// right, and the call it names is a library's, not htl's. `unmarked-struct` for a
-    /// fourth: what it reports is a record the project is free to leave unmarked, not a
-    /// state it is in by accident.
+    /// fourth, and `unmarked-sealed` for a fifth: what each reports is a record the
+    /// project is free to leave unmarked, not a state it is in by accident.
     #[test]
     fn the_defaults_are_warn_except_the_opinions_and_the_rules_that_are_not() {
         for (name, level) in rule_defaults() {
@@ -1344,7 +1376,8 @@ mod tests {
                 | "class-record"
                 | "nil-return-unchecked"
                 | "htlx-available"
-                | "unmarked-struct" => Level::Allow,
+                | "unmarked-struct"
+                | "unmarked-sealed" => Level::Allow,
                 // The four async rules: what each catches fails at run time at a line
                 // other than the one that caused it, whatever the project's opinion.
                 "await-missing"

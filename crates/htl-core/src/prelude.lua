@@ -451,7 +451,7 @@ end
 
 -- The data fields a record's own body adds: every name in `t.fields` that is neither a
 -- nested type declaration nor a method, with no marker read at all -- the half of
--- `struct_spec` (below) that `struct_sites` (below `H.check`'s census) needs too, since
+-- `struct_spec` (below) that `record_sites` (below `H.check`'s census) needs too, since
 -- telling a literal that sets everything from one that does not is the same question
 -- with the marker gate lifted. The two used to read `t.fields` the same way, word for
 -- word; this is that reading, kept once.
@@ -2493,10 +2493,11 @@ end
 -- and this counts what the project's own authors wrote.
 local marker_sites
 
--- The census `unmarked-struct` and, from it, `htl adopt`'s `---@struct` row read
--- (#304): every table literal in this file built as a *declared* record, whether
--- that record carries `---@struct` or not and whether the literal sets every field or
--- not -- the decision each rule makes from that is the caller's, not this walk's.
+-- The census of record sites: every table literal in this file typed as a *declared*
+-- record, and every `as` cast to one, whether that record carries `---@struct` or
+-- `---@sealed` or neither, and whether a literal sets every field or not -- the decision
+-- each rule makes from that (`unmarked-struct`, `unmarked-sealed`, and from them `htl
+-- adopt`'s `---@struct` row, #304) is the caller's, not this walk's.
 --
 -- Declared, to exclude the one shape `t.fields`/`t.file`/`t.y` cannot tell apart from a
 -- real one: the checker infers a record type for a bare `{ a = 1 }` with nowhere to
@@ -2513,11 +2514,27 @@ local marker_sites
 -- shape this guards against does not arise for it. A generic's `t.str` carries its own
 -- arguments (`"Box<T>"` for `record Box<T>`), which a declaration line spells only up to
 -- the `<` -- the bare name (the leading run of identifier characters) is read off `t.str`
--- once, below, and used for both this match and `record_name`.
+-- once, below, and used for both this match and `record_name`. An `as` cast's own
+-- position holds the same shape of type, read off the same gate (`by_pos[y][x]` for the
+-- `as` node is the cast's target, the position `sealed_at` and `struct_at` already read
+-- it from), so a cast to a declared record passes the gate exactly as a literal does. A
+-- cast nested in a literal (a field whose value is itself `as`-cast to a declared
+-- record) is its own site, wherever that holds, the same gate reached a second time at
+-- the nested node's own position. A literal nested in a cast is a site only when its
+-- own position is independently typed as a declared record -- not merely by sitting
+-- inside the cast: `{ ... } as R` types the literal's own position as the checker's
+-- inferred record (`as` is erased, not a hint that retypes the literal it wraps), so
+-- that literal is never a site, and the cast is the one and only site, of `R`.
+--
+-- `kind`: `"literal"` for a table constructor, `"cast"` for an `as` expression -- the two
+-- ways one of these records is made, and the two kinds `sealed-record` already walks.
 --
 -- `marked`: `has_marker(dlines, t.y, "struct")` on the *declaring* file's lines -- the
 -- same read `struct_spec` makes, so a record this walk calls marked is one `struct_at`
--- already treats as one.
+-- already treats as one. `sealed`: the same read of `---@sealed`, with or without a
+-- function list (`marker_on`'s truthiness, not its argument list) -- `unmarked_sealeds`
+-- (the Rust-side function this feeds, beside `unmarked_structs`) reads it to tell a
+-- sealed record apart from one free to be marked.
 --
 -- `complete`: the literal sets every name `record_fields` (above) calls `declared` for
 -- this record -- the data side of `struct_spec`, with no marker gate and no `---@optional`
@@ -2530,22 +2547,26 @@ local marker_sites
 -- `lib.rs`) to report. A key the literal sets that `declared` does not name (a stray, in
 -- `struct-fields`' own vocabulary) does not count against `complete`: that is a question
 -- for `struct-fields` to raise once the record is marked, not for this census to judge
--- before it is.
+-- before it is. A cast sets nothing at all, so it is always `complete = false` --
+-- `unmarked_structs` restricts itself to `kind == "literal"` sites for exactly this
+-- reason, a cast being no evidence either way of what a literal would set.
 --
--- One entry per literal, not deduplicated across literals the way `marker_sites`
--- dedupes across branches that can reach one site twice -- a pre-order walk reaches each
--- `literal_table` node exactly once, so the only dedupe worth doing is on position, for
--- the same reason `marker_sites`' is: insurance against a shape this walk does not
--- expect reaching one node by two paths. Sorted by `(y, x)`, the position a literal's own
--- `report` call elsewhere in this file already sorts findings by.
+-- One entry per site, not deduplicated across sites the way `marker_sites` dedupes
+-- across branches that can reach one site twice -- a pre-order walk reaches each
+-- `literal_table` or `as` node exactly once, so the only dedupe worth doing is on
+-- `(kind, y, x)`, for the same reason `marker_sites`' is: insurance against a shape this
+-- walk does not expect reaching one node by two paths. Sorted by `(y, x, kind)`, the
+-- position order the rest of this file sorts findings by, `kind` breaking the tie a
+-- literal and a cast sharing one position would otherwise need (they do not today, but
+-- nothing says a future node shape could not).
 --
 -- `H.check` computes this under the same gate `markers` is computed under (the lint pass
--- ran, and the file produced an AST) and returns it as `struct_sites`; whether the *whole
+-- ran, and the file produced an AST) and returns it as `record_sites`; whether the *whole
 -- project's* decision ("every site of this record") holds is answered in Rust, over every
 -- file's census together, because a record's sites live in files other than its own
--- declaration. `.d.tl` gives an empty census, like `marker_sites`: no literal is built in
--- a declaration file either.
-local struct_sites
+-- declaration. `.d.tl` gives an empty census, like `marker_sites`: no literal or cast is
+-- built in a declaration file either.
+local record_sites
 
 -- Checked-module store, shared by every fresh env in this state. A fresh env per file
 -- exists so that module *names* resolve under that file's own search path and never
@@ -2797,9 +2818,9 @@ function H.check(filename, env, opts)
    -- `htl adopt`'s input (#304); empty when the lint pass below is skipped (there is no
    -- `src` to read it from then) and for a `.d.tl` (`marker_sites` excludes it itself).
    local markers = {}
-   -- `unmarked-struct`'s input, and (#304) `htl adopt`'s `---@struct` row: same gate
-   -- and the same reason as `markers` above.
-   local struct_sites_found = {}
+   -- `unmarked-struct` and `unmarked-sealed`'s input, and (#304) `htl adopt`'s
+   -- `---@struct` row: same gate and the same reason as `markers` above.
+   local record_sites_found = {}
    if opts.lints ~= false and result.ast and #(result.syntax_errors or {}) == 0 then
       local fd = io.open(filename, "rb")
       if fd then src = fd:read("a"); fd:close() end
@@ -2807,7 +2828,7 @@ function H.check(filename, env, opts)
          local lines = {}
          for l in (src .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = l end
          markers = marker_sites(result, filename, lines)
-         struct_sites_found = struct_sites(result, filename, lines, {})
+         record_sites_found = record_sites(result, filename, lines, {})
          local t1 = os.clock()
          local enums = checked_enums(result, env)
          prof("enums", filename, t1)
@@ -2876,7 +2897,7 @@ function H.check(filename, env, opts)
       lints = lints, lint_fixes = lint_fixes, requires = requires, dependency_errors = dep_errors,
       error_items = error_items, warning_items = warning_items, lint_items = lint_items,
       global_sites = global_sites, closure_requires = closure_requires, markers = markers,
-      struct_sites = struct_sites_found,
+      record_sites = record_sites_found,
       syntax_errors = #(result.syntax_errors or {}), result = result, src = src }
 end
 
@@ -3537,7 +3558,7 @@ end
 -- Whether `line` -- the line `source_lines` reads back at a type's own `t.y` -- is a
 -- declaration of a record named `name`: `record <name>` (`local`/`global` prefix, or
 -- none, for a nested one) with `record` before the name somewhere on the line, or a
--- `type <name> = record` alias of one. See the doc comment above `local struct_sites`
+-- `type <name> = record` alias of one. See the doc comment above `local record_sites`
 -- for why this is what tells a declared record apart from the checker's own inferred one.
 local function declares_record(line, name)
    if not line then return false end
@@ -3547,13 +3568,14 @@ local function declares_record(line, name)
    return false
 end
 
--- See the doc comment above its forward declaration (`local struct_sites`, beside
+-- See the doc comment above its forward declaration (`local record_sites`, beside
 -- `marker_sites`). A pre-order walk of `result.ast`, the same shape `marker_sites` above
--- walks it with (same skip keys), collecting every `literal_table` node rather than
--- every marked declaration. `cache` is the source-lines cache `source_lines` reads and
--- fills -- the caller's, as `struct_resolver`'s own is, so that a run checking several
--- literals built against one declaring file reads that file once.
-function struct_sites(result, filename, lines, cache)
+-- walks it with (same skip keys), collecting every `literal_table` node typed as a
+-- declared record and every `as` cast to one, rather than every marked declaration.
+-- `cache` is the source-lines cache `source_lines` reads and fills -- the caller's, as
+-- `struct_resolver`'s own is, so that a run checking several sites built against one
+-- declaring file reads that file once.
+function record_sites(result, filename, lines, cache)
    local sites = {}
    if tostring(filename):sub(-5) == ".d.tl" or not lines then return sites end
    local ok, report = pcall(tl.get_types, result)
@@ -3566,45 +3588,82 @@ function struct_sites(result, filename, lines, cache)
       if t and t.ref and depth < 8 then return deref(t.ref, depth + 1) end
       return t
    end
+   -- The declared record a position's own type resolves to, its declaring file's lines
+   -- and its bare name -- or nil for a position `by_pos` holds nothing for, a type with
+   -- no fields, or an inferred record (the checker's own `{ ... }` with nowhere declared
+   -- for it, whether or not a declaration happens to share `by_pos[y][x]`'s file and
+   -- line, which `declares_record` is what actually tells apart). Shared by the literal
+   -- and the cast branch below, since both ask the same question of a different node
+   -- kind -- a table constructor's own position for one, the `as` node's for the other
+   -- (`by_pos[y][x]` holds the cast's target type there, the same report `sealed_at` and
+   -- `struct_at` read it from).
+   local function record_at(y, x)
+      local id = by_pos[y] and by_pos[y][x]
+      local t = id and deref(id, 0)
+      if not (t and t.fields and t.file and t.y) then return nil end
+      local dlines = source_lines(cache, t.file)
+      local decl = dlines and dlines[t.y]
+      -- `t.str` carries a generic's own arguments (`"Box<T>"` for `record Box<T>`) --
+      -- the bare name, the leading run of identifier characters, is what a declaration
+      -- line actually spells before the `<`, and what a reader of `record_name`
+      -- elsewhere (a lint's message, `htl adopt`'s candidate list) wants to see rather
+      -- than the generic signature.
+      local name = (t.str or ""):match("^[%w_]+") or "record"
+      if not (decl and declares_record(decl, name)) then return nil end
+      return t, dlines, name
+   end
    local seen_nodes = {}
    local function go(n)
       if type(n) ~= "table" or seen_nodes[n] then return end
       seen_nodes[n] = true
       if n.kind == "literal_table" and n.y and n.x then
-         local id = by_pos[n.y] and by_pos[n.y][n.x]
-         local t = id and deref(id, 0)
-         if t and t.fields and t.file and t.y then
-            local dlines = source_lines(cache, t.file)
-            local decl = dlines and dlines[t.y]
-            -- `t.str` carries a generic's own arguments (`"Box<T>"` for `record
-            -- Box<T>`) -- the bare name, the leading run of identifier characters, is
-            -- what a declaration line actually spells before the `<`, and what a
-            -- reader of `record_name` elsewhere (the lint's message, `htl adopt`'s
-            -- candidate list) wants to see rather than the generic signature.
-            local name = (t.str or ""):match("^[%w_]+") or "record"
-            if decl and declares_record(decl, name) then
-               local rf = record_fields(cache, report, t)
-               local declared = rf and rf.declared or {}
-               local present, any_declared, complete = {}, false, true
-               for _, item in ipairs(n) do
-                  if type(item) == "table" and item.key then
-                     local key = literal_key(item)
-                     if key then present[key] = true end
-                  end
+         local t, dlines, name = record_at(n.y, n.x)
+         if t then
+            local rf = record_fields(cache, report, t)
+            local declared = rf and rf.declared or {}
+            local present, any_declared, complete = {}, false, true
+            for _, item in ipairs(n) do
+               if type(item) == "table" and item.key then
+                  local key = literal_key(item)
+                  if key then present[key] = true end
                end
-               for fname in pairs(declared) do
-                  any_declared = true
-                  if not present[fname] then complete = false end
-               end
-               if not any_declared then complete = false end
-               sites[#sites + 1] = {
-                  record = { file = t.file, line = t.y, name = name },
-                  marked = has_marker(dlines, t.y, "struct"),
-                  y = n.y,
-                  x = n.x,
-                  complete = complete,
-               }
             end
+            for fname in pairs(declared) do
+               any_declared = true
+               if not present[fname] then complete = false end
+            end
+            if not any_declared then complete = false end
+            sites[#sites + 1] = {
+               record = { file = t.file, line = t.y, name = name },
+               marked = has_marker(dlines, t.y, "struct"),
+               y = n.y,
+               x = n.x,
+               kind = "literal",
+               sealed = (marker_on(dlines, t.y, "sealed")) and true or false,
+               complete = complete,
+            }
+         end
+      -- `{ ... } as R`: the literal keeps its own position's inferred type (`as` is
+      -- erased, so it is not the hint that makes the literal's own type the record) and
+      -- is not a site of its own, the way an un-cast inferred literal is not one --
+      -- `record_at` on the literal's own position answers that exactly as it already
+      -- does for that case. The `as` node is its own site of `R`, at its own position,
+      -- whatever is nested inside it.
+      elseif n.kind == "op" and n.op and n.op.op == "as" and n.y and n.x then
+         local t, dlines, name = record_at(n.y, n.x)
+         if t then
+            sites[#sites + 1] = {
+               record = { file = t.file, line = t.y, name = name },
+               marked = has_marker(dlines, t.y, "struct"),
+               y = n.y,
+               x = n.x,
+               kind = "cast",
+               -- A cast sets nothing, so it is never `complete`: `unmarked_structs`
+               -- (the Rust-side reader) counts construction sites alone, and a cast
+               -- site that read `true` here would be read as one.
+               sealed = (marker_on(dlines, t.y, "sealed")) and true or false,
+               complete = false,
+            }
          end
       end
       for i = 1, #n do
@@ -3618,9 +3677,16 @@ function struct_sites(result, filename, lines, cache)
       end
    end
    for _, node in ipairs(result.ast or {}) do go(node) end
+   -- Deduped by `(kind, y, x)` rather than `(y, x)` alone: a literal and a cast can
+   -- share a position only if one surrounds the other (`{ ... } as R`, where the
+   -- literal is never a site at all, above), so this is insurance against a shape this
+   -- walk does not expect reaching one node by two paths, the same reason `(y, x)` alone
+   -- was. Sorted by `(y, x, kind)`, the position order the rest of this file sorts
+   -- findings by, with `kind` as the tie-break the two shapes sharing a position would
+   -- otherwise need.
    local seen_site, deduped = {}, {}
    for _, s in ipairs(sites) do
-      local key = s.y .. "\0" .. s.x
+      local key = s.kind .. "\0" .. s.y .. "\0" .. s.x
       if not seen_site[key] then
          seen_site[key] = true
          deduped[#deduped + 1] = s
@@ -3628,7 +3694,8 @@ function struct_sites(result, filename, lines, cache)
    end
    table.sort(deduped, function(a, b)
       if a.y ~= b.y then return a.y < b.y end
-      return a.x < b.x
+      if a.x ~= b.x then return a.x < b.x end
+      return a.kind < b.kind
    end)
    return deduped
 end

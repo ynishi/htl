@@ -575,13 +575,15 @@ Examples:
     /// Report how many declarations carry each of htl's nine markers, and where
     ///
     /// `applicable` is how many declarations a lint has found the evidence to call
-    /// candidates for a marker. Only `---@struct`'s row has one so far — what
+    /// candidates for a marker. Two rows have one so far: `---@struct`'s is what
     /// `unmarked-struct` would report, a record built whole at every one of its
-    /// construction sites and left unmarked; every other row is empty (`-`), not `0`: a
-    /// feature with no evidence counted is a different claim from a feature nothing is
-    /// applicable to, and this command does not guess between them. `--detail` lists
-    /// each candidate after the row's marked declarations, with `(applicable: built
-    /// whole at N site(s))`. It is a report, not a gate: the exit code is always 0.
+    /// construction sites and left unmarked; `---@sealed`'s is what `unmarked-sealed`
+    /// would report, a record built and cast only in the file that declares it and left
+    /// unmarked. Every other row is empty (`-`), not `0`: a feature with no evidence
+    /// counted is a different claim from a feature nothing is applicable to, and this
+    /// command does not guess between them. `--detail` lists each candidate after the
+    /// row's marked declarations, with `(applicable: <reason>, N site(s))`. It is a
+    /// report, not a gate: the exit code is always 0.
     /// README, "Adoption": https://github.com/ynishi/htl#adoption-htl-adopt
     #[command(after_long_help = "\
 Examples:
@@ -2790,10 +2792,11 @@ fn print_adopt(rep: &htl::adopt::Report, detail: bool) {
                     format!("{} sites", c.sites)
                 };
                 eprintln!(
-                    "  {:<width$}{:<line_width$}  {}  (applicable: built whole at {sites})",
+                    "  {:<width$}{:<line_width$}  {}  (applicable: {}, {sites})",
                     format!("---@{}", f.marker),
                     format!("{}:{}", c.file.display(), c.line),
                     c.name,
+                    c.reason,
                     width = width,
                     line_width = line_width
                 );

@@ -110,17 +110,24 @@ use crate::{CheckInfo, DependencyError, Fix, RequireSite};
 /// check.
 ///
 /// 13: an entry now also carries the module's construction-site census
-/// ([`Module::struct_sites`], [`CheckInfoJson::struct_sites`]) — `unmarked-struct`'s input
+/// ([`Module::record_sites`], [`CheckInfoJson::record_sites`]) — `unmarked-struct`'s input
 /// and `htl adopt`'s `---@struct` row (#304). An entry of 12 has no such field, and
 /// `unmarked_structs` reads every file of the walk, replayed ones included, the same
 /// reason `markers` and `global_sites` carry through a replay.
+///
+/// 14: the census of 13 widened from construction sites alone to every site of a
+/// declared record, `as` casts included, and each [`RecordSiteJson`] now carries `kind`
+/// (`"literal"` / `"cast"`) and `sealed` beside what it already had — `unmarked-sealed`'s
+/// input (#304), beside `unmarked-struct`'s. An entry of 13 has neither field, and
+/// `unmarked_sealeds` reads every file of the walk the same way `unmarked_structs` does,
+/// so a replay of one would give it nothing for a file the run did not check.
 ///
 /// A change to the Lua a `module` entry carries needs no bump: the stamp's `checker` is a
 /// hash of `prelude.lua` among the rest ([`crate::checker_identity`]), so a generator that
 /// emits different text is a different checker and every warm entry misses on its own.
 /// What this number is for is a change to the shape of what is stored — a field, a key, a
 /// meaning — which the hash cannot see.
-const FORMAT: u32 = 13;
+const FORMAT: u32 = 14;
 
 /// Where the store lives under the project root. Generated, and `htl init` puts `.htl/` in
 /// `.gitignore` — one line for the cache and the installed deps beside it, both
@@ -425,13 +432,14 @@ pub struct Module {
     /// existed.
     #[serde(default)]
     pub markers: Vec<MarkerSiteJson>,
-    /// The construction-site census the check found in the file
-    /// ([`CheckInfo::struct_sites`]), kept for the same reason `markers` is: a run
-    /// replayed from the cache still feeds `unmarked_structs` and `htl adopt`'s
-    /// `---@struct` row (#304), and the module that carries them is all a replay has.
-    /// Absent in entries written before the field existed.
+    /// The census of record sites the check found in the file
+    /// ([`CheckInfo::record_sites`]), kept for the same reason `markers` is: a run
+    /// replayed from the cache still feeds `unmarked_structs`, `unmarked_sealeds` and
+    /// `htl adopt`'s `---@struct` and `---@sealed` rows (#304), and the module that
+    /// carries them is all a replay has. Absent in entries written before the field
+    /// existed.
     #[serde(default)]
-    pub struct_sites: Vec<StructSiteJson>,
+    pub record_sites: Vec<RecordSiteJson>,
     /// The names each member of the require closure required — its require sites, resolved
     /// or not ([`CheckInfo::closure_requires`]): the questions below the module that the
     /// probe asks again, each from the member that asked it. `deps` says the files read are unchanged;
@@ -507,11 +515,11 @@ pub struct CheckInfoJson {
     /// existed.
     #[serde(default)]
     pub markers: Vec<MarkerSiteJson>,
-    /// [`CheckInfo::struct_sites`], so the test runner's report of a replayed module
-    /// carries the same construction-site census a fresh check would. Absent in entries
+    /// [`CheckInfo::record_sites`], so the test runner's report of a replayed module
+    /// carries the same census of record sites a fresh check would. Absent in entries
     /// written before the field existed.
     #[serde(default)]
-    pub struct_sites: Vec<StructSiteJson>,
+    pub record_sites: Vec<RecordSiteJson>,
     /// [`CheckInfo::closure_requires`], so the check a replayed module hands back is the
     /// whole of what the fresh one said.
     #[serde(default)]
@@ -558,26 +566,30 @@ pub struct MarkerSiteJson {
     pub name: String,
 }
 
-/// One [`crate::StructSite`] as an entry stores it.
+/// One [`crate::RecordSite`] as an entry stores it.
 ///
 /// `PartialEq`, for the same reason `MarkerSiteJson` carries it: a replayed module's
 /// census is compared against a fresh check's
-/// (`crates/htl-core/tests/struct_sites.rs`).
+/// (`crates/htl-core/tests/record_sites.rs`).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct StructSiteJson {
-    /// [`crate::StructSite::record_file`].
+pub struct RecordSiteJson {
+    /// [`crate::RecordSite::record_file`].
     pub record_file: String,
-    /// [`crate::StructSite::record_line`].
+    /// [`crate::RecordSite::record_line`].
     pub record_line: usize,
-    /// [`crate::StructSite::record_name`].
+    /// [`crate::RecordSite::record_name`].
     pub record_name: String,
-    /// [`crate::StructSite::marked`].
+    /// [`crate::RecordSite::marked`].
     pub marked: bool,
-    /// [`crate::StructSite::line`].
+    /// [`crate::RecordSite::line`].
     pub line: usize,
-    /// [`crate::StructSite::col`].
+    /// [`crate::RecordSite::col`].
     pub col: usize,
-    /// [`crate::StructSite::complete`].
+    /// [`crate::RecordSite::kind`].
+    pub kind: String,
+    /// [`crate::RecordSite::sealed`].
+    pub sealed: bool,
+    /// [`crate::RecordSite::complete`].
     pub complete: bool,
 }
 
@@ -665,7 +677,7 @@ impl CheckInfoJson {
                 .collect(),
             global_sites: global_sites_json(c),
             markers: marker_sites_json(c),
-            struct_sites: struct_sites_json(c),
+            record_sites: record_sites_json(c),
             closure_requires: closure_requires_json(c),
         }
     }
@@ -713,7 +725,7 @@ impl CheckInfoJson {
                 .collect(),
             global_sites: global_sites_from_json(&self.global_sites),
             markers: marker_sites_from_json(&self.markers),
-            struct_sites: struct_sites_from_json(&self.struct_sites),
+            record_sites: record_sites_from_json(&self.record_sites),
             closure_requires: closure_requires_from_json(&self.closure_requires),
         }
     }
@@ -774,17 +786,19 @@ pub fn marker_sites_json(c: &CheckInfo) -> Vec<MarkerSiteJson> {
         .collect()
 }
 
-/// [`CheckInfo::struct_sites`] in the shape an entry stores.
-pub fn struct_sites_json(c: &CheckInfo) -> Vec<StructSiteJson> {
-    c.struct_sites
+/// [`CheckInfo::record_sites`] in the shape an entry stores.
+pub fn record_sites_json(c: &CheckInfo) -> Vec<RecordSiteJson> {
+    c.record_sites
         .iter()
-        .map(|s| StructSiteJson {
+        .map(|s| RecordSiteJson {
             record_file: s.record_file.clone(),
             record_line: s.record_line,
             record_name: s.record_name.clone(),
             marked: s.marked,
             line: s.line,
             col: s.col,
+            kind: s.kind.clone(),
+            sealed: s.sealed,
             complete: s.complete,
         })
         .collect()
@@ -832,16 +846,18 @@ fn marker_sites_from_json(sites: &[MarkerSiteJson]) -> Vec<crate::MarkerSite> {
         .collect()
 }
 
-fn struct_sites_from_json(sites: &[StructSiteJson]) -> Vec<crate::StructSite> {
+fn record_sites_from_json(sites: &[RecordSiteJson]) -> Vec<crate::RecordSite> {
     sites
         .iter()
-        .map(|s| crate::StructSite {
+        .map(|s| crate::RecordSite {
             record_file: s.record_file.clone(),
             record_line: s.record_line,
             record_name: s.record_name.clone(),
             marked: s.marked,
             line: s.line,
             col: s.col,
+            kind: s.kind.clone(),
+            sealed: s.sealed,
             complete: s.complete,
         })
         .collect()
@@ -867,17 +883,18 @@ impl Module {
     /// that closes through a module nobody edited is still a cycle — so a replayed module
     /// has to produce something that lint can read. `global_redeclarations` reads the
     /// sites the same way, and the error texts, for the one error of the checker's it
-    /// defers to; the recorded diagnostics give those back. `unmarked_structs` reads
-    /// `struct_sites` the same way again: a record's construction sites are typically in
-    /// files other than its own declaration, so a project-level census that skipped a
-    /// replayed module would silently lose every site that module built. Everything is
-    /// already printed by then, and nothing downstream looks at the other fields.
+    /// defers to; the recorded diagnostics give those back. `unmarked_structs` and
+    /// `unmarked_sealeds` read `record_sites` the same way again: a record's
+    /// construction and cast sites are typically in files other than its own
+    /// declaration, so a project-level census that skipped a replayed module would
+    /// silently lose every site that module built or cast. Everything is already
+    /// printed by then, and nothing downstream looks at the other fields.
     pub fn requires_only(&self) -> CheckInfo {
         CheckInfo {
             deps: self.deps.iter().map(PathBuf::from).collect(),
             requires: requires_from_json(&self.requires),
             global_sites: global_sites_from_json(&self.global_sites),
-            struct_sites: struct_sites_from_json(&self.struct_sites),
+            record_sites: record_sites_from_json(&self.record_sites),
             closure_requires: closure_requires_from_json(&self.closure_requires),
             errors: self
                 .diagnostics
@@ -901,7 +918,7 @@ impl Module {
             requires: requires_json(c),
             global_sites: global_sites_json(c),
             markers: marker_sites_json(c),
-            struct_sites: struct_sites_json(c),
+            record_sites: record_sites_json(c),
             closure_requires: closure_requires_json(c),
             code: Some(code),
             check: Some(CheckInfoJson::from_check(c)),
@@ -1954,7 +1971,7 @@ mod tests {
             requires: Vec::new(),
             global_sites: Vec::new(),
             markers: Vec::new(),
-            struct_sites: Vec::new(),
+            record_sites: Vec::new(),
             closure_requires: Vec::new(),
             code: Some("return {}".into()),
             check: Some(CheckInfoJson::default()),
