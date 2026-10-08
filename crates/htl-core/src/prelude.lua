@@ -944,6 +944,64 @@ local function union_resolver(result, filename)
    end
 end
 
+-- Resolver for the `type-guard` lint: what the checker typed the variable at (y, x) as,
+-- in the terms a `type(v) == "<tag>"` guard can be rewritten under. `{ any = true }` for
+-- `any`; `{ members = { { str, tag, plain }, ... } }` for a union, one entry per member,
+-- where `tag` is what `type()` returns for a value of the member (`"table"` for a record,
+-- a map, an array or a tuple, `"string"` for a string or an enum, ...) and `plain` says
+-- that `v is <str>` compiles to exactly `type(v) == "<tag>"` -- true for `string`,
+-- `number`, `boolean` and a table type without a `where` clause, false for `integer`
+-- (`math.type`), an enum (a value test) and a record with `where` (its predicate).
+-- `false` for anything else, nil when the report stored nothing at the position.
+local function guard_resolver(result, filename)
+   local ok, report = pcall(tl.get_types, result)
+   if not ok or type(report) ~= "table" then return nil end
+   local by_pos = report.by_pos and report.by_pos[filename]
+   if not by_pos then return nil end
+   local tc = tl.typecodes
+   local function deref(id, depth)
+      local t = report.types[id]
+      if t and t.ref and depth < 8 then return deref(t.ref, depth + 1) end
+      return t
+   end
+   local TABLE_CODES = {
+      [tc.RECORD] = true, [tc.MAP] = true, [tc.ARRAY] = true, [tc.TUPLE] = true,
+      [tc.INTERFACE] = true, [tc.EMPTY_TABLE] = true,
+   }
+   local function member(mid)
+      local m = report.types[mid]
+      local r = deref(mid, 0)
+      if not m or not r then return nil end
+      local str = m.str or r.str
+      if r.t == tc.STRING then return { str = str, tag = "string", plain = true } end
+      if r.t == tc.NUMBER then return { str = str, tag = "number", plain = true } end
+      if r.t == tc.BOOLEAN then return { str = str, tag = "boolean", plain = true } end
+      if r.t == tc.INTEGER then return { str = str, tag = "number", plain = false } end
+      if r.t == tc.ENUM then return { str = str, tag = "string", plain = false } end
+      if TABLE_CODES[r.t] then
+         local where = type(r.meta_fields) == "table" and r.meta_fields.__is ~= nil
+         return { str = str, tag = "table", plain = not where }
+      end
+      if r.t == tc.FUNCTION or r.t == tc.POLY then return { str = str, tag = "function", plain = false } end
+      return { str = str, tag = nil, plain = false }
+   end
+   return function(y, x)
+      local id = by_pos[y] and by_pos[y][x]
+      if not id then return nil end
+      local t = deref(id, 0)
+      if not t then return nil end
+      if t.t == tc.ANY then return { any = true } end
+      if t.t ~= tc.UNION or type(t.types) ~= "table" then return false end
+      local members = {}
+      for _, mid in ipairs(t.types) do
+         local m = member(mid)
+         if not m then return false end
+         members[#members + 1] = m
+      end
+      return { members = members }
+   end
+end
+
 -- Resolvers for the enum boundary lints, built from one type report:
 --
 --   `cast_at(y, x, from_y, from_x)` — for the `as` expression at (y, x): the enum it casts
@@ -2414,6 +2472,7 @@ function H.check(filename, env, opts)
             required = H.lang_async and required_modules(result, env) or nil,
             deps = H.deps,
             union_at = union_resolver(result, filename),
+            guard_at = guard_resolver(result, filename),
             cast_at = cast_at,
             enum_table_at = enum_table_at,
          })
