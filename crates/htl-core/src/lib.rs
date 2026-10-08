@@ -138,6 +138,11 @@ pub mod batteries;
 pub mod task;
 pub mod teal;
 pub mod testing;
+// How much of htl's marker vocabulary a project has written, and where. On the project
+// layer, whose check hands it the census, so it carries that layer's features — the same
+// two `unused` does, and for the same reason.
+#[cfg(all(feature = "pkg", feature = "dts"))]
+pub mod adopt;
 // The complement of the require closure: what no entry reaches. On the project layer,
 // whose check hands it the graph, so it carries that layer's features.
 #[cfg(all(feature = "pkg", feature = "dts"))]
@@ -265,6 +270,36 @@ pub struct CheckInfo {
     /// carries is all the run has. Each site once per check; the lint dedups across
     /// checks.
     pub global_sites: Vec<GlobalSite>,
+    /// One entry per (marker, declaration) for htl's nine markers
+    /// ([`crate::adopt::FEATURES`]: `struct`, `optional`, `sealed`, `extensible`,
+    /// `nilable`, `contract`, `required`, `async`, `noyield`) this check found on a
+    /// declaration of the file, once each, ordered by line, then marker, then name, then
+    /// kind — not by [`crate::adopt::FEATURES`] order. What [`crate::adopt`] counts to say
+    /// how much of a project already writes a marker.
+    ///
+    /// Empty for a `.d.tl`: `htl dts` writes `---@async` / `---@noyield` into a
+    /// declaration itself, and this is a census of what the project's own authors wrote.
+    pub markers: Vec<MarkerSite>,
+}
+
+/// One marker the census found on a declaration (see [`CheckInfo::markers`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MarkerSite {
+    /// The marker's name, without its `---@`: one of `struct`, `sealed`, `extensible`,
+    /// `contract`, `optional`, `required`, `nilable`, `async`, `noyield`.
+    pub marker: String,
+    /// What the marker is on: `"record"` for a record declaration, `"field"` for a record
+    /// field, `"function"` for a named function declaration.
+    pub kind: String,
+    /// Line of the declaration, counted from 1 — always the declaration's own line, never
+    /// the marker's: the marker itself is on that line (trailing) or on the line directly
+    /// above it (on a line of its own, the position `marker_on` reads), and either way
+    /// `line` is the declaration's.
+    pub line: usize,
+    /// The declaration's name: a type name (`Foo`, nested `Foo.Bar`) for a record, a
+    /// qualified field name (`Foo.field`) for a field, and a function's own name (`f`,
+    /// `M.f`, `M:f`) for a function.
+    pub name: String,
 }
 
 /// One `global` declaration a check saw (see [`CheckInfo::global_sites`]): the name and
@@ -2939,6 +2974,24 @@ fn read_checkinfo(t: &Table) -> Result<CheckInfo> {
             .collect::<Result<Vec<_>>>()?,
         Err(_) => Vec::new(),
     };
+    // Absent from an older prelude's result (one built before `markers` existed), tolerated
+    // the way `global_sites` above is: a missing table reads as no entries rather than an
+    // error.
+    let markers = match t.get::<Table>("markers") {
+        Ok(list) => list
+            .sequence_values::<Table>()
+            .map(|s| {
+                let s = s?;
+                Ok(MarkerSite {
+                    marker: s.get("marker")?,
+                    kind: s.get("kind")?,
+                    line: s.get("y")?,
+                    name: s.get("name")?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        Err(_) => Vec::new(),
+    };
     let closure_requires = match t.get::<Table>("closure_requires") {
         Ok(list) => list
             .sequence_values::<Table>()
@@ -2969,6 +3022,7 @@ fn read_checkinfo(t: &Table) -> Result<CheckInfo> {
         warning_items,
         lint_items,
         global_sites,
+        markers,
         closure_requires,
     })
 }

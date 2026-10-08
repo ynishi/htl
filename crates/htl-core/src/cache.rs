@@ -104,12 +104,17 @@ use crate::{CheckInfo, DependencyError, Fix, RequireSite};
 /// over an edit two requires away — exactly the entries this change exists to stop
 /// replaying — so they are a miss rather than a default.
 ///
+/// 12: an entry now carries the module's marker census ([`Module::markers`],
+/// [`CheckInfoJson::markers`]) — `htl adopt`'s input (#304). An entry of 11 has no such
+/// field, and a replay of one would give `htl adopt` nothing for a file the run did not
+/// check.
+///
 /// A change to the Lua a `module` entry carries needs no bump: the stamp's `checker` is a
 /// hash of `prelude.lua` among the rest ([`crate::checker_identity`]), so a generator that
 /// emits different text is a different checker and every warm entry misses on its own.
 /// What this number is for is a change to the shape of what is stored — a field, a key, a
 /// meaning — which the hash cannot see.
-const FORMAT: u32 = 11;
+const FORMAT: u32 = 12;
 
 /// Where the store lives under the project root. Generated, and `htl init` puts `.htl/` in
 /// `.gitignore` — one line for the cache and the installed deps beside it, both
@@ -407,6 +412,13 @@ pub struct Module {
     /// to carry the sites it saw. Absent in entries written before the field existed.
     #[serde(default)]
     pub global_sites: Vec<GlobalSiteJson>,
+    /// The marker census the check found on the file's declarations
+    /// ([`CheckInfo::markers`]), kept for the same reason `global_sites` is: `htl adopt`
+    /// (#304) reads every file of the walk, replayed ones included, and the module that
+    /// carries them is all a replay has. Absent in entries written before the field
+    /// existed.
+    #[serde(default)]
+    pub markers: Vec<MarkerSiteJson>,
     /// The names each member of the require closure required — its require sites, resolved
     /// or not ([`CheckInfo::closure_requires`]): the questions below the module that the
     /// probe asks again, each from the member that asked it. `deps` says the files read are unchanged;
@@ -477,6 +489,11 @@ pub struct CheckInfoJson {
     /// those are a format behind (the stamp) and not read.
     #[serde(default)]
     pub global_sites: Vec<GlobalSiteJson>,
+    /// [`CheckInfo::markers`], so the test runner's report of a replayed module carries
+    /// the same census a fresh check would. Absent in entries written before the field
+    /// existed.
+    #[serde(default)]
+    pub markers: Vec<MarkerSiteJson>,
     /// [`CheckInfo::closure_requires`], so the check a replayed module hands back is the
     /// whole of what the fresh one said.
     #[serde(default)]
@@ -504,6 +521,23 @@ pub struct GlobalSiteJson {
     pub line: usize,
     /// Column of the same.
     pub col: usize,
+}
+
+/// One [`crate::MarkerSite`] as an entry stores it.
+///
+/// `PartialEq` beyond what the neighbouring `*SiteJson` types derive: a replayed module's
+/// census is compared against a fresh check's (`crates/htl-core/tests/marker_census.rs`),
+/// which the other site types have had no reason to do yet.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MarkerSiteJson {
+    /// The marker's name, without its `---@`.
+    pub marker: String,
+    /// What the marker is on: `"record"`, `"field"` or `"function"`.
+    pub kind: String,
+    /// Line of the declaration the marker is read from.
+    pub line: usize,
+    /// The declaration's name.
+    pub name: String,
 }
 
 /// A [`crate::Diagnostic`]'s parts as an entry stores them: the position, the rule and the
@@ -589,6 +623,7 @@ impl CheckInfoJson {
                 })
                 .collect(),
             global_sites: global_sites_json(c),
+            markers: marker_sites_json(c),
             closure_requires: closure_requires_json(c),
         }
     }
@@ -635,6 +670,7 @@ impl CheckInfoJson {
                 })
                 .collect(),
             global_sites: global_sites_from_json(&self.global_sites),
+            markers: marker_sites_from_json(&self.markers),
             closure_requires: closure_requires_from_json(&self.closure_requires),
         }
     }
@@ -682,6 +718,19 @@ pub fn global_sites_json(c: &CheckInfo) -> Vec<GlobalSiteJson> {
         .collect()
 }
 
+/// [`CheckInfo::markers`] in the shape an entry stores.
+pub fn marker_sites_json(c: &CheckInfo) -> Vec<MarkerSiteJson> {
+    c.markers
+        .iter()
+        .map(|s| MarkerSiteJson {
+            marker: s.marker.clone(),
+            kind: s.kind.clone(),
+            line: s.line,
+            name: s.name.clone(),
+        })
+        .collect()
+}
+
 /// [`CheckInfo::closure_requires`] in the shape an entry stores.
 pub fn closure_requires_json(c: &CheckInfo) -> Vec<ClosureRequireJson> {
     c.closure_requires
@@ -708,6 +757,18 @@ fn global_sites_from_json(sites: &[GlobalSiteJson]) -> Vec<crate::GlobalSite> {
             file: PathBuf::from(&s.file),
             line: s.line,
             col: s.col,
+        })
+        .collect()
+}
+
+fn marker_sites_from_json(sites: &[MarkerSiteJson]) -> Vec<crate::MarkerSite> {
+    sites
+        .iter()
+        .map(|s| crate::MarkerSite {
+            marker: s.marker.clone(),
+            kind: s.kind.clone(),
+            line: s.line,
+            name: s.name.clone(),
         })
         .collect()
 }
@@ -761,6 +822,7 @@ impl Module {
             deps: c.deps.iter().map(|p| normal(p)).collect(),
             requires: requires_json(c),
             global_sites: global_sites_json(c),
+            markers: marker_sites_json(c),
             closure_requires: closure_requires_json(c),
             code: Some(code),
             check: Some(CheckInfoJson::from_check(c)),
@@ -1812,6 +1874,7 @@ mod tests {
             deps: Vec::new(),
             requires: Vec::new(),
             global_sites: Vec::new(),
+            markers: Vec::new(),
             closure_requires: Vec::new(),
             code: Some("return {}".into()),
             check: Some(CheckInfoJson::default()),

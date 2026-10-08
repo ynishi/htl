@@ -806,6 +806,7 @@ pub fn check_one<O: Output>(
         deps: c.deps.iter().map(|p| cache::normal(p)).collect(),
         requires: cache::requires_json(&c),
         global_sites: cache::global_sites_json(&c),
+        markers: cache::marker_sites_json(&c),
         closure_requires: cache::closure_requires_json(&c),
         // `htl check` has no use for generated Lua, nor for reading a `CheckInfo` back —
         // it replays the diagnostics above straight into the sink. `htl test` fills both in.
@@ -1121,6 +1122,10 @@ pub struct Report {
     /// edges: what does no entry reach ([`crate::unused`])? A replayed file carries its
     /// requires in its entry, so the graph is whole whether the run checked or replayed.
     pub requires: Vec<(PathBuf, Vec<cache::RequireJson>)>,
+    /// The marker census of every file the walk visits, as [`requires`](Self::requires)
+    /// is: filled from the entry on a hit and from the fresh check on a miss, so the
+    /// adoption report (`htl adopt`, #304) is whole whether the run checked or replayed.
+    pub markers: Vec<(PathBuf, Vec<cache::MarkerSiteJson>)>,
 }
 
 impl Report {
@@ -1226,6 +1231,7 @@ pub fn check<O: Output>(
     let (mut n_err, mut n_warn, mut n_lint) = (0usize, 0usize, 0usize);
     let mut infos: Vec<(PathBuf, CheckInfo)> = Vec::with_capacity(files.len());
     let mut requires: Vec<(PathBuf, Vec<cache::RequireJson>)> = Vec::with_capacity(files.len());
+    let mut markers: Vec<(PathBuf, Vec<cache::MarkerSiteJson>)> = Vec::with_capacity(files.len());
     let mut modules: Vec<cache::Module> = Vec::with_capacity(files.len());
     for ((f, key), hit) in files.iter().zip(&keys).zip(hits) {
         let m = match hit {
@@ -1250,6 +1256,7 @@ pub fn check<O: Output>(
         n_warn += m.warnings;
         n_lint += m.lints;
         requires.push((f.clone(), m.requires.clone()));
+        markers.push((f.clone(), m.markers.clone()));
         infos.push((f.clone(), m.requires_only()));
         modules.push(m);
     }
@@ -1288,6 +1295,7 @@ pub fn check<O: Output>(
         denied: sink.denied(),
         replayed,
         requires,
+        markers,
     })
 }
 

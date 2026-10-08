@@ -13,7 +13,8 @@
 //!   replayed, duration_ms, ok, seed }, coverage?: { modules: [{ path, executed, total,
 //!   unexecuted: [[first, last]], never_ran?: [{ name, line }] }], executed, total } }`
 //!   ([`TestFile`], [`TestSummary`]; `coverage` with `--coverage`).
-//! - `unused` and `resolve`: `htl::unused` and `htl::resolve` say their shapes.
+//! - `unused`, `resolve` and `adopt`: `htl::unused`, `htl::resolve` and `htl::adopt` say
+//!   their shapes.
 //!
 //! GitHub Actions annotations from a check, for instance:
 //!

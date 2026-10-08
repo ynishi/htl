@@ -74,6 +74,7 @@ htl = "0.8"                    # embedding: engine + proc macros in one import
 | `htl build <entry.tl \| dir> -o app.hb [-m main] [--debug] [--source] [--extra a,b] [--host x,y] [--no-cache] [--explain-cache]` | link the entry's `require` closure into one bundle (see Bundles), replaying from the run cache what still holds (see Caching; the directory form, whose entry module `-m` names, is not cached); a bundle is the `hb` target, so a project whose `[build] target` is anything else — `bin`, `cdylib`, `window` — is refused (see Layout of a project) |
 | `htl bundle info <app.hb> [--format json]` | what a bundle records, without running it: format, the htl that built it, payload kind, the Lua its bytecode is for, entry, modules, host-provided names |
 | `htl unused [paths] [--format json] [--exit-non-zero-on-unused] [--no-cache] [--explain-cache]` | the complement of the same closure: modules no entry reaches, and `[deps]` no reached module requires (see Unused) |
+| `htl adopt [paths] [--format json] [--detail] [--no-cache] [--explain-cache]` | how many declarations carry each of htl's nine markers, and where (`--detail`); a report, not a gate (see Adoption) |
 | `htl resolve <module> [path] [--format json]` | which file `require("<module>")` resolves to: every file of the project that answers to the name, which one is read, and which crate or dependency each came from (see `types/`); for a name the host provides, which source says so; exits 1 when the name resolves to nothing, to two implementations, or to a file under a name the host provides |
 | `htl pkg install` | fetch every dependency `mlua-pkg.toml` declares into `.htl/modules/` and write `mlua-pkg.lock`; the deps' own `types/` are then copied into the project's (see `types/`) |
 | `htl pkg add <name> <git> [--tag t \| --rev r \| --branch b] [--entry dir] [--target-dir dir]` | write the dependency into the manifest (`install` fetches it); a `patch_dir` the entry already declared is kept |
@@ -82,7 +83,7 @@ htl = "0.8"                    # embedding: engine + proc macros in one import
 | `htl pkg patch <dep> [--force]` | take that dependency's source into `patches/<dep>/`, where the project owns it and install resolves it from (see Patched dependencies) |
 | `htl types add <library> [--from dir] [--force]` | the declarations a library never shipped, from [teal-types](https://github.com/teal-language/teal-types), into `types/` with the commit they came from recorded beside each |
 | `htl cache status [path] [--entries] [--format json]` / `htl cache clear [path]` | report what the store holds, or empty it (see Caching) |
-| `htl dts [dir]` | write the `.d.tl` files this project declares: from Rust source, the ones `#[host_module]` / `#[derive(TealRecord)]` ask for, no build needed; from Teal, the module each `---@contract` type is declared in; from the crate graph, the ones a dependency ships (`[package.metadata.htl] dts`) into `types/<crate>/`. Every command that reads the project does this first (`check` / `run` / `test` / `build` / `fix` / `unused` / `resolve` / `gen`); exits non-zero when something it was asked to write could not be — a crate's declaration, or a `---@contract` type that cannot be published — never on a file it only [left in place](https://docs.rs/htl/latest/htl/dep_dts/index.html), and with nothing to write at all (no Cargo package above, no contract type) it is an error |
+| `htl dts [dir]` | write the `.d.tl` files this project declares: from Rust source, the ones `#[host_module]` / `#[derive(TealRecord)]` ask for, no build needed; from Teal, the module each `---@contract` type is declared in; from the crate graph, the ones a dependency ships (`[package.metadata.htl] dts`) into `types/<crate>/`. Every command that reads the project does this first (`check` / `run` / `test` / `build` / `fix` / `unused` / `adopt` / `resolve` / `gen`); exits non-zero when something it was asked to write could not be — a crate's declaration, or a `---@contract` type that cannot be published — never on a file it only [left in place](https://docs.rs/htl/latest/htl/dep_dts/index.html), and with nothing to write at all (no Cargo package above, no contract type) it is an error |
 
 Exit code 1 is a verdict (an error in a file, a finding at `deny`, a failing test, a name
 that resolves to nothing); 2 is a command that could not reach one (a directory in no
@@ -225,7 +226,8 @@ each rule catches, Teal's own warnings under `tl:*`, and the six markers
 (`---@struct`, `---@sealed`, `---@extensible`, `---@nilable`, `---@async`, `---@noyield`,
 which `#[host_module]` writes for a sync fn's `Function` parameters and
 `#[derive(TealRecord)]` for a field marked `#[teal(noyield)]`) that turn a rule on
-for a record or a function.
+for a record or a function (the full set of nine is what `htl adopt` reports; see
+Adoption).
 
 ## Project config (`htl.toml`)
 
@@ -477,10 +479,11 @@ flags: [`htl::fix`](https://docs.rs/htl/latest/htl/fix/index.html).
 
 ## Machine-readable output
 
-`--format json` on `check`, `test`, `unused` and `resolve` prints one JSON document on
-stdout, with the same exit code as the text form. The shapes:
+`--format json` on `check`, `test`, `unused`, `adopt` and `resolve` prints one JSON
+document on stdout, with the same exit code as the text form. The shapes:
 [`htl_cli::report`](https://docs.rs/htl-cli/latest/htl_cli/report/index.html),
 [`htl::unused`](https://docs.rs/htl/latest/htl/unused/index.html),
+[`htl::adopt`](https://docs.rs/htl/latest/htl/adopt/index.html),
 [`htl::resolve`](https://docs.rs/htl/latest/htl/resolve/index.html).
 
 ## Bundles (`htl build`)
@@ -498,6 +501,17 @@ store: [`htl::link`](https://docs.rs/htl/latest/htl/link/index.html) and
 walked from the entries the project already declares (`main.tl`, tests, contracts,
 `[build] extra`, what a Rust host embeds); exit 0 unless `--exit-non-zero-on-unused`.
 [`htl::unused`](https://docs.rs/htl/latest/htl/unused/index.html).
+
+## Adoption (`htl adopt`)
+
+`htl adopt` counts how many declarations carry each of htl's nine markers (`---@struct`,
+`---@optional`, `---@sealed`, `---@extensible`, `---@nilable`, `---@contract`,
+`---@required`, `---@async`, `---@noyield`) and, with `--detail`, where:
+`htl adopt: 3 of 9 features used, 4 markers in 2 files`. `applicable` — how many
+declarations the evidence in the project's own code says *could* carry a marker — is
+empty until a lint supplies it; none does yet, so every row's is empty in this release. A
+report, not a gate: the exit code is always 0.
+[`htl::adopt`](https://docs.rs/htl/latest/htl/adopt/index.html).
 
 ## Layout of a project (`htl new`)
 
