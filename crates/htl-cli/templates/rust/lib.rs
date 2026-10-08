@@ -31,8 +31,10 @@ impl Host {
 // bundle of stripped bytecode: a dependency from `mlua-pkg.toml` rides along, and a
 // `require` that resolves to nothing fails the build here rather than at run time. The
 // host's names come from its `#[host_module]`s — `host` above — and `std.*`: they are left
-// out of the bundle without being listed here. Keep this after `#[host_module]` (same
-// file, source order) so the declaration exists when the closure is checked.
+// out of the bundle without being listed here. `include_bundle!` regenerates every
+// `#[host_module]`'s declaration from the Rust source before checking against it (the
+// same scan `htl dts` runs), so nothing depends on this coming after `#[host_module]` —
+// in this file, or, when the two are in different files, in `mod` order.
 const BUNDLE: &[u8] = htl::include_bundle!("src/{{mod}}/init.tl");
 
 /// Register what this crate provides on a fresh `Htl`: the Rust `host` module, then the

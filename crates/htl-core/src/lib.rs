@@ -2817,6 +2817,16 @@ pub fn write_if_changed(path: &Path, text: &str) -> std::io::Result<bool> {
 
 /// [`write_if_changed`], writing only when `write` is set. Without it the answer is whether
 /// the file would change — what a dry run reports — and nothing on disk is touched.
+///
+/// The write itself is atomic: a sibling temp file is written first and then renamed over
+/// `path`, rather than truncating `path` in place. Two rustc processes can now write the
+/// same `.d.tl` — a `#[host_module]`'s own expansion and `include_tl!`'s crate-wide scan
+/// (`regenerate_crate` in `htl-macros`), each in the process building a different target
+/// (the lib, a test) of the same crate — while a third reads it (`include_tl!` of some
+/// other file, `htl check`); a plain `fs::write` lets that reader land between the
+/// truncate and the write and see a half-written (or, briefly, empty) file. A rename onto
+/// an existing path is atomic on the filesystems this runs on, so a reader always sees
+/// either the old content or the new, never a mix.
 pub fn write_if_changed_when(path: &Path, text: &str, write: bool) -> std::io::Result<bool> {
     if !write {
         return Ok(std::fs::read_to_string(path).map_or(true, |cur| cur != text));
@@ -2826,10 +2836,23 @@ pub fn write_if_changed_when(path: &Path, text: &str, write: bool) -> std::io::R
     {
         return Ok(false);
     }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("htl-write");
+    let tmp = dir.join(format!(".{name}.tmp-{}-{n}", std::process::id()));
+    if let Err(e) = std::fs::write(&tmp, text) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
-    std::fs::write(path, text)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     Ok(true)
 }
 
@@ -3252,5 +3275,75 @@ mod tests {
             declarations_key(&bundled_declarations())
         );
         assert_eq!(dir, lib_dir());
+    }
+
+    /// S6 of #429's review: the write is a temp-file-then-rename, not a `fs::write` that
+    /// truncates `path` in place — a basic round trip still writes the content, reports
+    /// `true`, and leaves no sibling temp file behind.
+    #[test]
+    fn write_if_changed_writes_new_content_and_leaves_no_temp_file() {
+        let dir = std::env::temp_dir().join(format!("htl-core-wic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.d.tl");
+
+        assert!(write_if_changed(&path, "first\n").unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first\n");
+
+        let siblings: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            siblings,
+            vec![std::ffi::OsString::from("out.d.tl")],
+            "{siblings:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Unchanged content is still a no-op: no write, no temp file, and the mtime is left
+    /// alone (indirectly checked by `write_if_changed` returning `false` at all, which it
+    /// only does after reading the existing content back and finding it equal).
+    #[test]
+    fn write_if_changed_is_a_no_op_when_the_content_already_matches() {
+        let dir = std::env::temp_dir().join(format!("htl-core-wic-noop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.d.tl");
+
+        assert!(write_if_changed(&path, "same\n").unwrap());
+        assert!(!write_if_changed(&path, "same\n").unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "same\n");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Two writers of the same target in quick succession — the shape `regenerate_crate`
+    /// and a `#[host_module]`'s own expansion can now be, in two different rustc
+    /// processes — each complete a full write-then-rename rather than interleaving, so
+    /// the file that lands is always wholly one writer's content or wholly the other's,
+    /// never a splice of both. A single process can only interleave at Rust statement
+    /// granularity, so this writes twice in a row rather than truly concurrently; the
+    /// rename itself being atomic is what the real two-process case relies on, which this
+    /// cannot exercise without two processes — it only confirms the no-splice property
+    /// each individual call has.
+    #[test]
+    fn write_if_changed_never_leaves_a_half_written_file() {
+        let dir = std::env::temp_dir().join(format!("htl-core-wic-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.d.tl");
+
+        write_if_changed(&path, "aaaa\n").unwrap();
+        write_if_changed(&path, "bbbbbb\n").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text == "aaaa\n" || text == "bbbbbb\n",
+            "never a mix of the two: {text:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
