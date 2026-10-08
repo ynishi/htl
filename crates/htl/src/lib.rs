@@ -78,6 +78,59 @@ That way out is [`ffi`] and [`macro@c_export`]."
 //! `async` / `await` syntax desugars to, with the channels, timers and `select` a loop in
 //! Teal waits on and the typed host channels (`htl::task::RecvChannel` / `SendChannel`)
 //! a host feeds it through; the README's Async section is the tour.
+#![cfg_attr(
+    feature = "async",
+    doc = "
+
+A host whose `Lua` lives on a thread of its own — mlua-isle's `AsyncIsle` reaches
+that state only from closures that run on its own thread (`init`, `exec`, and the
+builder's own `.lua` factory); `init` is the one that runs once, before any
+request — still reaches [`Htl::with_checker_lua`] from inside `init`: `lua.clone()`
+(mlua's `Lua` is a cheap handle to the state, not a copy) is the owned `Lua` it
+asks for, and the `Htl` this builds, and the checker it borrows, are used and
+dropped inside `init`, never crossing a thread — which is what a non-`Send` value
+captured from outside could not do, so the checker is built fresh here too. Once
+`init` returns, both are gone: the state runs only what was compiled ahead of it
+(a bundle's modules, `preload`ed source or bytecode) — nothing on it can check or
+resolve a `.tl` file, which needs a live checker (`htl::pkg`'s resolvers take one).
+
+```rust,ignore
+use htl::Htl;
+use htl::bundle::Bundle;
+use htl::mlua::Lua;
+use htl::mlua_isle::AsyncIsle;
+
+fn install(lua: &Lua, bundle: &Bundle) -> Result<(), htl::mlua::Error> {
+    let checker = Htl::new().map_err(htl::mlua::Error::external)?;
+    let h = Htl::with_checker_lua(&checker, lua.clone()).map_err(htl::mlua::Error::external)?;
+    h.install_task_lib().map_err(htl::mlua::Error::external)?;
+    h.install_bundle(bundle).map_err(htl::mlua::Error::external)
+}
+
+# async fn run(bundle: Bundle) -> anyhow::Result<()> {
+let (isle, driver) = AsyncIsle::spawn(move |lua| install(lua, &bundle)).await?;
+let answer: i64 = isle.coroutine_eval(\"return require('entry').answer()\").await?;
+driver.shutdown().await?;
+# Ok(()) }
+```
+
+`require`ing the bundle and running what it set up are two different coroutine
+turns: a module whose own top-level body awaited a task would be yielding across
+the bundle loader's `Function::call`, which is not a yield point — Lua's own
+\"attempt to yield across a C-call boundary\", not mlua-isle's \"sync requests
+cannot spawn\". `entry`'s module above only `require`s at its own top level;
+whatever spawns and awaits a task — here `answer()` — runs on its own coroutine
+turn, once `require` has already returned. `AsyncIsle::coroutine_eval` /
+`coroutine_call` run the way `Vm::run` does, so that works the same way a program
+run through `Htl::run_async` would.
+
+`with_checker_lua`'s attach runs inside `init`, before the isle attaches its own
+copy afterward; with no `.config(...)` on the builder, that second attach keeps
+whatever is already there, so the isle's cancel grace ends up at htl's default
+(one second) rather than mlua-isle's own default (zero). A project's `[async]`
+section still reaches the state: call [`Htl::configure_async`] from inside `init`,
+once `h` is built."
+)]
 //!
 //! # Against an unpublished htl
 //!
