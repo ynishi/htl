@@ -14,14 +14,13 @@ use htl::mlua_isle::runtime::CancelToken;
 use htl::task::{RecvChannel, Sender};
 use htl::teal::HostModule as _;
 use htl::{Htl, host_module};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc;
 use std::time::Duration;
 
 pub struct Host {
-    /// The sender half `events()` makes, handed to the test so it can feed the channel
-    /// from outside while Teal awaits the receiver — populated only once `events()` has
-    /// run, which is why it starts `None`.
-    events_tx: Arc<Mutex<Option<Sender<i64>>>>,
+    /// The sender half `events()` makes, handed to the test over this channel: the test's
+    /// `recv_timeout` returns once `events()` has sent it.
+    events_tx: mpsc::Sender<Sender<i64>>,
 }
 
 #[host_module(name = "host")]
@@ -33,12 +32,13 @@ impl Host {
 
     /// The channel is built inside the method, with the state the closure already has;
     /// the sender is handed to the test (through the host, since nothing else reaches
-    /// out of a `#[host_module]` method) rather than used here, so the test can send
-    /// while Teal is genuinely waiting on an empty channel rather than reading a value
-    /// already queued.
+    /// out of a `#[host_module]` method) so the value is sent from another thread only
+    /// after the channel exists, rather than queued by the method before Teal receives
+    /// it.
     pub fn events(&self, lua: &htl::mlua::Lua) -> RecvChannel<i64> {
         let (tx, ch) = RecvChannel::<i64>::new(lua, 1).unwrap();
-        *self.events_tx.lock().unwrap() = Some(tx);
+        // The test having dropped its receiver is not this method's failure.
+        let _ = self.events_tx.send(tx);
         ch
     }
 
@@ -65,16 +65,12 @@ impl Host {
     }
 }
 
-fn host() -> (Htl, Arc<Mutex<Option<Sender<i64>>>>) {
+fn host() -> (Htl, mpsc::Receiver<Sender<i64>>) {
     let h = Htl::new().unwrap();
     h.install_task_lib().unwrap();
-    let events_tx = Arc::new(Mutex::new(None));
-    Host {
-        events_tx: events_tx.clone(),
-    }
-    .htl_preload(&h)
-    .unwrap();
-    (h, events_tx)
+    let (events_tx, events_rx) = mpsc::channel();
+    Host { events_tx }.htl_preload(&h).unwrap();
+    (h, events_rx)
 }
 
 // ---------------------------------------------------------------- 1. count(&self, lua: &Lua)
@@ -90,7 +86,7 @@ fn the_declaration_leaves_the_lua_parameter_out() {
 
 #[test]
 fn require_host_count_from_teal_returns_an_integer() {
-    let (h, _tx) = host();
+    let (h, _events_rx) = host();
     let n: i64 = h
         .lua()
         .load("local host = require('host'); return host:count()")
@@ -113,19 +109,23 @@ fn the_channel_methods_declaration_also_leaves_lua_out() {
     );
 }
 
-/// The value is sent only after Teal is already blocked on `ch:recv()`, from a thread of
-/// its own (the pattern `task_channels.rs`'s asker thread uses for its `Request`): this is
-/// the issue's own case end to end, not a pre-buffered value read back.
+/// The sender thread blocks on `events_rx` until `events()` has sent the `Sender` it
+/// made, then sends 42; the 10s `recv_timeout` is a hang bound, not the ordering. This
+/// shows that a value sent from another OS thread after `events()` returned reaches
+/// Teal's `ch:recv()` inside `run_blocking`. It does not prove Teal has already entered
+/// `ch:recv()`: a host channel (`htl::task::RecvChannel`/`Sender`, cap >= 1, no
+/// rendezvous form) gives the host no way to see that the receiver is parked in
+/// `recv()`, and a value sent in the gap between `events()` returning and `recv()`
+/// being entered is buffered and still received.
 #[test]
-fn teal_receives_a_value_sent_while_it_is_genuinely_waiting_on_the_channel() {
-    let (h, events_tx) = host();
+fn teal_receives_a_value_sent_only_after_events_handed_out_the_sender() {
+    let (h, events_rx) = host();
     let sender = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(50));
-        let tx = events_tx
-            .lock()
-            .unwrap()
-            .take()
-            .expect("events() has populated the sender by now");
+        // A generous failure bound, not part of the ordering: `events()` normally runs
+        // in well under this.
+        let tx = events_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("events() did not hand out the sender");
         tx.try_send(42).unwrap();
     });
     h.run_blocking(
@@ -159,7 +159,7 @@ fn the_async_methods_declaration_also_leaves_lua_out() {
 
 #[tokio::test]
 async fn an_async_method_taking_lua_runs_through_call_async() {
-    let (h, _tx) = host();
+    let (h, _events_rx) = host();
     let f: htl::mlua::Function = h
         .lua()
         .load("return function() local host = require('host') return host:counted() end")
@@ -182,7 +182,7 @@ fn the_declaration_of_a_lua_parameter_after_a_regular_one_keeps_the_regular_one(
 
 #[test]
 fn a_lua_parameter_after_a_regular_one_does_not_disturb_its_value() {
-    let (h, _tx) = host();
+    let (h, _events_rx) = host();
     let n: i64 = h
         .lua()
         .load("local host = require('host'); return host:after(7)")
@@ -195,7 +195,7 @@ fn a_lua_parameter_after_a_regular_one_does_not_disturb_its_value() {
 
 #[test]
 fn a_lua_parameter_named_this_does_not_collide_with_the_receiver() {
-    let (h, _tx) = host();
+    let (h, _events_rx) = host();
     let n: i64 = h
         .lua()
         .load("local host = require('host'); return host:named_this()")
