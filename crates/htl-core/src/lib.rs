@@ -1722,9 +1722,12 @@ impl Htl {
 
     /// Attach the Teal compiler to an existing Lua state (the host's own `Lua`): the
     /// shared form, where the checker runs on the program's state too, so that state has
-    /// to hold what the checker needs as well as what the program does.
-    /// [`with_checker_lua`](Self::with_checker_lua) is the split form, where the host's
-    /// state holds only what the program needs.
+    /// to hold what the checker needs as well as what the program does — `tl.lua`,
+    /// `lint.lua` and `fmt.lua` compiled into `package.preload` and the prelude evaluated,
+    /// on every state this is called on. For a state that only runs code — a host's own,
+    /// an `AsyncIsle`'s included — see [`with_checker_lua`](Self::with_checker_lua), the
+    /// split form, where the host's state holds only what the program needs; the crate
+    /// doc's Embedding section shows it on an `AsyncIsle`.
     pub fn from_lua(lua: Lua) -> Result<Self> {
         let tl_loader: Function = lua
             .load(TL_SRC)
