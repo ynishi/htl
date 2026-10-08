@@ -853,3 +853,346 @@ print(await f())
         "{err}"
     );
 }
+
+/// #457: a statement-level `await` / `async local` whose keyword sits alone on its own
+/// line, with the call or the declaration on the next, under `htl fmt`.
+///
+/// `start_at` (prelude.lua) gives the rewritten node the keyword's column but leaves its
+/// `y` at the parser's own — the line of the first token *after* the keyword, i.e. the
+/// call's line when the keyword is alone. Two different things in `fmt.lua` went wrong
+/// from that one fact, and this test is one case of each:
+///
+/// - `first` (the keyword as a block's first statement, #457's own repro): the block's
+///   span looked itself up at `(call's y, keyword's x)`, a position nothing in the token
+///   stream sits at, so the lookup fell back to that same pair instead of finding the
+///   block's real opener (`then`) — and a block whose span starts on the *call's* line
+///   does not cover the keyword's line at all, which is why `await` moved out of the
+///   `if` a whole level to its left and `g(1)` came with it (`htl fmt` rewrote `      await`
+///   / `         g(1)` to `   await` / `      g(1)`).
+/// - `second` (the keyword as a block's *second* statement): the block's span is the real
+///   one here (its first statement, `local a = 1`, is never touched), so `await` itself
+///   never moved — only `g(a)` did, losing the one extra level a line that continues a
+///   statement whose own line held nothing but the keyword is owed, the same as a line
+///   ending in `+` owes the next one a level, except no operator marks this continuation
+///   and nothing in `fmt.lua` was watching for it at all.
+/// - `asyncnl` (`async local`, not `await`, as a block's first statement): the same
+///   mechanism as `first` — `local_declaration` is `start_at`'s other caller — and the
+///   same symptom (`async` / `local t = g(x)` moved a level left together).
+///
+/// A fourth file, `messy`, is the first shape written at the *wrong* depth (`await` one
+/// level too shallow): `htl fmt` recomputes depth from the AST rather than trusting
+/// existing indentation, so it is reindented to the one correct depth, asserted exactly
+/// rather than merely "0 would change" — the three shapes above already cover the
+/// idempotent case, and this is the one place the fix has to move text rather than leave
+/// it alone.
+///
+/// A fifth, `callback`, is a keyword immediately followed by a call whose own argument
+/// is a multi-line function literal — `await f(function(): integer ... end)`, both as a
+/// statement and inside `local v = ...`, and `async local t = f(function(): integer
+/// ... end)` — with the keyword sharing its line with the call rather than split from
+/// it. A keyword sharing its line with the call is left alone, however many lines the
+/// call itself runs on: the call's own spans (the paren span for its argument list, the
+/// block span for the callback's body) already count every one of them.
+///
+/// A sixth, `exprpos`, moves the split keyword out of statement position: `local v =
+/// await` / newline / `g(x)`, the expression of a declaration, and `return await` /
+/// newline / `g(x)`. The continuation rule is not specific to a statement-level keyword
+/// — it fires for a marked node wherever it is — so the call's line gets the same extra
+/// level there as it does as a bare statement.
+///
+/// A seventh pair, `splitcb`, is the split form of `callback`: `await` / newline /
+/// `f(function(): integer ... end)` and `async` / newline / `local u = f(function():
+/// integer ... end)`, each as an `if` body's first statement. The call's own line and
+/// the callback's own body line stack the keyword-continuation level on top of the
+/// block level the callback's body already gets, and the callback's closing `end)`
+/// drops back to the call's own (continuation-only) level, the same as any block's
+/// terminator does.
+///
+/// `messy2` and `messy3` repeat the `messy` idea (wrong depth corrected, asserted
+/// exactly, then a second `--check` confirming the result is now stable) for the other
+/// two shapes: `await` / `g(a)` written flat as a block's *second* statement, and
+/// `async` / `local t = g(1)` written flat as a block's *first*.
+#[test]
+fn fmt_reindents_or_leaves_alone_a_split_await_or_async_local_keyword_line() {
+    let root = scratch("await-keyword-line");
+    write(&root.join("htl.toml"), "[lang]\nasync = true\n");
+
+    write(
+        &root.join("src/first.tl"),
+        "local async function g(n: integer): integer
+   return n
+end
+local async function h(x: integer): integer
+   if x == 1 then
+      await
+         g(1)
+      return 2
+   end
+   return 0
+end
+
+return { h = h }
+",
+    );
+    write(
+        &root.join("src/second.tl"),
+        "local async function g(n: integer): integer
+   return n
+end
+local async function h(x: integer): integer
+   if x == 1 then
+      local a = 1
+      await
+         g(a)
+      return 2
+   end
+   return 0
+end
+
+return { h = h }
+",
+    );
+    write(
+        &root.join("src/asyncnl.tl"),
+        "local async function g(n: integer): integer
+   return n
+end
+local async function h(x: integer): integer
+   if x == 1 then
+      async
+         local t = g(x)
+      return await t
+   end
+   return 0
+end
+
+return { h = h }
+",
+    );
+
+    write(
+        &root.join("src/callback.tl"),
+        "local async function f(cb: function(): integer): integer
+   return cb()
+end
+local async function g(x: integer): integer
+   await f(function(): integer
+      return x
+   end)
+   local v = await f(function(): integer
+      return x
+   end)
+   async local t = f(function(): integer
+      return x
+   end)
+   return await t
+end
+
+return { g = g }
+",
+    );
+
+    write(
+        &root.join("src/exprpos.tl"),
+        "local async function g(n: integer): integer
+   return n
+end
+local async function via_decl(x: integer): integer
+   local v = await
+      g(x)
+   return v
+end
+local async function via_return(x: integer): integer
+   return await
+      g(x)
+end
+
+return { via_decl = via_decl, via_return = via_return }
+",
+    );
+
+    write(
+        &root.join("src/splitcb.tl"),
+        "local async function f(cb: function(): integer): integer
+   return cb()
+end
+local async function h4(x: integer): integer
+   if x == 1 then
+      await
+         f(function(): integer
+            return 1
+         end)
+      return 2
+   end
+   return 0
+end
+local async function h5(x: integer): integer
+   if x == 1 then
+      async
+         local u = f(function(): integer
+            return 4
+         end)
+      return await u
+   end
+   return 0
+end
+
+return { h4 = h4, h5 = h5 }
+",
+    );
+
+    let (ok, _, err) = htl(&["check", "src"], &root);
+    assert!(ok, "{err}");
+    assert!(err.contains("0 error(s)"), "{err}");
+
+    for f in [
+        "src/first.tl",
+        "src/second.tl",
+        "src/asyncnl.tl",
+        "src/callback.tl",
+        "src/exprpos.tl",
+        "src/splitcb.tl",
+    ] {
+        let (ok, _, err) = htl(&["fmt", "--check", f], &root);
+        assert!(ok, "{f} should already be in its formatted shape: {err}");
+        assert!(err.contains("0 would change"), "{f}: {err}");
+    }
+
+    let messy = root.join("src/messy.tl");
+    write(
+        &messy,
+        "local async function g(n: integer): integer
+   return n
+end
+local async function h(x: integer): integer
+   if x == 1 then
+   await
+      g(1)
+      return 2
+   end
+   return 0
+end
+
+return { h = h }
+",
+    );
+    let (ok, _, err) = htl(&["fmt", "--check", "src/messy.tl"], &root);
+    assert!(!ok, "a misindented keyword line should be reported: {err}");
+    assert!(err.contains("1 would change"), "{err}");
+    let (ok, _, err) = htl(&["fmt", "src/messy.tl"], &root);
+    assert!(ok, "{err}");
+    assert_eq!(
+        std::fs::read_to_string(&messy).unwrap(),
+        "local async function g(n: integer): integer
+   return n
+end
+local async function h(x: integer): integer
+   if x == 1 then
+      await
+         g(1)
+      return 2
+   end
+   return 0
+end
+
+return { h = h }
+"
+    );
+    let (ok, _, err) = htl(&["fmt", "--check", "src/messy.tl"], &root);
+    assert!(ok, "the reindented file should now be stable: {err}");
+    assert!(err.contains("0 would change"), "{err}");
+
+    // `messy2`: shape 2 (`await` as a block's *second* statement) written at the wrong,
+    // flat depth — `await` and `g(a)` both one level too shallow.
+    let messy2 = root.join("src/messy2.tl");
+    write(
+        &messy2,
+        "local async function g(n: integer): integer
+   return n
+end
+local async function h(x: integer): integer
+   if x == 1 then
+      local a = 1
+   await
+   g(a)
+      return 2
+   end
+   return 0
+end
+
+return { h = h }
+",
+    );
+    let (ok, _, err) = htl(&["fmt", "--check", "src/messy2.tl"], &root);
+    assert!(!ok, "a misindented keyword line should be reported: {err}");
+    assert!(err.contains("1 would change"), "{err}");
+    let (ok, _, err) = htl(&["fmt", "src/messy2.tl"], &root);
+    assert!(ok, "{err}");
+    assert_eq!(
+        std::fs::read_to_string(&messy2).unwrap(),
+        "local async function g(n: integer): integer
+   return n
+end
+local async function h(x: integer): integer
+   if x == 1 then
+      local a = 1
+      await
+         g(a)
+      return 2
+   end
+   return 0
+end
+
+return { h = h }
+"
+    );
+    let (ok, _, err) = htl(&["fmt", "--check", "src/messy2.tl"], &root);
+    assert!(ok, "the reindented file should now be stable: {err}");
+    assert!(err.contains("0 would change"), "{err}");
+
+    // `messy3`: shape 3 (`async local` as a block's *first* statement) written at the
+    // wrong, flat depth — `async` and `local t = g(1)` both one level too shallow.
+    let messy3 = root.join("src/messy3.tl");
+    write(
+        &messy3,
+        "local async function g(n: integer): integer
+   return n
+end
+local async function h(x: integer): integer
+   if x == 1 then
+   async
+   local t = g(1)
+      return await t
+   end
+   return 0
+end
+
+return { h = h }
+",
+    );
+    let (ok, _, err) = htl(&["fmt", "--check", "src/messy3.tl"], &root);
+    assert!(!ok, "a misindented keyword line should be reported: {err}");
+    assert!(err.contains("1 would change"), "{err}");
+    let (ok, _, err) = htl(&["fmt", "src/messy3.tl"], &root);
+    assert!(ok, "{err}");
+    assert_eq!(
+        std::fs::read_to_string(&messy3).unwrap(),
+        "local async function g(n: integer): integer
+   return n
+end
+local async function h(x: integer): integer
+   if x == 1 then
+      async
+         local t = g(1)
+      return await t
+   end
+   return 0
+end
+
+return { h = h }
+"
+    );
+    let (ok, _, err) = htl(&["fmt", "--check", "src/messy3.tl"], &root);
+    assert!(ok, "the reindented file should now be stable: {err}");
+    assert!(err.contains("0 would change"), "{err}");
+}
