@@ -514,23 +514,25 @@ fn a_field_the_struct_lint_cannot_read_is_not_counted() {
 }
 
 /// `field_lines` scans every `name:` line up to the record's closing `end`, nested bodies
-/// included, and keeps the last match -- so a field whose name a later nested record's own
-/// field of the same name shadows is read from that nested field's line, not its own, and
-/// rule 4 (the name's line and the type's line differ) drops it. `OnlyId.id` is declared
-/// before `Sub.id` and is dropped; in `IdAfter`, the same two fields declared in the other
-/// order leave `id`'s own
-/// line as the last match, so `IdAfter.id` is counted. This pins `field_lines`'s current
-/// behaviour, inherited here because `struct_spec` reads the same function; invert this
-/// test (both fixtures should then show the field) when `field_lines` stops reading nested
-/// bodies.
+/// included, but keeps only the entries at the scan's own shallowest indent -- a nested
+/// body's fields sit deeper than the record's own and are left out, so a field whose name
+/// a later nested record's own field of the same name would otherwise shadow is held to
+/// its own line regardless of which order the two are declared in. `OnlyId.id`, declared
+/// before `Sub.id`, is counted at its own line (2); in `IdAfter`, the same two fields
+/// declared in the other order leave `id`'s own line (5) just as reachable.
 #[test]
-fn a_field_shadowed_by_a_later_nested_fields_name_is_not_counted_today() {
+fn a_field_shadowed_by_a_later_nested_fields_name_is_counted() {
     let after = scratch("shadow-nested-after");
     write(
         &after.join("only_id.tl"),
         "local record OnlyId\n   id: integer   ---@optional\n   record Sub\n      id: string\n   end\nend\nreturn OnlyId\n",
     );
-    assert!(markers_of(&after, "only_id.tl").is_empty());
+    let markers = markers_of(&after, "only_id.tl");
+    assert_eq!(
+        markers,
+        vec![site("optional", "field", 2, "OnlyId.id")],
+        "{markers:#?}"
+    );
 
     let before = scratch("shadow-nested-before");
     write(
@@ -541,6 +543,28 @@ fn a_field_shadowed_by_a_later_nested_fields_name_is_not_counted_today() {
     assert_eq!(
         markers,
         vec![site("optional", "field", 5, "IdAfter.id")],
+        "{markers:#?}"
+    );
+}
+
+/// `cb:` alone on one line, its function type and `---@nilable` on the next: unlike a
+/// *plain* field wrapped the same way (`a_field_whose_type_wraps_to_the_next_line_is_not_
+/// counted`, above, dropped because the field-marker gate requires `at[fname] == fy`),
+/// a function-shaped field's marker is read through a different branch entirely --
+/// `marker_on(lines, fy, marker)` straight off the function type's own position, with no
+/// `at` lookup at all -- so `cb` is counted here, at the type's own line, where the
+/// plain field is not.
+#[test]
+fn a_wrapped_function_fields_marker_is_read_at_the_types_line() {
+    let dir = scratch("wrapped-function-field");
+    write(
+        &dir.join("wrapped_fn.tl"),
+        "local record W\n   cb:\n   function(): integer   ---@nilable\nend\nreturn W\n",
+    );
+    let markers = markers_of(&dir, "wrapped_fn.tl");
+    assert_eq!(
+        markers,
+        vec![site("nilable", "field", 3, "W.cb")],
         "{markers:#?}"
     );
 }

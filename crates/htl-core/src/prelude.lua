@@ -326,33 +326,127 @@ local function indent_of(line)
    return #(line:match("^(%s*)") or "")
 end
 
--- Fields of the record declared at `file:y`: a map of name -> the line it is declared on,
--- and the same fields in declaration order carrying the type each is written with.
--- A source scan: the record's fields are the `name: type` lines between the declaration
--- and the `end` that closes it, which is the first `end` indented no deeper than the
--- declaration itself -- the scan starts at the line after `y`, so a field written on the
--- declaration's own line is not among them. The map answers "is this one marked
--- `---@optional`"; the order and the type are what a fix spells at a construction site,
--- and neither survives the
--- checker's own view of the record (`t.fields` is a hash, and a type there is a resolved
--- object rather than the words the author wrote).
+-- Two spellings of one path, normalized to compare equal: one absolute and the other
+-- relative to the same root, or differing only in a leading `./`, are the same file for
+-- every reader below that asks `same_file` whether a position it holds and the file it
+-- is checking are one and the same, regardless of where either path started. Case-folded
+-- too: the filesystems this runs on are not all case-sensitive about it.
+local function clean_path(p)
+   local s = tostring(p or ""):gsub("\\", "/")
+   s = s:gsub("^%./", "")
+   return s:lower()
+end
+
+local function same_file(a, b)
+   if not a or not b then return false end
+   local x, y = clean_path(a), clean_path(b)
+   if x == y then return true end
+   -- One side may be absolute and the other relative to the same root.
+   return x:sub(-#y - 1) == "/" .. y or y:sub(-#x - 1) == "/" .. x
+end
+
+-- The fields of the record declared at `file:y`, in declaration order, each carrying the
+-- line it is written on and the type it is written with; and, second, the names of the
+-- type declarations (`record` / `enum` / `interface` / `type X = ...`) written at the
+-- same depth -- a set, since nothing about one but its name is a value a literal could
+-- set. A source scan: both are lines between the declaration and the `end` that closes
+-- it, which is the first `end` indented no deeper than the declaration itself -- the
+-- scan starts at the line after `y`, so either written on the declaration's own line is
+-- not among them.
+--
+-- The scan does not know where a nested record's own body begins and ends -- tracking
+-- that by matching `record` / `enum` / `interface` keywords against `end` keywords loses
+-- every field after a one-liner (`record Empty end` opens and closes on the one line, so
+-- a depth counter would only ever see the open) and mistakes a field merely *named*
+-- `record` for one. What it does know is indentation: this record's own fields and type
+-- declarations sit at one indent, and anything a nested body of its own declares sits
+-- deeper, whichever is declared first. Kept to the *shallowest* indent any `name:` line
+-- or declaration is found at -- not the first match's, so a nested body declared
+-- *before* the field it would otherwise shadow does not set the wrong depth, and the two
+-- kinds share one depth, so a record with no field of its own and only a nested type
+-- still finds that type's own indent to measure by. A line deeper than the shallowest is
+-- a nested body's own, not this record's, and is left out either way. The type and the
+-- order are what a fix spells at a construction site, and neither survives the checker's
+-- own view of the record (`t.fields` is a hash, and a type there is a resolved object
+-- rather than the words the author wrote).
+--
+-- The rule is: the lines found at this scan's own shallowest indent are this record's
+-- own. Depth alone decides it, so it can go either way when a nested body is not written
+-- deeper than what is around it, as a reader would normally write it: a nested body at
+-- the same indent as this record's own reads as one of them too, indistinguishably; a
+-- nested body written *shallower* than this record's own fields or declarations becomes
+-- the new shallowest, and those -- now the deeper ones -- lose to it and are left out
+-- instead.
 local function field_lines(lines, y)
-   local at, order = {}, {}
    local decl = lines[y]
-   if not decl then return at, order end
+   if not decl then return {}, {} end
    local base = indent_of(decl)
+   local field_candidates, decl_candidates, shallowest = {}, {}, nil
    for i = y + 1, #lines do
       local l = lines[i]
       if l:match("^%s*end%f[%W]") and indent_of(l) <= base then break end
+      local indent = indent_of(l)
       local name, written = l:match("^%s*([%w_]+)%s*:%s*(.-)%s*$")
       if name then
-         at[name] = i
+         if not shallowest or indent < shallowest then shallowest = indent end
          -- `inflicts: string   ---@optional` is the type up to the comment.
          local ty = written:gsub("%s*%-%-.*$", "")
-         order[#order + 1] = { name = name, type = ty }
+         field_candidates[#field_candidates + 1] = { name = name, type = ty, y = i, indent = indent }
+      else
+         -- A generic's `<...>` trails the name and is not part of it (`record Box<T>`);
+         -- `[%w_]+` already stops short of `<`, so the capture is the bare name either
+         -- way.
+         local tname = l:match("^%s*type%s+([%w_]+)%s*=")
+            or l:match("^%s*record%s+([%w_]+)")
+            or l:match("^%s*enum%s+([%w_]+)")
+            or l:match("^%s*interface%s+([%w_]+)")
+         if tname then
+            if not shallowest or indent < shallowest then shallowest = indent end
+            decl_candidates[#decl_candidates + 1] = { name = tname, indent = indent }
+         end
       end
    end
-   return at, order
+   local order, decl_names = {}, {}
+   for _, c in ipairs(field_candidates) do
+      if c.indent == shallowest then
+         order[#order + 1] = { name = c.name, type = c.type, y = c.y }
+      end
+   end
+   for _, c in ipairs(decl_candidates) do
+      if c.indent == shallowest then decl_names[c.name] = true end
+   end
+   return order, decl_names
+end
+
+-- The fields of the record declared at `file:y`, by name -- the last of `field_lines`'s
+-- entries for a name is the one this maps it to, so two fields at the scan's own
+-- shallowest indent that happen to share a name (an unformatted nested body written at
+-- the outer record's own indent, which the indent alone cannot tell from one of its own
+-- fields either) resolve to one line rather than two. `struct_spec` and the census
+-- (`record_marker_sites`, below `H.check`) share this map, rather than each reading
+-- `field_lines`'s entries its own way, so the two agree on which line answers for a name.
+local function name_lines(order)
+   local at = {}
+   for _, entry in ipairs(order) do at[entry.name] = entry.y end
+   return at
+end
+
+-- Pattern-escaped `s`: spliced into a pattern (`is_method_statement`, below) as itself
+-- rather than as pattern syntax, for the handful of characters that are both.
+local function escape_pattern(s)
+   return (s:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%0"))
+end
+
+-- Whether `line` is the statement that adds `name` as a method: `function M.name()` or
+-- `function M:name()`, whatever `M` is written as. This is the one thing the `TypeReport`
+-- does not carry for a function-shaped field with no `field_lines` entry of its own --
+-- `is_record_function` (tl.lua), the flag the checker's own walk sets for exactly this
+-- shape, is not among what `TypeReporter:get_typenum` (vendor/tl.lua) copies into a
+-- field's `ti` (its shape and position, nothing of how it was added) -- so it is read
+-- from the line the field's own position names instead.
+local function is_method_statement(line, name)
+   if not line then return false end
+   return line:match("^%s*function%s+[%w_.]+[.:]" .. escape_pattern(name) .. "%f[^%w_]") ~= nil
 end
 
 -- What `struct_at` returns for a position that holds a `---@struct` record:
@@ -361,25 +455,88 @@ end
 -- A field is required unless marked `---@optional`: the default is mandatory, which is
 -- the opposite of `---@contract`'s (optional unless `---@required`; see contract.rs),
 -- because this record is one the program builds itself and that one arrives from outside.
-local function struct_spec(cache, t)
+--
+-- `t.fields[name]` is a `TypeReport` id (`TypeReporter:get_typenum`, vendor/tl.lua), not
+-- the checker's own type table -- `report.types[id]` is what dereferences it, to a `ti`
+-- that carries the field's own position when its type is one the report does not intern:
+-- a record, interface, enum or function gets a fresh `ti`, with its own `.file`/`.y` and,
+-- for a record or interface, its own `.fields`; `string`, `integer` and the rest of
+-- Teal's primitives are shared by every field of that type project-wide (`get_typenum`
+-- answers every one of them with the same pre-minted id, by typename, before it would
+-- read a position at all), so a *primitive* field's `ti` carries no position of its own
+-- regardless of where it is written. The id tells apart a type from a value, and a
+-- function from a record, both without needing one; reading *which* line a value field
+-- is declared on, needed for all three (optional or required, and the fix's own text),
+-- falls to the same text scan (`field_lines`, above) this file already reads the marker
+-- through for everything else, kept nesting-safe by indentation rather than by name.
+--
+-- `t.fields` holds more than the data fields a literal is asked to set, and two kinds
+-- are skipped outright, neither `required` nor `declared`. A nested type declaration (a
+-- `record` / `enum` / `interface` written in the body, or a `type X = ...` alias) is a
+-- type, not a value a literal sets -- a reader finds its name among `decl_names`
+-- (`field_lines`'s second return, above), the declaration lines the scan itself can
+-- read at this record's own depth. That scan cannot read every shape a declaration
+-- takes, though, and an alias's own shape survives into `report.types` no better than a
+-- plain field's does: `type Alias = string` dereferences to the very id a `string`
+-- field would (`get_typenum` follows a `typedecl` straight to what it aliases, shared
+-- and positionless the same way), and `type Fn = function(integer): integer` comes back
+-- function-shaped with `Fn`'s own line, which is no method statement. So a name
+-- `decl_names` missed falls to a shape test after it: record-or-enum-shaped (`f.fields`
+-- or `f.enums`) is the one declaration shape this test alone still catches (a plain
+-- nested `record` / `interface`, whose line the scan reads as `decl_names` too, so this
+-- is only ever reached for one `field_lines` cannot read at all).
+--
+-- A `function M.f()` / `function M:f()` statement adds a field the same way, function-
+-- shaped (`f.args`) with no entry in either -- but function-shaped alone is not enough:
+-- a field `expand_interfaces` (tl.lua) copies in from an interface this record `is` can
+-- be function-shaped too (`cb: function()` in the interface), with no entry here
+-- either, and is a value the literal must still set, not a method. The two are told
+-- apart by `is_method_statement` (above), which reads the field's own line for the one
+-- shape a statement's own position actually has. A method statement is recognised on
+-- that one line, the line its own position names -- a name wrapped to the next
+-- (`function M.` / `   wrapped()`) is not read as one, and stays required. A function
+-- *field* the body itself writes (`go: function(...)`) is in `at` (below), under its own
+-- name, and is not either of these; it stays required unless marked, a value like any
+-- other.
+--
+-- What is left without an entry at all -- neither a type nor a method -- is `declared`
+-- and `required`, with no marker read for it: the `TypeReport` carries no position for a
+-- copied primitive field any more than for one written here (above), and the
+-- interface's own declaration -- the one place its marker could be read -- is text this
+-- record's own body does not contain.
+local function struct_spec(cache, report, t)
    local lines = source_lines(cache, t.file)
    if not lines then return nil end
    if not has_marker(lines, t.y, "struct") then return nil end
-   local at, order = field_lines(lines, t.y)
-   local required, declared = {}, {}
-   local any = false
-   for name in pairs(t.fields or {}) do
-      declared[name] = true
-      if not has_marker(lines, at[name], "optional") then
-         required[name] = true
-         any = true
+   local order, decl_names = field_lines(lines, t.y)
+   local at = name_lines(order)
+   local required, declared, any = {}, {}, false
+   for name, fid in pairs(t.fields or {}) do
+      if decl_names[name] then
+         -- A type: neither declared nor required.
+      elseif at[name] then
+         declared[name] = true
+         if not has_marker(lines, at[name], "optional") then
+            required[name] = true
+            any = true
+         end
+      else
+         local f = report.types[fid]
+         local is_type = type(f) == "table" and (f.fields ~= nil or f.enums ~= nil)
+         local is_method = type(f) == "table" and f.args ~= nil
+            and same_file(f.file, t.file) and is_method_statement(lines[f.y], name)
+         if not is_type and not is_method then
+            declared[name] = true
+            required[name] = true
+            any = true
+         end
       end
    end
    if not any then return nil end
    -- `fields` is the required ones in declaration order: a fix that spells them at the
-   -- site says them in the order a reader finds them in the declaration. It is filtered
-   -- through the checker's field set, so a line the scan picked up from a nested record
-   -- is not mistaken for one of this record's own.
+   -- site says them in the order a reader finds them in the declaration. A required field
+   -- `field_lines` has no entry for (copied from an interface) is left out here; the
+   -- message still names it.
    local fields, seen = {}, {}
    for _, f in ipairs(order) do
       if required[f.name] and not seen[f.name] then
@@ -410,7 +567,7 @@ local function struct_resolver(result, filename)
       if not id then return nil end
       local t = deref(id, 0)
       if not t or not t.fields or not t.file or not t.y then return nil end
-      if specs[id] == nil then specs[id] = struct_spec(sources, t) or false end
+      if specs[id] == nil then specs[id] = struct_spec(sources, report, t) or false end
       return specs[id] or nil
    end
 end
@@ -442,24 +599,6 @@ local function marker_on(lines, y, marker)
    return false, nil
 end
 
--- What `sealed_at` returns for a position whose type is a `---@sealed` record:
--- { name = "gate.Judged", file = "gate.tl", here = false, fns = { "gate.judge" } }.
--- `file` is the declaring file by its own name: the message says where the record may be
--- built, and where that file sits on this machine is not part of the answer.
-local function clean_path(p)
-   local s = tostring(p or ""):gsub("\\", "/")
-   s = s:gsub("^%./", "")
-   return s:lower()
-end
-
-local function same_file(a, b)
-   if not a or not b then return false end
-   local x, y = clean_path(a), clean_path(b)
-   if x == y then return true end
-   -- One side may be absolute and the other relative to the same root.
-   return x:sub(-#y - 1) == "/" .. y or y:sub(-#x - 1) == "/" .. x
-end
-
 -- The record as its declaration names it: `Judged` nested in `record gate` is
 -- `gate.Judged`, which is how a site that requires the module spells it. The checker's own
 -- name for it is the bare `Judged` (the same gap `enum-cast` closes by reading the site).
@@ -482,6 +621,10 @@ local function qualified_name(lines, y, name)
    return table.concat(parts, ".")
 end
 
+-- What `sealed_at` returns for a position whose type is a `---@sealed` record:
+-- { name = "gate.Judged", file = "gate.tl", here = false, fns = { "gate.judge" } }.
+-- `file` is the declaring file by its own name: the message says where the record may be
+-- built, and where that file sits on this machine is not part of the answer.
 local function sealed_spec(cache, t, filename)
    local lines = source_lines(cache, t.file)
    if not lines then return nil end
@@ -2226,7 +2369,12 @@ end
 -- apart by scanning the body: it reads the flag instead (the declaration-range rule below
 -- already puts such a field outside it on its own -- the function sits after the record's
 -- own `end` -- so the flag is redundant with that check, and kept anyway because it says
--- the same thing without relying on a line comparison to say it).
+-- the same thing without relying on a line comparison to say it). Such a field's marker
+-- is read at its function type's own line, the way `nilable_at_decl` (above) reads one,
+-- and only under rules 1-3 below (same file, in range, not an interface's copy) -- rule
+-- 4's name/type-line check is for the `optional` / `required` markers alone, so a
+-- wrapped `cb: function(): integer ---@nilable` is counted where a wrapped `multi:
+-- integer ---@optional` is not.
 --
 -- A record field (`optional`, `required`) is read at its own type's position -- the
 -- parser stamps every type node with the line of the syntax that produced it (`a_type`,
@@ -2256,27 +2404,27 @@ end
 --      is for the one shape that is not: an interface declared *inside* the same
 --      declaring statement's body as the record that `is` it, where both share one range.
 --
---   4. A field whose name and type disagree on which line they are read from -- `multi:`
---      on one line, its type (and any trailing marker) on the next -- is not counted
---      either: `struct_spec` reads a field's marker from its *name*'s line (`field_lines`,
---      above), this would read it from the type's, and a marker only one of the two would
---      see is not one the census can claim a lint acts on. `field_lines(lines, y)`, read
---      once per record (`y` is the record's own line, the same one `field_lines` is
---      already keyed by), answers which line a field's name is on; a field this census
---      would otherwise count, whose name's line disagrees with it or whose name
---      `field_lines` has no line for at all -- a quoted key (`["quoted key"]: integer`),
---      or a field written on the record's own declaration line (`field_lines` reads from
---      the line after it) -- is dropped either way: `struct_spec` cannot read a marker on
---      a field it cannot find a `name:` line for, so the census does not claim one either.
--- `field_lines` scans every `name:` line in the record's body, nested bodies included, and
--- keeps the last match -- so a field whose name a later *nested* record's own field of the
--- same name shadows is held to that nested field's line instead of its own, and is dropped
--- by the same check: not a limitation of this census, but one it inherits from the
--- function `struct_spec` reads too. Two shapes beside these are never counted at all, because
--- no lint reads a marker on either: a metamethod (`meta_fields`, `metamethod __call: ...`)
--- and a poly field (`typename == "poly"`, two declarations of one name as `f:
--- function(...)`, where which of the two a marker belongs to is not decidable from the
--- type alone).
+--   4. `at[fname] == fy`, where `at` is `name_lines(field_lines(lines, y))` (above
+--      `field_lines`): the field's own name, read once per record, maps to its own
+--      line. `struct_spec` reads a plain field's marker through this very map, so the
+--      two agree on which line answers for a name rather than each reading
+--      `field_lines`'s entries its own way -- `OnlyId.id`, declared before a nested
+--      `Sub` whose own field is also named `id`, is held to its own line regardless of
+--      which line `Sub.id` happens to sit on, the same way for both (`field_lines`
+--      itself also keeps the two apart, by indentation, for every *formatted* shape;
+--      `at`'s last-write-wins is what the two still agree on for an unformatted one --
+--      a nested body written at the outer record's own indent, where indentation alone
+--      cannot tell the two fields apart either). A field this census would otherwise
+--      count, whose own name's line in `at` disagrees with its `fy` or is absent
+--      entirely -- a quoted key (`["quoted key"]: integer`), a field written on the
+--      record's own declaration line (`field_lines` reads from the line after it), or
+--      one whose type wraps to the next line (`at` holds the name's line, not the
+--      type's) -- is dropped: `struct_spec` finds no entry for it there either, so the
+--      census does not claim a marker that lint cannot see.
+-- Two shapes beside these are never counted at all, because no lint reads a marker on
+-- either: a metamethod (`meta_fields`, `metamethod __call: ...`) and a poly field
+-- (`typename == "poly"`, two declarations of one name as `f: function(...)`, where which
+-- of the two a marker belongs to is not decidable from the type alone).
 --
 -- Defined below, after `FN_KINDS` and `function_name`, which it shares with
 -- `H.executable_ranges`; forward-declared here so `H.check` can call it. `.d.tl` gives an
@@ -3123,12 +3271,13 @@ local function record_marker_sites(t, name, node, lines, sites, seen, depth, fil
          sites[#sites + 1] = { marker = marker, kind = "record", y = y, name = name }
       end
    end
-   -- `field_lines(lines, y)` keyed by name, read once for every field below rather than
-   -- per field: `struct_spec` reads a field's marker from its *name*'s line, and a field
-   -- whose name and type are not on the same line (`multi:` on one, its type on the next)
-   -- is read from a different line by this function than by that one. Counting it here
-   -- anyway would claim a marker `struct_spec` cannot see.
-   local name_lines = field_lines(lines, y)
+   -- `name_lines(field_lines(lines, y))`, read once for every field below rather than
+   -- per field: the same name -> line map `struct_spec` reads a field's marker through,
+   -- so the two agree on which line answers for a name rather than each reading
+   -- `field_lines`'s entries its own way. A line that map has nothing for -- `multi:` on
+   -- one line and its type on the next, a quoted key -- is read from no line by that one
+   -- either, and counting it here would claim a marker `struct_spec` cannot see.
+   local at = name_lines(field_lines(lines, y))
    local iface_positions = interface_field_positions(t)
    for fname, ft in pairs(t.fields or {}) do
       if type(ft) == "table" then
@@ -3155,27 +3304,26 @@ local function record_marker_sites(t, name, node, lines, sites, seen, depth, fil
          if fy then
             local ff = inner.f or ft.f
             local fx = inner.x or ft.x
-            local name_line = name_lines[fname]
             -- The record's own declaration: its type's file is the one being checked, its
             -- line is inside the declaring statement's own range, and it is not a
             -- same-file interface's field copied in. A nested record or a `function M.f()`
             -- mirror has no `name:` line of its own (`field_lines` matches a bare
-            -- identifier before a colon, not a `record` / `type` keyword), so `name_line`
-            -- is `nil` for those and this alone does not exclude them -- the field-marker
-            -- check below is the one that also requires the name's line, since those two
-            -- shapes are not read through it. See the doc comment above `local
-            -- marker_sites` for why each of these is needed.
+            -- identifier before a colon, not a `record` / `type` keyword), so this alone
+            -- does not exclude them -- the field-marker check below is the one that also
+            -- requires `at` to name this field at this exact line, since those two shapes
+            -- are not read through it. See the doc comment above `local marker_sites` for
+            -- why each of these is needed.
             local own = same_file(ff, filename)
                and decl_y ~= nil and decl_yend ~= nil and decl_y <= fy and fy <= decl_yend
                and not copied_from_interface(iface_positions, fname, { f = ff, y = fy, x = fx })
-               and not (name_line and name_line ~= fy)
             if own then
-               -- A quoted key (`["quoted key"]: ...`) or any other field `field_lines` has
-               -- no `name:` line for at all (`name_line == nil`) is not read by
-               -- `struct_spec` either, so the field-marker loop -- the one that claims a
-               -- marker a lint reads this way -- requires the name's line to agree, not
-               -- merely not disagree.
-               if name_line == fy then
+               -- `at[fname] == fy`: the line `struct_spec` would read this same field's
+               -- marker from is this field's own line. A quoted key, a field whose type
+               -- wraps to the next line, or any other field `field_lines` has no entry
+               -- for at all is not read by that one either, so the field-marker loop --
+               -- the one that claims a marker a lint reads this way -- requires the two
+               -- to agree, not merely not disagree.
+               if at[fname] == fy then
                   for _, marker in ipairs(FIELD_MARKERS) do
                      if marker_on(lines, fy, marker) then
                         sites[#sites + 1] = { marker = marker, kind = "field", y = fy, name = name .. "." .. fname }

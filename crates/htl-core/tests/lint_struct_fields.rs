@@ -473,6 +473,152 @@ fn what_it_inserts_does_not_check() {
     );
 }
 
+// ------------------------------------------------------------- nested record declarations
+
+/// `Sub`, nested inside `Holder`, is a type declaration -- the checker's own field set
+/// lists it beside `id`, but a table literal cannot "set" a type. `make()` leaves both
+/// out and is whole.
+#[test]
+fn a_nested_record_type_is_not_a_field_the_literal_must_set() {
+    let dir = scratch("nested-type");
+    write(
+        &dir.join("holder.tl"),
+        "local record Holder   ---@struct\n   id: integer   ---@optional\n   record Sub\n      other: string\n   end\nend\n\n\
+         local function make(): Holder\n   return {}\nend\n\nreturn make\n",
+    );
+    assert!(lints_of(&dir, "holder.tl").is_empty());
+}
+
+/// `type Alias = string` and `type Fn = function(integer): integer` are both type
+/// declarations too, aliasing a primitive and a function rather than naming a record --
+/// `Alias` dereferences to the very id a plain `string` field would (no shape of its own
+/// to test), and `Fn` dereferences function-shaped at `Fn`'s own line, no method
+/// statement. `decl_names` (`field_lines`'s second return) catches both by the
+/// declaration's own text before either reaches the shape test. Only `name` is missing.
+#[test]
+fn a_nested_type_alias_is_not_a_field_the_literal_must_set() {
+    let dir = scratch("nested-alias");
+    write(
+        &dir.join("t.tl"),
+        "local record T   ---@struct\n   type Alias = string\n   type Fn = function(integer): integer\n   name: string\nend\n\n\
+         local function make(): T\n   return {}\nend\n\nreturn make\n",
+    );
+    let lints = lints_of(&dir, "t.tl");
+    assert_eq!(lints.len(), 1, "{lints:?}");
+    assert!(lints[0].contains("T is built without name"), "{}", lints[0]);
+}
+
+/// `OnlyId.id` is marked `---@optional` before `Sub`, nested after it, declares a field
+/// of the same name: the outer `id` keeps its own marker whatever a later nested record
+/// declares under it.
+#[test]
+fn an_optional_field_keeps_its_marker_when_a_later_nested_record_shadows_its_name() {
+    let dir = scratch("shadow-nested");
+    write(
+        &dir.join("only_id.tl"),
+        "local record OnlyId   ---@struct\n   id: integer   ---@optional\n   record Sub\n      id: string\n   end\nend\n\n\
+         local function make(): OnlyId\n   return {}\nend\n\nreturn make\n",
+    );
+    assert!(lints_of(&dir, "only_id.tl").is_empty());
+}
+
+/// The issue's other order (`after.tl`): `Sub`, nested first, declares `id: string`;
+/// `IdAfter`'s own `id: integer` is marked `---@optional` after it. The outer `id` keeps
+/// its own marker whichever side of a nested record of the same name it is declared on.
+#[test]
+fn an_optional_field_keeps_its_marker_when_an_earlier_nested_record_shares_its_name() {
+    let dir = scratch("shadow-nested-before");
+    write(
+        &dir.join("id_after.tl"),
+        "local record IdAfter   ---@struct\n   record Sub\n      id: string\n   end\n   id: integer   ---@optional\nend\n\n\
+         local function make(): IdAfter\n   return {}\nend\n\nreturn make\n",
+    );
+    assert!(lints_of(&dir, "id_after.tl").is_empty());
+}
+
+/// `Inner`, nested in `Outer`, carries its own `---@struct` and is checked as its own
+/// spec: `Outer` is whole without setting `id` (optional) or `Inner` (a type, not a
+/// field), and a literal of `Outer.Inner` missing `b` is reported under `Inner`'s own
+/// name, not `Outer`'s.
+#[test]
+fn a_nested_record_with_its_own_marker_is_its_own_spec() {
+    let dir = scratch("nested-spec");
+    write(
+        &dir.join("outer.tl"),
+        "local record Outer   ---@struct\n   id: string   ---@optional\n   record Inner   ---@struct\n      a: string\n      b: string\n   end\nend\n\n\
+         local function make(): Outer\n   return {}\nend\n\n\
+         local function inner(): Outer.Inner\n   return { a = \"x\" }\nend\n\n\
+         return { make = make, inner = inner }\n",
+    );
+    let lints = lints_of(&dir, "outer.tl");
+    assert_eq!(lints.len(), 1, "{lints:?}");
+    assert!(
+        lints[0].contains("Inner is built without b"),
+        "{}",
+        lints[0]
+    );
+}
+
+/// `WithFn.run` is a method defined by a `function WithFn.run()` statement -- the checker
+/// adds it to `WithFn`'s own field set flagged `is_record_function`, but it is defined
+/// below the record's own `end`, not by the literal. Only `go`, a function-typed field
+/// the body itself declares, is missing.
+#[test]
+fn a_method_defined_by_a_statement_is_not_a_field_the_literal_must_set() {
+    let dir = scratch("method-field");
+    write(
+        &dir.join("with_fn.tl"),
+        "local record WithFn   ---@struct\n   id: integer\n   go: function(WithFn)\nend\n\n\
+         function WithFn.run(w: WithFn)\nend\n\n\
+         local function make(): WithFn\n   return { id = 1 }\nend\n\nreturn make\n",
+    );
+    let lints = lints_of(&dir, "with_fn.tl");
+    assert_eq!(lints.len(), 1, "{lints:?}");
+    assert!(
+        lints[0].contains("WithFn is built without go"),
+        "{}",
+        lints[0]
+    );
+}
+
+/// `Holder` declares no field of its own at all -- only the nested `Sub`, which has one
+/// (`other`). `field_lines`' shallowest-indent scan has nothing of `Holder`'s own to set
+/// the depth from, so `Sub`'s field is the shallowest match found; the type-shaped skip
+/// (`Sub` is still a `typedecl`, not a `name:` entry) keeps it from being required all
+/// the same.
+#[test]
+fn a_record_with_no_own_fields_is_not_held_to_a_nested_records() {
+    let dir = scratch("no-own-fields");
+    write(
+        &dir.join("holder.tl"),
+        "local record Holder   ---@struct\n   record Sub\n      other: string\n   end\nend\n\n\
+         local function make(): Holder\n   return {}\nend\n\nreturn make\n",
+    );
+    assert!(lints_of(&dir, "holder.tl").is_empty());
+}
+
+/// The nested record's own `id: string` is a different declaration from the outer's
+/// `id: integer`, at a different line -- the fix for the outer still spells the outer's
+/// own placeholder, not the nested one's.
+#[test]
+fn the_fix_for_a_shadowed_field_spells_the_outer_records_own_type() {
+    let dir = scratch("shadow-fix");
+    write(
+        &dir.join("defs.tl"),
+        "local record defs\n   ---@struct\n   record OnlyId\n      id: integer\n      other: string\n      record Sub\n         id: string\n      end\n   end\nend\nreturn defs\n",
+    );
+    write(
+        &dir.join("mod.tl"),
+        "local defs = require(\"defs\")\nlocal m: defs.OnlyId = { other = \"x\" }\nreturn m\n",
+    );
+    let out = fix_only(&dir, "mod.tl", FixOptions::default());
+    let text = out.suggested.expect("the suggestion is rendered");
+    assert!(
+        text.contains("{ other = \"x\", id = htl_fixme(\"integer\") }"),
+        "the outer's own type (`integer`), not the nested `Sub.id`'s (`string`):\n{text}"
+    );
+}
+
 /// A field the message blames on a misspelling is not also inserted: the answer there is
 /// to correct the key that is there, not to add a second one beside it.
 #[test]
@@ -496,5 +642,29 @@ fn a_misspelled_field_is_not_offered_as_an_insertion() {
         ci.lint_fixes[at].is_none(),
         "nothing to insert: {:?}",
         ci.lint_fixes[at]
+    );
+}
+
+/// `A is I` copies all four of `I`'s fields into `A`'s own field set -- `cb: function()`
+/// beside three plain ones (`mode`, `n`, `pos`), and `A` writes no body of its own at
+/// all. `cb` is function-shaped exactly the way a method `function A.f()` adds below the
+/// record's own `end` is, but its own position is `I`'s `cb:` line, not a
+/// `function A.<name>()` statement -- so it is not one of those, and stays required
+/// beside its three copied siblings.
+#[test]
+fn an_interface_copied_function_field_stays_required() {
+    let dir = scratch("iface-fn-required");
+    write(
+        &dir.join("a.tl"),
+        "local interface I\n   cb: function()\n   mode: string\n   n: integer\n   pos: integer\nend\n\n\
+         local record A is I   ---@struct\nend\n\n\
+         local function make(): A\n   return {}\nend\n\nreturn make\n",
+    );
+    let lints = lints_of(&dir, "a.tl");
+    assert_eq!(lints.len(), 1, "{lints:?}");
+    assert!(
+        lints[0].contains("A is built without cb, mode, n, pos"),
+        "{}",
+        lints[0]
     );
 }
