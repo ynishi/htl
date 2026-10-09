@@ -84,10 +84,15 @@
 //! one this CLI links — same version, same tree — and the only question is where that
 //! tree is for the project: on crates.io at this version when the CLI is a published
 //! release, at a checkout's path when it was built from one. `build.rs` answers that at
-//! build time and [`HtlPin::default`] reads the answer; `--htl main` and `--htl
-//! path:<checkout>` name another tree by hand. There is no number to pass: a project for
+//! build time and [`HtlPin::default`] reads the answer; `--htl release`, `--htl main` and
+//! `--htl path:<checkout>` name a tree by hand. There is no number to pass: a project for
 //! an older release is written by that release's CLI (`cargo install htl-cli --version
 //! <release>`), the way every generator that ships beside its library does it.
+//!
+//! `htl pin` is the same three names, pointed at a project `htl new` already wrote rather
+//! than one about to be: it moves the `htl` (and `htl-mq`) line of `Cargo.toml`,
+//! `mise.toml`, and `[toolchain] htl` in `htl.toml`, then runs the `cargo update` that
+//! makes the lockfile agree. See `pin.rs`.
 //!
 //! It was a window once — `SUPPORTED`, a `DEFAULT_HTL` raised by hand after each publish,
 //! and `knows_*` questions that let one CLI write for two releases. The window cost a
@@ -154,7 +159,16 @@ impl Default for HtlPin {
 }
 
 impl HtlPin {
-    /// Read what `--htl` was given: nothing (the default), `main`, or `path:<checkout>`.
+    /// Read what `--htl` was given: nothing (the default), `release`, `main`, or
+    /// `path:<checkout>`.
+    ///
+    /// `release` is this CLI's own version, spelled out rather than left to the default:
+    /// the same number [`HtlPin::default`] answers from a published CLI, and, from one
+    /// built in a checkout, a version pin to that number rather than the checkout's path.
+    /// The scaffold never writes for a release it does not link (CONTRIBUTING,
+    /// "Verification"), so a checkout CLI names a release that may not be on crates.io
+    /// yet — which is what makes `htl pin release` able to move a project from `main` or
+    /// `path:` back to the version the checkout is about to cut, before it is published.
     ///
     /// A number is refused, and the refusal says where that release's scaffold is. This
     /// CLI's templates are the ones its own htl reads — `htl.toml` keys, the host's
@@ -165,6 +179,9 @@ impl HtlPin {
         let Some(s) = s else {
             return Ok(HtlPin::default());
         };
+        if s == "release" {
+            return Ok(HtlPin::Release(env!("CARGO_PKG_VERSION").to_string()));
+        }
         if s == "main" {
             return Ok(HtlPin::Main);
         }
@@ -207,7 +224,7 @@ impl HtlPin {
     /// crate in that tree is at the same place in it, so only the last path segment
     /// changes. A release and a branch do not even change that: the version and the branch
     /// are the workspace's, and the crate name is the key on the left of the line.
-    fn keys_for(&self, crate_name: &str) -> Vec<(&'static str, String)> {
+    pub(crate) fn keys_for(&self, crate_name: &str) -> Vec<(&'static str, String)> {
         match self {
             HtlPin::Release(v) => vec![("version", v.clone())],
             HtlPin::Main => vec![
@@ -234,7 +251,7 @@ impl HtlPin {
 /// What `--htl` accepts, for the refusals in [`HtlPin::parse`].
 fn accepted() -> String {
     format!(
-        "--htl takes `main` or `path:<checkout>`, and without it a project pins the htl this CLI was built with ({})",
+        "--htl takes `release`, `main` or `path:<checkout>`, and without it a project pins the htl this CLI was built with ({})",
         HtlPin::default().requirement()
     )
 }
@@ -1130,7 +1147,7 @@ fn t_htl_toml(target: Option<BuildTarget>) -> String {
 /// `cargo:` rather than `github:`, so the command is pinned in the same registry as the
 /// crate; mise takes the prebuilt release binary through that backend anyway when
 /// `cargo-binstall` is installed, since cargo-dist's asset names are binstall's defaults.
-fn t_mise(pin: &HtlPin) -> Option<String> {
+pub(crate) fn t_mise(pin: &HtlPin) -> Option<String> {
     let HtlPin::Release(v) = pin else {
         return None;
     };
@@ -1329,7 +1346,7 @@ fn window_readme_prose(ctx: &Ctx<'_>) -> String {
 /// reason [`HtlPin::keys_for`] hands back pairs instead of a finished line: the `cdylib`
 /// target's `features = ["ffi"]` has to survive all three pin kinds, and the way to be sure
 /// it does is for there to be one place it is written.
-fn dep_value(keys: &[(&str, String)], features: &[&str]) -> String {
+pub(crate) fn dep_value(keys: &[(&str, String)], features: &[&str]) -> String {
     if features.is_empty()
         && let [("version", v)] = keys
     {

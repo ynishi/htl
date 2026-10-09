@@ -65,6 +65,7 @@ htl = "0.8"                    # embedding: engine + proc macros in one import
 | command | what it does |
 |---|---|
 | `htl new <name>` / `htl init [dir]` | scaffold: `mlua-pkg.toml`, `htl.toml`, `src/<mod>/init.tl`, `src/main.tl`, `tests/<mod>_test.tl`, `types/README.md`, `.gitignore`, README — and `mise.toml` when the CLI is a published release (`--lib` for no entry script, which leaves `src/main.tl` out; `--target <name>` for what will run the output, `--embed` being the shorthand for `--target bin`; `--htl <req>` for which htl the project depends on; `--no-x` for no `htlx` dependency) |
+| `htl pin <release\|main\|path:<checkout>> [dir] [--no-update]` | move the htl a project `htl new` already wrote depends on: the same four things `--htl` decided at `new` time — `Cargo.toml`'s `htl` / `htl-mq` lines, `mise.toml`, `[toolchain] htl` in `htl.toml` — then `cargo update`; `--no-update` writes the files and prints that command instead of running it |
 | `htl check [paths] [--strict] [--lint rule=level] [--list-lints] [--statistics] [--format json] [--no-cache] [--cache-mode per-module\|whole-run] [--explain-cache]` | type-check; htl lints as `lint:`, advisory at their default level and fatal at `deny` (`--strict` promotes every `warn` to `deny`; `--list-lints` prints every rule with its default level and exits); a module reached through `require` (an installed dep, a `[check] paths` dir) is checked with the file and its type errors are errors too, once per run, with the file that required it; what has not changed is replayed from `.htl/` (see Caching) — or, with `--statistics`, how many findings each rule produced instead of the findings |
 | `htl run <file.tl \| app.hb> [args]` | check then execute, as a root coroutine on the executor (see Async); `require` of a `.tl` with type errors fails; Ctrl-C cancels the program, prints `htl run: interrupted` and exits 130 |
 | `htl test [paths] [--filter s] [--lib mod] [--lint rule=level] [--fail-fast] [--allow-empty] [-v \| -q] [--slow ms] [--update] [--seed n] [--coverage [--coverage-lines]] [--lcov file] [--junit file] [--format json] [--no-cache] [--explain-cache]` | every `.tl` that loads the test library (`htl.test`, or `--lib`), one isolated state per file; checking is replayed from `.htl/`, the run never is (see Caching; the flags are under Tests) |
@@ -542,7 +543,8 @@ a gate: the exit code is always 0.
 `htl pkg install`; `--no-x` leaves it out. `--target bin | cdylib | window` adds a Rust
 host (`--embed` is `--target bin`; `htl init --target` for an existing project), and
 the `htl` it pins is the one the binary was built with (`--htl main`, `--htl
-path:<checkout>` to move it). What each target produces and what the scaffold writes
+path:<checkout>` to pin another one; `htl pin` moves an existing project between them
+afterwards). What each target produces and what the scaffold writes
 for it: [`BuildTarget`](https://docs.rs/htl/latest/htl/build_target/enum.BuildTarget.html)
 and [htl-cli](https://docs.rs/htl-cli).
 
@@ -577,8 +579,13 @@ record cannot open with a field called `where`; `["where"]: <type>` works anywhe
 
 ## Running against an unpublished htl
 
-A consumer that needs a change before it is on crates.io points at a checkout, in its own
-`Cargo.toml`:
+A project `htl new` wrote moves with `htl pin path:<checkout>` (and back with `htl pin
+release`, once that checkout's release is out) — it rewrites the same `htl` / `htl-mq`
+line itself, `mise.toml` and `[toolchain] htl` with it, and runs the `cargo update` that
+makes `Cargo.lock` agree.
+
+Every other consumer — anything not an `htl new` tree, or an `htl` line `htl pin` does
+not recognise — points at a checkout by hand, in its own `Cargo.toml`:
 
 ```toml
 [patch.crates-io]

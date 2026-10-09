@@ -35,6 +35,10 @@ serde_json = "1"
 # version by cargo's own rule (`warn_cargo_htl_mismatch`). Both are already in the graph
 # under htl-core, which reads `htl.toml` and `[toolchain] htl` with the same two.
 toml = "0.8"
+# `htl pin` rewrites a project's `Cargo.toml` / `htl.toml` in place, keeping the rest of
+# each file byte-identical — the same job `htl-core`'s `pkg` feature already pulls this in
+# for (`Project::patch`'s `set_dep_key`), at the same version.
+toml_edit = "0.22"
 semver = { workspace = true }
 
 [dev-dependencies]

@@ -8,6 +8,7 @@
 
 use htl::cache;
 mod junit;
+mod pin;
 pub mod report;
 mod scaffold;
 
@@ -420,9 +421,9 @@ Layout of a project: https://github.com/ynishi/htl#layout-of-a-project-htl-new
         /// script, a thin src/main.rs
         #[arg(long, value_name = "NAME", value_parser = clap::builder::PossibleValuesParser::new(scaffold::target_names()))]
         target: Option<String>,
-        /// The htl the project depends on: `main`, or `path:<checkout>`. Without it, the
-        /// htl this binary was built with — its version on crates.io, or the checkout it
-        /// was built in
+        /// The htl the project depends on: `release`, `main`, or `path:<checkout>`.
+        /// Without it, the htl this binary was built with — its version on crates.io, or
+        /// the checkout it was built in
         #[arg(long, value_name = "REQ")]
         htl: Option<String>,
         /// Leave the htlx (htl-x collections) dependency out of mlua-pkg.toml
@@ -440,14 +441,52 @@ Layout of a project: https://github.com/ynishi/htl#layout-of-a-project-htl-new
         /// Fill in this target's files, and report the ones that were already there
         #[arg(long, value_name = "NAME", value_parser = clap::builder::PossibleValuesParser::new(scaffold::target_names()))]
         target: Option<String>,
-        /// The htl the project depends on: `main`, or `path:<checkout>`. Without it, the
-        /// htl this binary was built with — its version on crates.io, or the checkout it
-        /// was built in
+        /// The htl the project depends on: `release`, `main`, or `path:<checkout>`.
+        /// Without it, the htl this binary was built with — its version on crates.io, or
+        /// the checkout it was built in
         #[arg(long, value_name = "REQ")]
         htl: Option<String>,
         /// Leave the htlx (htl-x collections) dependency out of mlua-pkg.toml
         #[arg(long)]
         no_x: bool,
+    },
+    /// Move the htl a project `htl new` already wrote depends on
+    ///
+    /// Rewrites `Cargo.toml`'s `htl` line (and `htl-mq`'s, under `--target window`),
+    /// `mise.toml`, and `[toolchain] htl` in `htl.toml` when the project has one, then runs
+    /// `cargo update` so `Cargo.lock` agrees — the same four things `--htl` decides for a
+    /// project that does not exist yet (see `htl new`). `release` is this CLI's own
+    /// version, `main` its repository's branch, `path:<checkout>` a local clone — a
+    /// relative one resolved against the current directory, the way the shell reads it,
+    /// not against `dir`, and refused when there is no `crates/htl/Cargo.toml` under it;
+    /// a number is refused, the way `htl new --htl <number>` is, naming the release's own
+    /// CLI instead. `--no-update` writes the three files and prints the `cargo update` to
+    /// run by hand rather than running it.
+    ///
+    /// A `Cargo.toml` whose `htl` (or `htl-mq`) line this command does not recognise —
+    /// anything but a bare version, or a table naming exactly one of `version` / `git` +
+    /// `branch` / `path` plus an optional `features` list — is left untouched: the fallback
+    /// is the `[patch.crates-io]` block this refusal prints. README, "Running against an
+    /// unpublished htl": https://github.com/ynishi/htl#running-against-an-unpublished-htl
+    ///
+    /// Exit 0 once everything above is moved; 2 when `--htl` is not one of the three (or
+    /// names no checkout), there is no `Cargo.toml` to move, the line is not recognised,
+    /// or `cargo update` fails (the files are rewritten either way — only the lock is left
+    /// unresolved).
+    #[command(after_long_help = "\
+Examples:
+  htl pin path:../htl            from this project's own directory, move it onto a sibling
+                                  checkout, for a change that has to be built against it
+  htl pin release                move it back once that checkout's change is released
+")]
+    Pin {
+        /// `release`, `main`, or `path:<checkout>` — the same names `htl new --htl` takes
+        htl: String,
+        /// Project root or any path inside it (default: current directory)
+        dir: Option<PathBuf>,
+        /// Write the three files and print the `cargo update` to run, rather than running it
+        #[arg(long)]
+        no_update: bool,
     },
     /// Package management at the nearest `mlua-pkg.toml` project root: install / add /
     /// update / clean / patch, through mlua-pkg's library rather than its binary
@@ -837,6 +876,11 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
             htl.as_deref(),
             no_x,
         ),
+        Cmd::Pin {
+            htl,
+            dir,
+            no_update,
+        } => pin::cmd_pin(&htl, dir, no_update),
         Cmd::Gen { file, out } => cmd_gen(&file, out.as_deref()),
         Cmd::Run { file, args } => cmd_run(&file, &args),
         Cmd::Fix {
