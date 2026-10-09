@@ -4,9 +4,12 @@
 //!
 //! - `check`: `{ files, patched, diagnostics: [{ severity: "error"|"warning"|"lint", file,
 //!   line, col, rule?, message, fix?, required_by?, origin? }], summary: { errors, warnings,
-//!   lints, denied, strict, ok, cached, replayed } }` ([`CheckReport`], [`CheckSummary`],
+//!   lints, denied, strict, ok, cached, replayed }, statistics?: [{ rule, count, fixable,
+//!   unsafe_fixable }] }` ([`CheckReport`], [`CheckSummary`], [`RuleStatistic`],
 //!   `htl::Diagnostic`). `fix` is `{ applicability: "safe"|"unsafe"|"suggest", edits: [{
-//!   line, col, end_line, end_col, text }] }`.
+//!   line, col, end_line, end_col, text }] }`. `statistics` is present only under
+//!   `--statistics`, and `diagnostics` is then empty: the two never both carry the run's
+//!   findings.
 //! - `test`: `{ files: [{ path, ok, diagnostics, error?, file_level, passed, failed,
 //!   failures, tests: [{ name, ok, ms }], duration_ms, snapshots_written,
 //!   snapshots_updated }], summary: { files, files_run, passed, failed, files_with_errors,
@@ -32,8 +35,27 @@ use serde::Serialize;
 // the one way the library does.
 pub use htl::Diagnostic;
 
+/// The tally key for an error the checker left unclassified (`d.rule` is `None`) — none
+/// today: every error reaches [`Out::diagnostic`] already classed `tl:error` or
+/// `forward-ref` by `collect_errors` in `prelude.lua`. Spelled so it is neither a current
+/// nor a retired rule name (`"error"` is `RENAMED` to `"tl:error"` in `htl::lint`, and
+/// handing that spelling to `--explain` or `htl fix --rule` would be told it was renamed
+/// to the very class this key is standing in for not being).
+const NO_RULE: &str = "(no rule)";
+
+/// How many findings a rule produced, and how many of them carry a fix of each kind — the
+/// running total behind one row of [`Out::statistics`]. Not public: [`RuleStatistic`] is
+/// the document a caller reads; this is only what it is built from.
+#[derive(Default)]
+struct RuleTally {
+    count: usize,
+    fixable: usize,
+    unsafe_fixable: usize,
+}
+
 /// Where a diagnostic goes once the run has decided to say it: printed as it comes
-/// (text) or kept for the document (json).
+/// (text) or kept for the document (json) — or, under `--statistics`, neither, since the
+/// table it asked for is the tally alone.
 ///
 /// Which diagnostics a run says, and in what words, is the library's
 /// ([`htl::project::Sink`]) — a dependency's error is said once per run, and a replayed
@@ -42,18 +64,27 @@ pub use htl::Diagnostic;
 pub struct Out {
     pub json: bool,
     diagnostics: Vec<Diagnostic>,
-    /// The rules the findings said so far were under, each once, in name order: what
-    /// `htl check` names `--explain` for after the findings. Kept whether or not the run
-    /// prints text, since recording is cheap and the caller decides what to do with it.
-    rules: std::collections::BTreeSet<String>,
+    /// Which rule each finding counted under, and its fix numbers, keyed by the rule name
+    /// — in name order, which is what `rules_said()` wants and what `statistics()` sorts
+    /// from. Recorded for every diagnostic as it arrives, in both text and json mode,
+    /// whether or not `--statistics` was asked: tallying is cheap, and the caller decides
+    /// what to do with it. An error the checker left unclassified (`d.rule` is `None`) is
+    /// keyed by [`NO_RULE`] rather than dropped — see that constant for why such an error
+    /// does not arise today.
+    tally: std::collections::BTreeMap<String, RuleTally>,
+    /// `--statistics`: tally every diagnostic as always, but print nothing (text) and
+    /// push nothing (json) — the table (or the JSON `statistics` array) is the answer the
+    /// flag asks for, in place of the findings rather than beside them.
+    statistics_only: bool,
 }
 
 impl Out {
-    pub fn new(json: bool) -> Self {
+    pub fn new(json: bool, statistics_only: bool) -> Self {
         Self {
             json,
             diagnostics: Vec::new(),
-            rules: Default::default(),
+            tally: Default::default(),
+            statistics_only,
         }
     }
 
@@ -61,16 +92,62 @@ impl Out {
         std::mem::take(&mut self.diagnostics)
     }
 
-    /// The rules the findings said so far were under, each once, in name order.
+    /// The rules the findings said so far were under, each once, in name order: what
+    /// `htl check` names `--explain` for after the findings. [`NO_RULE`] is a key of the
+    /// tally, not a rule, and is skipped here.
     pub fn rules_said(&self) -> impl Iterator<Item = &str> {
-        self.rules.iter().map(String::as_str)
+        self.tally
+            .keys()
+            .map(String::as_str)
+            .filter(|&r| r != NO_RULE)
     }
+
+    /// One row per rule with at least one finding, count descending then rule ascending —
+    /// `ruff --statistics`'s shape. A rule with no finding this run is not a key of the
+    /// tally at all, so it is never a row.
+    pub fn statistics(&self) -> Vec<RuleStatistic> {
+        let mut rows: Vec<RuleStatistic> = self
+            .tally
+            .iter()
+            .map(|(rule, t)| RuleStatistic {
+                rule: rule.clone(),
+                count: t.count,
+                fixable: t.fixable,
+                unsafe_fixable: t.unsafe_fixable,
+            })
+            .collect();
+        rows.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.rule.cmp(&b.rule)));
+        rows
+    }
+}
+
+/// One row of `htl check --statistics`'s table, and of its `--format json` form: a rule
+/// with at least one finding this run, how many, and how many of those a fix covers.
+///
+/// `fixable` is `safe` and `suggest` findings together — what `htl fix` applies or shows
+/// without `--unsafe` — and `unsafe_fixable` is the rest that still carry a fix. Neither
+/// overlaps the other, and together they need not reach `count`: the difference is
+/// findings with no fix at all.
+#[derive(Serialize, Debug, PartialEq, Eq)]
+pub struct RuleStatistic {
+    pub rule: String,
+    pub count: usize,
+    pub fixable: usize,
+    pub unsafe_fixable: usize,
 }
 
 impl htl::project::Output for Out {
     fn diagnostic(&mut self, d: &Diagnostic) {
-        if let Some(rule) = &d.rule {
-            self.rules.insert(rule.clone());
+        let key = d.rule.clone().unwrap_or_else(|| NO_RULE.to_string());
+        let t = self.tally.entry(key).or_default();
+        t.count += 1;
+        match d.fix.as_ref().map(|f| f.applicability.as_str()) {
+            Some("safe") | Some("suggest") => t.fixable += 1,
+            Some("unsafe") => t.unsafe_fixable += 1,
+            _ => {}
+        }
+        if self.statistics_only {
+            return;
         }
         let severity = d.severity;
         if self.json {
@@ -109,6 +186,11 @@ pub struct CheckReport {
     pub patched: usize,
     pub diagnostics: Vec<Diagnostic>,
     pub summary: CheckSummary,
+    /// `--statistics`'s table, as the document's [`RuleStatistic`] rows — count
+    /// descending, then rule ascending. `Some` only under that flag, and then
+    /// `diagnostics` is empty: the two never both carry the run's findings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statistics: Option<Vec<RuleStatistic>>,
 }
 
 #[derive(Serialize, Debug)]
@@ -293,4 +375,42 @@ pub struct FixSummary {
 pub fn emit<T: Serialize>(v: &T) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(v)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use htl::project::Output as _;
+
+    /// The checker classifies every error it reports as `tl:error` or `forward-ref`
+    /// before it reaches [`Out`] — a syntax error and a type error both go through
+    /// `collect_errors` in `prelude.lua`, which never leaves one unclassified — so no
+    /// small fixture drives `htl check` to hand this a `rule: None` error. The tally has
+    /// to answer the case regardless, since nothing stops a future caller (or a different
+    /// path through the checker, such as a codegen failure after a clean type-check) from
+    /// handing it one, so it is exercised directly here.
+    #[test]
+    fn an_unclassified_error_is_tallied_under_no_rule() {
+        let mut out = Out::new(false, false);
+        out.diagnostic(&Diagnostic::new(
+            htl::Severity::Error,
+            "a.tl",
+            1,
+            1,
+            "generate failed: boom",
+            None,
+        ));
+        assert_eq!(
+            out.statistics(),
+            vec![RuleStatistic {
+                rule: NO_RULE.to_string(),
+                count: 1,
+                fixable: 0,
+                unsafe_fixable: 0,
+            }]
+        );
+        // The synthetic key is a tally key, not a rule: the `--explain` hint loop reads
+        // `rules_said()`, and it must not be asked to explain it.
+        assert_eq!(out.rules_said().collect::<Vec<_>>(), Vec::<&str>::new());
+    }
 }

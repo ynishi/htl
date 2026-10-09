@@ -206,6 +206,7 @@ Examples:
   htl check --list-lints         every rule with its default level, then exit
   htl check --explain union-exhaustive
                                  why the rule exists and how to decide its cases
+  htl check src --statistics     how many findings each rule produced, not the findings
 
 The store is .htl/cache at the project root, the nearest htl.toml or mlua-pkg.toml above
 the paths; --no-cache skips it, --explain-cache says why a lookup missed.
@@ -242,6 +243,14 @@ Caching: https://github.com/ynishi/htl#caching
         /// Say why the cache was not used, and what this run did with it
         #[arg(long)]
         explain_cache: bool,
+        /// Print how many findings each rule produced, instead of the findings
+        /// themselves: one row per rule with at least one, count first, `[*]` when every
+        /// finding of it has a fix `htl fix` applies, `[-]` when only some do or only
+        /// with `--unsafe`, `[ ]` when none has one; rules with no finding are not
+        /// listed. The summary line and the exit code are unchanged. With `--format
+        /// json`, `statistics` carries the same rows and `diagnostics` is empty
+        #[arg(long)]
+        statistics: bool,
     },
     /// Run tests: every `.tl` that requires the test library, one isolated state per file
     ///
@@ -697,6 +706,7 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
             no_cache,
             cache_mode,
             explain_cache,
+            statistics,
         } => cmd_check(
             &paths,
             lint.as_deref(),
@@ -708,6 +718,7 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
                 use_cache: !no_cache,
                 cache_mode: cache_mode.map(Into::into),
                 explain: explain_cache,
+                statistics,
             },
         ),
         Cmd::Fmt {
@@ -929,7 +940,7 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
 /// dependency's error said once, and never on behalf of a file the run checks itself —
 /// is then once per *command*, which is what `htl build` over a closure of modules wants.
 fn text_sink() -> project::Sink<report::Out> {
-    project::Sink::new(report::Out::new(false))
+    project::Sink::new(report::Out::new(false, false))
 }
 
 /// What else a verdict counted besides errors, for a summary line: a finding at `deny`,
@@ -1620,6 +1631,8 @@ struct CheckFlags {
     use_cache: bool,
     cache_mode: Option<cache::Mode>,
     explain: bool,
+    /// `--statistics`: the per-rule table in place of the findings.
+    statistics: bool,
 }
 
 struct TestFlags {
@@ -1806,7 +1819,7 @@ fn cmd_test(
         ),
     };
 
-    let mut sink = project::Sink::new(report::Out::new(flags.json));
+    let mut sink = project::Sink::new(report::Out::new(flags.json, false));
     let mut json_files: Vec<report::TestFile> = Vec::new();
     let mut junit_suites: Vec<junit::Suite> = Vec::new();
     // What is left of the run here: how a file reads on a terminal, and what the document
@@ -2255,7 +2268,7 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
         }
     }
 
-    let mut sink = project::Sink::new(report::Out::new(flags.json));
+    let mut sink = project::Sink::new(report::Out::new(flags.json, false));
     // Judged by the levels `htl check` judges by: a finding under a rule at `deny` fails.
     sink.judge_by(scope.lints.selection());
     // Dependencies are reported as `htl check` reports them and never rewritten: a fix
@@ -2489,9 +2502,10 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
         use_cache,
         cache_mode,
         explain,
+        statistics,
         ..
     } = flags;
-    let mut sink = project::Sink::new(report::Out::new(json));
+    let mut sink = project::Sink::new(report::Out::new(json, statistics));
     let paths = if paths.is_empty() {
         vec![PathBuf::from(".")]
     } else {
@@ -2596,6 +2610,7 @@ fn cmd_check(paths: &[PathBuf], lint: Option<&str>, flags: CheckFlags) -> Result
     let fail = report_check(
         sink.out(),
         json,
+        statistics,
         &rep,
         &policy,
         patched_files(walk_model.as_ref(), &rep.files),
@@ -3104,6 +3119,81 @@ fn patched_files(model: Option<&htl::model::Project>, files: &[PathBuf]) -> usiz
         .count()
 }
 
+/// `htl check --statistics`'s table: one row per rule, count first, the rule names left
+/// aligned on the longest of them. Nothing is printed for an empty slice — a run with no
+/// finding leaves the summary line to say `0 error(s), 0 warning(s), 0 lint(s)` on its own.
+fn print_statistics(rows: &[report::RuleStatistic]) {
+    let width = rows.iter().map(|r| r.rule.len()).max().unwrap_or(0);
+    for r in rows {
+        eprintln!(
+            "{:>5}  {:<width$}  {}",
+            r.count,
+            r.rule,
+            statistics_marker(r)
+        );
+    }
+}
+
+/// `[*]`: every finding of the rule carries a fix `htl fix` applies without being asked
+/// (`safe`) or shows (`suggest`). `[ ]`: none does. `[-]`: the rest — some findings fixable
+/// and some not, or every one fixable but only some `safe`/`suggest`, the remainder
+/// needing `--unsafe`.
+fn statistics_marker(r: &report::RuleStatistic) -> &'static str {
+    if r.fixable == r.count {
+        "[*]"
+    } else if r.fixable + r.unsafe_fixable == 0 {
+        "[ ]"
+    } else {
+        "[-]"
+    }
+}
+
+#[cfg(test)]
+mod statistics_marker_tests {
+    use super::statistics_marker;
+    use crate::report::RuleStatistic;
+
+    fn stat(count: usize, fixable: usize, unsafe_fixable: usize) -> RuleStatistic {
+        RuleStatistic {
+            rule: "r".to_string(),
+            count,
+            fixable,
+            unsafe_fixable,
+        }
+    }
+
+    /// Every finding fixable, and none of it `--unsafe`-only.
+    #[test]
+    fn full_safe_coverage_is_a_star() {
+        assert_eq!(statistics_marker(&stat(2, 2, 0)), "[*]");
+    }
+
+    /// No finding carries a fix at all.
+    #[test]
+    fn no_fix_at_all_is_blank() {
+        assert_eq!(statistics_marker(&stat(2, 0, 0)), "[ ]");
+    }
+
+    /// Some fixable, some not: a genuine mix.
+    #[test]
+    fn a_mix_of_fixable_and_not_is_a_dash() {
+        assert_eq!(statistics_marker(&stat(3, 1, 0)), "[-]");
+    }
+
+    /// Full coverage, but not every one of it `safe`/`suggest`: the `--unsafe` ones keep
+    /// it from being a plain `[*]`.
+    #[test]
+    fn full_coverage_split_between_safe_and_unsafe_is_a_dash() {
+        assert_eq!(statistics_marker(&stat(2, 1, 1)), "[-]");
+    }
+
+    /// Full coverage, every one of it `--unsafe`-only.
+    #[test]
+    fn full_unsafe_only_coverage_is_a_dash() {
+        assert_eq!(statistics_marker(&stat(2, 0, 2)), "[-]");
+    }
+}
+
 /// The one place a check reports its totals, so a replayed module and a checked one cannot
 /// drift apart in how they are summarized. Returns whether the run counts as a failure.
 ///
@@ -3115,6 +3205,7 @@ fn patched_files(model: Option<&htl::model::Project>, files: &[PathBuf]) -> usiz
 fn report_check(
     out: &mut report::Out,
     json: bool,
+    statistics: bool,
     rep: &project::Report,
     policy: &htl::verdict::Policy,
     patched: usize,
@@ -3139,8 +3230,12 @@ fn report_check(
                 cached: all_cached,
                 replayed,
             },
+            statistics: statistics.then(|| out.statistics()),
         })?;
     } else {
+        if statistics {
+            print_statistics(&out.statistics());
+        }
         // Say nothing when nothing was replayed; say how much when it was only some.
         let cached = if all_cached {
             " [cached]".to_string()
