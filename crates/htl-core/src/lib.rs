@@ -162,20 +162,27 @@ const TL_SRC: &str = include_str!("../vendor/tl.lua");
 const LINT_SRC: &str = include_str!("lint.lua");
 const FMT_SRC: &str = include_str!("fmt.lua");
 const PRELUDE: &str = include_str!("prelude.lua");
+/// `require` resolution shared by the checker prelude and a split runtime state's
+/// (`search.lua`, loaded by both `from_lua` and
+/// [`with_checker_lua`](Htl::with_checker_lua)).
+const SEARCH_SRC: &str = include_str!("search.lua");
 
-/// A hash of the Lua the checker is made of: the vendored `tl`, the lints, the formatter
-/// and the prelude. Two builds with the same value generate the same Lua for the same
-/// input, whatever else differs about them.
+/// A hash of the Lua the checker is made of: the vendored `tl`, the lints, the formatter,
+/// the search chunk and the prelude. Two builds with the same value generate the same Lua
+/// for the same input, whatever else differs about them.
 ///
 /// The run cache stamps its entries with this ([`cache`]). The CLI also stamps them with
 /// its own binary, which moves on every rebuild; inside a proc macro the binary is
 /// `rustc`, which does not move when htl does, and this is what tells those entries apart
 /// from a checker that no longer exists.
+///
+/// `SEARCH_SRC` is in the array because it changes what a `require` does — generated Lua
+/// cached under one version of it is not safe to replay under another.
 pub fn checker_identity() -> &'static str {
     static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     ID.get_or_init(|| {
         let mut h = blake3::Hasher::new();
-        for src in [TL_SRC, LINT_SRC, FMT_SRC, PRELUDE] {
+        for src in [TL_SRC, LINT_SRC, FMT_SRC, SEARCH_SRC, PRELUDE] {
             h.update(src.as_bytes());
             h.update(b"\0");
         }
@@ -1550,104 +1557,25 @@ pub(crate) fn declaration_only_message(module: &str, decl: &str) -> String {
     )
 }
 
-/// The part of the prelude a runtime state needs when its checker lives elsewhere:
-/// the strict searcher (asking the checker through `gen`), the declaration-only
-/// module, and `package.path` bookkeeping.
+/// The part of the prelude a runtime state needs when its checker lives elsewhere: the
+/// search chunk's functions (`S`, received as this chunk's first argument — see
+/// [`with_checker_lua`](Htl::with_checker_lua)), copied onto `R` so every name Rust looks
+/// up on a split state's runtime table (`reset_path`, `drop_cwd_path`, `add_path`,
+/// `install_searcher`) resolves exactly as it did when this chunk defined them itself;
+/// plus `R.preload_generated`, which has no checker-side counterpart and stays here.
 const RUNTIME_PRELUDE: &str = r#"
+local S = ...
+
 local R = {}
-
--- Handed to a Teal `require` of a declaration-only module; plain Lua is declined instead
--- (`required_from_teal`). The checker prelude's `H.type_only_module` says why, and why the
--- metatable is tagged `htl_declaration` (`guard_loaded`).
-function R.type_only_module(module_name, decl_path)
-   return setmetatable({}, {
-      htl_declaration = true,
-      __index = function(_, key)
-         error(string.format(
-            "module '%s' is declaration-only here (%s): '%s' has no implementation on this path. " ..
-            "It must be provided by the host program (e.g. a Rust #[host_module] via cargo run) " ..
-            "or by a .tl/.lua module with that name.",
-            module_name, decl_path, tostring(key)), 2)
-      end,
-   })
-end
-
--- Whether the `require` that reached the searcher was written in Teal: the first frame
--- above it that is neither C (`require`, `pcall`) nor this prelude's own has a source
--- ending in `.tl`. The checker prelude's `required_from_teal` is the same function and
--- says why; a state without `debug` keeps the table (`true`).
-local function required_from_teal()
-   local getinfo = type(debug) == "table" and debug.getinfo
-   if type(getinfo) ~= "function" then return true end
-   local own = getinfo(1, "S").source
-   local level = 2
-   while true do
-      local info = getinfo(level, "S")
-      if not info then return false end
-      if info.what ~= "C" and info.source ~= own then
-         return type(info.source) == "string" and info.source:sub(-3) == ".tl"
-      end
-      level = level + 1
-   end
-end
-
--- Keep the stand-in out of `package.loaded`, handing it back from a side table to Teal
--- only; a `package.loaded` that already has a metatable is the host's and is left alone.
--- The checker prelude's `guard_loaded` is the same function and says why.
-local function guard_loaded()
-   local pkg = package
-   local loaded = type(pkg) == "table" and pkg.loaded
-   if type(loaded) ~= "table" or getmetatable(loaded) ~= nil then return end
-   local side = {}
-   setmetatable(loaded, {
-      __newindex = function(t, k, v)
-         local mt = type(v) == "table" and getmetatable(v)
-         if type(mt) == "table" and rawget(mt, "htl_declaration") == true then
-            side[k] = v
-         else
-            side[k] = nil
-            rawset(t, k, v)
-         end
-      end,
-      __index = function(_, k)
-         local v = side[k]
-         if v == nil then return nil end
-         local preload = rawget(pkg, "preload")
-         if type(preload) == "table" and preload[k] ~= nil then return nil end
-         if required_from_teal() then return v end
-         return nil
-      end,
-   })
-end
-
--- gen(name) -> kind, a, b  (see resolve_for_require in the checker prelude)
--- decline(name, decl) -> the text a plain-Lua `require` of a declaration fails with
-function R.install_searcher(gen, decline)
-   table.insert(package.searchers, 2, function(module_name)
-      local kind, a, b = gen(module_name)
-      if kind == "code" then
-         local chunk, lerr = load(a, "@" .. b, "t")
-         if not chunk then
-            error("htl: generated Lua failed to load: " .. tostring(lerr), 0)
-         end
-         return function(modname) return chunk(modname, b) end, b
-      elseif kind == "type_only" then
-         if not decline or required_from_teal() then
-            return function() return R.type_only_module(module_name, a) end, a
-         end
-         return decline(module_name, a)
-      end
-      return a
-   end)
-   guard_loaded()
-end
+for k, v in pairs(S) do R[k] = v end
 
 -- Put already-generated Lua in front of the searcher for one module name.
 --
--- `package.preload` is searcher position 1 and R.install_searcher puts htl's at 2, so a
--- preloaded module is never asked of the searcher — which is the point: asking would check
--- and generate it again. Loaded the same way the searcher would have loaded it, so the
--- module sees the same chunk name and the same arguments.
+-- `package.preload` is searcher position 1 and R.install_searcher (S.install_searcher,
+-- copied above) puts htl's at 2, so a preloaded module is never asked of the searcher —
+-- which is the point: asking would check and generate it again. Loaded the same way the
+-- searcher would have loaded it, so the module sees the same chunk name and the same
+-- arguments.
 function R.preload_generated(module_name, code, filename)
    -- Never displace what is already there. The test library and anything a host preloads are
    -- put in package.preload by whoever owns them, and Lua generated from a `.tl` of the same
@@ -1659,42 +1587,6 @@ function R.preload_generated(module_name, code, filename)
       error("htl: cached Lua failed to load: " .. tostring(lerr), 0)
    end
    package.preload[module_name] = function(modname) return chunk(modname, filename) end
-end
-
--- Idempotent, as the checker prelude's H.add_path is and for the same reason: a
--- directory already on the path keeps the place whoever put it there gave it, and
--- `Htl::add_path` calls both states, so the two must agree on the order they produce.
--- The templates are the prelude's `H.templates`: `?/?` only for a directory of packages.
-function R.add_path(dir, packages)
-   local templates = dir .. "/?.lua;" .. dir .. "/?/init.lua"
-   if packages then templates = templates .. ";" .. dir .. "/?/?.lua" end
-   if package.path == nil or package.path == "" then
-      package.path = templates
-      return
-   end
-   local first = dir .. "/?.lua"
-   for entry in package.path:gmatch("[^;]+") do
-      if entry == first then
-         return
-      end
-   end
-   package.path = templates .. ";" .. package.path
-end
-
--- Drop the entries of package.path that are relative to the working directory (Lua's own
--- `./?.lua;./?/init.lua`), keeping the rest in order.
-function R.drop_cwd_path()
-   local kept = {}
-   for entry in (package.path or ""):gmatch("[^;]+") do
-      if entry:sub(1, 2) ~= "./" and entry:sub(1, 1) ~= "?" then
-         kept[#kept + 1] = entry
-      end
-   end
-   package.path = table.concat(kept, ";")
-end
-
-function R.reset_path()
-   package.path = ""
 end
 
 return R
@@ -1828,10 +1720,15 @@ impl Htl {
     /// ```
     pub fn with_checker_lua(checker: &Htl, lua: Lua) -> Result<Self> {
         attach_hook_owner(&lua)?;
+        let s: Table = lua
+            .load(SEARCH_SRC)
+            .set_name("=htl-search")
+            .eval()
+            .context("loading htl search chunk")?;
         let r: Table = lua
             .load(RUNTIME_PRELUDE)
             .set_name("=htl-runtime")
-            .eval()
+            .call(s)
             .context("loading htl runtime prelude")?;
         lua.set_named_registry_value(RUNTIME_REGISTRY_KEY, r)?;
         lua.set_app_data(CheckerHandle(checker.h.clone()));
@@ -2062,10 +1959,20 @@ impl Htl {
         preload.set("tl", tl_loader)?;
         preload.set("htl.lint", lint_loader)?;
         preload.set("htl.fmt", fmt_loader)?;
+        // Not `package.preload["htl.search"]`: a project's own `require("htl.search")`
+        // (a `src/htl/search.tl` of its own — nothing reserves that name) must reach its
+        // module, in a shared state exactly as it does in a split one, where this chunk
+        // is never put in `package.preload` either (`with_checker_lua` below). Evaluated
+        // directly and handed to the prelude as its argument instead.
+        let s: Table = lua
+            .load(SEARCH_SRC)
+            .set_name("=htl-search")
+            .eval()
+            .context("loading htl search chunk")?;
         let h: Table = lua
             .load(PRELUDE)
             .set_name("=htl-prelude")
-            .eval()
+            .call(s)
             .context("loading htl prelude")?;
         lua.set_named_registry_value(PRELUDE_REGISTRY_KEY, h.clone())?;
         let checker = lua.weak();

@@ -4,6 +4,11 @@
 local tl = require("tl")
 local lint = require("htl.lint")
 local fmt_mod = require("htl.fmt")
+-- Not `require("htl.search")`: that name is a project's to use, and `package.preload`
+-- never carries this chunk (see `search.lua`'s header, and `Htl::from_lua`). Handed in as
+-- this chunk's first argument instead, the same way a split runtime state's prelude
+-- receives it.
+local search = ...
 local H = {}
 
 -- The requiring file, for the project model's resolver (`H.resolve_name`, installed by
@@ -3098,32 +3103,10 @@ function H.gen_string(src, filename)
    return code, c
 end
 
--- Value handed to a Teal `require` for a declaration-only module (`name.d.tl` with no
--- implementation on the path). Indexing it explains what is missing instead of the
--- bare "attempt to call a nil value" that would surface otherwise.
---
--- Only Teal is handed it (`strict_searcher`, `required_from_teal`). A checked `.tl` was
--- typed against the declaration, so a table that stands for the module until something
--- touches it is the declaration's promise kept as far as this run can keep it: an engine
--- that calls its host in one function loads, and is tested, without the host. A plain
--- `.lua` was never checked and sees no declaration — to it the name is not a module, and
--- `pcall(require, name)`, Lua's one way to ask, has to say so.
---
--- The metatable carries `htl_declaration = true` so the stand-in is known by construction:
--- `H.install_searcher`'s `package.loaded` metatable keeps it out of `package.loaded` and
--- hands it back to Teal only (`guard_loaded`).
-function H.type_only_module(module_name, decl_path)
-   return setmetatable({}, {
-      htl_declaration = true,
-      __index = function(_, key)
-         error(string.format(
-            "module '%s' is declaration-only here (%s): '%s' has no implementation on this path. " ..
-            "It must be provided by the host program (e.g. a Rust #[host_module] via cargo run) " ..
-            "or by a .tl/.lua module with that name.",
-            module_name, decl_path, tostring(key)), 2)
-      end,
-   })
-end
+-- Value handed to a Teal `require` for a declaration-only module: the search chunk's
+-- (`search.lua`), which both the checker and a split runtime state use (#318). See there
+-- for why.
+H.type_only_module = search.type_only_module
 
 -- Declared field names of a record type reachable as `<module>.<Type>`. The declaring
 -- module is loaded into the shared env on first use (its declarations are the same for
@@ -3938,117 +3921,14 @@ end
 
 H.gen_for_require = resolve_for_require
 
--- Whether the `require` that reached a searcher was written in Teal: the source name of
--- the chunk that called it ends in `.tl`. Every chunk `htl run` / `htl test` make from a
--- `.tl` is named so — `strict_searcher` below, `R.preload_generated`, the test runner and
--- the entry (`@<path>.tl`) — while Lua's own searcher names a `.lua` `@<path>.lua`.
---
--- The caller is the first frame above the searcher that is neither C nor this prelude's
--- own: `require` itself is C, and a C frame past it is `pcall` / `xpcall` or the like
--- passing the call through, not the chunk that wrote it. So `pcall(require, x)`
--- in a `.lua` is Lua's, and the same line in a `.tl` is Teal's: the split is by the
--- language of the chunk, not by how it called. A Lua helper requiring on a Teal caller's
--- behalf is the first Lua frame and is Lua, which is what it is. A chunk under any other
--- name (a host's own label, a stripped payload's `?`) or no Lua frame at all counts as
--- Lua: the conservative side, an error naming the declaration rather than a table that
--- says the module is there.
---
--- A state without the `debug` library (a host that sandboxed it) cannot see who asked
--- and answers `true`, keeping the table every caller got before this rule.
-local function required_from_teal()
-   local getinfo = type(debug) == "table" and debug.getinfo
-   if type(getinfo) ~= "function" then return true end
-   local own = getinfo(1, "S").source
-   local level = 2
-   while true do
-      local info = getinfo(level, "S")
-      if not info then return false end
-      if info.what ~= "C" and info.source ~= own then
-         return type(info.source) == "string" and info.source:sub(-3) == ".tl"
-      end
-      level = level + 1
-   end
-end
-
--- `decline(name, decl)`: the text a `require` from plain Lua fails with when `name` has
--- only a declaration — the `Registry`'s trailing searcher's text, handed in from Rust by
--- `Htl::install_searcher` so the two say one thing.
-local decline
-
--- Strict searcher for a state that hosts its own checker.
-local function strict_searcher(module_name)
-   local kind, a, b = resolve_for_require(module_name)
-   if kind == "code" then
-      local chunk, lerr = load(a, "@" .. b, "t")
-      if not chunk then
-         error("htl: generated Lua failed to load: " .. tostring(lerr), 0)
-      end
-      return function(modname)
-         return chunk(modname, b)
-      end, b
-   elseif kind == "type_only" then
-      -- Teal gets the table (see `H.type_only_module`); plain Lua gets Lua's answer: a
-      -- searcher that returns a string has not found the module, so `require` fails with
-      -- the text and `pcall(require, …)` is `false`, as through a `Registry`.
-      if not decline or required_from_teal() then
-         return function() return H.type_only_module(module_name, a) end, a
-      end
-      return decline(module_name, a)
-   end
-   return a
-end
-
--- Keep the stand-in out of `package.loaded`. `require` stores what a loader returned in
--- `package.loaded` and answers every later `require` of the name from there, before any
--- searcher runs, so a stand-in a Teal `require` received would be handed to a plain-Lua
--- `require` after it: `pcall(require, name)` in a `.lua` would say `true` or `false` by
--- which file happened to ask first. A metatable on `package.loaded` moves the stand-in
--- aside instead. `require` reads and writes `package.loaded` through metamethods, and a
--- stand-in is never there raw, so both go through these two:
---
--- - `__newindex` stores a stand-in (`htl_declaration` on its metatable) in `side`, keyed by
---   name, and anything else raw, dropping the name's side entry: a real module stored later
---   (a `package.preload` loader's value, a host's own assignment, a `nil` that unloads it)
---   answers every caller from then on.
--- - `__index` hands the side entry back only when the read came from Teal
---   (`required_from_teal`, walking up from this function's frame as it walks up from the
---   searcher's) and nothing in `package.preload` answers the name, which a loader
---   registered after the stand-in (`preload_value`) does; otherwise `nil`, so a `.lua`'s
---   `require` goes on to the searchers and is declined, and a `.lua` reading
---   `package.loaded[name]` sees nothing.
---
--- A `package.loaded` that already has a metatable is the host's, and is left alone: that
--- run keeps the first caller's answer for every later one.
-local function guard_loaded()
-   local pkg = package
-   local loaded = type(pkg) == "table" and pkg.loaded
-   if type(loaded) ~= "table" or getmetatable(loaded) ~= nil then return end
-   local side = {}
-   setmetatable(loaded, {
-      __newindex = function(t, k, v)
-         local mt = type(v) == "table" and getmetatable(v)
-         if type(mt) == "table" and rawget(mt, "htl_declaration") == true then
-            side[k] = v
-         else
-            side[k] = nil
-            rawset(t, k, v)
-         end
-      end,
-      __index = function(_, k)
-         local v = side[k]
-         if v == nil then return nil end
-         local preload = rawget(pkg, "preload")
-         if type(preload) == "table" and preload[k] ~= nil then return nil end
-         if required_from_teal() then return v end
-         return nil
-      end,
-   })
-end
-
-function H.install_searcher(decline_fn)
-   decline = decline_fn
-   table.insert(package.searchers, 2, strict_searcher)
-   guard_loaded()
+-- The search chunk's `S.install_searcher(gen, decline)` wants `gen` as a plain function;
+-- the checker's is this prelude's own `resolve_for_require`, closed over here rather than
+-- read from a shared upvalue, so a call made with one `decline_fn` can never be answered
+-- with another's. See `search.lua` for the searcher itself, the frame walk that tells a
+-- Teal `require` from a Lua one, and why the two states share this rather than each
+-- keeping a copy (#318).
+H.install_searcher = function(decline_fn)
+   search.install_searcher(resolve_for_require, decline_fn)
 end
 
 function H.get_path()
@@ -4065,43 +3945,12 @@ function H.begin_program()
    H.env = new_env() -- seeded on its first check, once the program's paths are set
 end
 
--- tl.search_module rewrites the ".lua" suffix of each package.path template to
--- ".tl" / ".d.tl" / ".lua" in turn, so templates must end in ".lua".
---
--- The templates of a directory are the naming rule's spellings (`htl_core::naming`):
--- `?.lua` and `?/init.lua` everywhere, and `?/?.lua` only where the directory holds
--- packages by name (`packages` true: the dependency links, the parent of a vendored copy
--- or a patch), because `<name>/<name>.tl` is a flat package's entry and nothing else. On
--- any other directory the template made `util/util.tl` answer to `util` as well as to
--- `util.util`.
-function H.templates(dir, packages)
-   local t = dir .. "/?.lua;" .. dir .. "/?/init.lua"
-   if packages then t = t .. ";" .. dir .. "/?/?.lua" end
-   return t
-end
---
--- A directory already on the path keeps the place it has. Whoever put it there said
--- where it goes -- a host stating its order once with add_search_paths, or an earlier
--- add_path -- and moving it to the front would make the search order depend on who
--- called last: a resolver that puts its own root in front on its first resolve would
--- override the host for every module checked after it. Absent from the path, the
--- directory is still prepended, so the only source of a root is still consulted first.
-function H.add_path(dir, packages)
-   local templates = H.templates(dir, packages)
-   if package.path == nil or package.path == "" then
-      package.path = templates
-      return
-   end
-   -- Whole entries, not a substring: "/a/?.lua" must not match "/other/a/?.lua". The
-   -- first template stands for the rest, which are only ever written together here.
-   local first = dir .. "/?.lua"
-   for entry in package.path:gmatch("[^;]+") do
-      if entry == first then
-         return
-      end
-   end
-   package.path = templates .. ";" .. package.path
-end
+-- The templates of a directory, and prepending one to the path: the search chunk's
+-- (`search.lua`), which both the checker and a split runtime state use (#318) —
+-- `H.templates` is the form `search.add_path` builds on, and the one `H.push_path_front`
+-- below uses too.
+H.templates = search.templates
+H.add_path = search.add_path
 
 -- Put `dir` in front of the path for the length of one check, whatever else is on it,
 -- and return the path it replaced so the caller can put it back with H.set_path.
@@ -4113,7 +3962,7 @@ end
 -- of the same name would otherwise decide which file the contract is checked against.
 function H.push_path_front(dir, packages)
    local saved = package.path
-   local templates = H.templates(dir, packages)
+   local templates = search.templates(dir, packages)
    if saved == nil or saved == "" then
       package.path = templates
    else
@@ -4122,23 +3971,15 @@ function H.push_path_front(dir, packages)
    return saved
 end
 
+-- Drop the entries of package.path that are relative to the working directory (Lua's own
+-- `./?.lua;./?/init.lua`), keeping the rest in order. The search chunk's (`search.lua`),
+-- shared with a split runtime state (#318).
+H.drop_cwd_path = search.drop_cwd_path
+
 -- Drop Lua's default search path (`./?.lua` etc., i.e. cwd-relative resolution) so only
 -- directories given to add_path are consulted. Used by the proc macros, where the cwd
--- is cargo's and has nothing to do with the script being embedded.
--- Drop the entries of package.path that are relative to the working directory (Lua's own
--- `./?.lua;./?/init.lua`), keeping the rest in order.
-function H.drop_cwd_path()
-   local kept = {}
-   for entry in (package.path or ""):gmatch("[^;]+") do
-      if entry:sub(1, 2) ~= "./" and entry:sub(1, 1) ~= "?" then
-         kept[#kept + 1] = entry
-      end
-   end
-   package.path = table.concat(kept, ";")
-end
-
-function H.reset_path()
-   package.path = ""
-end
+-- is cargo's and has nothing to do with the script being embedded. The search chunk's
+-- (`search.lua`), shared with a split runtime state (#318).
+H.reset_path = search.reset_path
 
 return H
