@@ -1889,12 +1889,23 @@ local function apply_async_marks(ast, marks, errs, filename)
          -- built on it upward, stopping at a binary operator (`await f(b) + 1` awaits
          -- `f(b)`). A call node is positioned at its `(`, not at the name, so the chain is
          -- climbed from the name rather than looked up by position.
+         --
+         -- The walk starts at the innermost node at the token after `await` whose kind can
+         -- begin an operand: a name (`variable`, `identifier`), a parenthesis, a literal
+         -- (`number` is a float; `integer`, `string`, `boolean`, `nil`, `literal_table`, `...`)
+         -- or a unary operator (`op`, arity 1). A unary or literal node is never the `e1` of a
+         -- postfix op, so the climb stops at it. A binary op is not a start: its node sits at
+         -- its operator token, so one found here means `await` has no operand of its own
+         -- (`a await - 1`). A start that is neither a call nor an async local is refused as
+         -- "applies to a call"; no start at all (`await end`) is "needs a call after it".
          local target
          local list = by_pos[m.oy] and by_pos[m.oy][m.ox]
          for i = #(list or {}), 1, -1 do
             local n = list[i]
             if n.kind == "variable" or n.kind == "paren" or n.kind == "string" or
-               n.kind == "table" or n.kind == "number" or n.kind == "identifier" then
+               n.kind == "number" or n.kind == "integer" or n.kind == "boolean" or
+               n.kind == "nil" or n.kind == "literal_table" or n.kind == "..." or
+               n.kind == "identifier" or (n.kind == "op" and n.op.arity == 1) then
                target = n
                break
             end

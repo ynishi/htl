@@ -594,31 +594,27 @@ const NOT_AN_ASYNC_LOCAL_MESSAGE: &str = "'await' on 'f', which is not an async 
 function is awaited at its call (await f(x)), a task at the name an 'async local' gave it";
 const APPLIES_TO_A_CALL_MESSAGE: &str = "syntax error: 'await' applies to a call: await f(x)";
 
-/// `await` on something that is not a call reports one of three messages, depending on
-/// what is there: for a unary minus, the token after `await` is not one the operand walk
-/// starts from (a name, a parenthesis, a float or string literal), so nothing is found and
-/// the generic message is given ("needs a call after it"); a plain local is a name, but
-/// not one an `async local` gave a task to ("which is not an async local"); a float
-/// literal is something, but still not a call ("applies to a call"). Each one is the same
-/// inside an `if` as it is at the top level: the fix that lets the walk see `if` bodies
-/// must not also make it accept an operand it would otherwise reject.
+/// `await`'s answer for an operand that is not a call -- a plain local, a unary
+/// expression, a missing operand -- is the same inside an `if` as it is at the top
+/// level: the fix that lets the walk see `if` bodies must not also make it accept an
+/// operand it would otherwise reject, or reject one it would otherwise accept.
 #[test]
 fn await_on_a_non_call_inside_an_if_reports_the_same_error_as_outside_one() {
     let root = tempdir("not-a-call");
     write(&root.join("htl.toml"), "[lang]\nasync = true\n");
 
     write(
-        &root.join("top.tl"),
+        &root.join("neg_top.tl"),
         "local v = await -1
 print(v)
 ",
     );
-    let (ok, _, err) = htl(&["check", "top.tl"], &root);
+    let (ok, _, err) = htl(&["check", "neg_top.tl"], &root);
     assert!(!ok);
-    assert!(err.contains(NOT_A_CALL_MESSAGE), "{err}");
+    assert!(err.contains(APPLIES_TO_A_CALL_MESSAGE), "{err}");
 
     write(
-        &root.join("in_if.tl"),
+        &root.join("neg_if.tl"),
         "local x = 1
 if x == 1 then
    local v = await -1
@@ -626,9 +622,32 @@ if x == 1 then
 end
 ",
     );
-    let (ok, _, err) = htl(&["check", "in_if.tl"], &root);
+    let (ok, _, err) = htl(&["check", "neg_if.tl"], &root);
+    assert!(!ok);
+    assert!(
+        err.contains(APPLIES_TO_A_CALL_MESSAGE),
+        "the message inside the `if` must be the one `await -1` gets at the top level: {err}"
+    );
+
+    write(&root.join("ret.tl"), "return await\n");
+    let (ok, _, err) = htl(&["check", "ret.tl"], &root);
     assert!(!ok);
     assert!(err.contains(NOT_A_CALL_MESSAGE), "{err}");
+
+    write(
+        &root.join("ifret.tl"),
+        "local x = 1
+if x == 1 then
+   return await
+end
+",
+    );
+    let (ok, _, err) = htl(&["check", "ifret.tl"], &root);
+    assert!(!ok);
+    assert!(
+        err.contains(NOT_A_CALL_MESSAGE),
+        "the message inside the `if` must be the one `return await` gets at the top level: {err}"
+    );
 
     write(
         &root.join("top_local.tl"),
@@ -683,6 +702,130 @@ end
         err.contains(APPLIES_TO_A_CALL_MESSAGE),
         "the message inside the `if` must be the one `await 1.5` gets at the top level: {err}"
     );
+}
+
+/// `await`'s operand walk (`#436`) starts at a name, a parenthesis, a literal (an
+/// integer, a float, a string, `true` / `false`, `nil`, a table constructor, `...`) or a
+/// unary operator. A literal or a unary operand is refused as "applies to a call", the
+/// same as any other operand that is not a call or an async local; a missing operand
+/// (nothing an expression starts with follows `await`) is "needs a call after it". One
+/// file per row, each asserting the exact message at the literal's position; a last file
+/// keeps the forms this walk must accept -- a call chained to a binary operator, a method
+/// call, and an `async local` awaited by its name -- checking clean. (A parenthesized
+/// call, `await (f)(x)`, is not in that file: `split_async_tokens` treats any `await`
+/// directly followed by `(` as the name of a plain function -- `AWAIT_NAME_BEFORE["("]`
+/// -- so it is never recognized as the keyword there at all.)
+#[test]
+fn await_on_a_literal_or_a_unary_operator_applies_to_a_call() {
+    let root = tempdir("literal-operand");
+    write(&root.join("htl.toml"), "[lang]\nasync = true\n");
+
+    for (file, body) in [
+        (
+            "integer.tl",
+            "local async function f(): integer
+   local v = await 1
+   return v
+end
+",
+        ),
+        (
+            "boolean.tl",
+            "local async function f(): integer
+   local v = await true
+   return 1
+end
+",
+        ),
+        (
+            "nil.tl",
+            "local async function f(): integer
+   local v = await nil
+   return 1
+end
+",
+        ),
+        (
+            "table.tl",
+            "local async function f(): integer
+   local v = await {}
+   return 1
+end
+",
+        ),
+        (
+            "float.tl",
+            "local async function f(): integer
+   local v = await 1.5
+   return 1
+end
+",
+        ),
+        (
+            "string.tl",
+            "local async function f(): integer
+   local v = await \"s\"
+   return 1
+end
+",
+        ),
+        (
+            "vararg.tl",
+            "local async function f(...: integer): integer
+   local v = await ...
+   return 1
+end
+",
+        ),
+        (
+            "unary_minus.tl",
+            "local async function f(): integer
+   local v = await -1
+   return v
+end
+",
+        ),
+        (
+            "unary_not.tl",
+            "local async function f(x: boolean): integer
+   local v = await not x
+   return 1
+end
+",
+        ),
+    ] {
+        write(&root.join(file), body);
+        let (ok, _, err) = htl(&["check", file], &root);
+        assert!(!ok, "{file}: {err}");
+        assert!(
+            err.contains(&format!(
+                "{file}:2:14: syntax error: 'await' applies to a call: await f(x)"
+            )),
+            "{file}: {err}"
+        );
+    }
+
+    write(
+        &root.join("clean.tl"),
+        "local task = require(\"htl.task\")
+
+local async function g(): integer
+   return 1
+end
+
+local async function f(): integer
+   local a = await g() + 1
+   await task.after(1):wait()
+   async local u = g()
+   local b = await u
+   return a + b
+end
+print(await f())
+",
+    );
+    let (ok, _, err) = htl(&["check", "clean.tl"], &root);
+    assert!(ok, "{err}");
+    assert!(err.contains("0 error(s)"), "{err}");
 }
 
 const SAME_LINE_DECLARATIONS_PROGRAM: &str = "\
