@@ -73,7 +73,8 @@ from a checkout pins that checkout (`--htl path:<other-checkout>` names another)
 so a change that has to be built against, and not only run by, this working copy
 is one `htl new` and one `cargo build`, with nothing patched. Only a binary built
 from the crates.io tarball pins a version; the scaffold never writes for a release
-it does not link.
+it does not link. An existing project moves the same way with `htl pin
+path:<checkout>` (and back with `htl pin release`), without writing a new one.
 
 `HTL_PROFILE=1` prints per-phase timings; a performance change quotes them,
 before and after, and says which build produced them. A number that is to outlive

@@ -136,6 +136,29 @@ fn new_htl_path_writes_a_path_pin() {
     );
 }
 
+/// `--htl release` names this CLI's own version by hand, rather than leaving it to the
+/// default: the same number a published CLI pins without being asked, and, from a
+/// checkout CLI, a version pin in place of that checkout's path.
+#[test]
+fn new_htl_release_writes_this_clis_own_version() {
+    let root = tempdir("release-pin");
+    let (ok, _, stderr) = htl(&["new", "r", "--target", "bin", "--htl", "release"], &root);
+    assert!(ok, "{stderr}");
+    assert_eq!(
+        htl_line(&root.join("r/Cargo.toml")),
+        format!("htl = \"{}\"", env!("CARGO_PKG_VERSION"))
+    );
+    // A release pin writes `mise.toml`, whatever this binary's own default is.
+    let mise = std::fs::read_to_string(root.join("r/mise.toml")).unwrap();
+    assert!(
+        mise.ends_with(&format!(
+            "\"cargo:htl-cli\" = \"{}\"\n",
+            env!("CARGO_PKG_VERSION")
+        )),
+        "{mise}"
+    );
+}
+
 /// A release by number is refused — this CLI writes for the htl it links, and the CLI
 /// that writes for another release is on crates.io beside it — and, like an unknown
 /// target, before the directory exists, so a typo leaves nothing behind.
