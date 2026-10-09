@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0](https://github.com/ynishi/htl/compare/v0.13.0...v0.14.0) - 2026-10-09
+
+### Added
+
+- htl pin <release | main | path:<checkout>> moves the htl a scaffolded project depends on, and --htl release names the release this CLI is
+- htl check --statistics prints how many findings each rule produced, instead of the findings, and the JSON check document carries the same rows
+- unmarked-sealed reports a record built and cast only in its own file and carrying no ---@sealed, and htl adopt's ---@sealed row counts those records as applicable
+- unmarked-struct reports a record built whole at every construction site and carrying no ---@struct, and htl adopt's ---@struct row counts those records as applicable
+- htl adopt reports how many declarations carry each of htl's nine markers, and where; the checker's census rides in the cache so an unchanged project replays it
+- include_tl! and include_bundle! rewrite the crate's host_module .d.tl declarations before checking, so the order of mod declarations no longer matters
+- records = [geom::Point] nests a record declared in another file of the crate, read through its mod declaration
+- a uses entry names a module path, `uses = [Mode, task = "htl.task"]`, so a .d.tl imports another library's types under the name it uses them by
+- type-guard, a lint whose fix rewrites type(v) == "<tag>" on an any or union variable to v is T, the spelling Teal narrows under, and drops the casts the guard made redundant
+- a #[host_module] method takes &Lua, filled from the closure's own handle and left out of the .d.tl
+
+### Fixed
+
+- await on a literal or a unary expression is refused as "applies to a call", whatever the literal's kind
+- htl fmt keeps an await or async keyword written on a line of its own inside its block, and indents the line that completes it
+- a statement-level await <call> that opens a block keeps its indentation under htl fmt
+- await-missing reads the async keyword at the callee's declaration, not anywhere on its line
+- an await inside an if checks: the node walk descends into if_blocks, the plain array Teal keeps an if's branches in
+- struct-fields holds a literal only to the fields the record's own body declares, and a nested record's same-named field no longer takes the outer field's ---@optional
+- the resolver tests build their scratch directory canonical, so a requirer they never write places under the same roots on macOS
+
+### Other
+
+- Merge remote-tracking branch 'origin/main' into feat/unmarked-sealed
+- every test temp directory is a TempDir that removes itself when the test passes, and the helpers are named tempdir for what they make
+- the checker prelude and the runtime state load one chunk for what both need, instead of each carrying a copy
+- Htl::from_lua names with_checker_lua as the route for a state that only runs, and the crate doc shows it on mlua-isle's AsyncIsle
+- Htl::new and with_checker_lua say why the state is unsafe_new (debug), not that a safe state refuses bundles
+- the channel test orders its sender after events() by a handshake, not a 50 ms sleep
+- a_child_left_sleeping_is_dropped_before_the_run_returns checks the drop, not the clock
+
 ## [0.13.0](https://github.com/ynishi/htl/compare/v0.12.0...v0.13.0) - 2026-10-07
 
 ### Added
