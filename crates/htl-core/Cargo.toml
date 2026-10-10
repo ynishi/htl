@@ -33,12 +33,10 @@ ffi = []
 # `tokio` feature, which is `Vm::run`, the `task` library and `cancellable`. Off by
 # default: it changes how mlua is built, and a host with no async method needs none of it.
 async = ["mlua/async", "mlua-isle/tokio", "dep:tokio"]
-# `Htl::install_std`: mlua-batteries' modules as `require("std.json")`, `std.string` and so
-# on, with their declarations in front of the checker. The crate ships them under its own
-# name and leaves `std` for the host to assemble; this is htl assembling it. Its default
-# features only (json / env / path / time / string / validate / pretty / argparse), which
-# add serde_json to the graph and nothing else — the modules that pull a runtime or a
-# network stack (fs / http / llm / task) are the host's to turn on, not the toolchain's.
+# `Htl::install_std`: mlua-batteries' default set (synchronous, costing only serde_json)
+# as `require("std.json")`, `std.string` and so on. htl-std's async I/O modules are not
+# this feature: a host calls `htl_std::install`, a binary also registers it through
+# `registry` — `batteries.rs`'s module doc has the rest.
 std = ["dep:mlua-batteries"]
 
 [dependencies]

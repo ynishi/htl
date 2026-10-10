@@ -197,7 +197,8 @@ and the pages behind it are
   [`ffi`](https://docs.rs/htl/latest/htl/ffi/index.html) — `#[c_export]`, a C ABI for
   a caller that is not Rust (feature `ffi`; `htl new --lib --target cdylib`);
 - [htl-mq](https://docs.rs/htl-mq) — a window (`htl new --target window`);
-- [htl-std](https://docs.rs/htl-std) — asynchronous file I/O (`require("std.fs")`).
+- [htl-std](crates/htl-std) — asynchronous file and process I/O (`require("std.fs")`,
+  `require("std.proc")`).
 
 **Both ways of holding Teal are in this repository, built and run on every commit**:
 [`examples/`](examples/README.md) has `embed`, where `include_tl!`, `include_bundle!`,
@@ -311,9 +312,13 @@ local rows: {Row} = json.decode(text)    -- decode is generic: annotate the resu
 
 `json`, `env`, `path`, `time`, `string`, `validate`, `pretty` and `argparse`, from
 [mlua-batteries](https://github.com/ynishi/mlua-batteries); every function raises, so a
-result-style call is `pcall`. Under a Rust host, `h.install_std()?` in `preload` (feature
-`std`, on by default). The rest is
-[`htl::batteries`](https://docs.rs/htl/latest/htl/batteries/index.html).
+result-style call is `pcall`. `fs` and `proc` are [htl-std](crates/htl-std)'s, and
+asynchronous only — `local fs = require("std.fs")` then `await fs.read(p)`; a `select`
+(Async, below) can wait on a process and a timer together. `htl run` and `htl test` have
+all of it with no host to ask for it; a Rust host adds `htl_std::install(&h)?` beside
+`h.install_std()?` (feature `std`, on by default) in `preload`. The rest is
+[`htl::batteries`](https://docs.rs/htl/latest/htl/batteries/index.html) and the
+`htl-std` crate doc.
 
 ## Tests
 
@@ -344,7 +349,9 @@ host's `async fn` suspends the program and resumes it with the value, as any oth
 a plain `Htl::exec` has nothing to suspend to, and such a call raises there. Ctrl-C in
 `htl run` cancels the root: the program gets its grace to clean up (Settings, below),
 `htl run: interrupted` is printed and the exit code is 130. The `embed` example
-(`cargo run -p embed -- --async`) is a host with such a method.
+(`cargo run -p embed -- --async`) is a host with such a method. Besides a host's
+`async fn`, a task, a channel or a timer, what a program awaits includes `std.fs` and
+`std.proc` (`std.*`, above).
 
 ### async / await
 

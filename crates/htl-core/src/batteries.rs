@@ -24,12 +24,19 @@
 //! typed against `std.*` and failing at the first `require`; a host that leaves the
 //! feature off does so knowingly.
 //!
-//! What is in it is the crate's default feature set and not `full`: json, env, path, time,
-//! string, validate, pretty, argparse. Those add serde_json to the build and nothing else.
-//! A module that reaches the file system, the network or a runtime (fs / http / llm /
-//! task) is a decision about what a script may do, and that is a host's to make in its
-//! own `Cargo.toml` with its own prefix — not something a toolchain turns on for every
-//! project it runs.
+//! `std.*` is htl's re-export of Rust libraries to Teal. This module carries one slice
+//! of it — mlua-batteries' default feature set, not `full`: json, env, path, time,
+//! string, validate, pretty, argparse, all synchronous and none of them reading or
+//! writing a file. That set is the default here because it costs only serde_json,
+//! which htl-core already builds, feature or not, for its own run cache.
+//!
+//! The I/O modules under the same prefix, `std.fs` and `std.proc`, are `htl-std`'s,
+//! asynchronous. `htl-std` depends on `htl`, which depends on `htl-core`, so `htl-core`
+//! naming `htl-std` would close a cycle; the two meet the other way round. A Rust host
+//! that builds its own `Htl` calls `htl_std::install(&h)?` beside
+//! [`Htl::install_std`]. A binary also hands that function to [`crate::registry`] once
+//! at startup, so the states `htl-core` builds for itself — the checker, the test
+//! runner — carry it too.
 //!
 //! The declarations are the crate's, written verbatim — `---@nilable` markers included,
 //! so a project using `std.*` gets the `nil-return` rule on those functions without
