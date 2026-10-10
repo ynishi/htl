@@ -1002,6 +1002,27 @@ fn union_from(en: &ItemEnum, name: &str, variants: &[dts::UnionVariant]) -> Toke
 /// rewritten first, and `include_tl!` / `include_bundle!` check against it. The
 /// breakdown is `htl_core::dts::host_decl`, which `htl dts` runs without building.
 ///
+/// `name` may be dotted (`name = "std.fs"`): the whole string is `require`'s key and
+/// what `htl_preload` registers in `package.preload` under, but a Teal declaration has
+/// room for only one identifier where the module sits (`local record ..`, `self: ..`,
+/// `return ..`), so that identifier is `name`'s last segment (`fs`) — the same split
+/// `std.json`'s `local record json` and `require("std.json")` make
+/// (`htl_core::batteries`). Every segment, including the ones before the last, has to be
+/// a Teal identifier and not a Teal keyword; `name = "std"` (one segment) is the plain,
+/// undotted case and renders exactly as before, and a `name` that is not a Teal
+/// identifier (`name = "my-mod"`) is refused — by the macro at `cargo build`, and by
+/// `htl dts`, which runs the same breakdown — so no declaration Teal itself would refuse
+/// to parse is ever written.
+///
+/// `dts` still names wherever the `.d.tl` is written, but a dotted name's declaration
+/// has to sit where the project model's path-based naming rule reads it back as that
+/// name: `dts = "types/std/fs.d.tl"` for `name = "std.fs"`, the per-segment path under
+/// the declaration root — the same place `std.json`'s own declaration sits, at
+/// `std/json.d.tl`. `dts = "types/fs.d.tl"` would write a file the checker reads back as
+/// `fs`, not `std.fs`: the project model learns from this attribute that the host
+/// provides `std.fs`, but it finds the declaration of a name only by the file's path
+/// under the declaration root, so a file at the wrong path declares a different name.
+///
 /// `&str`, `&[T]`, `&Record` and `&Lua` (see *The Lua state as a parameter*) parameters
 /// are accepted (`&mut` is not); an `Option<T>`
 /// parameter is declared `name?: T`, so a caller may write `api:find("x")`; another host
@@ -1425,7 +1446,7 @@ fn expand_c_export(
                 .into(),
         );
     }
-    let hd = dts::host_decl(imp, dts::TealAttrs::default(), None, None)?;
+    let hd = dts::host_decl_for_c_export(imp, None, None)?;
     let plan = htl_core::cexport::plan(&hd, imp, attrs)?;
     let header = plan.header();
     if let Some(path) = &plan.header_path {

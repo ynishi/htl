@@ -732,12 +732,12 @@ pub fn header(plan: &CPlan) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dts::{TealAttrs, host_decl};
+    use crate::dts::host_decl_for_c_export;
 
     /// Build the plan for one `impl` block written as source.
     fn planned(src: &str) -> Result<CPlan, String> {
         let imp: ItemImpl = syn::parse_str(src).expect("parses as an impl block");
-        let hd = host_decl(&imp, TealAttrs::default(), None, None)?;
+        let hd = host_decl_for_c_export(&imp, None, None)?;
         plan(&hd, &imp, CAttrs::default())
     }
 
@@ -803,6 +803,20 @@ mod tests {
             planned(GAME).unwrap().header(),
             planned(GAME).unwrap().header()
         );
+    }
+
+    /// A `#[c_export]` impl target may be named anything Rust allows, Teal keyword or
+    /// not: it writes no `.d.tl` (`host_decl_for_c_export` skips the Teal-name check
+    /// `#[host_module]` applies), so `End` lowercasing to the Teal keyword `end` is not
+    /// this path's problem.
+    #[test]
+    fn a_type_name_that_is_a_teal_keyword_still_plans() {
+        let p = planned(
+            "impl End { pub fn open(o: &str) -> Self { todo!() } \
+             pub fn ping(&self) -> i32 { 1 } }",
+        )
+        .expect("plans despite `End` lowercasing to the Teal keyword `end`");
+        assert_eq!(p.open.c_name, "end_open");
     }
 
     /// The refusals. Each names the offending type and ends with the allowed set, so a
