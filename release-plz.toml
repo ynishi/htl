@@ -48,12 +48,21 @@ changelog_path = "./CHANGELOG.md"
 # `publish = false` here until then (htl-mq 0.8.0 went out that way).
 changelog_include = ["htl-core", "htl-macros", "htl", "htl-mq"]
 
-# htl-std's first release is published by hand, the way htl-mq 0.8.0 was (#291): the
-# Trusted Publishing this workflow uses is configured on a crate that exists and cannot
-# create one. The release job publishes the other five; then `cargo publish -p htl-std`
-# with a token from the same commit (its `htl` dependency is on crates.io by then); then
-# the trusted publisher is added to the new crate, this entry comes out, and `htl-std`
-# goes into `changelog_include` above. The version still moves with the workspace.
+# htl-std's first release is published by hand, as htl-mq 0.8.0 was (#291): the Trusted
+# Publishing this workflow uses is configured on a crate that exists and cannot create
+# one. Unlike htl-mq, htl-std is a dependency of htl-cli, so the job cannot finish on
+# its own. htl-std's first version depends on the `htl` of the same release, which is on
+# crates.io only once the job has published it, and htl-cli depends on htl-std, which the
+# job cannot publish. release-plz publishes in dependency order and stops at the first
+# failure, so for that release the job is expected to publish htl-core, htl-macros and
+# htl, then fail on htl-cli for the missing `htl-std` and publish nothing after it —
+# htl-mq included. Check on crates.io which crates reached `<version>` rather than
+# trusting this paragraph. Then, from the release commit, by hand and in this order,
+# `cargo publish -p` each of htl-std, htl-cli and htl-mq that is not there yet, and push
+# the `v<version>` tag: the job tags on htl-cli's publish, which it did not do, and the
+# tag is what cargo-dist builds binaries for. After that the trusted publisher is added
+# to htl-std, this entry comes out, and `htl-std` goes into `changelog_include` above.
+# The version still moves with the workspace.
 [[package]]
 name = "htl-std"
 publish = false

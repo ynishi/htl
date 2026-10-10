@@ -1,7 +1,8 @@
 //! `htl pin <release|main|path:<checkout>> [dir] [--no-update]` through the real binary:
 //! what each pin rewrites in a project `htl new` already wrote — `Cargo.toml`'s `htl` /
-//! `htl-mq` lines, `mise.toml`, `[toolchain] htl` in `htl.toml` — what a line this does
-//! not recognise is refused with, and the one case that actually runs `cargo update`.
+//! `htl-mq` / `htl-std` lines, `mise.toml`, `[toolchain] htl` in `htl.toml` — what a line
+//! this does not recognise is refused with, and the one case that actually runs `cargo
+//! update`.
 
 use std::path::Path;
 use std::process::Command;
@@ -106,7 +107,9 @@ fn pin_path_rewrites_a_release_or_checkout_pin_and_removes_mise_toml() {
     assert!(!dir.join("mise.toml").exists(), "{stderr}");
 
     let after = std::fs::read_to_string(&manifest).unwrap();
-    let keep = |l: &&str| !l.starts_with("htl = ");
+    // `htl-std` moves with `htl` too (a `--target bin` sibling, like `htl-mq` under
+    // `window`), so its line is excluded from "the rest" alongside `htl`'s own.
+    let keep = |l: &&str| !l.starts_with("htl = ") && !l.starts_with("htl-std = ");
     assert_eq!(
         before.lines().filter(keep).collect::<Vec<_>>(),
         after.lines().filter(keep).collect::<Vec<_>>(),
@@ -191,6 +194,54 @@ fn the_window_targets_htl_mq_line_moves_with_the_htl_line() {
     assert_eq!(
         dep_line(&manifest, "htl-mq"),
         format!("htl-mq = {{ path = \"{checkout}/crates/htl-mq\" }}")
+    );
+}
+
+/// A `--target bin` project's `htl-std` line moves with `htl`'s the same way `htl-mq`'s
+/// does under the window target (the test above): `htl pin release` leaves the bare
+/// version, `htl pin path:<checkout>` leaves the checkout's `crates/htl-std`. This is the
+/// case the `SIBLINGS` loop in `pin.rs` fixes — before it, `htl-std` was left wherever
+/// `htl new` wrote it while `htl` moved beneath it, and `cargo update` then failed on a
+/// stale `htl-std` requirement.
+#[test]
+fn the_bin_targets_htl_std_line_moves_with_the_htl_line() {
+    let root = tempdir("bin-std");
+    let (code, _, stderr) = htl(&["new", "s", "--target", "bin", "--htl", "main"], &root);
+    assert_eq!(code, Some(0), "{stderr}");
+    let dir = root.join("s");
+    let manifest = dir.join("Cargo.toml");
+    assert!(
+        htl_line(&manifest).contains("branch = \"main\""),
+        "{}",
+        htl_line(&manifest)
+    );
+    assert!(
+        dep_line(&manifest, "htl-std").contains("branch = \"main\""),
+        "{}",
+        dep_line(&manifest, "htl-std")
+    );
+
+    let (code, _, stderr) = htl(&["pin", "release", "--no-update"], &dir);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(
+        htl_line(&manifest),
+        format!("htl = \"{}\"", env!("CARGO_PKG_VERSION"))
+    );
+    assert_eq!(
+        dep_line(&manifest, "htl-std"),
+        format!("htl-std = \"{}\"", env!("CARGO_PKG_VERSION"))
+    );
+
+    let checkout = checkout_path();
+    let (code, _, stderr) = htl(&["pin", &format!("path:{checkout}"), "--no-update"], &dir);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(
+        htl_line(&manifest),
+        format!("htl = {{ path = \"{checkout}/crates/htl\" }}")
+    );
+    assert_eq!(
+        dep_line(&manifest, "htl-std"),
+        format!("htl-std = {{ path = \"{checkout}/crates/htl-std\" }}")
     );
 }
 

@@ -384,9 +384,11 @@ pub struct TargetProfile {
 /// entry script. `--target bin`, and `--embed` which is its shorthand, add to the tree:
 ///
 /// ```text
-/// ├── Cargo.toml             htl + anyhow, and [profile.dev.build-override] opt-level = 3
+/// ├── Cargo.toml             htl + htl-std (under the same pin) + anyhow, and
+/// │                          [profile.dev.build-override] opt-level = 3
 /// ├── src/lib.rs             #[host_module] Host, its records, the embedded module,
-/// │                          and pub fn preload(&Htl) registering both
+/// │                          and pub fn preload(&Htl) registering both (plus htl-std's
+/// │                          std.fs / std.proc)
 /// ├── src/host.d.tl          generated from src/lib.rs — by cargo build, and by
 /// │                          htl dts / htl check without building
 /// └── src/main.rs            the binary: preload, then the bundle of src/main.tl it embeds
@@ -396,6 +398,9 @@ const BIN: TargetProfile = TargetProfile {
     target: BuildTarget::Bin,
     deps: &[
         DepLine::plain("htl", Dep::Htl),
+        // Under the same pin as `htl`: the asynchronous I/O slice of `std.*`, which this
+        // target's `preload` installs beside `h.install_std()?` (see `templates/rust/lib.rs`).
+        DepLine::plain("htl-std", Dep::Sibling("htl-std")),
         DepLine::plain("anyhow", Dep::Version("1")),
     ],
     lib: ScaffoldFile {
@@ -513,9 +518,10 @@ const CDYLIB: TargetProfile = TargetProfile {
 /// run` stops after sixty frames and writes the last one as a PNG.
 ///
 /// ```text
-/// ├── Cargo.toml             htl + htl-mq (under the same pin) + anyhow
+/// ├── Cargo.toml             htl + htl-mq + htl-std (under the same pin) + anyhow
 /// ├── src/lib.rs             #[host_module] Fx — the project's own GPU side — the embedded
-/// │                          engine, and preload registering it, `fx` and htl-mq's `mq`
+/// │                          engine, and preload registering it, `fx`, htl-mq's `mq` and
+/// │                          htl-std's std.fs / std.proc
 /// ├── src/fx.d.tl            generated from src/lib.rs by cargo build / htl dts / htl check
 /// ├── src/<mod>/init.tl      the engine: balls in a box, pure rules, no window
 /// ├── src/main.tl            the game table htl_mq::run drives: update(dt), draw()
@@ -528,6 +534,9 @@ const WINDOW: TargetProfile = TargetProfile {
         DepLine::plain("htl", Dep::Htl),
         // Under the same pin as `htl`: they are two crates of one tree, and one version.
         DepLine::plain("htl-mq", Dep::Sibling("htl-mq")),
+        // Also under that pin: the asynchronous I/O slice of `std.*`, which this target's
+        // `preload` installs beside `h.install_std()?` (see `templates/window/lib.rs`).
+        DepLine::plain("htl-std", Dep::Sibling("htl-std")),
         DepLine::plain("anyhow", Dep::Version("1")),
     ],
     lib: ScaffoldFile {

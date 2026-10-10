@@ -221,6 +221,29 @@ fn the_window_targets_htl_mq_line_follows_the_pin() {
     );
 }
 
+/// `htl-std` is a crate of this repository too, so a `--target bin` project's manifest
+/// pins it where it pins `htl` — the same shape as `the_window_targets_htl_mq_line_follows_the_pin`
+/// above — and `src/lib.rs`'s `preload` installs it right beside `h.install_std()?`, with
+/// no edit a project author has to make for `std.fs` / `std.proc` to be typed and present.
+#[test]
+fn the_bin_targets_htl_std_line_follows_the_pin_and_preload_installs_it() {
+    let root = tempdir("bin-std");
+    let (ok, _, stderr) = htl(&["new", "s", "--target", "bin"], &root);
+    assert!(ok, "{stderr}");
+    let manifest = root.join("s/Cargo.toml");
+    let htl = htl_line(&manifest);
+    let std_line = dep_line(&manifest, "htl-std");
+    assert_eq!(
+        std_line,
+        htl.replacen("htl = ", "htl-std = ", 1)
+            .replace("/crates/htl\"", "/crates/htl-std\""),
+        "htl: {htl}"
+    );
+    let lib_rs = std::fs::read_to_string(root.join("s/src/lib.rs")).unwrap();
+    assert!(lib_rs.contains("h.install_std()?;"), "{lib_rs}");
+    assert!(lib_rs.contains("htl_std::install(h)?;"), "{lib_rs}");
+}
+
 /// The frame loop is handed the table `src/main.tl` returns, so the window target refuses
 /// `--lib` — the mirror of the `cdylib` refusal above — and, like it, before the directory
 /// exists.
