@@ -76,16 +76,31 @@
 //! `std/fs.d.tl` under `types/htl-std/`, for example), the same way it would for any
 //! other dependency that ships a `.d.tl`. That is the same name declared twice: once by
 //! `install_declarations`, under the binary's own temp directory, and once by the
-//! project's own `types/`. Which one the checker reads is [`Htl::add_path`]'s own rule —
-//! prepend order, so whichever directory was put on the path last is searched first —
-//! and every site that calls [`Htl::install_registered`] calls it before the project's
-//! own directories go on the path (`apply_model`), so the project's copy ends up in
-//! front. That is the order a project's own pin should win by: `types/<crate>/` is
-//! written from the version the project's `Cargo.lock` resolved, which a project author
-//! can see and change, while the registered installer's copy is only ever the version
-//! the binary doing the checking happened to be built with — a fact about that binary,
-//! not a choice the project made. A project's own files, including the ones a dependency
-//! manager wrote for it, read before whatever the binary carries beyond them.
+//! project's own `types/`.
+//!
+//! The project's copy wins, but not by `Htl::add_path`'s prepend order, and not by when
+//! [`Htl::install_registered`] is called relative to [`Htl::apply_model`]. `apply_model`
+//! installs the project model's own resolver ([`crate::model::Resolver`]), which answers
+//! every `require` the model's own modules can name — a project's own `.d.tl` under its
+//! declaration root included — on its own, before any directory on the search path is
+//! consulted at all
+//! (`Htl::apply_model`'s own doc in `model.rs`: "None of the model's directories goes
+//! on `package.path`"). The registered installer's temp directory is never one of
+//! the model's own modules — it is only ever reached through the search path, the way a
+//! library installed on the machine would be — so a name the model already has never
+//! gets that far, whichever directory `add_path` put where. Only a name the model does
+//! not have ([`crate::model::Resolution::Outside`]) falls through to the search path,
+//! and only there does `add_path`'s prepend order — and so the order a call to
+//! [`Htl::install_registered`] runs in relative to another directory on the path — decide
+//! anything.
+//!
+//! So the project's copy winning is not an ordering this crate arranges; it is what a
+//! project's own declaration always does to a registered installer's, the same way it
+//! would to a plain library's `.d.tl` on the machine. It is still the right one to win:
+//! `types/<crate>/` is written from the version the project's `Cargo.lock` resolved,
+//! which a project author can see and change, while the registered installer's copy is
+//! only ever the version the binary doing the checking happened to be built with — a
+//! fact about that binary, not a choice the project made.
 use crate::{Htl, declarations_key, write_if_changed};
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;

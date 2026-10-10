@@ -706,6 +706,31 @@ pub fn command() -> clap::Command {
     <Cli as clap::CommandFactory>::command()
 }
 
+/// `htl::registry::register_installer("htl-std", htl_std::install, htl_std::PROVIDES)`,
+/// once.
+///
+/// This binary links both `htl-core` and `htl-std` at once, which is exactly the seam
+/// `htl_core::registry`'s own doc describes ("Why this exists"): `htl-core` cannot depend
+/// on `htl-std` back (`htl-std -> htl -> htl-core -> htl-std` would be a cycle), so only a
+/// binary that sits above both can hand `htl-core` the function pointer. Doing it here —
+/// in `run()`, before anything parses a command — rather than in `htl-core` itself is the
+/// whole reason the registry module exists; see that module's doc for the rest. The call
+/// goes through `htl::registry` rather than naming `htl-core` directly: `htl` already
+/// re-exports it (`pub use htl_core::*`), and this crate has no other reason to depend on
+/// `htl-core` itself.
+///
+/// Registering the same name twice is refused (`register_installer`'s own doc, "Order and
+/// duplicates"), so this is behind a `std::sync::Once`: `run()` is the entry both `htl` and
+/// `cargo-htl` call, once each per process, which is enough on its own, but an in-process
+/// caller could call it more than once without the guard.
+fn register_libraries() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        htl::registry::register_installer("htl-std", htl_std::install, htl_std::PROVIDES)
+            .expect("\"htl-std\" registered twice");
+    });
+}
+
 /// Parse the command line and run the command; the exit code.
 ///
 /// An exit of 1 is a verdict — an error in a file, a finding at `deny`, a failing test, a
@@ -714,6 +739,7 @@ pub fn command() -> clap::Command {
 /// cannot read, a flag it does not take — says why and exits 2, whichever command it was
 /// (clap exits 2 on a bad flag, and an `Err` from any command lands on the same arm).
 pub fn run() -> ExitCode {
+    register_libraries();
     // Invoked as `cargo htl ...` -> argv = ["cargo-htl", "htl", ...]; drop the "htl".
     let mut argv: Vec<String> = std::env::args().collect();
     let is_cargo = Path::new(&argv[0])
@@ -2905,6 +2931,16 @@ fn cmd_resolve(module: &str, path: Option<&Path>, json: bool) -> Result<ExitCode
     // First, so that the project's own directories go in front of it as they do under
     // `htl run`: `add_path` prepends, and the report prints the order it searched.
     h.install_std()?;
+    // `std.fs` / `std.proc`, registered at this binary's entry (`register_libraries`):
+    // right after `install_std`, so every install call here reads in the same order the
+    // other commands give them. Not for the reason the comment above gives `install_std`
+    // itself: a project that carries its own `types/std/fs.d.tl` is answered from there
+    // regardless of where this directory sits, because the project's model answers a
+    // name it has on its own before any directory on the path is searched at all
+    // (`htl_core::registry`'s own doc, "Which copy wins when a project has one too").
+    // Order only matters here for a name outside the model, which `add_path`'s prepend
+    // rule then decides among whatever directories claim it.
+    h.install_registered()?;
     let model = apply_model(&h, &cfg, start)?;
     let rep = htl::resolve::resolve(
         &h,
@@ -3332,6 +3368,7 @@ fn cmd_gen(file: &Path, out: Option<&Path>) -> Result<ExitCode> {
     let model = apply_model(&h, &cfg, file)?;
     project::file_view(&h, model.as_ref(), file)?;
     h.install_std()?;
+    h.install_registered()?;
     let (code, c) = h.gen_lua(file)?;
     text_sink().checkinfo(&c);
     // Judged on its errors alone (`Policy::ERRORS_ONLY`): the warnings and lints above are
@@ -3364,6 +3401,7 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
     let model = apply_model(&h, &cfg, file)?;
     h.install_test_lib()?;
     h.install_std()?;
+    h.install_registered()?;
     h.install_task_lib()?;
     if Bundle::is_bundle(&bytes) {
         let b = Bundle::decode(&bytes)?;
@@ -3514,6 +3552,7 @@ fn cmd_build(
     // the host's modules — which is what it is: the binary that runs the bundle preloads
     // it, as `htl run` does before `run_bundle`.
     h.install_std()?;
+    h.install_registered()?;
     let cfg = load_config(entry)?;
     // The rules and levels `htl check` uses: a bundle is judged as a check of its closure
     // would be, and a rule the project turned off is not reported here either.

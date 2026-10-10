@@ -46,6 +46,10 @@ rust-version = "1.88"
 htl-core = { path = "crates/htl-core", version = "0.14.0", default-features = false }
 htl-macros = { path = "crates/htl-macros", version = "0.14.0" }
 htl = { path = "crates/htl", version = "0.14.0", default-features = false }
+# `std.fs` / `std.proc`: the asynchronous I/O slice of `std.*`, which the CLI registers
+# with `htl_core::registry::register_installer` so every state it builds for itself
+# (the checker, a test file) carries it beside the synchronous `std.*` `htl` installs.
+htl-std = { path = "crates/htl-std", version = "0.14.0" }
 mlua = { version = "0.12.2", features = ["lua54", "vendored", "error-send"] }
 mlua-pkg = "0.11.0"
 anyhow = "1.0.104"

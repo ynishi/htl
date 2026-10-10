@@ -24,6 +24,11 @@ categories = ["development-tools", "command-line-utilities"]
 # `async fn`: the entry chunk runs as a root on mlua-isle's executor (`Htl::run_async`),
 # whether or not the program awaits anything.
 htl = { workspace = true, features = ["pkg", "dts", "std", "async"] }
+# `std.fs`, `std.proc`: the asynchronous I/O slice of `std.*`, registered once at this
+# binary's entry (`register_libraries`, `src/lib.rs`) through `htl::registry` — `htl`
+# re-exports `htl_core::registry` (`pub use htl_core::*`) rather than this crate naming
+# `htl-core` itself, which it otherwise has no reason to depend on directly.
+htl-std = { workspace = true }
 # The executor `htl run` drives (`Htl::run_async` on a current-thread runtime and a
 # `LocalSet`), and the Ctrl-C that cancels its root.
 tokio = { version = "1", features = ["rt", "time", "signal"] }

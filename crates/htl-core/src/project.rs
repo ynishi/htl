@@ -579,15 +579,18 @@ pub fn checker(
     #[cfg(feature = "std")]
     h.install_std()?;
     // Whatever a registered installer (`crate::registry::register_installer`) adds
-    // beyond that — see its module doc. Every install call here — the test lib, `std`,
-    // this one, and the task lib below — goes before `apply_model`, so a project's own
-    // directories still end up in front of whatever
-    // the binary carries — `add_path` prepends, so whichever call comes later searches
-    // first. Same order `run_in` in `testing.rs` gives them (test lib, `std`,
-    // registered, task lib, then the model); `cmd_resolve` in `htl-cli` puts what the
-    // binary carries down before the project's own directories the same way, so this
-    // agrees with them (`registry.rs`'s own doc says which copy wins when a project
-    // has one of its own).
+    // beyond that — see its module doc. This, the test lib, `std` above and the task
+    // lib below all go before `apply_model`, but the order among them does not decide
+    // which copy of a name `apply_model` later reads: `apply_model`'s own resolver
+    // answers every name the project's model has on its own, before the search path
+    // any of these calls wrote to is ever consulted (`registry.rs`'s own doc, "Which
+    // copy wins when a project has one too"). The order only matters for a name
+    // outside the model — two of these calls naming the same thing, say — where
+    // `add_path`'s prepend rule picks whichever ran last. Kept in this order only so
+    // every site that builds a state this crate uses for itself reads alike: the same
+    // order `run_in` in `testing.rs` gives them (test lib, `std`, registered, task
+    // lib, then the model), and the same order `cmd_resolve` in `htl-cli` gives its
+    // own `install_std` / `install_registered` before `apply_model`.
     h.install_registered()?;
     // And a program on the executor may require("htl.task"): the same, for its types.
     #[cfg(feature = "async")]

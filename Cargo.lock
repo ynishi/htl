@@ -589,6 +589,7 @@ dependencies = [
  "clap",
  "criterion",
  "htl",
+ "htl-std",
  "semver",
  "serde",
  "serde_json",

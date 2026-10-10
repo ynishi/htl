@@ -40,9 +40,9 @@
 //! (`tokio::process::Command::process_group(0)`, the group id equal to the child's own
 //! pid) before spawning it; every descendant that does not itself ask to leave that
 //! group (a plain fork, as `sh` running `sleep` without `exec`ing it is) stays in it.
-//! Killing stops there with `libc::killpg` rather than [`Child::kill`], which reaches
+//! Killing stops there with `libc::killpg` rather than `tokio::process::Child::kill`, which reaches
 //! only the one process whose handle `tokio::process::Command` returned. On every other
-//! platform `run` still only has [`Child::kill`] / `kill_on_drop` to reach with, so a
+//! platform `run` still only has `Child::kill` / `kill_on_drop` to reach with, so a
 //! descendant that outlives the direct child is not killed there; see "Cancellation"
 //! below for exactly what each platform's kill reaches.
 //!
@@ -60,7 +60,7 @@
 //! a plain foreground child — only this process's own handling of them, and what that
 //! handling does in turn, still can. Under `htl run`, a first Ctrl-C is exactly that: it
 //! becomes `token.cancel()`, mlua-isle's `cancellable` drops the suspended future at its
-//! next chance to, and [`KillProcessGroupOnDrop`]'s drop (below) kills the group — the
+//! next chance to, and `KillProcessGroupOnDrop`'s drop (below) kills the group — the
 //! child still dies, just relayed through this process rather than struck directly by the
 //! terminal. A second Ctrl-C (`htl run`'s own escalation to `std::process::exit(130)`)
 //! does not unwind the stack, so no `Drop` runs at all; a `SIGKILL` of this process itself
@@ -83,7 +83,7 @@
 //! platform, not a choice this crate gets to round up:
 //!
 //! - **Unix**: the dropped future's locals are torn down in the usual order, which runs
-//!   a guard ([`KillProcessGroupOnDrop`]) built right after the child is spawned, before
+//!   a guard (`KillProcessGroupOnDrop`) built right after the child is spawned, before
 //!   `tokio::process::Child`'s own `kill_on_drop` guard (declared first, torn down
 //!   last). That guard's drop sends `SIGKILL` to the whole process group with
 //!   `libc::killpg` — see "`sh -c "..."` and other children that do not `exec`" above
@@ -175,7 +175,7 @@ pub struct Proc;
 impl Proc {
     /// Runs `argv[1]` with `argv[2..]` as its arguments — no shell, so a pipeline or a
     /// redirect needs `argv = {"sh", "-c", "..."}` to ask a shell for one (and see the
-    /// crate doc's `"sh -c "..."` and other children that do not exec"` for what that
+    /// crate doc's section on `sh -c` and other children that do not exec for what that
     /// shape means for `timeout_ms` and cancellation). Raises
     /// `std.proc.run: argv is empty` for an empty `argv`, and
     /// `std.proc.run: <argv[1]>: <OS message>` if the program cannot even be spawned

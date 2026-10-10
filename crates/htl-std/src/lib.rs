@@ -1,22 +1,22 @@
 //! htl's own asynchronous I/O for Teal: `require("std.fs")`, `require("std.proc")`.
 //!
-//! `crates/htl-core/src/batteries.rs`'s `std.*` is mlua-batteries, and deliberately
-//! narrow: its default feature set is json, env, path, time, string, validate, pretty,
-//! argparse — modules that do not read or write files (`path`'s own `absolute` still
-//! touches the filesystem, to canonicalise one; what none of the default set does is
-//! move bytes into or out of one), reach the network, run another process, or need a
-//! runtime, because what a script may do to the machine it runs on is a host's decision
-//! and not something a toolchain turns on for every project it runs. `fs` is the first
-//! module that decision covers for htl itself, under the same `std.` prefix, and it
-//! offers no synchronous form beside it: a script that wants a file without blocking the
-//! program while it waits reads it with `await`, and a script that is content to block
-//! still has Lua's own `io`, global and untouched, in its own namespace — this crate
-//! adds the asynchronous way beside it, not instead of it. mlua-batteries has its own
-//! synchronous `fs` feature (outside its default set, so htl-core's `std` feature does
-//! not carry it in); a host that turned that feature on as well would have two things
-//! registering `require("std.fs")`, and whichever of the two called `htl_preload` /
-//! `preload_all` last would shadow the other's under the same name — not a conflict this
-//! crate resolves, since it has no way to see what else is installed. [`proc`]'s
+//! `std.*` is htl's re-export of Rust libraries to Teal. `crates/htl-core/src/batteries.rs`'s
+//! slice of it is mlua-batteries, and deliberately narrow: its default feature set is json,
+//! env, path, time, string, validate, pretty, argparse — modules that do not read or write
+//! files (`path`'s own `absolute` still touches the filesystem, to canonicalise one; what
+//! none of the default set does is move bytes into or out of one), reach the network, run
+//! another process, or need a runtime. This crate is the asynchronous I/O slice of the same
+//! namespace: `std.fs`, installed by the CLI through `htl_core::registry` and by a Rust
+//! host through [`install`], and it offers no synchronous form beside it: a script that
+//! wants a file without blocking the program while it waits reads it with `await`, and a
+//! script that is content to block still has Lua's own `io`, global and untouched, in its
+//! own namespace — this crate adds the asynchronous way beside it, not instead of it.
+//! mlua-batteries has its own synchronous `fs` feature (outside its default set, so
+//! htl-core's `std` feature does not carry it in); a host that turned that feature on
+//! as well would have two things registering `require("std.fs")`, and whichever of the
+//! two called `htl_preload` / `preload_all` last would shadow the other's under the
+//! same name — not a conflict this crate resolves, since it has no way to see what
+//! else is installed. [`proc`]'s
 //! `std.proc` is the same decision applied to a child process rather than a file:
 //! mlua-batteries has no synchronous `proc` feature at all, so there is nothing beside
 //! it to shadow or be shadowed by.
@@ -111,12 +111,32 @@
 //! h.install_std()?;      // std.json, std.string, ... — mlua-batteries, synchronous
 //! htl_std::install(&h)?; // std.fs, std.proc — this crate, asynchronous
 //! ```
+//!
+//! [`install`] also puts both declarations on `h`'s own checker search path
+//! ([`Htl::install_declarations`]), so a state with no project around it — this crate's
+//! own tests, a host's `Htl::new` with nothing else on the path — types `require("std.fs")`
+//! and `require("std.proc")` the moment `install` returns, with no `[package.metadata.htl]
+//! dts` of its own to ask for it. A project that depends on this crate still gets its own
+//! copy through that `dts` / `dts_root` metadata, materialised under `types/htl-std/` by
+//! `htl dts`, and that copy is the one the checker reads: the project's model answers
+//! `require("std.fs")` from its own `types/` before `h`'s search path is ever consulted —
+//! see [`htl::registry`]'s "Which copy wins when a project has one too" for why that is
+//! the model's doing and not an ordering between this function and the project's own
+//! directories.
 
 use htl::mlua::{Lua, LuaString};
+use htl::teal::HostModule;
 use htl::{Htl, host_module};
 
 pub mod proc;
 pub use proc::Proc;
+
+/// `Fs::MODULE` and `Proc::MODULE` — never a hand-written `"std.fs"` / `"std.proc"`, the
+/// way [`htl::registry::register_installer`]'s own doc asks a registered crate's
+/// `provides` to come from the registering crate's `#[host_module]` constants rather
+/// than a second list a rename could leave behind. What a binary that links this crate
+/// hands `register_installer` as `provides`.
+pub const PROVIDES: &[&str] = &[Fs::MODULE, Proc::MODULE];
 
 /// Stateless: every function is a plain `tokio::fs` (or `walkdir`) call with nothing of
 /// its own to keep between them, so `require("std.fs")` is called with `.`, the way
@@ -262,19 +282,28 @@ fn walk_sync(path: &str) -> anyhow::Result<Vec<String>> {
     Ok(out)
 }
 
-/// `Fs.htl_preload(h)` and `Proc.htl_preload(h)`: the one entry point a host calls to
-/// make `require("std.fs")` and `require("std.proc")` resolve at run time. That is all
-/// `htl_preload` does — it registers the runtime `package.preload` entry and nothing
-/// about the checker. Typing the module under `htl check` / `htl test` is a separate
-/// step, the `.d.tl` reaching the checker's search path: through `[package.metadata.htl]
-/// dts` (and `dts_root`, since `std.fs` and `std.proc` are both dotted) for a project
-/// depending on this crate (`crates/htl-core/src/dep_dts.rs`), or through
-/// `Htl::add_path` directly, the way this crate's own tests wire it with no project
-/// model in play. Beside `h.install_std()?` for the synchronous `std.*`
-/// (`htl::Htl::install_std`).
+/// `Fs.htl_preload(h)` and `Proc.htl_preload(h)`: the two `require` entries at run time,
+/// plus [`Htl::install_declarations`] for both their `.d.tl`, under `"htl-std"`, so a
+/// state with no project around it is typed the moment this returns — the way
+/// `Htl::install_std` leaves nothing for the checker to catch up
+/// on either. A state built for a project that depends on this crate still ends up reading
+/// the project's own copy: `dep_dts` (`crates/htl-core/src/dep_dts.rs`) materialises it
+/// under `types/htl-std/` from `[package.metadata.htl] dts` / `dts_root`, and that copy is
+/// what answers `require("std.fs")` — not because of any order between this call and the
+/// project's own directories going on the path, but because the project's model answers
+/// every name it has on its own, before the path this function wrote to is ever searched;
+/// see [`htl::registry`]'s "Which copy wins when a project has one too". A binary that
+/// registers this crate with `htl_core::registry::register_installer` instead of calling
+/// this function directly gets the same two lines from
+/// [`Htl::install_registered`](htl::Htl::install_registered), which runs whatever was
+/// registered — this included.
 pub fn install(h: &Htl) -> anyhow::Result<()> {
     Fs.htl_preload(h)?;
     Proc.htl_preload(h)?;
+    h.install_declarations(
+        "htl-std",
+        &[("std/fs.d.tl", Fs::DECL), ("std/proc.d.tl", Proc::DECL)],
+    )?;
     Ok(())
 }
 

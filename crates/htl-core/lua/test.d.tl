@@ -57,6 +57,13 @@ local record test
       fail_fast: boolean
    end
 
+   -- `body` may be an `async function` literal — it checks against the plain
+   -- `function()` here the same as any other value would — and then may `await`:
+   -- the file that calls `describe` / `it` runs as a root on the executor under
+   -- `htl test` ([lang] async), so `body` runs inside that root rather than outside
+   -- any coroutine. A plain (non-`async`) `function()` that awaits still runs, but
+   -- `await-outside-async` reports it at `htl check` time; an `async function`
+   -- literal has nothing reported against it.
    describe: function(name: string, body: function())
    it: function(name: string, body: function())
    expect: function<T>(actual: T): Expect<T>
