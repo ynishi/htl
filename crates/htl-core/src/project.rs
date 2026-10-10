@@ -573,17 +573,28 @@ pub fn checker(
     let h = Htl::new()?;
     h.select_lints(sel)?;
     h.set_lang(lang)?;
-    if let Some(m) = model {
-        h.apply_model(m, crate::model::View::Source)?;
-    }
     // `*_test.tl` under the checked tree require("htl.test"): make its types visible.
     h.install_test_lib()?;
-    // And a program on the executor may require("htl.task"): the same, for its types.
-    #[cfg(feature = "async")]
-    h.install_task_lib()?;
     // And any file may require("std.json"): the same, for the modules the binary carries.
     #[cfg(feature = "std")]
     h.install_std()?;
+    // Whatever a registered installer (`crate::registry::register_installer`) adds
+    // beyond that — see its module doc. Every install call here — the test lib, `std`,
+    // this one, and the task lib below — goes before `apply_model`, so a project's own
+    // directories still end up in front of whatever
+    // the binary carries — `add_path` prepends, so whichever call comes later searches
+    // first. Same order `run_in` in `testing.rs` gives them (test lib, `std`,
+    // registered, task lib, then the model); `cmd_resolve` in `htl-cli` puts what the
+    // binary carries down before the project's own directories the same way, so this
+    // agrees with them (`registry.rs`'s own doc says which copy wins when a project
+    // has one of its own).
+    h.install_registered()?;
+    // And a program on the executor may require("htl.task"): the same, for its types.
+    #[cfg(feature = "async")]
+    h.install_task_lib()?;
+    if let Some(m) = model {
+        h.apply_model(m, crate::model::View::Source)?;
+    }
     Ok(h)
 }
 

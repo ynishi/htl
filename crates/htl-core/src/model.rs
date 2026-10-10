@@ -258,11 +258,20 @@ pub enum Provider {
     /// for a host whose registration the model cannot read (one written by hand, or in
     /// another crate).
     Build,
-    /// A `std.*` module — and `std` itself — which htl's own binary and
-    /// [`Htl::install_std`](crate::Htl::install_std) provide. Only in a build with the
-    /// `std` feature; without it nothing provides these names. In a bundle it is a host
-    /// module: `htl build` files it with the modules the running binary provides rather
-    /// than bundling Rust, and `htl run x.hb` preloads it before the bundle starts.
+    /// A module the running binary carries rather than the project: `std.*` — and `std`
+    /// itself — from [`Htl::install_std`](crate::Htl::install_std) under the `std`
+    /// feature, and any name a crate registered with
+    /// [`crate::registry::register_installer`] makes `require`-able. The two report
+    /// alike here because the project cannot tell which of them installed a name —
+    /// neither is a file of the project's, and what answers `require` for either is a
+    /// decision this binary's build made, not something the project's files say.
+    /// Without the `std` feature and with nothing registered, nothing provides these
+    /// names. In a bundle `std.*` is a host module: `htl build` files it with the
+    /// modules the running binary provides rather than bundling Rust, and `htl run
+    /// x.hb` preloads it (`Htl::install_std`) before the bundle starts. A registered
+    /// name is preloaded under `htl run x.hb` only where the binary's run site calls
+    /// the registering crate's installer; `htl build` files it as a host module
+    /// either way, from this provider.
     Std,
     /// Declared and nothing else: the model has a `.d.tl` under the name and no `.tl` or
     /// `.lua`, and none of the three sources above names it. The environment provides it
@@ -663,7 +672,11 @@ impl Project {
             home: Some(crate::lib_dir()),
         });
         let host_crate = crate::dts::find_cargo_package_root(root);
-        let providers = providers(host_crate.as_deref(), &config);
+        let providers = providers(
+            host_crate.as_deref(),
+            &config,
+            &crate::registry::registered_provides(),
+        );
         let mut project = Self {
             root: root.to_path_buf(),
             config,
@@ -1494,14 +1507,26 @@ fn crate_modules(decl_root: &Path) -> Vec<Module> {
         .collect()
 }
 
-/// The names the host provides, from the three sources the model reads, one entry per
+/// The names the host provides, from the four sources the model reads, one entry per
 /// name sorted by it; where two sources name one module the higher [`Provider::rank`]
 /// keeps it.
 ///
 /// The host crate is scanned here, once per load, with the same scan `htl check` ran for
 /// its lint ([`host_module_names`](crate::dts::host_module_names)): a substring test per
 /// `.rs` file, and a parse only of those that mention `host_module`.
-fn providers(host_crate: Option<&Path>, config: &HtlConfig) -> Vec<(String, Provider)> {
+///
+/// `registered` is what a crate registered with `crate::registry::register_installer`
+/// beyond `std.*` ([`crate::registry::registered_provides`] is [`Project::load`]'s own
+/// argument for it) rather than something this function reads for itself: the registry
+/// is process-wide state, and a function that reaches into it directly is one whose
+/// tests either leak into every other test in the same process or cannot exercise this
+/// fold without doing so — passing the list in keeps the fold itself testable with an
+/// ordinary, local argument instead.
+fn providers(
+    host_crate: Option<&Path>,
+    config: &HtlConfig,
+    registered: &[String],
+) -> Vec<(String, Provider)> {
     use std::collections::BTreeMap;
     let mut table: BTreeMap<String, Provider> = BTreeMap::new();
     let mut add = |name: String, p: Provider| {
@@ -1513,6 +1538,10 @@ fn providers(host_crate: Option<&Path>, config: &HtlConfig) -> Vec<(String, Prov
     #[cfg(feature = "std")]
     for n in crate::batteries::module_names() {
         add(n, Provider::Std);
+    }
+    // See `Provider::Std`'s own doc for why the two are not told apart here.
+    for n in registered {
+        add(n.clone(), Provider::Std);
     }
     for n in &config.build.host {
         add(n.clone(), Provider::Build);
@@ -1852,6 +1881,28 @@ mod tests {
         assert_eq!(p.provides("std.json"), Some(Provider::Std));
         assert_eq!(p.provides("std"), Some(Provider::Std));
         assert_eq!(p.provides("json"), None, "only under the std prefix");
+    }
+
+    /// A name `providers()` is handed through its `registered` argument is provided
+    /// too, under [`Provider::Std`] — see that variant's doc for why it is not told
+    /// apart from mlua-batteries' own `std.*`. Through the argument rather than
+    /// `crate::registry::register_installer` and `Project::load`: the registry is a
+    /// process-wide, append-only list shared with every other test in this binary, and
+    /// a name registered into it stays there for all of them — `providers()` takes the
+    /// fold as an argument precisely so a test of the fold does not have to touch that
+    /// global state (see `providers`'s own doc, and `registry.rs`'s "Order and
+    /// duplicates").
+    #[test]
+    fn a_registered_name_is_provided_by_the_binary() {
+        let table = providers(
+            None,
+            &HtlConfig::default(),
+            &["registry.model-test".to_string()],
+        );
+        assert_eq!(
+            table.iter().find(|(n, _)| n == "registry.model-test"),
+            Some(&("registry.model-test".to_string(), Provider::Std))
+        );
     }
 
     #[test]
