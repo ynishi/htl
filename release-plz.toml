@@ -31,9 +31,10 @@ git_tag_name = "v{{ version }}"
 release_always = false
 pr_labels = ["release"]
 
-# The five crates move in lockstep through `[workspace.package] version`, so one crate
+# The six crates move in lockstep through `[workspace.package] version`, so one crate
 # is enough to tag and to keep the single root CHANGELOG. `htl-cli` is that crate; the
-# other four fold their commits into its changelog.
+# others fold their commits into its changelog once each is on crates.io
+# (`changelog_include` below).
 [[package]]
 name = "htl-cli"
 git_tag_enable = true
@@ -46,6 +47,16 @@ changelog_path = "./CHANGELOG.md"
 # crate that exists, so a new crate's first version is `cargo publish` by hand with
 # `publish = false` here until then (htl-mq 0.8.0 went out that way).
 changelog_include = ["htl-core", "htl-macros", "htl", "htl-mq"]
+
+# htl-std's first release is published by hand, the way htl-mq 0.8.0 was (#291): the
+# Trusted Publishing this workflow uses is configured on a crate that exists and cannot
+# create one. The release job publishes the other five; then `cargo publish -p htl-std`
+# with a token from the same commit (its `htl` dependency is on crates.io by then); then
+# the trusted publisher is added to the new crate, this entry comes out, and `htl-std`
+# goes into `changelog_include` above. The version still moves with the workspace.
+[[package]]
+name = "htl-std"
+publish = false
 
 # Changelog grouping. `commit_parsers` replaces release-plz's defaults rather than
 # extending them, so adding one rule means restating the seven it ships with (read from

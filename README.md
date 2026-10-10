@@ -196,7 +196,8 @@ and the pages behind it are
 - [`cexport`](https://docs.rs/htl/latest/htl/cexport/index.html) and
   [`ffi`](https://docs.rs/htl/latest/htl/ffi/index.html) — `#[c_export]`, a C ABI for
   a caller that is not Rust (feature `ffi`; `htl new --lib --target cdylib`);
-- [htl-mq](https://docs.rs/htl-mq) — a window (`htl new --target window`).
+- [htl-mq](https://docs.rs/htl-mq) — a window (`htl new --target window`);
+- [htl-std](https://docs.rs/htl-std) — asynchronous file I/O (`require("std.fs")`).
 
 **Both ways of holding Teal are in this repository, built and run on every commit**:
 [`examples/`](examples/README.md) has `embed`, where `include_tl!`, `include_bundle!`,

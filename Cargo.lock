@@ -632,6 +632,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "htl-std"
+version = "0.14.0"
+dependencies = [
+ "anyhow",
+ "htl",
+ "tokio",
+ "walkdir",
+]
+
+[[package]]
 name = "icu_collections"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
