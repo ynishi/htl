@@ -22,15 +22,26 @@ categories = ["filesystem", "asynchronous", "development-tools"]
 # `types/htl-std/std/fs.d.tl`, which `require("std.fs")` resolves.
 [package.metadata.htl]
 dts_root = "dts"
-dts = ["dts/std/fs.d.tl"]
+dts = ["dts/std/fs.d.tl", "dts/std/proc.d.tl"]
 
 [dependencies]
 htl = { workspace = true, features = ["macros", "async"] }
 # `fs` for the async file operations; `rt` because every one of them is a `spawn_blocking`
 # under tokio's own `fs` module, which needs the blocking pool the runtime provides.
-tokio = { version = "1", features = ["fs", "rt"] }
+# `process` for `std.proc`'s `tokio::process::Command`; `io-util` for the `AsyncReadExt` /
+# `AsyncWriteExt` that drain its stdout/stderr and feed its stdin; `time` for the
+# `tokio::time::timeout` around a `timeout_ms` run.
+tokio = { version = "1", features = ["fs", "rt", "process", "io-util", "time"] }
 # `walk` is the one function with no `tokio::fs` primitive to be: it is one
 # `spawn_blocking` around a synchronous directory-tree walk, and the workspace already
 # depends on this crate for that (`htl-core`'s own project walks).
 walkdir = { workspace = true }
 anyhow = { workspace = true }
+
+# `std.proc.run`'s `timeout_ms` and cancellation kill have to reach a whole process
+# group, not only the direct child — `{"sh", "-c", "sleep 5"}` does not `exec`, so
+# `sleep` is a grandchild `tokio::process::Child::kill` cannot name — and `killpg(2)` is
+# `libc`'s; `tokio::process::Command::process_group` and every use of `libc::*` in
+# `src/proc.rs` are behind `#[cfg(unix)]`, so this is Unix-only.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

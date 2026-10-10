@@ -1,30 +1,33 @@
-//! htl's own asynchronous I/O for Teal: `require("std.fs")`.
+//! htl's own asynchronous I/O for Teal: `require("std.fs")`, `require("std.proc")`.
 //!
 //! `crates/htl-core/src/batteries.rs`'s `std.*` is mlua-batteries, and deliberately
 //! narrow: its default feature set is json, env, path, time, string, validate, pretty,
 //! argparse — modules that do not read or write files (`path`'s own `absolute` still
 //! touches the filesystem, to canonicalise one; what none of the default set does is
-//! move bytes into or out of one), reach the network, or need a runtime, because what a
-//! script may do to the machine it runs on is a host's decision and not something a
-//! toolchain turns on for every project it runs. `fs` is the first module that decision
-//! covers for htl itself, under the same `std.` prefix, and it offers no synchronous
-//! form beside it: a script that wants a file without blocking the program while it
-//! waits reads it with `await`, and a script that is content to block still has Lua's
-//! own `io`, global and untouched, in its own namespace — this crate adds the
-//! asynchronous way beside it, not instead of it. mlua-batteries has its own synchronous
-//! `fs` feature (outside its default set, so htl-core's `std` feature does not carry it
-//! in); a host that turned that feature on as well would have two things registering
-//! `require("std.fs")`, and whichever of the two called `htl_preload` / `preload_all`
-//! last would shadow the other's under the same name — not a conflict this crate
-//! resolves, since it has no way to see what else is installed.
+//! move bytes into or out of one), reach the network, run another process, or need a
+//! runtime, because what a script may do to the machine it runs on is a host's decision
+//! and not something a toolchain turns on for every project it runs. `fs` is the first
+//! module that decision covers for htl itself, under the same `std.` prefix, and it
+//! offers no synchronous form beside it: a script that wants a file without blocking the
+//! program while it waits reads it with `await`, and a script that is content to block
+//! still has Lua's own `io`, global and untouched, in its own namespace — this crate
+//! adds the asynchronous way beside it, not instead of it. mlua-batteries has its own
+//! synchronous `fs` feature (outside its default set, so htl-core's `std` feature does
+//! not carry it in); a host that turned that feature on as well would have two things
+//! registering `require("std.fs")`, and whichever of the two called `htl_preload` /
+//! `preload_all` last would shadow the other's under the same name — not a conflict this
+//! crate resolves, since it has no way to see what else is installed. [`proc`]'s
+//! `std.proc` is the same decision applied to a child process rather than a file:
+//! mlua-batteries has no synchronous `proc` feature at all, so there is nothing beside
+//! it to shadow or be shadowed by.
 //!
 //! # Why a crate, and why not inside `htl-core`
 //!
 //! `#[host_module]` is `htl-macros`'s, built on top of `htl-core` rather than inside it,
 //! and a crate that uses the macro to publish a `require`-able module is a consumer of
-//! `htl`, the umbrella crate, the way `htl-mq`'s `Mq` is. [`Fs`] is exactly that shape:
-//! a `#[host_module]` crate with nothing in it but the module, minus the window `htl-mq`
-//! carries alongside its own.
+//! `htl`, the umbrella crate, the way `htl-mq`'s `Mq` is. [`Fs`] and [`Proc`] are exactly
+//! that shape: a `#[host_module]` crate with nothing in it but the two modules, minus the
+//! window `htl-mq` carries alongside its own.
 //!
 //! # One call, one blocking operation
 //!
@@ -50,7 +53,12 @@
 //! one `spawn_blocking` of its own around a synchronous `walkdir` walk (which also
 //! checks, inside that one call, that `path` is a directory before descending into it) —
 //! the same rule, applied to the one function that has no `tokio::fs` primitive to lean
-//! on in the first place.
+//! on in the first place. [`Proc::run`] is not a `tokio::fs` call at all, but the same
+//! economy holds at the one level up: it is one child process run to completion, not
+//! several — stdin written and closed, stdout and stderr drained, the exit (or the
+//! timeout's kill) all inside that one call, rather than a `spawn` a caller would then
+//! have to poll, write to and read from itself over several round trips to get the same
+//! answer.
 //!
 //! # Cancellation
 //!
@@ -73,6 +81,14 @@
 //! on. So a write or a walk already underway when its caller is cancelled runs to
 //! completion on the pool, and its result, success or failure, is discarded unread.
 //!
+//! [`Proc::run`] answers the same dropped future differently, because a child process is
+//! not a thread-pool call: dropping the future — the same program cancel or unawaited
+//! `async local` as above — reaches the process rather than letting it run to
+//! completion. File: the result is dropped and the operation completes. Process:
+//! killed — see [`proc`]'s own doc for exactly what gets killed, on which platform, and
+//! for the rest of the detail (the two tasks that drain its pipes, and how a
+//! `timeout_ms` kill is the same signal under a different trigger).
+//!
 //! # Errors
 //!
 //! Every function that can fail does so by raising a Lua error (the macro's default;
@@ -93,11 +109,14 @@
 //! ```rust,ignore
 //! let h = htl::Htl::new()?;
 //! h.install_std()?;      // std.json, std.string, ... — mlua-batteries, synchronous
-//! htl_std::install(&h)?; // std.fs — this crate, asynchronous
+//! htl_std::install(&h)?; // std.fs, std.proc — this crate, asynchronous
 //! ```
 
 use htl::mlua::{Lua, LuaString};
 use htl::{Htl, host_module};
+
+pub mod proc;
+pub use proc::Proc;
 
 /// Stateless: every function is a plain `tokio::fs` (or `walkdir`) call with nothing of
 /// its own to keep between them, so `require("std.fs")` is called with `.`, the way
@@ -243,17 +262,19 @@ fn walk_sync(path: &str) -> anyhow::Result<Vec<String>> {
     Ok(out)
 }
 
-/// `Fs.htl_preload(h)`: the one entry point a host calls to make `require("std.fs")`
-/// resolve at run time. That is all `htl_preload` does — it registers the runtime
-/// `package.preload` entry and nothing about the checker. Typing the module under `htl
-/// check` / `htl test` is a separate step, the `.d.tl` reaching the checker's search
-/// path: through `[package.metadata.htl] dts` (and `dts_root`, since `std.fs` is dotted)
-/// for a project depending on this crate (`crates/htl-core/src/dep_dts.rs`), or through
+/// `Fs.htl_preload(h)` and `Proc.htl_preload(h)`: the one entry point a host calls to
+/// make `require("std.fs")` and `require("std.proc")` resolve at run time. That is all
+/// `htl_preload` does — it registers the runtime `package.preload` entry and nothing
+/// about the checker. Typing the module under `htl check` / `htl test` is a separate
+/// step, the `.d.tl` reaching the checker's search path: through `[package.metadata.htl]
+/// dts` (and `dts_root`, since `std.fs` and `std.proc` are both dotted) for a project
+/// depending on this crate (`crates/htl-core/src/dep_dts.rs`), or through
 /// `Htl::add_path` directly, the way this crate's own tests wire it with no project
 /// model in play. Beside `h.install_std()?` for the synchronous `std.*`
 /// (`htl::Htl::install_std`).
 pub fn install(h: &Htl) -> anyhow::Result<()> {
     Fs.htl_preload(h)?;
+    Proc.htl_preload(h)?;
     Ok(())
 }
 
