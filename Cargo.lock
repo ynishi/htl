@@ -1019,9 +1019,9 @@ dependencies = [
 
 [[package]]
 name = "mlua-isle"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5cc4a795b44e2778b3b0a3c52fccfc4dc089ae57da2577e53235a084dbdf80b2"
+checksum = "90c9a0587786cb800063f87bc94cecc9ea552a7923fcd2ccf2fe025407eb33b8"
 dependencies = [
  "mlua",
  "thiserror",

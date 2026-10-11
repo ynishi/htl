@@ -110,19 +110,23 @@
 //! [`Asker::ask_within`] overrides it for one call: a library default would be a number
 //! nobody can justify, and a kind without a deadline is a caller that can wait forever.
 //!
-//! An ask ends one of four ways. `Ok(a)`: the loop replied within the deadline.
+//! An ask ends one of five ways. `Ok(a)`: the loop replied within the deadline.
 //! [`AskError::Timeout`]: it did not; the request is dropped, and a `req:reply` the loop
 //! makes afterwards returns `false` — a late answer is discarded, not delivered to the next
 //! ask. [`AskError::Closed`]: the loop is gone — Teal called `close` on the channel, or the
 //! program's state was dropped (a loop that returned while the state lives, with the `Ask`
 //! in it, does not close the channel, and an ask then ends in `Timeout`). [`AskError::NoReply`]: the loop took
 //! the request and closed it (`local req <close> = ..`) or let it be collected without
-//! answering. A fifth, the loop refusing with a reason, is not here yet: it needs a
-//! `req:fail` on mlua-isle's request, and arrives as a variant of the `#[non_exhaustive]`
-//! [`AskError`].
+//! answering. [`AskError::Rejected`]: the loop refused, `req:reject(reason)`, and the host
+//! gets the reason as Teal gave it; like a reply, a reject after the deadline returns
+//! `false` to Teal.
 //!
-//! The host maps `Err(_)` to its safe default in one place, not per failure: the four are
-//! told apart for its log, not for its decision.
+//! The reason is a `string`: the [`Request<Q, A>`] an [`Ask`] carries is mlua-isle's
+//! `Request<Q, A, E>` with its default `E = String`, and htl offers no typed reason — a
+//! refusal is told apart for the host's log, and text is what a log takes.
+//!
+//! The host maps `Err(_)` to its safe default in one place, not per failure: the four
+//! failures are told apart for its log, not for its decision.
 //!
 //! Only a host whose Teal runs on the executor can ask: the loop has to wait on the
 //! request channel. The window and cdylib hosts cannot — nothing in their run is a root
@@ -526,19 +530,26 @@ impl<Q, A> Asker<Q, A> {
     /// with its time driver enabled.
     ///
     /// Dropping the future is the same as a timeout: the request is abandoned, and a
-    /// `req:reply` Teal makes afterwards returns `false`.
+    /// `req:reply` or `req:reject` Teal makes afterwards returns `false`.
     ///
     /// # Errors
     ///
     /// [`AskError::Timeout`] with `deadline` when no answer came in time;
     /// [`AskError::Closed`] when the channel was closed before the request was queued (Teal
-    /// closed it, or the program's state was dropped); [`AskError::NoReply`] when Teal
+    /// closed it, or the program's state was dropped); [`AskError::Rejected`] with the
+    /// reason when Teal called `req:reject(reason)`; [`AskError::NoReply`] when Teal
     /// closed or collected the request unanswered, or `q` failed to convert to a Lua value.
     pub async fn ask_within(&self, q: Q, deadline: Duration) -> Result<A, AskError> {
         match tokio::time::timeout(deadline, self.tx.request(q)).await {
             Ok(Ok(a)) => Ok(a),
             Ok(Err(RequestError::Closed(_))) => Err(AskError::Closed),
             Ok(Err(RequestError::NoReply)) => Err(AskError::NoReply),
+            Ok(Err(RequestError::Rejected(reason))) => Err(AskError::Rejected(reason)),
+            // `RequestError` is `#[non_exhaustive]`: a later mlua-isle may add a way for a
+            // request to end unanswered. Until htl names it, it is the request ending
+            // without an answer, and `AskError` (non-exhaustive too) can take a variant for
+            // it when it comes.
+            Ok(Err(_)) => Err(AskError::NoReply),
             Err(_elapsed) => Err(AskError::Timeout(deadline)),
         }
     }
@@ -552,14 +563,13 @@ impl<Q, A> Asker<Q, A> {
 /// argument of the call that failed) and an error that carries `Q` cannot be one type
 /// across kinds.
 ///
-/// `#[non_exhaustive]` because a fifth arrives with mlua-isle's `req:fail(reason)`:
-/// `Rejected(String)`, the loop refusing with a reason rather than staying silent. A match
-/// on it keeps a `_` arm.
+/// `#[non_exhaustive]` because the transport may learn another way to fail (mlua-isle's
+/// `RequestError` is non-exhaustive too). A match on it keeps a `_` arm.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AskError {
     /// No answer within the deadline, which it carries. The request is abandoned: Teal's
-    /// later `req:reply` returns `false`.
+    /// later `req:reply` or `req:reject` returns `false`.
     Timeout(Duration),
     /// The loop is gone: the channel was closed before the request was queued — Teal
     /// called `close` on it, or the program's state was dropped.
@@ -568,6 +578,9 @@ pub enum AskError {
     /// collected without answering; or the question failed to convert to a Lua value, and
     /// Teal never saw it.
     NoReply,
+    /// The loop refused: Teal called `req:reject(reason)`. Carries the reason as Teal gave
+    /// it.
+    Rejected(String),
 }
 
 impl std::fmt::Display for AskError {
@@ -576,6 +589,7 @@ impl std::fmt::Display for AskError {
             AskError::Timeout(d) => write!(f, "Teal did not answer within {d:?}"),
             AskError::Closed => f.write_str("the Teal loop's request channel is closed"),
             AskError::NoReply => f.write_str("Teal closed the request without answering"),
+            AskError::Rejected(reason) => write!(f, "Teal rejected the request: {reason}"),
         }
     }
 }

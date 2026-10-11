@@ -16,8 +16,9 @@
 //!   when its scope ends, and the host sees its future dropped.
 //! - `--ask` runs `scripts/ask.tl`, a loop that answers the host's questions: the host
 //!   asks from a thread of its own through an `htl::task::Asker` with the kind's deadline,
-//!   Teal takes each one from `gate:calls()` and replies, and an ask that fails — here the
-//!   one Teal answers too late — becomes the safe side (deny) in one place.
+//!   Teal takes each one from `gate:calls()` and replies or rejects, and an ask that fails
+//!   — here the one Teal answers too late and the one it rejects — becomes the safe side
+//!   (deny) in one place.
 
 use anyhow::Result;
 use htl::task::{Ask, Asker, RecvChannel, Request};
@@ -201,7 +202,7 @@ impl Gate {
 }
 
 /// The one place an ask that has no answer becomes the safe side: whatever the reason —
-/// a timeout, a closed loop, a request left unanswered — the path is denied, and the
+/// a timeout, a closed loop, a request left unanswered or rejected — the path is denied, and the
 /// error's text is kept as the reason for the log.
 async fn ask_gate(asker: &Asker<Call, Decision>, path: &str) -> Decision {
     let call = Call {
@@ -268,7 +269,7 @@ fn main() -> Result<()> {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_time()
                 .build()?;
-            for path in ["/public/index", "/admin", "/slow"] {
+            for path in ["/public/index", "/admin", "relative", "/slow"] {
                 let d = rt.block_on(ask_gate(&asker, path));
                 if d.allow {
                     println!("gate {path} -> allow");

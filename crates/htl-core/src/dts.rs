@@ -44,7 +44,7 @@
 //! | `&mlua::Lua` as a `#[host_module]` parameter | nothing: left out, as `&self` is; see the `host_module` macro doc | the state the method runs on |
 //! | `#[teal(noyield)] update: Function` as a record field | `update: function ---@noyield` (`Option<Function>` as any field); see the `host_module` macro doc, *A Lua function as a parameter*, for when a field says it | a Lua function the host reads off the table and calls |
 //! | `htl::task::RecvChannel<T>` / `SendChannel<T>` (feature `async`) as a `#[host_module]` return or parameter | `task.RecvChannel<T>` / `task.SendChannel<T>`, with `local type task = require("htl.task")` as the file's first line | the `htl.task` channel object: Teal receives from the first and sends into the second, and the other direction is a check error |
-//! | `htl::task::Request<Req, Resp>` as a channel's element | `task.Request<Req, Resp>` | a value Teal answers once with `req:reply(v)` |
+//! | `htl::task::Request<Req, Resp>` as a channel's element | `task.Request<Req, Resp>` | a value Teal answers once, `req:reply(v)` or `req:reject(reason)`; a third type argument (mlua-isle's rejection type) is an error, the reason being a `string` |
 //!
 //! A data-carrying enum is declared nested in the host module (`records = [Shape]`),
 //! where its variant records are reachable as `host.Shape_Circle` for `is`; a record
@@ -213,12 +213,24 @@ fn teal_type_in(ty: &Type, self_name: &str, uses: &[Use]) -> Result<String, Stri
                 // `htl::task`'s typed host channels and requests, declared in `htl.task`:
                 // the generated declaration imports it as `task` (see `with_task_default`).
                 // Matched by name and arity, so a type of the host's own called `Request`
-                // without two type arguments stays a name of its own.
+                // with fewer than two type arguments stays a name of its own (three is
+                // refused below).
                 "RecvChannel" | "SendChannel" if args.len() == 1 => {
                     format!("{TASK_ALIAS}.{ident}<{}>", arg(0)?)
                 }
                 "Request" if args.len() == 2 => {
                     format!("{TASK_ALIAS}.Request<{}, {}>", arg(0)?, arg(1)?)
+                }
+                // mlua-isle's `Request<Req, Resp, E>` with the rejection reason's type
+                // spelled out. `task.Request` declares `req:reject(reason: string)`, the
+                // `E = String` htl's `Ask` uses; a third argument has no Teal spelling, and
+                // falling through to the bare name would declare a `Request` no `.d.tl`
+                // has. Refused here rather than guessed.
+                "Request" if args.len() == 3 => {
+                    return Err("`Request` with three type arguments: htl's `task.Request` \
+                                takes two, `Request<Q, A>`; the rejection reason is a string \
+                                (`req:reject(reason: string)`), so drop the third"
+                        .into());
                 }
                 other => other.to_string(),
             })
@@ -2806,6 +2818,35 @@ mod tests {
         assert_eq!(
             teal_type(&ty("htl::task::Request<i64>"), "Self").unwrap(),
             "Request"
+        );
+    }
+
+    /// `Request` with a third type argument — mlua-isle's rejection reason type — is
+    /// refused, not passed through as the bare name: `task.Request<Q, A>` fixes the reason
+    /// to `string`, so the message names the two-argument form to write instead. The
+    /// refusal reaches a `#[host_module]` signature (the macro and `htl dts` both declare
+    /// through `host_decl`).
+    #[test]
+    fn a_request_with_a_rejection_type_argument_is_refused() {
+        let ty = |s: &str| syn::parse_str::<Type>(s).unwrap();
+        let err = teal_type(&ty("Request<String, i64, String>"), "Self").unwrap_err();
+        assert!(
+            err.contains("`task.Request` takes two, `Request<Q, A>`"),
+            "{err}"
+        );
+        assert!(err.contains("the rejection reason is a string"), "{err}");
+        assert!(err.contains("drop the third"), "{err}");
+        let err = match host_of_result(
+            "pub struct D;\n\
+             #[host_module(name = \"d\")]\n\
+             impl D {\n    pub fn calls(&self) -> RecvChannel<Request<String, i64, String>> { todo!() }\n}\n",
+        ) {
+            Ok(hd) => panic!("expected an error, got {}", hd.decl),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("`task.Request` takes two, `Request<Q, A>`"),
+            "{err}"
         );
     }
 
