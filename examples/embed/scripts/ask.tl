@@ -30,7 +30,10 @@ while open do
             await task.after(500):wait()
             assert(not req:reply(decide(req.value)), "a reply after the deadline was delivered")
          else
-            req:reply(decide(req.value))
+            -- The ordinary path: `answer` replies with what `decide` returns, and would
+            -- reject with the error if `decide` raised, so a bug reaches the host as
+            -- `AskError::Rejected` rather than as a timeout.
+            await task.answer(req, decide)
          end
          return true
       end),

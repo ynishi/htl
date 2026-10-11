@@ -67,7 +67,9 @@
 -- A host hands a channel to Teal from a `#[host_module]` method: `htl::task::RecvChannel<T>`
 -- is declared `task.RecvChannel<T>` (the host sends, Teal receives), `htl::task::SendChannel<T>`
 -- is `task.SendChannel<T>` (Teal sends, the host receives), and `htl::task::Request<A, B>`
--- is `task.Request<A, B>`, a value Teal answers with `reply`. Calling `send` on a
+-- is `task.Request<A, B>`, a value Teal answers with `reply` or `reject`, or hands to
+-- `await task.answer(req, f)`, which replies with what `f` returns and rejects with the
+-- error when `f` raises. Calling `send` on a
 -- receive-only channel, or `recv` on a send-only one, is a check error. A local
 -- `task.channel` is both, a `Channel<T>`, and goes wherever either end is asked for.
 --
@@ -214,6 +216,15 @@ local record task
    -- reads `async local x = e` as (`[lang] async`), so that `x: Task<T>` is typed from `e`;
    -- the Lua that runs spawns `e` as a task instead. It has no select case.
    of: function<T>(v: T): Task<T>
+
+   -- Answer `req` with `f(req.value)`: the value is replied (`reply`'s boolean returned);
+   -- an error `f` raises is rejected with its `tostring` (the position prefix included,
+   -- the stack traceback cut off), and a value `reply` cannot convert with
+   -- `reply failed: ` and the conversion error, so
+   -- a decision that fails reaches the host as `Rejected` and not as a timeout. A cancel
+   -- inside `f` rejects the request and is raised again. `---@async` because `f` may await
+   -- (an `async function`); a plain `f` is fine, and the `await` costs nothing.
+   answer: function<Req, Resp>(req: Request<Req, Resp>, f: function(Req): Resp): boolean ---@async
 
    -- Whether `err` is a cancellation: what a cancel raises inside a task (caught with
    -- `pcall`, or handed to a `__close` handler), or `CANCELLED`. `false` for anything else.

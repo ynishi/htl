@@ -2,7 +2,8 @@
 //! the host channels a `#[host_module]` hands to Teal (`htl::task::RecvChannel` /
 //! `SendChannel` / `Request`, and `Ask` for a question): what the checker accepts and
 //! refuses, that a host feeds and drains a Teal loop through them, how an ask ends (an
-//! answer, a timeout, a closed channel, a request left unanswered), that a generated
+//! answer, a timeout, a closed channel, a request left unanswered or rejected), what
+//! `task.answer` turns a decision into (a reply, or a reject with why), that a generated
 //! declaration imports `htl.task` for a channel, and that `await-missing` reports the waits
 //! written without `await`. The
 //! library's own run-time cases, the joined state of a task case included, are in
@@ -662,5 +663,192 @@ fn await_missing_reports_the_waits_written_without_await() {
         !ci.lints.iter().any(|l| l.contains("await-non-async")),
         "{:#?}",
         ci.lints
+    );
+}
+
+// ---------------------------------------------------------------- 5. task.answer
+
+/// `task.answer(req, f)` with an `f` that returns: the request is replied with the value,
+/// and `answer` returns `reply`'s `true`.
+#[test]
+fn answer_replies_with_what_f_returns() {
+    let (_c, h, asker) = asking_daemon(Duration::from_secs(10));
+    let asking = ask_on_a_thread(asker, "hello");
+    run(
+        &h,
+        "local task = require('htl.task') \
+         local d = require('daemon') \
+         local req = d:calls():recv() \
+         DELIVERED = task.answer(req, function(q) return #q end)",
+    )
+    .unwrap();
+    assert_eq!(asking.join().unwrap().0, Ok(5));
+    assert!(global::<bool>(&h, "DELIVERED"));
+}
+
+/// An `f` that raises: the request is rejected with the error's `tostring`, which carries
+/// the position prefix Lua gave it — here `test:1: ` (the chunk is `=test`, all on one
+/// line; a program's file gives `main.tl:N: `) — and the ask ends at once, not at the
+/// deadline.
+#[test]
+fn answer_rejects_with_the_error_f_raised() {
+    let deadline = Duration::from_secs(10);
+    let (_c, h, asker) = asking_daemon(deadline);
+    let asking = ask_on_a_thread(asker, "hello");
+    run(
+        &h,
+        "local task = require('htl.task') \
+         local d = require('daemon') \
+         local req = d:calls():recv() \
+         DELIVERED = task.answer(req, function(q) error('bad input') end)",
+    )
+    .unwrap();
+    let (answer, waited) = asking.join().unwrap();
+    assert_eq!(
+        answer,
+        Err(AskError::Rejected("test:1: bad input".to_string()))
+    );
+    assert!(waited < deadline, "{waited:?}");
+    assert!(global::<bool>(&h, "DELIVERED"));
+}
+
+/// An `f` that returns what the host's type does not take (a table for `i64`): `reply`
+/// raises the conversion error, and `answer` rejects with it after `reply failed: ` rather
+/// than leaving the request open until the deadline. The conversion error is mlua's error
+/// value, whose `tostring` carries a stack traceback; `answer` cuts it, and the reason is
+/// the one line before it.
+#[test]
+fn answer_rejects_a_value_reply_cannot_convert() {
+    let deadline = Duration::from_secs(10);
+    let (_c, h, asker) = asking_daemon(deadline);
+    let asking = ask_on_a_thread(asker, "hello");
+    run(
+        &h,
+        "local task = require('htl.task') \
+         local d = require('daemon') \
+         local req = d:calls():recv() \
+         DELIVERED = task.answer(req, function(q) return {} end)",
+    )
+    .unwrap();
+    let (answer, waited) = asking.join().unwrap();
+    match &answer {
+        Err(AskError::Rejected(msg)) => assert_eq!(
+            msg,
+            "reply failed: error converting Lua table to i64 \
+             (expected number or string coercible to number)"
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert!(waited < deadline, "{waited:?}");
+    assert!(global::<bool>(&h, "DELIVERED"));
+}
+
+/// The Teal form: `await task.answer(req, async function(q: string): integer .. end)` under
+/// `[lang] async` checks clean (an `async function` is an `f`), and its generated Lua, run
+/// on the host, answers after `f`'s own await.
+#[test]
+fn answer_with_an_async_f_checks_and_replies_after_its_await() {
+    let dir = tempdir("answer-async");
+    write(&dir, "daemon.d.tl", Daemon::DECL);
+    let main = write(
+        &dir,
+        "main.tl",
+        "local task = require(\"htl.task\")\n\
+         local daemon = require(\"daemon\")\n\
+         local req = await daemon:calls():recv()\n\
+         local delivered = await task.answer(req, async function(q: string): integer\n\
+         \x20  await task.after(10):wait()\n\
+         \x20  return #q\n\
+         end)\n\
+         print(delivered)\n",
+    );
+    let (code, ci) = checker(&dir, true).gen_lua(&main).unwrap();
+    assert!(ci.errors.is_empty(), "{:#?}", ci.errors);
+    assert!(
+        !ci.lints.iter().any(|l| l.contains("await-")),
+        "{:#?}",
+        ci.lints
+    );
+    let code = code.expect("generated");
+    let (_c, h, asker) = asking_daemon(Duration::from_secs(10));
+    let asking = ask_on_a_thread(asker, "hello");
+    run(&h, &code).unwrap();
+    assert_eq!(asking.join().unwrap().0, Ok(5));
+}
+
+/// `answer` is `---@async`: under `[lang] async`, a call written without `await` is
+/// reported at its line, and the same call with it is not.
+#[test]
+fn await_missing_reports_an_answer_written_without_await() {
+    let dir = tempdir("answer-await-missing");
+    write(&dir, "daemon.d.tl", Daemon::DECL);
+    let main = write(
+        &dir,
+        "main.tl",
+        "local task = require(\"htl.task\")\n\
+         local daemon = require(\"daemon\")\n\
+         local req = await daemon:calls():recv()\n\
+         local function decide(q: string): integer return #q end\n\
+         local a = task.answer(req, decide)\n\
+         local b = await task.answer(req, decide)\n\
+         print(a, b)\n",
+    );
+    let ci = checker(&dir, true).check(&main).unwrap();
+    assert!(ci.errors.is_empty(), "{:#?}", ci.errors);
+    let missing: Vec<&String> = ci
+        .lints
+        .iter()
+        .filter(|l| l.contains("[htl await-missing]"))
+        .collect();
+    assert_eq!(missing.len(), 1, "{:#?}", ci.lints);
+    assert!(
+        missing[0].contains(
+            "main.tl:5:11: call of an async function without await: task.answer may suspend"
+        ),
+        "{}",
+        missing[0]
+    );
+}
+
+/// A loop task cancelled while `f` waits inside `answer`: the cancel reaches `f` at its
+/// await, `answer` rejects the request with the cancel's text and raises the cancel again,
+/// so the task ends cancelled (its `join` gives `false` and a value `is_cancelled`
+/// recognises) and the host's ask is `Rejected`, at once rather than at the deadline. The
+/// reason is the cancel's `tostring` with its stack traceback cut: `cancelled`.
+#[test]
+fn a_cancel_inside_answer_rejects_the_request_and_is_raised_again() {
+    let deadline = Duration::from_secs(10);
+    let (_c, h, asker) = asking_daemon(deadline);
+    let asking = ask_on_a_thread(asker, "hello");
+    run(
+        &h,
+        "local task = require('htl.task') \
+         local d = require('daemon') \
+         local t = task.spawn(function() \
+            local req = d:calls():recv() \
+            task.answer(req, function(q) task.after(60000):wait() return #q end) \
+            AFTER = true \
+         end) \
+         task.after(100):wait() \
+         t:cancel() \
+         local ok, err = t:join() \
+         JOINED_OK = ok CANCELLED = task.is_cancelled(err)",
+    )
+    .unwrap();
+    let (answer, waited) = asking.join().unwrap();
+    assert_eq!(
+        answer,
+        Err(AskError::Rejected("cancelled".to_string())),
+        "{answer:?}"
+    );
+    assert!(waited < deadline, "{waited:?}");
+    assert!(!global::<bool>(&h, "JOINED_OK"));
+    assert!(global::<bool>(&h, "CANCELLED"));
+    assert!(
+        h.lua()
+            .globals()
+            .get::<Option<bool>>("AFTER")
+            .unwrap()
+            .is_none()
     );
 }
