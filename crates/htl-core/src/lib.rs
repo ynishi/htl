@@ -77,6 +77,21 @@ pub use mlua;
 /// and a host's own instruction or line callback register with it rather than each
 /// taking the one hook slot a Lua thread has — see [`Htl::hook_owner`].
 pub use mlua_isle;
+/// serde, with its `derive` feature, as htl builds it: `htl::serde`. A host that already
+/// depends on `serde` itself changes nothing and keeps writing `#[derive(Serialize)]`
+/// against its own. A host that does not can derive through this one, but serde's derive
+/// writes `::serde::..` paths into the code it generates, which only resolve against a
+/// direct dependency, so the type also says where serde is:
+///
+/// ```rust,ignore
+/// #[derive(htl::serde::Serialize, htl::serde::Deserialize)]
+/// #[serde(crate = "htl::serde")]
+/// struct Call { id: String }
+/// ```
+pub use serde;
+/// serde_json, as htl builds it: `htl::serde_json`, for the host that reads or writes the
+/// JSON its `htl::serde` types describe without a dependency of its own.
+pub use serde_json;
 
 use anyhow::{Context, Result, anyhow, bail};
 use mlua::chunk::ChunkMode;
