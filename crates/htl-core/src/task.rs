@@ -125,6 +125,28 @@
 //! `Request<Q, A, E>` with its default `E = String`, and htl offers no typed reason — a
 //! refusal is told apart for the host's log, and text is what a log takes.
 //!
+//! `task.answer(req, f)` answers a request with the loop's decision, `f(req.value)`, and
+//! turns a decision that fails into a refusal instead of silence: what `f` returns is
+//! replied; an error `f` raises is rejected with its `tostring` — the message as Lua gives
+//! it, `main.tl:12: ` position prefix included — and a value `reply` cannot convert to the
+//! host's type is rejected with `reply failed: ` and the conversion error. The stack
+//! traceback an error raised on the Rust side (a conversion, a cancel) carries in its
+//! `tostring` is cut off: the reason is the message before it, position prefix included,
+//! and the traceback stays the loop's debug information, out of the host's log. Either
+//! way the
+//! host gets [`AskError::Rejected`] with the reason at once, not [`AskError::Timeout`] at the
+//! deadline. A cancellation of the loop is not a refusal: `answer` rejects the request, best
+//! effort, and raises the cancel again, so the loop unwinds as a cancelled task does. It is
+//! declared `---@async` because `f` may await (a host call, a timer); a plain `f` is fine
+//! too, and the `await` costs nothing:
+//!
+//! ```lua
+//! reqs:on(function(req: task.Request<hook.Call, hook.Decision>, ok: boolean): boolean
+//!    if ok then await task.answer(req, decide) end
+//!    return ok
+//! end)
+//! ```
+//!
 //! The host maps `Err(_)` to its safe default in one place, not per failure: the four
 //! failures are told apart for its log, not for its decision.
 //!
@@ -165,6 +187,10 @@ pub const TASK_LIB: &str = "htl.task";
 /// already joined": the value was already consumed. The field is mlua-isle's, not a
 /// documented API; `select_case_then_await` in `crates/htl/tests/task_lib.rs` is
 /// what notices if a release renames it.
+///
+/// `answer` is the one function of htl's that takes a request: `pcall` around the loop's
+/// decision, so that a decision that raises still answers the host (see the module doc,
+/// "A host asks Teal").
 ///
 /// Channels, timers and select (`channel`, `after`, `ticker`, `select`, `select_raw`) are
 /// mlua-isle's functions forwarded as they are: their objects carry no method of htl's,
@@ -245,6 +271,35 @@ local Done = {
 Done.__index = Done
 function task.of(v)
    return setmetatable({ h = setmetatable({ v = v }, Done) }, Task)
+end
+-- Answer `req` with what `f(req.value)` returns, or refuse it with why it could not be
+-- answered: a value is replied (and `reply`'s boolean returned); an error `f` raised is
+-- rejected with its `tostring`, the position prefix Lua gave it included; a value `reply`
+-- cannot convert to the host's type is rejected with `reply failed: ` and the conversion
+-- error. A cancellation is not an answer: the request is rejected best effort and the
+-- cancel is raised again, so the loop unwinds. A `reject` that raises (the request was
+-- already answered) propagates: that is the loop's bug, not the request's. Every reason
+-- goes through `reason`, which cuts the stack traceback an error raised on the Rust side
+-- carries in its `tostring`: the traceback is the loop's debug information, and the
+-- reason is what the host logs.
+local function reason(err)
+   local msg = tostring(err)
+   local at = msg:find("\nstack traceback:", 1, true)
+   if at then return msg:sub(1, at - 1) end
+   return msg
+end
+function task.answer(req, f)
+   local ok, r = pcall(f, req.value)
+   if ok then
+      local replied, sent = pcall(req.reply, req, r)
+      if replied then return sent end
+      return req:reject("reply failed: " .. reason(sent))
+   end
+   if task.is_cancelled(r) then
+      pcall(req.reject, req, reason(r))
+      error(r, 0)
+   end
+   return req:reject(reason(r))
 end
 return task
 "#;
