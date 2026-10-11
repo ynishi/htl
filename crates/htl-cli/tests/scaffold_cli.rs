@@ -254,13 +254,20 @@ fn the_bin_targets_htl_std_line_follows_the_pin_and_preload_installs_it() {
     let htl = htl_line(&manifest);
     assert!(htl.contains("features = [\"async\"]"), "htl: {htl}");
     let std_line = dep_line(&manifest, "htl-std");
-    assert_eq!(
-        std_line,
-        htl.replace(", features = [\"async\"]", "")
-            .replacen("htl = ", "htl-std = ", 1)
-            .replace("/crates/htl\"", "/crates/htl-std\""),
-        "htl: {htl}"
-    );
+    let expected = htl
+        .replace(", features = [\"async\"]", "")
+        .replacen("htl = ", "htl-std = ", 1)
+        .replace("/crates/htl\"", "/crates/htl-std\"");
+    // With the feature list gone, a release pin is a bare version, which the scaffold
+    // writes in the short form (`htl-std = "0.7.0"`), not as a one-key table.
+    let expected = match expected
+        .strip_prefix("htl-std = { version = ")
+        .and_then(|rest| rest.strip_suffix(" }"))
+    {
+        Some(version) => format!("htl-std = {version}"),
+        None => expected,
+    };
+    assert_eq!(std_line, expected, "htl: {htl}");
     let lib_rs = std::fs::read_to_string(root.join("s/src/lib.rs")).unwrap();
     assert!(lib_rs.contains("h.install_std()?;"), "{lib_rs}");
     assert!(lib_rs.contains("htl_std::install(h)?;"), "{lib_rs}");
