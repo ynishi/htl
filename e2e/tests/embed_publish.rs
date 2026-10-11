@@ -16,12 +16,15 @@
 //! install` naming the URL rather than a skip.
 //!
 //! **The pin is rewritten before packaging, and that is not a weakening.** A CLI built
-//! from this checkout writes `htl = { path = <checkout> }`, and cargo refuses to package
-//! a path dependency that names no version — so the line becomes the version this
-//! workspace is at, and the three htl crates are patched at the trees under test through
-//! `--config`, off to one side of the manifest. That is what `e2e-scaffold-packaged`
-//! does for the same reason, and cargo applies it to the verification build as well: the
-//! copy under `target/package/` compiles against the htl in this working tree.
+//! from this checkout writes `htl = { path = <checkout>, features = ["async"] }` and
+//! `htl-std = { path = <checkout> }` — `--embed` is `--target bin`, which carries both,
+//! issue #474 acceptance 3 — and cargo refuses to package a path dependency that names
+//! no version, so each line becomes the version this workspace is at (`htl`'s features
+//! kept, or the verification build below fails on its feature-gated calls), and the
+//! four htl crates are patched at the trees under test through `--config`, off to one
+//! side of the manifest. That is what `e2e-scaffold-packaged` does for the same reason,
+//! and cargo applies it to the verification build as well: the copy under
+//! `target/package/` compiles against the htl in this working tree.
 
 use std::ffi::OsString;
 use std::fs;
@@ -137,7 +140,7 @@ fn git(cwd: &Path, args: &[&str]) {
     );
 }
 
-/// Where the three htl crates are for the project being packaged: the extracted tarballs
+/// Where the four htl crates are for the project being packaged: the extracted tarballs
 /// when the packaged gate named them, this checkout otherwise.
 fn patch_args() -> Vec<String> {
     let mut args = Vec::new();
@@ -145,6 +148,7 @@ fn patch_args() -> Vec<String> {
         ("htl", "HTL_PATCH_HTL", "crates/htl"),
         ("htl-core", "HTL_PATCH_CORE", "crates/htl-core"),
         ("htl-macros", "HTL_PATCH_MACROS", "crates/htl-macros"),
+        ("htl-std", "HTL_PATCH_STD", "crates/htl-std"),
     ] {
         let path = std::env::var_os(var)
             .map(PathBuf::from)
@@ -222,12 +226,27 @@ fn a_crate_with_a_patched_dependency_packages_and_verifies_with_nothing_written_
     // Cargo will not package a path dependency that names no version; the header of this
     // file says why rewriting it is the same build all the same.
     let manifest = project.join("Cargo.toml");
+    // `htl`'s line also carries `features = ["async"]` (`--embed` is `--target bin`, and
+    // the host's `preload` / `main.rs` need `Htl::install_task_lib` / `call_blocking`,
+    // issue #474 acceptance 3) — kept rather than dropped, or the verification build
+    // below fails on those feature-gated calls. `htl-std` names no features of its own,
+    // the way `htl-mq` does not under `--target window`, so its line only moves to a
+    // version.
+    let version = env!("CARGO_PKG_VERSION");
     let pinned = fs::read_to_string(&manifest)
         .unwrap()
         .lines()
         .map(|l| {
             if l.starts_with("htl = ") {
-                format!("htl = \"{}\"", env!("CARGO_PKG_VERSION"))
+                match l.find("features = [") {
+                    Some(start) => {
+                        let end = l[start..].find(']').map(|e| start + e + 1).unwrap();
+                        format!("htl = {{ version = \"{version}\", {} }}", &l[start..end])
+                    }
+                    None => format!("htl = \"{version}\""),
+                }
+            } else if l.starts_with("htl-std = ") {
+                format!("htl-std = \"{version}\"")
             } else {
                 l.to_string()
             }
@@ -235,8 +254,14 @@ fn a_crate_with_a_patched_dependency_packages_and_verifies_with_nothing_written_
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        pinned.contains(&format!("htl = \"{}\"", env!("CARGO_PKG_VERSION"))),
+        pinned.contains(&format!(
+            "htl = {{ version = \"{version}\", features = [\"async\"] }}"
+        )),
         "the scaffold writes a line starting `htl = `, whoever built it:\n{pinned}"
+    );
+    assert!(
+        pinned.contains(&format!("htl-std = \"{version}\"")),
+        "and the sibling it carries under the same pin, the way --target window carries htl-mq:\n{pinned}"
     );
     assert!(
         !pinned.contains("patch.crates-io") && !pinned.contains("exclude"),

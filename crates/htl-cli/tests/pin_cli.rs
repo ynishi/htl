@@ -92,9 +92,15 @@ fn pin_path_rewrites_a_release_or_checkout_pin_and_removes_mise_toml() {
         "a release pin writes mise.toml"
     );
     let before = std::fs::read_to_string(&manifest).unwrap();
+    // `--target bin` carries `features = ["async"]` on the `htl` line, which `htl pin`
+    // keeps across the move (`the_cdylib_feature_list_survives_every_pin_kind` holds the
+    // same for `ffi`).
     assert_eq!(
         htl_line(&manifest),
-        format!("htl = \"{}\"", env!("CARGO_PKG_VERSION"))
+        format!(
+            "htl = {{ version = \"{}\", features = [\"async\"] }}",
+            env!("CARGO_PKG_VERSION")
+        )
     );
 
     let checkout = checkout_path();
@@ -102,7 +108,7 @@ fn pin_path_rewrites_a_release_or_checkout_pin_and_removes_mise_toml() {
     assert_eq!(code, Some(0), "{stderr}");
     assert_eq!(
         htl_line(&manifest),
-        format!("htl = {{ path = \"{checkout}/crates/htl\" }}")
+        format!("htl = {{ path = \"{checkout}/crates/htl\", features = [\"async\"] }}")
     );
     assert!(!dir.join("mise.toml").exists(), "{stderr}");
 
@@ -132,7 +138,10 @@ fn pin_release_writes_the_clis_version_and_mise_toml_back() {
     assert_eq!(code, Some(0), "{stderr}");
     assert_eq!(
         htl_line(&dir.join("Cargo.toml")),
-        format!("htl = \"{}\"", env!("CARGO_PKG_VERSION"))
+        format!(
+            "htl = {{ version = \"{}\", features = [\"async\"] }}",
+            env!("CARGO_PKG_VERSION")
+        )
     );
     let mise = std::fs::read_to_string(dir.join("mise.toml")).unwrap();
     assert!(
@@ -225,7 +234,10 @@ fn the_bin_targets_htl_std_line_moves_with_the_htl_line() {
     assert_eq!(code, Some(0), "{stderr}");
     assert_eq!(
         htl_line(&manifest),
-        format!("htl = \"{}\"", env!("CARGO_PKG_VERSION"))
+        format!(
+            "htl = {{ version = \"{}\", features = [\"async\"] }}",
+            env!("CARGO_PKG_VERSION")
+        )
     );
     assert_eq!(
         dep_line(&manifest, "htl-std"),
@@ -237,7 +249,7 @@ fn the_bin_targets_htl_std_line_moves_with_the_htl_line() {
     assert_eq!(code, Some(0), "{stderr}");
     assert_eq!(
         htl_line(&manifest),
-        format!("htl = {{ path = \"{checkout}/crates/htl\" }}")
+        format!("htl = {{ path = \"{checkout}/crates/htl\", features = [\"async\"] }}")
     );
     assert_eq!(
         dep_line(&manifest, "htl-std"),
@@ -446,7 +458,7 @@ fn a_relative_path_is_resolved_against_the_current_directory() {
         .to_string();
     assert_eq!(
         htl_line(&sub.join("demo/Cargo.toml")),
-        format!("htl = {{ path = \"{expected}/crates/htl\" }}")
+        format!("htl = {{ path = \"{expected}/crates/htl\", features = [\"async\"] }}")
     );
 }
 
@@ -622,17 +634,25 @@ fn an_htl_line_outside_dependencies_does_not_confuse_the_real_one() {
     // would have left the git pin in place (reading the patch line as already-correct)
     // and the path form only once.
     assert!(!after.contains("branch = \"main\""), "{after}");
-    let path_form = format!("htl = {{ path = \"{checkout}/crates/htl\" }}");
-    assert_eq!(after.matches(&path_form).count(), 2, "{after}");
+    // The `[patch.crates-io]` line is hand-written above and untouched by the move, so
+    // it carries no features; the real `[dependencies]` line does (`--target bin`'s
+    // `features = ["async"]`), so the two are no longer the same string.
+    let patch_path_form = format!("htl = {{ path = \"{checkout}/crates/htl\" }}");
+    let dep_path_form =
+        format!("htl = {{ path = \"{checkout}/crates/htl\", features = [\"async\"] }}");
+    assert_eq!(after.matches(&patch_path_form).count(), 1, "{after}");
+    assert_eq!(after.matches(&dep_path_form).count(), 1, "{after}");
     assert!(
-        after.contains(&format!("[patch.crates-io]\n{path_form}")),
+        after.contains(&format!("[patch.crates-io]\n{patch_path_form}")),
         "{after}"
     );
 
     // And the summary reported the real move (git -> path), not a no-op.
     assert!(stderr.contains("git = "), "{stderr}");
     assert!(
-        stderr.contains(&format!("-> {{ path = \"{checkout}/crates/htl\" }}")),
+        stderr.contains(&format!(
+            "-> {{ path = \"{checkout}/crates/htl\", features = [\"async\"] }}"
+        )),
         "{stderr}"
     );
 }
@@ -642,7 +662,7 @@ fn an_htl_line_outside_dependencies_does_not_confuse_the_real_one() {
 /// first two and silently miss the third.
 #[test]
 fn differently_spaced_htl_lines_all_move() {
-    for prefix in ["htl=\"", "htl   = \"", "\"htl\" = \""] {
+    for prefix in ["htl=", "htl   = ", "\"htl\" = "] {
         let root = tempdir("spacing");
         let (code, _, stderr) = htl(&["new", "a", "--target", "bin", "--htl", "release"], &root);
         assert_eq!(code, Some(0), "{prefix}: {stderr}");
@@ -650,8 +670,12 @@ fn differently_spaced_htl_lines_all_move() {
         let manifest = dir.join("Cargo.toml");
         let original = std::fs::read_to_string(&manifest).unwrap();
         let version = env!("CARGO_PKG_VERSION");
-        let canonical = format!("htl = \"{version}\"");
-        let respaced = format!("{prefix}{version}\"");
+        // `--target bin` writes the table form (`features = ["async"]`), not the bare
+        // string: only the key's spacing varies here, so the value is carried as one
+        // piece into each respelling.
+        let value = format!("{{ version = \"{version}\", features = [\"async\"] }}");
+        let canonical = format!("htl = {value}");
+        let respaced = format!("{prefix}{value}");
         let rewritten = original.replacen(&canonical, &respaced, 1);
         assert_ne!(
             rewritten, original,

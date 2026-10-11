@@ -267,32 +267,36 @@ post-publish:
     # copies out of the htl-mq this CLI's pin resolves — the published one, which is the
     # question this recipe asks — so the check runs here before that project's cargo does.
     "$dir/cli/bin/htl" check "$dir/window-sample"
+    # A published CLI pins a version and nothing else: the bin target's htl line carries
+    # `features = ["async"]` beside it (its host runs on the executor), the window target's
+    # is the bare version. Two or three numbers: from 0.7.0 the CLI writes its own three,
+    # and the 0.6.x CLIs on crates.io wrote two.
     pin="$(grep -m1 '^htl = ' "$dir/bin-sample/Cargo.toml")"
-    # A published CLI pins a version and nothing else on the line. Two or three numbers:
-    # from 0.7.0 the CLI writes its own three, and the 0.6.x CLIs on crates.io wrote two.
-    if [[ ! "$pin" =~ ^htl\ =\ \"[0-9]+\.[0-9]+(\.[0-9]+)?\"$ ]]; then
-      echo "post-publish: htl-cli $ver pins \`${pin#htl = }\`, not a version — a published CLI has to" >&2
+    if [[ ! "$pin" =~ ^htl\ =\ \{\ version\ =\ \"([0-9]+\.[0-9]+(\.[0-9]+)?)\",\ features\ =\ \[\"async\"\]\ \}$ ]]; then
+      echo "post-publish: htl-cli $ver pins \`${pin#htl = }\` in bin-sample, not \`{ version = \"<version>\", features = [\"async\"] }\` — a published CLI has to" >&2
       exit 1
     fi
-    echo "post-publish: htl-cli $ver pins ${pin#htl = }"
-    # The window project pins htl-mq beside htl, and a published CLI writes the same bare
-    # version on both lines.
+    bare="\"${BASH_REMATCH[1]}\""
+    echo "post-publish: htl-cli $ver pins $bare"
+    # The window project pins htl and htl-mq as the same bare version.
+    win="$(grep -m1 '^htl = ' "$dir/window-sample/Cargo.toml")"
+    if [[ "${win#htl = }" != "$bare" ]]; then
+      echo "post-publish: window-sample pins htl as \`${win#htl = }\`, not $bare" >&2
+      exit 1
+    fi
     mq="$(grep -m1 '^htl-mq = ' "$dir/window-sample/Cargo.toml")"
-    if [[ "${mq#htl-mq = }" != "${pin#htl = }" ]]; then
-      echo "post-publish: window-sample pins htl-mq as \`${mq#htl-mq = }\` beside htl ${pin#htl = }" >&2
+    if [[ "${mq#htl-mq = }" != "$bare" ]]; then
+      echo "post-publish: window-sample pins htl-mq as \`${mq#htl-mq = }\` beside htl $bare" >&2
       exit 1
     fi
-    # bin-sample and window-sample both pin htl-std beside htl too — the asynchronous I/O
-    # slice of `std.*` their `preload` installs — and a published CLI writes the same bare
-    # version on that line as it does on htl's.
+    # bin-sample pins htl-std beside htl too — the asynchronous I/O slice of `std.*` its
+    # `preload` installs — as the same bare version. window-sample has no htl-std: every
+    # std.fs / std.proc function is async, and nothing in the window target's run is a
+    # root the executor runs (`scaffold.rs`'s `WINDOW` doc says why), so it does not
+    # carry the dependency.
     std_bin="$(grep -m1 '^htl-std = ' "$dir/bin-sample/Cargo.toml")"
-    if [[ "${std_bin#htl-std = }" != "${pin#htl = }" ]]; then
-      echo "post-publish: bin-sample pins htl-std as \`${std_bin#htl-std = }\` beside htl ${pin#htl = }" >&2
-      exit 1
-    fi
-    std_win="$(grep -m1 '^htl-std = ' "$dir/window-sample/Cargo.toml")"
-    if [[ "${std_win#htl-std = }" != "${pin#htl = }" ]]; then
-      echo "post-publish: window-sample pins htl-std as \`${std_win#htl-std = }\` beside htl ${pin#htl = }" >&2
+    if [[ "${std_bin#htl-std = }" != "$bare" ]]; then
+      echo "post-publish: bin-sample pins htl-std as \`${std_bin#htl-std = }\` beside htl $bare" >&2
       exit 1
     fi
     for project in bin-sample lib-sample cdylib-sample window-sample; do

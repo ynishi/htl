@@ -384,24 +384,42 @@ pub struct TargetProfile {
 /// entry script. `--target bin`, and `--embed` which is its shorthand, add to the tree:
 ///
 /// ```text
-/// ├── Cargo.toml             htl + htl-std (under the same pin) + anyhow, and
+/// ├── Cargo.toml             htl (features = ["async"]) + htl-std (under the same pin)
+/// │                          + anyhow + tokio (rt, signal), and
 /// │                          [profile.dev.build-override] opt-level = 3
 /// ├── src/lib.rs             #[host_module] Host, its records, the embedded module,
 /// │                          and pub fn preload(&Htl) registering both (plus htl-std's
-/// │                          std.fs / std.proc)
+/// │                          std.fs / std.proc and htl.task)
 /// ├── src/host.d.tl          generated from src/lib.rs — by cargo build, and by
 /// │                          htl dts / htl check without building
-/// └── src/main.rs            the binary: preload, then the bundle of src/main.tl it embeds
+/// └── src/main.rs            the binary: preload, then the bundle of src/main.tl it embeds,
+///                            run on the executor with a Ctrl-C watcher of its own
 ///                            (omitted with --lib)
 /// ```
 const BIN: TargetProfile = TargetProfile {
     target: BuildTarget::Bin,
     deps: &[
-        DepLine::plain("htl", Dep::Htl),
+        DepLine {
+            name: "htl",
+            req: Dep::Htl,
+            // `Htl::install_task_lib` / `call_blocking`, so `src/main.rs` can run its
+            // bundle on the executor the way `htl run` does (issue #474 acceptance 3) —
+            // off by default (see `htl`'s `Cargo.toml`), since a host with no async
+            // method should not pay for mlua's own `async` feature unasked.
+            features: &["async"],
+        },
         // Under the same pin as `htl`: the asynchronous I/O slice of `std.*`, which this
         // target's `preload` installs beside `h.install_std()?` (see `templates/rust/lib.rs`).
         DepLine::plain("htl-std", Dep::Sibling("htl-std")),
         DepLine::plain("anyhow", Dep::Version("1")),
+        DepLine {
+            name: "tokio",
+            req: Dep::Version("1"),
+            // `src/main.rs`'s Ctrl-C watcher: a thread of its own awaiting
+            // `tokio::signal::ctrl_c()`, the way `htl run`'s `run_root` does. `rt` for the
+            // runtime that thread builds to await it on; neither is on by default.
+            features: &["rt", "signal"],
+        },
     ],
     lib: ScaffoldFile {
         path: "src/lib.rs",
@@ -518,25 +536,30 @@ const CDYLIB: TargetProfile = TargetProfile {
 /// run` stops after sixty frames and writes the last one as a PNG.
 ///
 /// ```text
-/// ├── Cargo.toml             htl + htl-mq + htl-std (under the same pin) + anyhow
+/// ├── Cargo.toml             htl + htl-mq (under the same pin) + anyhow
 /// ├── src/lib.rs             #[host_module] Fx — the project's own GPU side — the embedded
-/// │                          engine, and preload registering it, `fx`, htl-mq's `mq` and
-/// │                          htl-std's std.fs / std.proc
+/// │                          engine, and preload registering it, `fx` and htl-mq's `mq`
 /// ├── src/fx.d.tl            generated from src/lib.rs by cargo build / htl dts / htl check
 /// ├── src/<mod>/init.tl      the engine: balls in a box, pure rules, no window
 /// ├── src/main.tl            the game table htl_mq::run drives: update(dt), draw()
 /// ├── src/main.rs            the binary: preload, then htl_mq::run
 /// └── types/htl-mq/mq.d.tl   the dependency's declaration, copied in by htl check
 /// ```
+///
+/// No `htl-std`: every `std.fs` / `std.proc` function is `async`, and nothing in this
+/// target's run is a root the executor runs. `src/main.tl`'s top level runs synchronously
+/// (`htl_mq::run` reads `require('main')` through a plain `eval`), and `update` / `draw`
+/// are `#[teal(noyield)]`, called by macroquad's own loop. An `await` in a callback is
+/// refused by the checker; one at the top level passes `htl check` (the entry is treated
+/// as async there) and then fails at run time, since a `require` reached through `eval`
+/// cannot yield (`htl::lint`'s `await-outside-async` says the same). A target whose loop
+/// can run a root would carry it.
 const WINDOW: TargetProfile = TargetProfile {
     target: BuildTarget::Window,
     deps: &[
         DepLine::plain("htl", Dep::Htl),
         // Under the same pin as `htl`: they are two crates of one tree, and one version.
         DepLine::plain("htl-mq", Dep::Sibling("htl-mq")),
-        // Also under that pin: the asynchronous I/O slice of `std.*`, which this target's
-        // `preload` installs beside `h.install_std()?` (see `templates/window/lib.rs`).
-        DepLine::plain("htl-std", Dep::Sibling("htl-std")),
         DepLine::plain("anyhow", Dep::Version("1")),
     ],
     lib: ScaffoldFile {

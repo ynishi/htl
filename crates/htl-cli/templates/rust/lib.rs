@@ -37,8 +37,8 @@ impl Host {
 // in this file, or, when the two are in different files, in `mod` order.
 const BUNDLE: &[u8] = htl::include_bundle!("src/{{mod}}/init.tl");
 
-/// Register what this crate provides on a fresh `Htl`: the Rust `host` module, `std.*`
-/// and `std.fs` / `std.proc`, then the Teal module as `require("{{mod}}")`.
+/// Register what this crate provides on a fresh `Htl`: the Rust `host` module, `std.*`,
+/// `std.fs` / `std.proc` and `htl.task`, then the Teal module as `require("{{mod}}")`.
 pub fn preload(h: &Htl) -> anyhow::Result<()> {
     Host.htl_preload(h)?;
     // `std.*`: json, string, path and the rest, from mlua-batteries; typed in the checker
@@ -48,6 +48,9 @@ pub fn preload(h: &Htl) -> anyhow::Result<()> {
     // from `types/htl-std/`, which `htl check` / `htl dts` materialise from the `htl-std`
     // dependency in `Cargo.toml`.
     htl_std::install(h)?;
+    // `htl.task`: so an `async` program's tasks, channels and timers resolve; `src/main.rs`
+    // is the executor that runs them (`call_blocking`), the way `htl run` is.
+    h.install_task_lib()?;
     // Every module in the bundle goes into `package.preload`; a name already there
     // (`host`, `std.*`) stays the host's. Stripped bytecode is small and has neither line
     // numbers nor a chunk name, so a failure inside this module reads `?: in function
