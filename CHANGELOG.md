@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0](https://github.com/ynishi/htl/compare/v0.14.0...v0.15.0) - 2026-10-11
+
+### Added
+
+- a scaffolded bin host runs its program on the executor, as htl run does
+- a scaffolded host depends on htl-std and installs it, and htl pin moves its line with htl's
+- htl run, test, check, resolve and build carry std.fs and std.proc, with no host
+- htl-std, htl's asynchronous I/O for Teal, starting with std.fs
+- a #[host_module] name may be dotted; the require key is the whole name and the record is its last segment
+- a binary registers the libraries it adds to every state htl-core builds
+- std.proc.run, a child process run to completion as one await
+
+### Other
+
+- the bin scaffold test derives the htl-std line from a release pin as the scaffold writes it
+- the scaffold's unit tests expect the executor host and the async feature
+- std.* is htl's re-export of Rust libraries, and the I/O slice is htl-std's
+
 ## [0.14.0](https://github.com/ynishi/htl/compare/v0.13.0...v0.14.0) - 2026-10-09
 
 ### Added
