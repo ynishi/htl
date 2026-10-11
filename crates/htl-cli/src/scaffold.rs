@@ -1580,11 +1580,16 @@ mod tests {
         let main = rust_main_rs(&ctx);
         assert!(
             main.contains("include_bundle!(\"src/main.tl\", host = [\"sample\"], debug = true)")
-                && main.contains("h.run_bundle(&Bundle::decode(MAIN)?, &args)?;"),
+                && main.contains("h.load_bundle(&Bundle::decode(MAIN)?, &args)?")
+                && main.contains("h.call_blocking(main, va, &token)"),
             "{main}"
         );
+        // The executor runs the entry, as `htl run app.hb` does: no synchronous call.
         assert!(
-            !main.contains("set_arg") && !main.contains("h.exec(") && !main.contains("{{"),
+            !main.contains("run_bundle")
+                && !main.contains("set_arg")
+                && !main.contains("h.exec(")
+                && !main.contains("{{"),
             "{main}"
         );
     }
@@ -1996,11 +2001,22 @@ mod tests {
         let toml = t_cargo("sample", profile(DEFAULT_TARGET).unwrap(), &release);
         assert!(!toml.contains("[lib]"), "{toml}");
         assert!(toml.contains("anyhow = \"1\"\n"), "{toml}");
-        // A release pin is a plain requirement, so it takes the short form and the
-        // `anyhow` beside it is unchanged by the pin being a table in the other tests.
+        // The bin target's host runs on the executor, so its `htl` carries the `async`
+        // feature and a release pin is the table form; the `anyhow` beside it is unchanged
+        // by the pin being a table.
         assert!(
-            toml.contains(&format!("htl = \"{}\"\n", env!("CARGO_PKG_VERSION"))),
+            toml.contains(&format!(
+                "htl = {{ version = \"{}\", features = [\"async\"] }}\n",
+                env!("CARGO_PKG_VERSION")
+            )),
             "{toml}"
+        );
+        // A release pin with no features is a plain requirement and takes the short form:
+        // the window target's `htl` line.
+        let win = t_cargo("sample", profile(BuildTarget::Window).unwrap(), &release);
+        assert!(
+            win.contains(&format!("htl = \"{}\"\n", env!("CARGO_PKG_VERSION"))),
+            "{win}"
         );
 
         let toml = t_cargo("sample", profile(BuildTarget::Cdylib).unwrap(), &release);
