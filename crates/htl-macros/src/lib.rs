@@ -710,7 +710,8 @@ fn write_dts(rel: &str, text: &str) -> Result<(), String> {
 ///
 /// - on the type: `name = ".."` (the Teal name), `dts = ".."` (write the declaration to
 ///   that path, relative to the crate root), `uses = [..]` (types from other `.d.tl`
-///   modules), and on an enum `rename_all = ".."` (how its variants are spelled);
+///   modules), and `rename_all = ".."` (how an enum's variants, or a struct's fields, are
+///   spelled; it wins over `#[serde(rename_all)]`);
 /// - on a variant: `name = ".."` (that variant's word);
 /// - on a field: `as = "<teal type>"` — the field is declared as that Teal text, verbatim,
 ///   instead of what its Rust type maps to; the value still crosses by the field type's
@@ -721,7 +722,42 @@ fn write_dts(rel: &str, text: &str) -> Result<(), String> {
 ///   `host_module`, *A Lua function as a parameter*).
 ///
 /// Anything else is refused at compile time rather than ignored, as is `as` anywhere but
-/// on a field. A field is declared under its Rust name; `as` does not rename it.
+/// on a field. `as` does not rename a field.
+///
+/// The type's `#[serde(..)]` is read too, so a type deriving `Serialize` / `Deserialize`
+/// beside `TealRecord` crosses under serde's names, and the keys of the table `into_lua`
+/// makes are the keys of the object `serde_json::to_value` makes:
+///
+/// - read: `rename_all` (a struct's fields, an enum's variants), `rename_all_fields` (an
+///   enum's struct-variant fields), `rename` (a field or a variant), `alias` (a field: one
+///   more key `from_lua` reads when the field's own is nil; not declared, not written). The
+///   declaration, `into_lua`, `from_lua` and the `FieldError` path all use the renamed
+///   name (`Call.callId: expected string, got nil`). A word on the field or variant beats
+///   the type's rule, and `teal` beats `serde` at each level. A renamed field may carry
+///   `#[teal(as)]`.
+/// - refused at compile time: a name that differs by direction (`rename(serialize = "a",
+///   deserialize = "b")`, or one side alone; `rename_all` the same), and the words that
+///   change the shape and are not read yet — `skip`, `skip_serializing`,
+///   `skip_deserializing`, `skip_serializing_if`, `default`, `flatten`, `tag`, `content`,
+///   `untagged`, `transparent`, `with`, `serialize_with`, `deserialize_with`, `from`,
+///   `into`, `try_from`, `remote`, `other`, `borrow`, `getter`, `variant_identifier`,
+///   `field_identifier`; nothing is silently ignored. A data enum crosses in the `kind`
+///   form whatever serde's own form is.
+/// - passed through to serde: `crate`, `bound`, `deny_unknown_fields`, `expecting`, and
+///   `rename` on the type itself.
+///
+/// ```rust,ignore
+/// #[derive(Serialize, Deserialize, TealRecord)]
+/// #[serde(rename_all = "camelCase")]
+/// struct Call {
+///     call_id: String,
+///     #[serde(alias = "msg")] message: String,
+/// }
+/// // local record Call
+/// //    callId: string
+/// //    message: string
+/// // end
+/// ```
 ///
 /// ```rust,ignore
 /// #[derive(TealRecord)]
@@ -754,9 +790,11 @@ fn expand_record(item: &Item) -> Result<TokenStream, String> {
     }
     let name = rd.name.as_str();
     let (ident, into, from) = match (item, &rd.kind) {
-        (Item::Struct(st), dts::RecordKind::Record { fields, .. }) => {
-            (&st.ident, record_into(st), record_from(st, name, fields))
-        }
+        (Item::Struct(st), dts::RecordKind::Record { fields, .. }) => (
+            &st.ident,
+            record_into(st, fields),
+            record_from(st, name, fields),
+        ),
         (Item::Struct(st), dts::RecordKind::Alias { inner }) => {
             (&st.ident, alias_into(), alias_from(st, name, inner))
         }
@@ -811,8 +849,10 @@ fn expand_record(item: &Item) -> Result<TokenStream, String> {
 }
 
 /// `field: { .. }` initializers reading each named field out of table `t`, in
-/// declaration order, so `teal` (from `dts`, same order) pairs with the Rust types.
-/// A failed field is reported under `path` (`Record` or `Enum.Variant`).
+/// declaration order, so `teal` (from `dts`, same order) pairs with the Rust types: the
+/// key is the name `dts` declared (serde's, when serde renames it), then each
+/// `#[serde(alias)]` in turn while what was read is nil. A failed field is reported under
+/// `path` (`Record` or `Enum.Variant`) and the declared name.
 fn field_reads(
     path: &str,
     named: &syn::FieldsNamed,
@@ -824,20 +864,30 @@ fn field_reads(
         .zip(teal)
         .map(|(f, (fname, fteal))| {
             let id = f.ident.as_ref().unwrap();
-            let read = field_read(path, fname, &f.ty, fteal);
+            let aliases = dts::serde_aliases(&f.attrs);
+            let read = field_read(path, fname, &aliases, &f.ty, fteal);
             quote! { #id: #read }
         })
         .collect()
 }
 
-/// A block reading key `fname` out of table `t` as `ty`, reporting a failure as
-/// `path.fname` with the Teal type `fteal` the declaration promised.
-fn field_read(path: &str, fname: &str, ty: &syn::Type, fteal: &str) -> TokenStream2 {
+/// A block reading key `fname` out of table `t` as `ty` — or, while that is nil, each of
+/// `aliases` in turn — reporting a failure as `path.fname` with the Teal type `fteal` the
+/// declaration promised.
+fn field_read(
+    path: &str,
+    fname: &str,
+    aliases: &[String],
+    ty: &syn::Type,
+    fteal: &str,
+) -> TokenStream2 {
     quote! {
         {
             // Take the field as a Value first: what arrived is half the message, and
             // the conversion consumes it.
-            let v: ::htl::mlua::Value = t.get(#fname)?;
+            #[allow(unused_mut)]
+            let mut v: ::htl::mlua::Value = t.get(#fname)?;
+            #( if v.is_nil() { v = t.get(#aliases)?; } )*
             let got = v.type_name();
             <#ty as ::htl::mlua::FromLua>::from_lua(v, lua).map_err(|e| {
                 ::htl::teal::field_error(#path, #fname, #fteal, got, e)
@@ -853,14 +903,15 @@ fn named_fields(st: &ItemStruct) -> &syn::FieldsNamed {
     }
 }
 
-/// Record -> table, one key per field.
-fn record_into(st: &ItemStruct) -> TokenStream2 {
+/// Record -> table, one key per field, under the name `fields` (from `dts`, in
+/// declaration order) declares it.
+fn record_into(st: &ItemStruct, fields: &[(String, String)]) -> TokenStream2 {
     let idents: Vec<_> = named_fields(st)
         .named
         .iter()
         .map(|f| f.ident.as_ref().unwrap())
         .collect();
-    let names: Vec<String> = idents.iter().map(|i| i.to_string()).collect();
+    let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
     quote! {
         let t = lua.create_table()?;
         #( t.set(#names, self.#idents)?; )*
@@ -934,8 +985,8 @@ fn enum_from(en: &ItemEnum, name: &str, variants: &[String]) -> TokenStream2 {
 }
 
 /// Data enum -> table: `kind` carries the variant's word (the one its `where` clause
-/// tests), a newtype payload goes under `value`, struct-variant fields under their own
-/// names.
+/// tests), a newtype payload goes under `value`, struct-variant fields under the names
+/// `dts` declared them as.
 fn union_into(en: &ItemEnum, variants: &[dts::UnionVariant]) -> TokenStream2 {
     let arms: Vec<TokenStream2> = en
         .variants
@@ -953,7 +1004,10 @@ fn union_into(en: &ItemEnum, variants: &[dts::UnionVariant]) -> TokenStream2 {
                 },
                 syn::Fields::Named(n) => {
                     let ids: Vec<_> = n.named.iter().map(|f| f.ident.as_ref().unwrap()).collect();
-                    let names: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+                    let dts::VariantShape::Struct(fields) = &uv.shape else {
+                        unreachable!("dts::record_decl and this walk see the same variants")
+                    };
+                    let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
                     // Bound under prefixed names: a field called `t` or `lua` must not
                     // shadow the table or the state the arm writes through.
                     let binds: Vec<_> =
@@ -993,7 +1047,7 @@ fn union_from(en: &ItemEnum, name: &str, variants: &[dts::UnionVariant]) -> Toke
             match (&v.fields, &uv.shape) {
                 (syn::Fields::Unit, _) => quote! { #vname => Ok(Self::#id), },
                 (syn::Fields::Unnamed(u), dts::VariantShape::Newtype(teal)) => {
-                    let read = field_read(&path, "value", &u.unnamed[0].ty, teal);
+                    let read = field_read(&path, "value", &[], &u.unnamed[0].ty, teal);
                     quote! { #vname => Ok(Self::#id(#read)), }
                 }
                 (syn::Fields::Named(n), dts::VariantShape::Struct(fields)) => {
