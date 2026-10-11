@@ -188,7 +188,8 @@ local same: boolean = daemon:is_reports(reports)
 local calls = daemon:calls()
 local req = calls:recv()
 local answered: boolean = req:reply(#req.value)
-print(got, n, a, b, v, ok, w, ready, open, sent, ev.n, more, as_recv:len(), as_send:cap(), same, answered, req:replied())
+local refused: boolean = req:reject(\"no\")
+print(got, n, a, b, v, ok, w, ready, open, sent, ev.n, more, as_recv:len(), as_send:cap(), same, answered, refused, req:replied())
 ";
 
 #[test]
@@ -288,6 +289,23 @@ fn a_tasks_case_handler_is_typed_from_the_task() {
     );
 }
 
+/// The reason of a reject is a `string` (`task.Request`'s `E` is htl's `String`): another
+/// type is an argument error at the call.
+#[test]
+fn a_reject_reason_that_is_not_a_string_is_refused() {
+    let errs = errors_of(
+        "reject-reason",
+        "local daemon = require(\"daemon\")\n\
+         local req = daemon:calls():recv()\n\
+         print(req:reject(1))\n",
+    );
+    assert_eq!(errs.len(), 1, "{errs:#?}");
+    assert!(
+        errs[0].contains("main.tl:3:") && errs[0].contains("got integer, expected string"),
+        "{errs:#?}"
+    );
+}
+
 // ---------------------------------------------------------------- 2. run time
 
 /// The host's main loop of `main.tl`, as `include_tl!` generated it: events and a request
@@ -355,6 +373,51 @@ fn a_loop_that_answers_after_the_deadline_times_out_and_its_late_reply_is_false(
          local req = d:calls():recv() \
          task.after(400):wait() \
          LATE = req:reply(1)",
+    )
+    .unwrap();
+    let (answer, waited) = asking.join().unwrap();
+    assert_eq!(answer, Err(AskError::Timeout(deadline)));
+    assert!(waited >= deadline, "{waited:?}");
+    assert!(!global::<bool>(&h, "LATE"));
+}
+
+/// A loop that refuses with `req:reject(reason)`: the ask is `Rejected` with the reason as
+/// Teal gave it, at once rather than at the deadline; `reject` reports it delivered, and
+/// the request counts as answered (`replied()`).
+#[test]
+fn a_request_rejected_with_a_reason_is_rejected() {
+    let deadline = Duration::from_secs(10);
+    let (_c, h, asker) = asking_daemon(deadline);
+    let asking = ask_on_a_thread(asker, "hello");
+    run(
+        &h,
+        "local d = require('daemon') \
+         local req = d:calls():recv() \
+         DELIVERED = req:reject('why') \
+         REPLIED = req:replied()",
+    )
+    .unwrap();
+    let (answer, waited) = asking.join().unwrap();
+    assert_eq!(answer, Err(AskError::Rejected("why".to_string())));
+    assert!(waited < deadline, "{waited:?}");
+    assert!(global::<bool>(&h, "DELIVERED"));
+    assert!(global::<bool>(&h, "REPLIED"));
+}
+
+/// A reject after the deadline is discarded like a late reply: the ask is `Timeout`, and
+/// `reject` returns `false` to Teal.
+#[test]
+fn a_reject_after_the_deadline_times_out_and_returns_false() {
+    let deadline = Duration::from_millis(50);
+    let (_c, h, asker) = asking_daemon(deadline);
+    let asking = ask_on_a_thread(asker, "hello");
+    run(
+        &h,
+        "local task = require('htl.task') \
+         local d = require('daemon') \
+         local req = d:calls():recv() \
+         task.after(400):wait() \
+         LATE = req:reject('too late')",
     )
     .unwrap();
     let (answer, waited) = asking.join().unwrap();

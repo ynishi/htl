@@ -20,7 +20,11 @@ while open do
          if not ok then
             return false
          end
-         if req.value.path == "/slow" then
+         if req.value.path:sub(1, 1) ~= "/" then
+            -- Not a question the gate answers: refused with a reason, which reaches the
+            -- host as `AskError::Rejected` — told apart from a deny the gate decided.
+            assert(req:reject("path must start with /"), "a reject in time was not delivered")
+         elseif req.value.path == "/slow" then
             -- Longer than the deadline: the host has taken its default by now, and the
             -- late answer is discarded rather than delivered to the next question.
             await task.after(500):wait()

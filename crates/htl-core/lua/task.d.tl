@@ -190,12 +190,15 @@ local record task
    end
 
    -- A request a host sent (`htl::task::Request<Req, Resp>`) over a `RecvChannel`, for
-   -- Teal to answer once. `reply` returns `false` when the host stopped waiting, and
-   -- raises on a second answer; closing an unanswered one (`local req <close> = ..`)
-   -- tells the host there will be no answer.
+   -- Teal to answer once: `reply(v)` with an answer, or `reject(reason)` to refuse it
+   -- (the host's `ask` gets `AskError::Rejected(reason)`). Either returns `false` when the
+   -- host stopped waiting, and raises on a second answer. `replied()` is `true` after
+   -- either. Closing an unanswered one (`local req <close> = ..`) tells the host there
+   -- will be no answer; closing an answered one does nothing.
    record Request<Req, Resp>
       value: Req
       reply: function(self, v: Resp): boolean
+      reject: function(self, reason: string): boolean
       replied: function(self): boolean
       metamethod __close: function(self)
    end
