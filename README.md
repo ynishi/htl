@@ -455,6 +455,17 @@ without `await`. On the Rust side, a `#[host_module]` method returning
 `include_tl!` at `cargo build`. How a host makes the channels:
 [`htl::task`](https://docs.rs/htl/latest/htl/task/index.html#channels-between-the-host-and-teal).
 
+A host asks Teal through `htl::task::Ask<Q, A>`, one kind of question with the kind's
+deadline — there is no library default. `Ask::new` hands back two ends: the `Ask`, which the
+host struct holds and whose getter gives Teal the channel of `task.Request<Q, A>` to answer
+with `req:reply`, and the `Asker`, `Send + Clone`, for a handler on another thread or
+runtime to call `asker.ask(q).await` on. The answer is `Ok`, or an `AskError`: `Timeout` (a
+late `reply` returns `false`), `Closed` (the loop is gone) or `NoReply` (taken and left
+unanswered); a refusal with a reason comes later, with `req:fail`. The host maps any `Err`
+to its safe side in one place, and dropping the last `Asker` ends the loop. The `--ask`
+mode of `examples/embed` is one, end to end:
+[`htl::task`](https://docs.rs/htl/latest/htl/task/index.html#a-host-asks-teal).
+
 ### Settings
 
 Two tables of `htl.toml`, both with every key in
