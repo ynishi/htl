@@ -1,8 +1,10 @@
 //! `htl.task`'s channels, timers and `select` (mlua-isle 0.9's), typed by `task.d.tl`, and
 //! the host channels a `#[host_module]` hands to Teal (`htl::task::RecvChannel` /
-//! `SendChannel` / `Request`): what the checker accepts and refuses, that a host feeds and
-//! drains a Teal loop through them, that a generated declaration imports `htl.task` for a
-//! channel, and that `await-missing` reports the waits written without `await`. The
+//! `SendChannel` / `Request`, and `Ask` for a question): what the checker accepts and
+//! refuses, that a host feeds and drains a Teal loop through them, how an ask ends (an
+//! answer, a timeout, a closed channel, a request left unanswered), that a generated
+//! declaration imports `htl.task` for a channel, and that `await-missing` reports the waits
+//! written without `await`. The
 //! library's own run-time cases, the joined state of a task case included, are in
 //! `task_lib.rs`.
 
@@ -10,10 +12,11 @@
 
 use htl::config::LangConfig;
 use htl::mlua_isle::runtime::CancelToken;
-use htl::task::{RecvChannel, Request, SendChannel};
+use htl::task::{Ask, AskError, Asker, RecvChannel, Request, SendChannel};
 use htl::teal::HostModule as _;
 use htl::{Htl, TealRecord, host_module, include_tl};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------- the host
 
@@ -27,11 +30,12 @@ pub struct Report {
     pub text: String,
 }
 
-/// A daemon's host side: events and requests go to Teal, reports come back. The channels
-/// are made on the program's state before it runs and handed out by the methods.
+/// A daemon's host side: events and questions go to Teal, reports come back. The channels
+/// (and the `Ask`, Teal's end of the questions) are made on the program's state before it
+/// runs and handed out by the methods.
 pub struct Daemon {
     events: RecvChannel<Event>,
-    calls: RecvChannel<Request<String, i64>>,
+    calls: Ask<String, i64>,
     reports: SendChannel<Report>,
 }
 
@@ -45,7 +49,7 @@ impl Daemon {
         self.events.clone()
     }
     pub fn calls(&self) -> RecvChannel<Request<String, i64>> {
-        self.calls.clone()
+        self.calls.channel()
     }
     pub fn reports(&self) -> SendChannel<Report> {
         self.reports.clone()
@@ -107,6 +111,45 @@ fn program_state() -> (Htl, Htl) {
     let h = Htl::with_checker(&checker).unwrap();
     h.install_task_lib().unwrap();
     (checker, h)
+}
+
+/// A program state with a `Daemon` whose only kind of question has `deadline`, and the
+/// `Asker` for it: the host as an ask test needs it. The other channels' host ends are
+/// dropped (events and reports are closed for Teal).
+fn asking_daemon(deadline: Duration) -> (Htl, Htl, Asker<String, i64>) {
+    let (c, h) = program_state();
+    let (_tx, events) = RecvChannel::<Event>::new(h.lua(), 1).unwrap();
+    let (reports, _rx) = SendChannel::<Report>::new(h.lua(), 1).unwrap();
+    let (asker, calls) = Ask::<String, i64>::new(h.lua(), 1, deadline).unwrap();
+    Daemon {
+        events,
+        calls,
+        reports,
+    }
+    .htl_preload(&h)
+    .unwrap();
+    (c, h, asker)
+}
+
+/// `asker.ask(q)` on a thread and runtime of its own, as a handler outside the program's
+/// would: started before the program runs, joined after. The asker is dropped after the
+/// ask, which closes the question channel for Teal when it was the last.
+fn ask_on_a_thread(
+    asker: Asker<String, i64>,
+    q: &str,
+) -> std::thread::JoinHandle<(Result<i64, AskError>, Duration)> {
+    let q = q.to_string();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let start = Instant::now();
+        let answer = rt.block_on(asker.ask(q));
+        let waited = start.elapsed();
+        drop(asker);
+        (answer, waited)
+    })
 }
 
 // ---------------------------------------------------------------- 1. types
@@ -253,7 +296,7 @@ fn a_tasks_case_handler_is_typed_from_the_task() {
 fn a_host_feeds_and_drains_the_teal_loop_through_typed_channels() {
     let (_c, h) = program_state();
     let (tx, events) = RecvChannel::<Event>::new(h.lua(), 8).unwrap();
-    let (call_tx, calls) = RecvChannel::<Request<String, i64>>::new(h.lua(), 1).unwrap();
+    let (asker, calls) = Ask::<String, i64>::new(h.lua(), 1, Duration::from_secs(10)).unwrap();
     let (reports, mut rx) = SendChannel::<Report>::new(h.lua(), 4).unwrap();
     Daemon {
         events,
@@ -266,17 +309,11 @@ fn a_host_feeds_and_drains_the_teal_loop_through_typed_channels() {
         tx.try_send(Event { n }).unwrap();
     }
     drop(tx);
-    // The request is answered while the Teal loop runs, from a thread of its own.
-    let asker = std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        let answer = rt.block_on(call_tx.request("hello".to_string()));
-        drop(call_tx);
-        answer
-    });
+    // The question is asked while the Teal loop runs, from a thread of its own; dropping
+    // the asker after it closes the channel, which ends the loop's calls case.
+    let asking = ask_on_a_thread(asker, "hello");
     run(&h, MAIN).unwrap();
-    assert_eq!(asker.join().unwrap().unwrap(), 5);
+    assert_eq!(asking.join().unwrap().0, Ok(5));
     assert_eq!(
         rx.try_recv().unwrap(),
         Report {
@@ -286,13 +323,132 @@ fn a_host_feeds_and_drains_the_teal_loop_through_typed_channels() {
     assert!(rx.try_recv().is_err(), "closed after the one report");
 }
 
+/// An answer within the deadline is the value Teal replied, and Teal's `reply` reports it
+/// delivered.
+#[test]
+fn a_reply_within_the_deadline_is_ok() {
+    let (_c, h, asker) = asking_daemon(Duration::from_secs(10));
+    let asking = ask_on_a_thread(asker, "hello");
+    run(
+        &h,
+        "local d = require('daemon') \
+         local req = d:calls():recv() \
+         DELIVERED = req:reply(#req.value)",
+    )
+    .unwrap();
+    assert_eq!(asking.join().unwrap().0, Ok(5));
+    assert!(global::<bool>(&h, "DELIVERED"));
+}
+
+/// A loop that takes the question and answers only after the deadline: the ask is
+/// `Timeout` with the deadline, no sooner than it, and the late `reply` returns `false`
+/// (the answer is discarded).
+#[test]
+fn a_loop_that_answers_after_the_deadline_times_out_and_its_late_reply_is_false() {
+    let deadline = Duration::from_millis(50);
+    let (_c, h, asker) = asking_daemon(deadline);
+    let asking = ask_on_a_thread(asker, "hello");
+    run(
+        &h,
+        "local task = require('htl.task') \
+         local d = require('daemon') \
+         local req = d:calls():recv() \
+         task.after(400):wait() \
+         LATE = req:reply(1)",
+    )
+    .unwrap();
+    let (answer, waited) = asking.join().unwrap();
+    assert_eq!(answer, Err(AskError::Timeout(deadline)));
+    assert!(waited >= deadline, "{waited:?}");
+    assert!(!global::<bool>(&h, "LATE"));
+}
+
+/// The path to `Closed` where the program is gone: it returned, and the host dropped its
+/// state (the `Daemon`, with the `Ask` and Teal's end of the channel, goes with it). The
+/// `Asker` outlives both, and its ask finds the channel closed at once rather than waiting
+/// for the deadline.
+#[test]
+fn an_ask_after_the_program_state_is_dropped_is_closed() {
+    let deadline = Duration::from_secs(10);
+    let (c, h, asker) = asking_daemon(deadline);
+    run(&h, "require('daemon')").unwrap();
+    drop(h);
+    drop(c);
+    let (answer, waited) = ask_on_a_thread(asker, "hello").join().unwrap();
+    assert_eq!(answer, Err(AskError::Closed));
+    assert!(waited < deadline, "{waited:?}");
+}
+
+/// The other path to `Closed`: Teal closes its request channel (`task.RecvChannel` has
+/// `close`) while the state lives on.
+#[test]
+fn an_ask_after_teal_closed_the_channel_is_closed() {
+    let deadline = Duration::from_secs(10);
+    let (_c, h, asker) = asking_daemon(deadline);
+    run(&h, "require('daemon'):calls():close()").unwrap();
+    let (answer, waited) = ask_on_a_thread(asker, "hello").join().unwrap();
+    assert_eq!(answer, Err(AskError::Closed));
+    assert!(waited < deadline, "{waited:?}");
+}
+
+/// A program that returned while its state lives, with the `Ask` (Teal's end) in it, has
+/// not closed its channel, and the `Asker` keeps it open from the host's side: the request
+/// is queued, nobody takes it, and the ask ends at the deadline — not `Closed`. What tells
+/// the host the loop is gone is the state dropped or Teal's `close` (the two tests above).
+#[test]
+fn an_ask_after_the_program_returned_but_its_state_lives_times_out() {
+    let deadline = Duration::from_millis(50);
+    let (_c, h, asker) = asking_daemon(deadline);
+    run(&h, "require('daemon')").unwrap();
+    let (answer, _) = ask_on_a_thread(asker, "hello").join().unwrap();
+    assert_eq!(answer, Err(AskError::Timeout(deadline)));
+}
+
+/// The host's side of closing: once the last `Asker` is dropped, Teal's `recv` on the
+/// question channel gets `nil, false`, as it does on an event channel whose senders are
+/// gone. The `Ask` in the state does not keep it open.
+#[test]
+fn the_question_channel_closes_for_teal_when_the_last_asker_is_dropped() {
+    let (_c, h, asker) = asking_daemon(Duration::from_secs(10));
+    let clone = asker.clone();
+    drop(asker);
+    drop(clone);
+    run(
+        &h,
+        "local d = require('daemon') \
+         local req, ok = d:calls():recv() \
+         GOT_NIL = req == nil OK = ok",
+    )
+    .unwrap();
+    assert!(global::<bool>(&h, "GOT_NIL"));
+    assert!(!global::<bool>(&h, "OK"));
+}
+
+/// A loop that takes the request into a `<close>` local and leaves the scope without
+/// answering: the ask is `NoReply` at once, not at the deadline.
+#[test]
+fn a_request_closed_unanswered_is_no_reply() {
+    let deadline = Duration::from_secs(10);
+    let (_c, h, asker) = asking_daemon(deadline);
+    let asking = ask_on_a_thread(asker, "hello");
+    run(
+        &h,
+        "local d = require('daemon') \
+         do local req <close> = d:calls():recv() end",
+    )
+    .unwrap();
+    let (answer, waited) = asking.join().unwrap();
+    assert_eq!(answer, Err(AskError::NoReply));
+    assert!(waited < deadline, "{waited:?}");
+}
+
 /// A channel Teal hands back comes in as the same object; a table that is not a channel
 /// is refused at the boundary.
 #[test]
 fn a_channel_handed_back_is_the_same_channel_and_a_plain_table_is_refused() {
     let (_c, h) = program_state();
     let (_tx, events) = RecvChannel::<Event>::new(h.lua(), 1).unwrap();
-    let (_tx2, calls) = RecvChannel::<Request<String, i64>>::new(h.lua(), 1).unwrap();
+    let (_asker, calls) = Ask::<String, i64>::new(h.lua(), 1, Duration::from_secs(1)).unwrap();
     let (reports, _rx) = SendChannel::<Report>::new(h.lua(), 1).unwrap();
     Daemon {
         events,

@@ -57,11 +57,84 @@
 //! channel and a later `require("htl.task")` share it. The contracts — capacity, closing,
 //! conversion errors, cancellation, several receivers — are mlua-isle's, in its `runtime`
 //! module docs ("Host channels and requests", "Channels to the host").
+//!
+//! # A host asks Teal
+//!
+//! A host that keeps its entry points in Rust and moves a decision into the Teal loop asks
+//! the loop a question and waits for the answer. [`Ask<Q, A>`] is one kind of question: the
+//! channel of [`Request<Q, A>`] Teal receives from, with the kind's deadline. [`Ask::new`]
+//! makes it on the program's state before it runs and hands back two ends, the way
+//! [`RecvChannel::new`] does: the [`Asker`] (`Send + Clone`, the [`Sender`] and the
+//! deadline), which a handler on another runtime or thread — an HTTP route, a WebSocket
+//! session, a tool call — holds and awaits [`Asker::ask`] on; and the [`Ask`], Teal's end,
+//! which the host struct holds and whose `#[host_module]` getter returns [`Ask::channel`],
+//! declared `task.RecvChannel<task.Request<Q, A>>` as any channel of requests is.
+//!
+//! The channel closes for Teal as an event channel does: when the last `Asker` is dropped,
+//! the loop's `recv` gets `nil, false` once the queued requests are taken. Dropping the
+//! askers is how the host says it will ask no more; the `Ask` in the state does not keep
+//! the channel open.
+//!
+//! ```rust,ignore
+//! use htl::task::{Ask, AskError};
+//! use std::time::Duration;
+//!
+//! pub struct Hook {
+//!     decide: Ask<Call, Decision>,
+//! }
+//!
+//! #[host_module(name = "hook", dts = "scripts/hook.d.tl", records = [Call, Decision])]
+//! impl Hook {
+//!     pub fn decide(&self) -> RecvChannel<Request<Call, Decision>> { self.decide.channel() }
+//! }
+//!
+//! let (asker, decide) = Ask::<Call, Decision>::new(h.lua(), 16, Duration::from_millis(500))?;
+//! Hook { decide }.htl_preload(&h)?;               // asker: to the handler's runtime
+//!
+//! // in the handler, the one place a failure becomes the safe side:
+//! let d = asker.ask(call).await.unwrap_or(Decision::Deny);
+//! ```
+//!
+//! ```lua
+//! local reqs = hook:decide()
+//! await task.select({
+//!    reqs:on(function(req: task.Request<hook.Call, hook.Decision>, ok: boolean): boolean
+//!       if ok then req:reply(decide(req.value)) end
+//!       return ok
+//!    end),
+//!    -- the loop's other cases
+//! })
+//! ```
+//!
+//! **The deadline is per kind, and htl has no default.** [`Ask::new`] takes it and
+//! [`Asker::ask_within`] overrides it for one call: a library default would be a number
+//! nobody can justify, and a kind without a deadline is a caller that can wait forever.
+//!
+//! An ask ends one of four ways. `Ok(a)`: the loop replied within the deadline.
+//! [`AskError::Timeout`]: it did not; the request is dropped, and a `req:reply` the loop
+//! makes afterwards returns `false` — a late answer is discarded, not delivered to the next
+//! ask. [`AskError::Closed`]: the loop is gone — Teal called `close` on the channel, or the
+//! program's state was dropped (a loop that returned while the state lives, with the `Ask`
+//! in it, does not close the channel, and an ask then ends in `Timeout`). [`AskError::NoReply`]: the loop took
+//! the request and closed it (`local req <close> = ..`) or let it be collected without
+//! answering. A fifth, the loop refusing with a reason, is not here yet: it needs a
+//! `req:fail` on mlua-isle's request, and arrives as a variant of the `#[non_exhaustive]`
+//! [`AskError`].
+//!
+//! The host maps `Err(_)` to its safe default in one place, not per failure: the four are
+//! told apart for its log, not for its decision.
+//!
+//! Only a host whose Teal runs on the executor can ask: the loop has to wait on the
+//! request channel. The window and cdylib hosts cannot — nothing in their run is a root
+//! the executor runs (the window's `main.tl` is read through a plain `eval` and its
+//! callbacks are called by macroquad's own loop; a cdylib's caller calls in synchronously
+//! through `#[c_export]`). A target whose loop can run a root would carry it.
 use crate::{Htl, write_if_changed};
 use anyhow::{Context, Result};
 use mlua::{FromLua, IntoLua, Lua, Value};
 use std::marker::PhantomData;
 use std::path::PathBuf;
+use std::time::Duration;
 
 pub use mlua_isle::runtime::{Receiver, Request, RequestError, Sender};
 
@@ -340,3 +413,171 @@ macro_rules! channel_end {
 
 channel_end!(RecvChannel);
 channel_end!(SendChannel);
+
+/// Teal's end of one kind of question: the channel of [`Request<Q, A>`] Teal receives from,
+/// and the kind's deadline. Made by [`Ask::new`] beside the [`Asker`] the host asks with;
+/// see the [module docs](self#a-host-asks-teal) for the pattern.
+///
+/// It is the program state's, as the [`RecvChannel`] in it is, and stays on the thread that
+/// runs the program: the host struct holds it and its `#[host_module]` getter returns
+/// [`channel`](Self::channel). It holds no sender, so it does not keep the channel open:
+/// the channel closes for Teal when the last [`Asker`] is dropped.
+pub struct Ask<Q, A> {
+    teal: RecvChannel<Request<Q, A>>,
+    deadline: Duration,
+}
+
+impl<Q, A> Ask<Q, A>
+where
+    Q: IntoLua + Send + 'static,
+    A: FromLua + Send + 'static,
+{
+    /// A kind of question with up to `cap` requests queued for Teal (`cap >= 1`) and
+    /// `deadline` as the limit of each [`Asker::ask`]: the [`Asker`] for the host,
+    /// `Send + Clone`, and Teal's end — the order [`RecvChannel::new`] returns its two in.
+    /// Called on the program's state ([`Htl::lua`]), on its thread, before the program
+    /// runs. The channel closes for Teal, after the queued requests, when every `Asker` is
+    /// dropped.
+    ///
+    /// `cap` is backpressure only: an ask waits for room in the queue and then for its
+    /// answer, both inside the deadline. There is no default deadline: it is the kind's,
+    /// chosen by the host (see the [module docs](self#a-host-asks-teal)).
+    ///
+    /// # Errors
+    ///
+    /// As [`RecvChannel::new`].
+    pub fn new(lua: &Lua, cap: usize, deadline: Duration) -> Result<(Asker<Q, A>, Self)> {
+        let (tx, teal) = RecvChannel::<Request<Q, A>>::new(lua, cap)?;
+        Ok((Asker { tx, deadline }, Ask { teal, deadline }))
+    }
+}
+
+impl<Q, A> Ask<Q, A> {
+    /// The end Teal receives the requests from: what the `#[host_module]` getter returns,
+    /// declared `task.RecvChannel<task.Request<Q, A>>`. Every call hands out the same
+    /// channel.
+    pub fn channel(&self) -> RecvChannel<Request<Q, A>> {
+        self.teal.clone()
+    }
+
+    /// The kind's deadline, the one its [`Asker::ask`] waits for.
+    pub fn deadline(&self) -> Duration {
+        self.deadline
+    }
+}
+
+impl<Q, A> std::fmt::Debug for Ask<Q, A> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Ask")
+            .field("channel", &self.teal)
+            .field("deadline", &self.deadline)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The asking end of a kind of question: what a handler on another runtime or thread holds.
+/// Made by [`Ask::new`]; `Send + Clone` when `Q` and `A` are `Send`, and a clone asks the
+/// same kind with the same deadline.
+///
+/// The askers are the channel's senders: when the last one is dropped, the channel closes
+/// for Teal, and its `recv` gets `nil, false` once the queued requests are taken — the way
+/// the host says it will ask no more, as dropping the last [`Sender`] of an event channel
+/// is.
+pub struct Asker<Q, A> {
+    tx: Sender<Request<Q, A>>,
+    deadline: Duration,
+}
+
+impl<Q, A> Clone for Asker<Q, A> {
+    fn clone(&self) -> Self {
+        Asker {
+            tx: self.tx.clone(),
+            deadline: self.deadline,
+        }
+    }
+}
+
+impl<Q, A> std::fmt::Debug for Asker<Q, A> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Asker")
+            .field("deadline", &self.deadline)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<Q, A> Asker<Q, A> {
+    /// The deadline [`ask`](Self::ask) waits for.
+    pub fn deadline(&self) -> Duration {
+        self.deadline
+    }
+
+    /// Ask `q` and wait, within the kind's deadline, for Teal's answer:
+    /// [`ask_within`](Self::ask_within) with the deadline [`Ask::new`] was given.
+    ///
+    /// # Errors
+    ///
+    /// As [`ask_within`](Self::ask_within).
+    pub async fn ask(&self, q: Q) -> Result<A, AskError> {
+        self.ask_within(q, self.deadline).await
+    }
+
+    /// Ask `q` and wait at most `deadline` for Teal's answer: the wait for room in the
+    /// queue and the wait for the reply together. Must be awaited inside a tokio runtime
+    /// with its time driver enabled.
+    ///
+    /// Dropping the future is the same as a timeout: the request is abandoned, and a
+    /// `req:reply` Teal makes afterwards returns `false`.
+    ///
+    /// # Errors
+    ///
+    /// [`AskError::Timeout`] with `deadline` when no answer came in time;
+    /// [`AskError::Closed`] when the channel was closed before the request was queued (Teal
+    /// closed it, or the program's state was dropped); [`AskError::NoReply`] when Teal
+    /// closed or collected the request unanswered, or `q` failed to convert to a Lua value.
+    pub async fn ask_within(&self, q: Q, deadline: Duration) -> Result<A, AskError> {
+        match tokio::time::timeout(deadline, self.tx.request(q)).await {
+            Ok(Ok(a)) => Ok(a),
+            Ok(Err(RequestError::Closed(_))) => Err(AskError::Closed),
+            Ok(Err(RequestError::NoReply)) => Err(AskError::NoReply),
+            Err(_elapsed) => Err(AskError::Timeout(deadline)),
+        }
+    }
+}
+
+/// Why an [`Asker::ask`] has no answer. The transport's failures, told apart for the host's
+/// log; the host maps any of them to its safe default in one place.
+///
+/// Not generic over the question: unlike [`RequestError::Closed`], [`Closed`](Self::Closed)
+/// does not hand the value back, since the host still holds what it asked (it is the
+/// argument of the call that failed) and an error that carries `Q` cannot be one type
+/// across kinds.
+///
+/// `#[non_exhaustive]` because a fifth arrives with mlua-isle's `req:fail(reason)`:
+/// `Rejected(String)`, the loop refusing with a reason rather than staying silent. A match
+/// on it keeps a `_` arm.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AskError {
+    /// No answer within the deadline, which it carries. The request is abandoned: Teal's
+    /// later `req:reply` returns `false`.
+    Timeout(Duration),
+    /// The loop is gone: the channel was closed before the request was queued — Teal
+    /// called `close` on it, or the program's state was dropped.
+    Closed,
+    /// Teal took the request and closed it (`local req <close> = ..`) or let it be
+    /// collected without answering; or the question failed to convert to a Lua value, and
+    /// Teal never saw it.
+    NoReply,
+}
+
+impl std::fmt::Display for AskError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AskError::Timeout(d) => write!(f, "Teal did not answer within {d:?}"),
+            AskError::Closed => f.write_str("the Teal loop's request channel is closed"),
+            AskError::NoReply => f.write_str("Teal closed the request without answering"),
+        }
+    }
+}
+
+impl std::error::Error for AskError {}
