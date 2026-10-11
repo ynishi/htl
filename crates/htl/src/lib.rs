@@ -47,6 +47,12 @@
 //! run time describes its directories once ([`model::Project::for_host`]) and derives the
 //! checker and the run from that ([`pkg::TealResolver`]).
 //!
+//! The crates htl is built against are re-exported, so a host names the versions htl
+//! links rather than adding its own: [`mlua`], [`mlua_isle`], [`serde`] (with `derive`)
+//! and [`serde_json`]. A host with no `serde` dependency of its own derives through
+//! `htl::serde` and writes `#[serde(crate = "htl::serde")]` on the type, because serde's
+//! derive writes `::serde` paths; one that has the dependency changes nothing.
+//!
 //! The macros run the checker inside the proc macro, under `[profile.dev.build-override]`
 //! — `htl new --embed` writes `opt-level = 3` into that section, and a host that predates
 //! it adds the two lines by hand (one rebuild of the macro's dependencies, then every

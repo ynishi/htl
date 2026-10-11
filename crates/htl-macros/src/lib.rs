@@ -701,6 +701,39 @@ fn write_dts(rel: &str, text: &str) -> Result<(), String> {
 
 // ------------------------------------------------------------------ #[derive(TealRecord)]
 
+/// Declare a struct or enum on the Teal side and convert it both ways: `TealRecord::DECL`
+/// (the `.d.tl` text), `IntoLua` / `FromLua` that produce and accept exactly what it
+/// declares, and `htl_preload`. What each Rust shape lowers to is the type table in
+/// `htl::dts`, which is also what `htl dts` reads; the two cannot disagree.
+///
+/// The words `#[teal(..)]` takes, by where it is written:
+///
+/// - on the type: `name = ".."` (the Teal name), `dts = ".."` (write the declaration to
+///   that path, relative to the crate root), `uses = [..]` (types from other `.d.tl`
+///   modules), and on an enum `rename_all = ".."` (how its variants are spelled);
+/// - on a variant: `name = ".."` (that variant's word);
+/// - on a field: `as = "<teal type>"` — the field is declared as that Teal text, verbatim,
+///   instead of what its Rust type maps to; the value still crosses by the field type's
+///   own `IntoLua` / `FromLua`, so this is for a host type whose impls the type table
+///   cannot see into (a `Stamp(u64)` that crosses as a string). It goes on a field of a
+///   struct or of a data enum's struct variant;
+/// - on a field: `noyield`, on a `Function` / `Option<Function>` field of a struct (see
+///   `host_module`, *A Lua function as a parameter*).
+///
+/// Anything else is refused at compile time rather than ignored, as is `as` anywhere but
+/// on a field. A field is declared under its Rust name; `as` does not rename it.
+///
+/// ```rust,ignore
+/// #[derive(TealRecord)]
+/// struct Entry {
+///     #[teal(as = "string")] stamp: Stamp, // Stamp: IntoLua / FromLua as a string
+///     text: String,
+/// }
+/// // local record Entry
+/// //    stamp: string
+/// //    text: string
+/// // end
+/// ```
 #[proc_macro_derive(TealRecord, attributes(teal))]
 pub fn derive_teal_record(input: TokenStream) -> TokenStream {
     let item = parse_macro_input!(input as Item);
@@ -1136,9 +1169,10 @@ fn union_from(en: &ItemEnum, name: &str, variants: &[dts::UnionVariant]) -> Toke
 /// // end
 /// ```
 ///
-/// `noyield` is the only word a field takes, and only on a `Function` / `Option<Function>`
-/// field of a struct (a data variant's fields take none); a field has no default to turn
-/// around, so an unmarked one is simply not a boundary. The derive re-emits nothing, so the
+/// `noyield` goes only on a `Function` / `Option<Function>` field of a struct (a data
+/// variant's fields cannot take it; the one other word a field takes is `as`, see
+/// `TealRecord`); a field has no default to turn around, so an unmarked one is simply not
+/// a boundary. The derive re-emits nothing, so the
 /// attribute stays on the struct, where rustc reads it as the derive's own.
 ///
 /// # The Lua state as a parameter

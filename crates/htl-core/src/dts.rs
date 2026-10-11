@@ -42,6 +42,7 @@
 //! | `mlua::Value` / `serde_json::Value` | `any` | unchanged: the deliberate escape hatch |
 //! | `mlua::Function` as a `#[host_module]` parameter | `f: function` (`Option<Function>` as any `Option` parameter), and a sync fn's ones named in a trailing `---@noyield(f)`; see the `host_module` macro doc for the rule and the overrides | a Lua function the host calls |
 //! | `&mlua::Lua` as a `#[host_module]` parameter | nothing: left out, as `&self` is; see the `host_module` macro doc | the state the method runs on |
+//! | `#[teal(as = "string")] stamp: Stamp` as a record field (or a struct variant's), `Stamp` a host type with its own `IntoLua` / `FromLua` | `stamp: string`: the text, verbatim; the Rust type is not read | by `Stamp`'s own `IntoLua` / `FromLua`; a refused read is `Rec.stamp: expected string, got integer` |
 //! | `#[teal(noyield)] update: Function` as a record field | `update: function ---@noyield` (`Option<Function>` as any field); see the `host_module` macro doc, *A Lua function as a parameter*, for when a field says it | a Lua function the host reads off the table and calls |
 //! | `htl::task::RecvChannel<T>` / `SendChannel<T>` (feature `async`) as a `#[host_module]` return or parameter | `task.RecvChannel<T>` / `task.SendChannel<T>`, with `local type task = require("htl.task")` as the file's first line | the `htl.task` channel object: Teal receives from the first and sends into the second, and the other direction is a check error |
 //! | `htl::task::Request<Req, Resp>` as a channel's element | `task.Request<Req, Resp>` | a value Teal answers once, `req:reply(v)` or `req:reject(reason)`; a third type argument (mlua-isle's rejection type) is an error, the reason being a `string` |
@@ -98,10 +99,24 @@
 //!   holds `"open"` in its store should not have to become `"Open"` to move its enum to
 //!   the host. What the rule does *not* touch is the union's record names
 //!   (`Shape_InReview` stays): those are Teal identifiers, and `kebab-case` is not one.
-//!   Record fields are declared under their Rust names; renaming those is a separate
-//!   decision nobody has asked for. The one word a field takes is `#[teal(noyield)]`, on a
-//!   `Function` / `Option<Function>` field of a struct, which says how the host calls it
-//!   rather than how it is spelled; anything else in a field's `#[teal(..)]` is refused.
+//!   Record fields are declared under their Rust names. A field's `#[teal(..)]` takes two
+//!   words, neither of which spells it: `as = "<teal type>"`, the type it is declared as
+//!   when its Rust type does not say (below), and `noyield`, on a `Function` /
+//!   `Option<Function>` field of a struct, which says how the host calls it. Anything else
+//!   in a field's `#[teal(..)]` is refused. Renaming a field is not `as`'s job: `as` says
+//!   the type, and the name stays the Rust one.
+//! - **`#[teal(as = "..")]` declares; it does not convert.** The field is written as the
+//!   given Teal text, verbatim (`"string"`, `"{string}"`, `"geom.Point"`), and the Rust type
+//!   is not mapped; the value still crosses by the field type's own `IntoLua` / `FromLua`,
+//!   so that type must implement both, and the attribute is the host's statement of the
+//!   shape they produce — a type with a hand-written `IntoLua` that crosses as a string,
+//!   say. Nothing checks the statement against the impl: a field that says `string` and
+//!   converts to a table is a declaration that lies. The text is also what a refused read
+//!   reports as expected, when the type's `FromLua` refuses with mlua's
+//!   `FromLuaConversionError` (`Rec.stamp: expected string, got integer`); any other error
+//!   it returns keeps its own message under the field's path. It applies to a field
+//!   of a struct record or of a data enum's struct variant; on a type, a variant or a
+//!   `#[host_module]` it is refused.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -695,6 +710,11 @@ fn use_list(arr: &syn::ExprArray) -> Result<Vec<Use>, String> {
     Ok(out)
 }
 
+/// The refusal of `as` written on a type, a variant or a `#[host_module]`.
+const AS_OFF_FIELD: &str = "`as` is a field attribute: `#[teal(as = \"<teal type>\")]` goes on \
+     a field of a `#[derive(TealRecord)]` struct or of a data enum's struct variant, not on a \
+     type, an enum variant or a `#[host_module]`";
+
 /// Parse `name = "..", rename_all = "..", dts = "..", uses = [A, b = "mod.b"], records =
 /// [C]`.
 ///
@@ -703,6 +723,11 @@ fn use_list(arr: &syn::ExprArray) -> Result<Vec<Use>, String> {
 pub fn parse_attr_metas(metas: impl IntoIterator<Item = Meta>) -> Result<TealAttrs, String> {
     let mut out = TealAttrs::default();
     for meta in metas {
+        // `as` is a word of a record field's `#[teal(..)]`, and a field is the only place it
+        // means anything; here it would be read as nothing, so it is refused by name.
+        if meta.path().is_ident("as") {
+            return Err(AS_OFF_FIELD.into());
+        }
         let Meta::NameValue(nv) = meta else {
             return Err("expected `key = value` pairs".into());
         };
@@ -747,7 +772,15 @@ fn parse_named_attr(
             if let Meta::List(_) = &a.meta {
                 let list = a
                     .parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| {
+                        // A `Meta` cannot be named by a keyword, so `as` fails the parse
+                        // before `parse_attr_metas` could name the place it belongs.
+                        if names_as(a) {
+                            AS_OFF_FIELD.to_string()
+                        } else {
+                            e.to_string()
+                        }
+                    })?;
                 metas.extend(list);
             }
         }
@@ -756,6 +789,23 @@ fn parse_named_attr(
         return Ok(None);
     }
     parse_attr_metas(metas).map(Some)
+}
+
+/// `true` when `a`'s list names `as` as one of its words, read with the parser that takes a
+/// keyword as a word's name (the one a list of `Meta` refuses).
+fn names_as(a: &Attribute) -> bool {
+    let mut found = false;
+    let _ = a.parse_nested_meta(|m| {
+        if m.path.is_ident("as") {
+            found = true;
+            return Err(m.error("as"));
+        }
+        if m.input.peek(Token![=]) {
+            m.value()?.parse::<Expr>()?;
+        }
+        Ok(())
+    });
+    found
 }
 
 /// `#[teal(...)]` on a struct or enum (absent -> defaults).
@@ -879,10 +929,12 @@ pub enum RecordKind {
     /// A struct with named fields: `record N` with `(field, teal type)` in declaration
     /// order, crossing as a plain table.
     Record {
-        /// Rust field name and the Teal type it maps to. The name is the Rust one:
-        /// `rename_all` spells variants, and renaming fields is a decision nobody has
-        /// asked for, so `#[teal(..)]` on a field is refused rather than applied here —
-        /// all but the one word below.
+        /// Rust field name and the Teal type it maps to — or, for a field marked
+        /// `#[teal(as = "..")]`, the text it gives. The name is the Rust one: `rename_all`
+        /// spells variants, and `as` says what a field is declared as, never what it is
+        /// called (renaming is `#[serde(rename)]`'s job, which this derive does not read
+        /// yet). A field's `#[teal(..)]` takes `as` and the one word below; anything else is
+        /// refused rather than ignored.
         fields: Vec<(String, String)>,
         /// The fields marked `#[teal(noyield)]`, in declaration order: each is declared
         /// with a trailing bare `---@noyield` (the host reads the function off the table
@@ -974,9 +1026,14 @@ impl RecordDecl {
 type Fields = (Vec<(String, String)>, Vec<String>);
 
 /// The fields of a struct record (`struct_record` = `true`) or of a data variant, and which
-/// of them carry `#[teal(noyield)]` (always none for a variant, whose fields take no word).
+/// of them carry `#[teal(noyield)]` (always none for a variant, whose fields cannot take it).
 /// `uses` is what a qualified field type crosses dotted against ([`teal_type_in`]): the
 /// record's own at the top level, the host's for one nested through `records = [..]`.
+///
+/// A field's Teal type is the one [`teal_type_in`] maps its Rust type to, unless the field
+/// says `#[teal(as = "..")]`: then it is that text, written as given, and the Rust type is
+/// not mapped at all — the attribute is for the type whose `IntoLua` / `FromLua` the host
+/// wrote itself, which the type table cannot see into.
 fn record_fields(
     fields: &syn::FieldsNamed,
     self_name: &str,
@@ -987,17 +1044,16 @@ fn record_fields(
     let mut noyield = Vec::new();
     for f in &fields.named {
         let fi = f.ident.as_ref().unwrap().to_string();
-        // Renaming a field is a decision nobody has taken, and an attribute that is quietly
-        // ignored is worse than one that is refused; `noyield` is the one word a field takes,
-        // and only a struct's field. A variant's field is refused whatever the word, so the
-        // message does not suggest a word it would accept.
-        if !struct_record && f.attrs.iter().any(|a| a.path().is_ident("teal")) {
-            return Err(format!(
-                "TealRecord: {self_name}.{fi}: `#[teal(noyield)]` applies to a field of a struct \
-                 record; a variant's fields take no `#[teal(..)]`"
-            ));
-        }
-        if field_noyield(&f.attrs, self_name, &fi)? {
+        let fa = field_attrs(&f.attrs, self_name, &fi)?;
+        if fa.noyield {
+            // A variant's field is never called through by the host: the table the host
+            // reads a callback off is a record it was handed, not one variant of a union.
+            if !struct_record {
+                return Err(format!(
+                    "TealRecord: {self_name}.{fi}: `#[teal(noyield)]` applies to a field of a struct \
+                     record; a variant's fields take only `as`"
+                ));
+            }
             if !is_function(&f.ty) {
                 return Err(format!(
                     "TealRecord: {self_name}.{fi}: `#[teal(noyield)]` on a field that is not a \
@@ -1006,56 +1062,103 @@ fn record_fields(
             }
             noyield.push(fi.clone());
         }
-        let tt = teal_type_in(&f.ty, self_name, uses)?;
+        let tt = match fa.as_type {
+            Some(t) => t,
+            None => teal_type_in(&f.ty, self_name, uses)?,
+        };
         out.push((fi, tt));
     }
     Ok((out, noyield))
 }
 
-/// `#[teal(noyield)]` on field `fname` of `rec`: `true` when the field carries it, `false`
-/// when it carries no `#[teal(..)]`. Any other word, or the attribute with no word, is
-/// refused: a word nobody reads is worse than a refusal.
-fn field_noyield(attrs: &[Attribute], rec: &str, fname: &str) -> Result<bool, String> {
+/// What a record field's `#[teal(..)]` says.
+#[derive(Default)]
+struct FieldAttrs {
+    /// `#[teal(as = "..")]`: the Teal type the field is declared as, verbatim.
+    as_type: Option<String>,
+    /// `#[teal(noyield)]`: the host calls the function it reads from the field from C.
+    noyield: bool,
+}
+
+/// The words a record field's `#[teal(..)]` takes, as a refusal names them.
+const FIELD_WORDS: &str = "`as = \"<teal type>\"` or `noyield`";
+
+/// `#[teal(..)]` on field `fname` of `rec`. A field takes two words: `as = ".."`, the Teal
+/// type it is declared as when the Rust type does not say (see [`record_fields`]), and
+/// `noyield`. Any other word, a word in the wrong form, or the attribute with no word is
+/// refused: a word nobody reads is worse than a refusal. Names are not among them —
+/// a field is declared under its Rust name.
+fn field_attrs(attrs: &[Attribute], rec: &str, fname: &str) -> Result<FieldAttrs, String> {
+    let mut out = FieldAttrs::default();
     let mut found = false;
-    let mut marked = false;
+    let mut said = false;
     for a in attrs.iter().filter(|a| a.path().is_ident("teal")) {
         found = true;
         let Meta::List(_) = &a.meta else {
             return Err(format!(
-                "TealRecord: {rec}.{fname}: `#[teal(..)]` on a record field takes `noyield`"
+                "TealRecord: {rec}.{fname}: `#[teal(..)]` on a record field takes {FIELD_WORDS}"
             ));
         };
-        let list = a
-            .parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
-            .map_err(|e| format!("TealRecord: {rec}.{fname}: {e}"))?;
-        for meta in list {
-            if meta.path().is_ident("noyield") {
-                if !matches!(meta, Meta::Path(_)) {
-                    return Err(format!(
-                        "TealRecord: {rec}.{fname}: `noyield` takes no value"
-                    ));
+        // `parse_nested_meta` rather than a list of `Meta`: `as` is a keyword, and only the
+        // nested-meta parser takes a keyword as a word's name.
+        a.parse_nested_meta(|meta| {
+            let fail = |msg: String| Err(meta.error(msg));
+            if meta.path.is_ident("noyield") {
+                if !(meta.input.is_empty() || meta.input.peek(Token![,])) {
+                    return fail("`noyield` takes no value".into());
                 }
-                marked = true;
-                continue;
+                out.noyield = true;
+                said = true;
+                return Ok(());
+            }
+            if meta.path.is_ident("as") {
+                let text = if meta.input.peek(Token![=]) {
+                    match meta.value()?.parse::<Expr>()? {
+                        Expr::Lit(l) => lit_str(&l.lit).ok(),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                let Some(text) = text else {
+                    return fail(
+                        "`as` takes the Teal type as a string: `#[teal(as = \"<teal type>\")]`"
+                            .into(),
+                    );
+                };
+                if text.trim().is_empty() {
+                    return fail(
+                        "`#[teal(as = \"\")]` names no type; write the Teal type the field \
+                         crosses as, `as = \"string\"` say"
+                            .into(),
+                    );
+                }
+                if out.as_type.is_some() {
+                    return fail("`as` is given twice".into());
+                }
+                out.as_type = Some(text);
+                said = true;
+                return Ok(());
             }
             let key = meta
-                .path()
+                .path
                 .segments
                 .iter()
                 .map(|s| s.ident.to_string())
                 .collect::<Vec<_>>()
                 .join("::");
-            return Err(format!(
-                "TealRecord: {rec}.{fname}: `#[teal(..)]` on a record field takes `noyield`, got `{key}`"
-            ));
-        }
+            fail(format!(
+                "`#[teal(..)]` on a record field takes {FIELD_WORDS}, got `{key}`"
+            ))
+        })
+        .map_err(|e| format!("TealRecord: {rec}.{fname}: {e}"))?;
     }
-    if found && !marked {
+    if found && !said {
         return Err(format!(
-            "TealRecord: {rec}.{fname}: `#[teal(..)]` on a record field takes `noyield`"
+            "TealRecord: {rec}.{fname}: `#[teal(..)]` on a record field takes {FIELD_WORDS}"
         ));
     }
-    Ok(marked)
+    Ok(out)
 }
 
 /// The kind a struct lowers to: named fields -> record, one unnamed field -> alias.
@@ -2599,8 +2702,8 @@ mod tests {
         assert!(e.contains("State::Open and State::Closed"), "{e}");
     }
 
-    /// Fields are declared under their Rust names: `rename_all` on a struct and
-    /// `#[teal(..)]` on a field are refused rather than quietly ignored.
+    /// Fields are declared under their Rust names: `rename_all` on a struct and a naming
+    /// word in a field's `#[teal(..)]` are refused rather than quietly ignored.
     #[test]
     fn renaming_record_fields_is_refused_not_ignored() {
         let e = record_decl(&item(
@@ -2614,7 +2717,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             e,
-            "TealRecord: P.x: `#[teal(..)]` on a record field takes `noyield`, got `name`"
+            "TealRecord: P.x: `#[teal(..)]` on a record field takes `as = \"<teal type>\"` or `noyield`, got `name`"
         );
     }
 
@@ -2657,19 +2760,19 @@ mod tests {
         for (src, want) in [
             (
                 "pub struct G { #[teal(yields)] f: Function }",
-                "TealRecord: G.f: `#[teal(..)]` on a record field takes `noyield`, got `yields`",
+                "TealRecord: G.f: `#[teal(..)]` on a record field takes `as = \"<teal type>\"` or `noyield`, got `yields`",
             ),
             (
                 "pub struct G { #[teal(noyield, name = \"g\")] f: Function }",
-                "TealRecord: G.f: `#[teal(..)]` on a record field takes `noyield`, got `name`",
+                "TealRecord: G.f: `#[teal(..)]` on a record field takes `as = \"<teal type>\"` or `noyield`, got `name`",
             ),
             (
                 "pub struct G { #[teal] f: Function }",
-                "TealRecord: G.f: `#[teal(..)]` on a record field takes `noyield`",
+                "TealRecord: G.f: `#[teal(..)]` on a record field takes `as = \"<teal type>\"` or `noyield`",
             ),
             (
                 "pub struct G { #[teal()] f: Function }",
-                "TealRecord: G.f: `#[teal(..)]` on a record field takes `noyield`",
+                "TealRecord: G.f: `#[teal(..)]` on a record field takes `as = \"<teal type>\"` or `noyield`",
             ),
             (
                 "pub struct G { #[teal(noyield)] n: i64 }",
@@ -2689,16 +2792,116 @@ mod tests {
             ),
             (
                 "pub enum G { A, B { #[teal(noyield)] f: Function } }",
-                "TealRecord: G.f: `#[teal(noyield)]` applies to a field of a struct record; a variant's fields take no `#[teal(..)]`",
+                "TealRecord: G.f: `#[teal(noyield)]` applies to a field of a struct record; a variant's fields take only `as`",
             ),
             (
                 "pub enum G { A, Y { #[teal(name = \"z\")] f: i64 } }",
-                "TealRecord: G.f: `#[teal(noyield)]` applies to a field of a struct record; a variant's fields take no `#[teal(..)]`",
+                "TealRecord: G.f: `#[teal(..)]` on a record field takes `as = \"<teal type>\"` or `noyield`, got `name`",
             ),
         ] {
             let e = record_decl(&item(&format!("#[derive(TealRecord)] {src}"))).unwrap_err();
             assert_eq!(e, want, "{src}");
         }
+    }
+
+    /// `#[teal(as = "..")]` on a field declares it as the text given, verbatim, whatever
+    /// the Rust type — one the type table would map, one it would not — on a struct's
+    /// field, a struct variant's, and beside `noyield`; the Rust type is not read, so one
+    /// the table refuses is declared too.
+    #[test]
+    fn a_field_marked_as_is_declared_as_the_text_it_gives() {
+        let rd = record_decl(&item(
+            "#[derive(TealRecord)] pub struct Entry {\n\
+             \x20   #[teal(as = \"string\")] stamp: Stamp,\n\
+             \x20   #[teal(as = \"{string}\")] tags: Tags,\n\
+             \x20   #[teal(as = \"geom.Point\")] at: (f64, f64),\n\
+             \x20   #[teal(as = \"function(integer)\", noyield)] on: Function,\n\
+             \x20   n: i64,\n\
+             }",
+        ))
+        .unwrap();
+        assert_eq!(
+            rd.decl,
+            "local record Entry\n   stamp: string\n   tags: {string}\n   at: geom.Point\n   \
+             on: function(integer) ---@noyield\n   n: integer\nend\n\nreturn Entry\n"
+        );
+        let RecordKind::Record { fields, noyield } = &rd.kind else {
+            panic!("{:?}", rd.kind)
+        };
+        assert_eq!(fields[0], ("stamp".to_string(), "string".to_string()));
+        assert_eq!(noyield, &["on".to_string()]);
+        let rd = record_decl(&item(
+            "#[derive(TealRecord)] pub enum Ev { Tick { #[teal(as = \"string\")] at: Stamp } }",
+        ))
+        .unwrap();
+        assert!(
+            rd.decl.contains("local record Ev_Tick\n   where self.kind == \"Tick\"\n   kind: string\n   at: string\nend\n"),
+            "{}",
+            rd.decl
+        );
+    }
+
+    /// `as` is refused when it names nothing, when it is not a string, and anywhere but on
+    /// a field — the type, a variant, a `#[host_module]` — with the place it does go named.
+    #[test]
+    fn as_that_names_no_type_or_sits_off_a_field_is_refused() {
+        let off_field = "`as` is a field attribute: `#[teal(as = \"<teal type>\")]` goes on a \
+                         field of a `#[derive(TealRecord)]` struct or of a data enum's struct \
+                         variant, not on a type, an enum variant or a `#[host_module]`";
+        for (src, want) in [
+            (
+                "pub struct S { #[teal(as = \"\")] stamp: Stamp }",
+                "TealRecord: S.stamp: `#[teal(as = \"\")]` names no type; write the Teal type the field crosses as, `as = \"string\"` say".to_string(),
+            ),
+            (
+                "pub struct S { #[teal(as = \"  \")] stamp: Stamp }",
+                "TealRecord: S.stamp: `#[teal(as = \"\")]` names no type; write the Teal type the field crosses as, `as = \"string\"` say".to_string(),
+            ),
+            (
+                "pub struct S { #[teal(as)] stamp: Stamp }",
+                "TealRecord: S.stamp: `as` takes the Teal type as a string: `#[teal(as = \"<teal type>\")]`".to_string(),
+            ),
+            (
+                "pub struct S { #[teal(as = string)] stamp: Stamp }",
+                "TealRecord: S.stamp: `as` takes the Teal type as a string: `#[teal(as = \"<teal type>\")]`".to_string(),
+            ),
+            (
+                "pub struct S { #[teal(as = \"string\", as = \"number\")] stamp: Stamp }",
+                "TealRecord: S.stamp: `as` is given twice".to_string(),
+            ),
+            (
+                "#[teal(as = \"string\")] pub struct S { stamp: Stamp }",
+                off_field.to_string(),
+            ),
+            (
+                "#[teal(as = \"string\")] pub struct S(Stamp);",
+                off_field.to_string(),
+            ),
+            (
+                "pub enum E { #[teal(as = \"string\")] A, B(i64) }",
+                off_field.to_string(),
+            ),
+        ] {
+            let e = record_decl(&item(&format!("#[derive(TealRecord)] {src}"))).unwrap_err();
+            assert!(e.ends_with(&want), "{src}\n got: {e}\nwant: {want}");
+        }
+        let imp: syn::ItemImpl =
+            syn::parse_str("#[host_module(name = \"h\", as = \"string\")] impl H {}").unwrap();
+        assert_eq!(parse_host_module_attr(&imp.attrs).unwrap_err(), off_field);
+    }
+
+    /// A naming word on a field is refused, the message naming the two a field takes:
+    /// `as` declares a type and nothing else, so there is no `rename` beside it.
+    #[test]
+    fn a_rename_on_a_field_is_refused_naming_the_words_a_field_takes() {
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] pub struct P { #[teal(rename = \"x\")] pub ex: f64 }",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "TealRecord: P.ex: `#[teal(..)]` on a record field takes `as = \"<teal type>\"` or `noyield`, got `rename`"
+        );
     }
 
     #[test]
