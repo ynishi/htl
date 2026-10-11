@@ -68,7 +68,10 @@
 //! deadline), which a handler on another runtime or thread — an HTTP route, a WebSocket
 //! session, a tool call — holds and awaits [`Asker::ask`] on; and the [`Ask`], Teal's end,
 //! which the host struct holds and whose `#[host_module]` getter returns [`Ask::channel`],
-//! declared `task.RecvChannel<task.Request<Q, A>>` as any channel of requests is.
+//! declared `task.RecvChannel<task.Request<Q, A>>` as any channel of requests is. The
+//! deadline is tokio's timer, so the runtime the asker's future runs on has the timer
+//! enabled (`enable_time()` or `enable_all()` on its builder); the `time` feature itself
+//! comes with htl, a host's own tokio line need not name it.
 //!
 //! The channel closes for Teal as an event channel does: when the last `Asker` is dropped,
 //! the loop's `recv` gets `nil, false` once the queued requests are taken. Dropping the
