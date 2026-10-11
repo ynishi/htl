@@ -495,6 +495,212 @@ fn the_bin_target_builds_tests_and_greets() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// The bin target carries a question the host asks Teal (#473), with nothing changed in what
+/// the scaffold wrote but the kind itself. The `Ask` is made on the state `preload` already
+/// fills — `asksample::gate` is one more call beside it — the loop runs on the executor
+/// `src/main.rs` already has (`call_blocking`), and `htl.task` is already installed by
+/// `preload`. What is added is the kind (`Call`, `Decision`, a `Gate` holding the `Ask`, its
+/// getter), the handler that asks, and the loop in `src/main.tl` that answers.
+///
+/// `[lang] async` is turned on by uncommenting the `# async = true` line the scaffold's
+/// `htl.toml` already carries under `[lang]`, so the file is the generated one with one
+/// line changed. The edits to the generated sources are appends and insertions at anchors
+/// the templates have (`asksample::preload(&h)?;`, `match h.call_blocking(`), not rewrites;
+/// the one line that changes is that `match`, which becomes a `let` so the handler thread is
+/// joined after the run and before the exit code is decided.
+///
+/// The handler's runtime is built with `enable_all()`, as the template's Ctrl-C thread's is,
+/// not `enable_time()`: the project's `Cargo.toml` names tokio with `rt` and `signal` only,
+/// and the timer the deadline needs is compiled in by htl's `async` feature (htl-core's
+/// tokio has `time`), which `enable_all()` turns on without the project naming a feature it
+/// does not declare.
+///
+/// Two questions, so both ends of the one place the handler maps an `Err` are seen: one
+/// answered through `task.answer`, and one refused with `req:reject` and a fixed reason, which
+/// reaches the host as `AskError::Rejected` and is printed as the mapped deny. `gate:calls()`
+/// is taken once before the loop, as `examples/embed/scripts/ask.tl` does, rather than per
+/// iteration.
+#[test]
+fn the_bin_target_carries_a_question_the_host_asks_teal() {
+    let _lock = one_at_a_time();
+    let dir = tempdir("asksample");
+    let project = htl_new(&dir, "asksample", &["--target", "bin"]);
+    assert_unpatched_pin(&project);
+
+    edit(&project.join("htl.toml"), |s| {
+        splice(&s, "\n# async = true", "\nasync = true")
+    });
+    edit(&project.join("src/lib.rs"), |s| s + ASK_LIB_RS);
+    edit(&project.join("src/main.rs"), |s| {
+        let s = splice(
+            &s,
+            "asksample::preload(&h)?;\n",
+            "asksample::preload(&h)?;\n    let asker = asksample::gate(&h)?;\n",
+        );
+        splice(
+            &s,
+            "    match h.call_blocking(main, va, &token) {\n",
+            ASK_MAIN_RS,
+        )
+    });
+    edit(&project.join("src/main.tl"), |s| s + ASK_MAIN_TL);
+
+    must_run(&mut cargo_in(&project, &["test"]), "cargo test");
+
+    let out = must_capture(
+        cargo_in(&project, &["run", "-q"]).arg("--").arg("Ada"),
+        "cargo run -- Ada",
+    );
+    let lines: Vec<&str> = out.lines().collect();
+    let at = |want: &str| {
+        lines
+            .iter()
+            .position(|line| *line == want)
+            .unwrap_or_else(|| panic!("no line {want:?} in the run's output:\n{out}"))
+    };
+    let greeted = at("hello from Rust, Ada");
+    let allowed = at("gate /public/index -> allow");
+    let refused = at("gate relative -> deny (Teal rejected the request: path must start with /)");
+    assert!(
+        greeted < allowed && allowed < refused,
+        "the template's greeting, then the answer, then the mapped refusal:\n{out}"
+    );
+
+    let dts_path = project.join("src/gate.d.tl");
+    let dts = fs::read_to_string(&dts_path)
+        .unwrap_or_else(|e| panic!("{}: the build writes it: {e}", dts_path.display()));
+    println!("--- src/gate.d.tl ---\n{dts}");
+    assert!(
+        dts.contains("calls: function(self: gate): task.RecvChannel<task.Request<Call, Decision>>"),
+        "the getter is declared as a channel of requests:\n{dts}"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// Appended to the generated `src/lib.rs`: the kind, and `gate`, which makes the `Ask` on
+/// the state `preload` filled and hands back the asker.
+const ASK_LIB_RS: &str = r#"
+use htl::task::{Ask, Asker, RecvChannel, Request};
+use std::time::Duration;
+
+/// What the host asks Teal: may `path` be served?
+#[derive(TealRecord, Clone)]
+pub struct Call {
+    pub path: String,
+}
+
+/// Teal's answer; `reason` says why a path is denied.
+#[derive(TealRecord, Clone)]
+pub struct Decision {
+    pub allow: bool,
+    pub reason: String,
+}
+
+/// Teal's end of the one kind of question.
+pub struct Gate {
+    calls: Ask<Call, Decision>,
+}
+
+#[host_module(name = "gate", dts = "src/gate.d.tl", records = [Call, Decision])]
+impl Gate {
+    pub fn calls(&self) -> RecvChannel<Request<Call, Decision>> {
+        self.calls.channel()
+    }
+}
+
+/// Install `gate` on a state `preload` filled, and hand back the asker for the handler.
+pub fn gate(h: &Htl) -> anyhow::Result<Asker<Call, Decision>> {
+    let (asker, calls) = Ask::new(h.lua(), 1, Duration::from_millis(500))?;
+    Gate { calls }.htl_preload(h)?;
+    Ok(asker)
+}
+"#;
+
+/// Put in place of the generated `src/main.rs`'s `match h.call_blocking(..) {` line: the
+/// handler, on a thread and a runtime of its own, asks twice, maps an `Err` to a deny in
+/// one place and drops the asker, which closes the channel and ends Teal's loop; the run's
+/// result is matched as before once the handler is joined.
+const ASK_MAIN_RS: &str = r#"    let handler = std::thread::spawn(move || -> anyhow::Result<()> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        for path in ["/public/index", "relative"] {
+            let call = asksample::Call {
+                path: path.to_string(),
+            };
+            let d = rt
+                .block_on(asker.ask(call))
+                .unwrap_or_else(|e| asksample::Decision {
+                    allow: false,
+                    reason: e.to_string(),
+                });
+            if d.allow {
+                println!("gate {path} -> allow");
+            } else {
+                println!("gate {path} -> deny ({})", d.reason);
+            }
+        }
+        drop(asker);
+        Ok(())
+    });
+
+    let ran = h.call_blocking(main, va, &token);
+    handler.join().expect("the handler thread panicked")?;
+    match ran {
+"#;
+
+/// Appended to the generated `src/main.tl`, after the template's lines: the loop that
+/// answers the gate's questions until the host drops its asker.
+const ASK_MAIN_TL: &str = r#"
+local task = require("htl.task")
+local gate = require("gate") -- Rust side, see src/lib.rs (types: src/gate.d.tl)
+
+-- A path under `/public/` may be served.
+local function decide(call: gate.Call): gate.Decision
+   if call.path:sub(1, #"/public/") == "/public/" then
+      return { allow = true, reason = "" }
+   end
+   return { allow = false, reason = "not public" }
+end
+
+local calls = gate:calls()
+local open = true
+while open do
+   open = await task.select({
+      calls:on(async function(req: task.Request<gate.Call, gate.Decision>, ok: boolean): boolean
+         if not ok then
+            return false
+         end
+         if req.value.path:sub(1, 1) ~= "/" then
+            assert(req:reject("path must start with /"), "a reject in time was not delivered")
+         else
+            await task.answer(req, decide)
+         end
+         return true
+      end),
+   })
+end
+"#;
+
+/// Rewrite a generated file in place.
+fn edit(path: &Path, f: impl FnOnce(String) -> String) {
+    let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    fs::write(path, f(text)).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+}
+
+/// `text` with its one occurrence of `anchor` replaced by `with`. An anchor the template
+/// no longer has, or has twice, fails here, naming it, rather than as an edit that landed
+/// somewhere else.
+fn splice(text: &str, anchor: &str, with: &str) -> String {
+    assert_eq!(
+        text.matches(anchor).count(),
+        1,
+        "the anchor {anchor:?} is not in the generated file exactly once:\n{text}"
+    );
+    text.replacen(anchor, with, 1)
+}
+
 /// The same target without a binary: the library still builds and its test still goes
 /// through preload, and there is no entry point for `cargo run` to find.
 #[test]
