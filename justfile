@@ -157,8 +157,8 @@ e2e-scaffold-packaged:
     # uploaded — and a clean worktree is also what puts .cargo_vcs_info.json inside it.
     # Cargo scopes that to the files it is about to ship, which is the right scope and
     # narrower than it sounds: an uncommitted README or justfile is not refused here,
-    # because neither is in any of the five tarballs.
-    cargo package --target-dir "$target" -p htl-core -p htl-macros -p htl -p htl-cli -p htl-mq
+    # because neither is in any of the six tarballs.
+    cargo package --target-dir "$target" -p htl-core -p htl-macros -p htl -p htl-std -p htl-cli -p htl-mq
     ver="$(cargo pkgid -p htl-core | sed 's/.*[#@]//')"
     dir="$(mktemp -d)"
     trap 'rm -rf "$dir"' EXIT
@@ -168,13 +168,13 @@ e2e-scaffold-packaged:
     # unpack sits under this workspace root with `[workspace]` stripped from its manifest,
     # which is precisely the arrangement cargo refuses to build: it walks up, finds this
     # workspace, and reports a package that believes it is not in one.
-    for crate in htl-core htl-macros htl htl-cli htl-mq; do
+    for crate in htl-core htl-macros htl htl-std htl-cli htl-mq; do
       tar -xzf "$target/package/$crate-$ver.crate" -C "$dir"
     done
     # The binary that writes the scaffolds below, built from the extracted tree, so that
     # the CLI under test is the one being shipped and the thirteen templates it reads with
     # `include_str!` are proved to be in the tarball rather than only in the checkout. Its
-    # three library dependencies are patched at their extracted trees for the same reason
+    # four library dependencies are patched at their extracted trees for the same reason
     # the projects below are: the version they name is not on crates.io while this runs,
     # and this is the run that decides whether it should be. --debug because the question
     # is what it builds and what it writes, and a debug build shares the graph the projects
@@ -182,25 +182,27 @@ e2e-scaffold-packaged:
     # patch as unused here and is right to: the CLI takes `htl` with default features off,
     # so the proc macros are not in its graph. It is passed anyway, because the alternative
     # to patching a crate that is not published is resolving it, and if this dependency ever
-    # arrives the failure should not be a resolution error about crates.io. htl-mq is not
-    # among the three and needs no `--config` line here: the CLI does not depend on it, only
-    # the window project it writes does — which is what `HTL_PATCH_MQ` below is for.
+    # arrives the failure should not be a resolution error about crates.io. htl-std is among
+    # the four — the CLI depends on it directly (`register_libraries`, `src/lib.rs`), unlike
+    # htl-mq, which is not: the CLI does not depend on it, only the window project it writes
+    # does — which is what `HTL_PATCH_MQ` below is for.
     cargo install --locked --debug --path "$dir/htl-cli-$ver" --root "$dir/cli" \
       --target-dir "$target" \
       --config "patch.crates-io.htl.path='$dir/htl-$ver'" \
       --config "patch.crates-io.htl-core.path='$dir/htl-core-$ver'" \
-      --config "patch.crates-io.htl-macros.path='$dir/htl-macros-$ver'"
-    # Two packages, pointed at the CLI just installed and at the four extracted trees
+      --config "patch.crates-io.htl-macros.path='$dir/htl-macros-$ver'" \
+      --config "patch.crates-io.htl-std.path='$dir/htl-std-$ver'"
+    # Two packages, pointed at the CLI just installed and at the five extracted trees
     # instead of at this checkout. `e2e` is the same four tests `e2e` runs; `htl-cli` is
     # its whole integration suite — 206 tests across 34 files that spawn `htl_bin()`, which
-    # is `HTL_TEST_BIN` when it is set. Six variables are the whole of the difference
+    # is `HTL_TEST_BIN` when it is set. Seven variables are the whole of the difference
     # between the two gates, as five positional arguments were when this was a shared bash
     # recipe — a release gate that checked less than the loop running on every commit would
     # be the wrong way round, and one implementation is how that stays true.
     #
     # What the second package adds is not the file set. `cargo package` verifies each
     # tarball by building it, so an `include_str!` target left out of one fails above,
-    # before this line runs, and every file these five crates ship is read that way. What
+    # before this line runs, and every file these six crates ship is read that way. What
     # is left is everything the shipped binary *does* that compiling it does not ask:
     # the bytes `htl new` writes for each host profile, what `fmt` writes, which lints
     # fire, what the run cache reports. The four scaffold tests see one corner of that —
@@ -223,6 +225,7 @@ e2e-scaffold-packaged:
     HTL_PATCH_CORE="$dir/htl-core-$ver" \
     HTL_PATCH_MACROS="$dir/htl-macros-$ver" \
     HTL_PATCH_MQ="$dir/htl-mq-$ver" \
+    HTL_PATCH_STD="$dir/htl-std-$ver" \
       cargo test -p htl-cli -p e2e
 
 # After a publish, and only then: the CLI a user installs, writing the project a user gets,
@@ -264,19 +267,36 @@ post-publish:
     # copies out of the htl-mq this CLI's pin resolves — the published one, which is the
     # question this recipe asks — so the check runs here before that project's cargo does.
     "$dir/cli/bin/htl" check "$dir/window-sample"
+    # A published CLI pins a version and nothing else: the bin target's htl line carries
+    # `features = ["async"]` beside it (its host runs on the executor), the window target's
+    # is the bare version. Two or three numbers: from 0.7.0 the CLI writes its own three,
+    # and the 0.6.x CLIs on crates.io wrote two.
     pin="$(grep -m1 '^htl = ' "$dir/bin-sample/Cargo.toml")"
-    # A published CLI pins a version and nothing else on the line. Two or three numbers:
-    # from 0.7.0 the CLI writes its own three, and the 0.6.x CLIs on crates.io wrote two.
-    if [[ ! "$pin" =~ ^htl\ =\ \"[0-9]+\.[0-9]+(\.[0-9]+)?\"$ ]]; then
-      echo "post-publish: htl-cli $ver pins \`${pin#htl = }\`, not a version — a published CLI has to" >&2
+    if [[ ! "$pin" =~ ^htl\ =\ \{\ version\ =\ \"([0-9]+\.[0-9]+(\.[0-9]+)?)\",\ features\ =\ \[\"async\"\]\ \}$ ]]; then
+      echo "post-publish: htl-cli $ver pins \`${pin#htl = }\` in bin-sample, not \`{ version = \"<version>\", features = [\"async\"] }\` — a published CLI has to" >&2
       exit 1
     fi
-    echo "post-publish: htl-cli $ver pins ${pin#htl = }"
-    # The window project pins htl-mq beside htl, and a published CLI writes the same bare
-    # version on both lines.
+    bare="\"${BASH_REMATCH[1]}\""
+    echo "post-publish: htl-cli $ver pins $bare"
+    # The window project pins htl and htl-mq as the same bare version.
+    win="$(grep -m1 '^htl = ' "$dir/window-sample/Cargo.toml")"
+    if [[ "${win#htl = }" != "$bare" ]]; then
+      echo "post-publish: window-sample pins htl as \`${win#htl = }\`, not $bare" >&2
+      exit 1
+    fi
     mq="$(grep -m1 '^htl-mq = ' "$dir/window-sample/Cargo.toml")"
-    if [[ "${mq#htl-mq = }" != "${pin#htl = }" ]]; then
-      echo "post-publish: window-sample pins htl-mq as \`${mq#htl-mq = }\` beside htl ${pin#htl = }" >&2
+    if [[ "${mq#htl-mq = }" != "$bare" ]]; then
+      echo "post-publish: window-sample pins htl-mq as \`${mq#htl-mq = }\` beside htl $bare" >&2
+      exit 1
+    fi
+    # bin-sample pins htl-std beside htl too — the asynchronous I/O slice of `std.*` its
+    # `preload` installs — as the same bare version. window-sample has no htl-std: every
+    # std.fs / std.proc function is async, and nothing in the window target's run is a
+    # root the executor runs (`scaffold.rs`'s `WINDOW` doc says why), so it does not
+    # carry the dependency.
+    std_bin="$(grep -m1 '^htl-std = ' "$dir/bin-sample/Cargo.toml")"
+    if [[ "${std_bin#htl-std = }" != "$bare" ]]; then
+      echo "post-publish: bin-sample pins htl-std as \`${std_bin#htl-std = }\` beside htl $bare" >&2
       exit 1
     fi
     for project in bin-sample lib-sample cdylib-sample window-sample; do

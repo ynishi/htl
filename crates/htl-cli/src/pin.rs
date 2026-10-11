@@ -2,12 +2,13 @@
 //! `htl new` already wrote depends on.
 //!
 //! A scaffolded project pins four things to one tree — `Cargo.toml`'s `htl` line (and
-//! `htl-mq`'s, under the window target), `mise.toml`, `[toolchain] htl` in `htl.toml` when
-//! the project wrote one, and `Cargo.lock` — because [`crate::scaffold::HtlPin`] decides
-//! all four at `htl new` time and nothing moves them afterwards (see `scaffold.rs`, "What
-//! the output pins"). This module moves the same four by hand: read back out of the tree
-//! `htl new` already wrote rather than computed fresh, and finished with the `cargo
-//! update` that makes the lockfile agree.
+//! `htl-mq`'s under the window target, `htl-std`'s under bin and window — see
+//! [`SIBLINGS`]), `mise.toml`, `[toolchain] htl` in `htl.toml` when the project wrote one,
+//! and `Cargo.lock` — because [`crate::scaffold::HtlPin`] decides all four at `htl new`
+//! time and nothing moves them afterwards (see `scaffold.rs`, "What the output pins").
+//! This module moves the same four by hand: read back out of the tree `htl new` already
+//! wrote rather than computed fresh, and finished with the `cargo update` that makes the
+//! lockfile agree.
 //!
 //! `release` is this CLI's own version, by name, so `htl pin release` is the way back
 //! from `main` or `path:` once the checkout a project moved to is cut — before that, the
@@ -96,6 +97,23 @@ htl = { path = \"/path/to/htl/crates/htl\" }\n\
 htl-core = { path = \"/path/to/htl/crates/htl-core\" }\n\
 htl-macros = { path = \"/path/to/htl/crates/htl-macros\" }\n";
 
+/// Every crate of this repository besides `htl` itself that a scaffolded manifest may
+/// name beside it, under the same pin: `htl-mq` (the window target) and `htl-std` (bin
+/// and window). Each is independently present or absent — a project may have one, the
+/// other, both or neither — so [`cmd_pin`] loops over this rather than asking after each
+/// by name; a target that grows a third sibling dependency is a fourth entry here.
+const SIBLINGS: &[&str] = &["htl-mq", "htl-std"];
+
+/// One sibling from [`SIBLINGS`] this manifest actually names: what it currently reads as
+/// ([`value_text`]) and what the pin being moved to would write ([`dep_value`]), both
+/// computed before anything is written — see the module doc, "Why every file is read and
+/// parsed before anything is written".
+struct SiblingPin {
+    name: &'static str,
+    old: String,
+    new: String,
+}
+
 pub(crate) fn cmd_pin(htl: &str, dir: Option<PathBuf>, no_update: bool) -> Result<ExitCode> {
     let pin = HtlPin::parse(Some(htl))?;
 
@@ -157,31 +175,26 @@ pub(crate) fn cmd_pin(htl: &str, dir: Option<PathBuf>, no_update: bool) -> Resul
     let old_htl = value_text(htl_item.expect("checked is_none() above"));
     let new_htl = dep_value(&pin.keys_for("htl"), &refs(&htl_features));
 
-    let has_mq = cargo_doc
-        .get("dependencies")
-        .and_then(|i| i.as_table_like())
-        .map(|d| d.contains_key("htl-mq"))
-        .unwrap_or(false);
-    let mq_item = if has_mq {
-        cargo_doc
+    // Every sibling of `htl` this manifest may also name, read and recognised the same
+    // way `htl` itself was above — present or absent, each on its own, so a third name
+    // here is a third entry in [`SIBLINGS`] and not a third copy of this block.
+    let mut siblings: Vec<SiblingPin> = Vec::new();
+    for name in SIBLINGS {
+        let item = cargo_doc
             .get("dependencies")
             .and_then(|i| i.as_table_like())
-            .and_then(|d| d.get("htl-mq"))
-    } else {
-        None
-    };
-    let mq_features = if has_mq {
-        match recognised_features(mq_item) {
-            Some(f) => Some(f),
-            None => return Ok(refuse_unrecognised(mq_item, "htl-mq")),
+            .and_then(|d| d.get(name));
+        if item.is_none() {
+            continue;
         }
-    } else {
-        None
-    };
-    let old_mq = mq_item.map(value_text);
-    let new_mq = mq_features
-        .as_ref()
-        .map(|f| dep_value(&pin.keys_for("htl-mq"), &refs(f)));
+        let features = match recognised_features(item) {
+            Some(f) => f,
+            None => return Ok(refuse_unrecognised(item, name)),
+        };
+        let old = value_text(item.expect("checked is_none() above"));
+        let new = dep_value(&pin.keys_for(name), &refs(&features));
+        siblings.push(SiblingPin { name, old, new });
+    }
 
     // `mise.toml`: what it should say under this pin, computed without writing it. A
     // directory (or anything else that is not a plain file) where it is expected is
@@ -283,31 +296,32 @@ pub(crate) fn cmd_pin(htl: &str, dir: Option<PathBuf>, no_update: bool) -> Resul
         )?;
         cargo_changed = true;
     }
-    if let (Some(old), Some(new)) = (&old_mq, &new_mq)
-        && old != new
-    {
-        let deps = cargo_doc
-            .get_mut("dependencies")
-            .and_then(|i| i.as_table_like_mut())
-            .context("no [dependencies] table in Cargo.toml")?;
-        set_value_keeping_decor(
-            deps,
-            "htl-mq",
-            new.parse()
-                .with_context(|| format!("parsing the value htl pin computed for htl-mq: {new}"))?,
-        )?;
-        cargo_changed = true;
+    for s in &siblings {
+        if s.old != s.new {
+            let deps = cargo_doc
+                .get_mut("dependencies")
+                .and_then(|i| i.as_table_like_mut())
+                .context("no [dependencies] table in Cargo.toml")?;
+            set_value_keeping_decor(
+                deps,
+                s.name,
+                s.new.parse().with_context(|| {
+                    format!(
+                        "parsing the value htl pin computed for {}: {}",
+                        s.name, s.new
+                    )
+                })?,
+            )?;
+            cargo_changed = true;
+        }
     }
     if cargo_changed {
         fs::write(&manifest_path, cargo_doc.to_string())
             .with_context(|| format!("writing {}", manifest_path.display()))?;
     }
     let mut cargo_line = format!("htl pin: Cargo.toml  htl: {old_htl} -> {new_htl}");
-    if let Some(new_mq) = &new_mq {
-        cargo_line.push_str(&format!(
-            "  htl-mq: {} -> {new_mq}",
-            old_mq.as_deref().unwrap_or("")
-        ));
+    for s in &siblings {
+        cargo_line.push_str(&format!("  {}: {} -> {}", s.name, s.old, s.new));
     }
     eprintln!("{cargo_line}");
 
@@ -344,8 +358,8 @@ pub(crate) fn cmd_pin(htl: &str, dir: Option<PathBuf>, no_update: bool) -> Resul
     // file above is already written and reported by the time this runs, so a failure
     // here still has those lines above it.
     let mut names = vec!["htl", "htl-core", "htl-macros"];
-    if has_mq {
-        names.push("htl-mq");
+    for s in &siblings {
+        names.push(s.name);
     }
     if no_update {
         let flags = names
@@ -499,9 +513,9 @@ fn value_text(item: &toml_edit::Item) -> String {
 /// `[dependencies.<name>]` stand-in when it is a table, and a note when it is absent —
 /// read from the parsed document rather than the raw file text, for the same reason
 /// [`value_text`] is. The caller handles an absent `htl` itself with a different
-/// message (see the module doc); the `None` branch here is only ever reached for
-/// `htl-mq`, which has no dependency of its own to be absent from if `has_mq` said it
-/// was there.
+/// message (see the module doc); the `None` branch here is unreachable in practice for
+/// `htl` and for a [`SIBLINGS`] entry, both of which are only ever passed in once their
+/// caller already confirmed the item is there.
 fn refuse_unrecognised(item: Option<&toml_edit::Item>, name: &str) -> ExitCode {
     let found = match item {
         None => format!("no {name} dependency in [dependencies]"),

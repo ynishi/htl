@@ -609,6 +609,11 @@ fn run_in(h: &Htl, path: &Path, r: RunIn<'_>, out_code: &mut Option<String>) -> 
     h.install_test_lib()?;
     #[cfg(feature = "std")]
     h.install_std()?;
+    // Whatever a registered installer (`crate::registry::register_installer`) adds
+    // beyond that — see its module doc for why this crate cannot name the crate it
+    // comes from. Not behind any feature: the mechanism is neither `std`'s nor
+    // `async`'s.
+    h.install_registered()?;
     // A test on the executor may spawn tasks: the library that does, on the same terms.
     #[cfg(feature = "async")]
     h.install_task_lib()?;

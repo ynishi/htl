@@ -13,8 +13,16 @@
 //!
 //! The two `failing/` fixtures had no caller at all before this file: they were checked in
 //! to be run by hand and nothing ever ran them.
+//!
+//! The fixtures are copied into each test's own temp directory rather than read in place
+//! from `tests/fixtures/`: a path under this crate's own tree has `crates/htl-cli/Cargo.toml`
+//! above it, and that manifest depends on `htl-std` (since `fecb368`), so running the
+//! binary against a fixture's checkout path — rather than a copy with nothing above it —
+//! has `auto_dts` walk up to that manifest and materialise `types/htl-std/` into the real
+//! source tree instead of nowhere. `dep_dts.rs`'s `project` does the same copy for the
+//! same reason; see its own doc.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 mod common;
@@ -23,22 +31,49 @@ fn tempdir(name: &str) -> common::TempDir {
     common::tempdir("htl-cli-sample", name)
 }
 
-/// A fixture's absolute path. The tests run from a temp directory rather than from the
-/// checkout, so every path handed to the binary has to be absolute.
-fn fixture(rel: &str) -> String {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+/// `tests/fixtures/<sub>` (`sample` or `failing`), copied under `root` — a test's own temp
+/// directory, with no `Cargo.toml` above it — and the copy's own directory returned. See
+/// the module doc for why this is a copy rather than the checkout path itself.
+fn fixture_tree(root: &Path, sub: &str) -> PathBuf {
+    let from = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
-        .join(rel)
+        .join(sub);
+    let to = root.join(sub);
+    copy_tree(&from, &to);
+    to
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        let name = e.file_name();
+        let src = e.path();
+        let dst = to.join(&name);
+        if src.is_dir() {
+            copy_tree(&src, &dst);
+        } else {
+            std::fs::copy(&src, &dst).unwrap();
+        }
+    }
+}
+
+/// One file of a fixture tree, as an absolute path into the copy under `root`.
+fn fixture(root: &Path, sub: &str, name: &str) -> String {
+    fixture_tree(root, sub)
+        .join(name)
         .to_string_lossy()
         .into_owned()
 }
 
-/// The three modules of the sample: a library, a program requiring it, and its test suite.
-/// `main.tl` says `require("util")`, so the set is also a resolution case.
-fn sample() -> Vec<String> {
-    ["sample/util.tl", "sample/main.tl", "sample/util_test.tl"]
+/// The three modules of the sample, copied under `root`: a library, a program requiring
+/// it, and its test suite. `main.tl` says `require("util")`, so the set is also a
+/// resolution case.
+fn sample(root: &Path) -> Vec<String> {
+    let dir = fixture_tree(root, "sample");
+    ["util.tl", "main.tl", "util_test.tl"]
         .iter()
-        .map(|f| fixture(f))
+        .map(|f| dir.join(f).to_string_lossy().into_owned())
         .collect()
 }
 
@@ -68,7 +103,7 @@ fn run_with(args: &[&str], extra: &[String], cwd: &Path) -> (bool, String) {
 #[test]
 fn the_sample_modules_check_clean() {
     let dir = tempdir("check");
-    let (ok, out) = run_with(&["check"], &sample(), &dir);
+    let (ok, out) = run_with(&["check"], &sample(&dir), &dir);
     assert!(ok, "the sample must check clean:\n{out}");
     assert!(
         out.contains("3 file(s), 0 error(s), 0 warning(s), 0 lint(s)"),
@@ -81,7 +116,7 @@ fn the_sample_modules_check_clean() {
 #[test]
 fn the_sample_suite_passes() {
     let dir = tempdir("test");
-    let (ok, out) = run(&["test", &fixture("sample/util_test.tl")], &dir);
+    let (ok, out) = run(&["test", &fixture(&dir, "sample", "util_test.tl")], &dir);
     assert!(ok, "the sample suite must pass:\n{out}");
     assert!(
         out.contains("4 passed, 0 failed"),
@@ -105,7 +140,7 @@ fn the_sample_suite_passes() {
 #[test]
 fn the_second_check_is_answered_out_of_the_store() {
     let dir = tempdir("cache");
-    let files = sample();
+    let files = sample(&dir);
 
     let (ok, cold) = run_with(&["check", "--explain-cache"], &files, &dir);
     assert!(ok, "{cold}");
@@ -135,7 +170,7 @@ fn the_second_check_is_answered_out_of_the_store() {
 #[test]
 fn cache_status_reports_what_the_check_wrote() {
     let dir = tempdir("status");
-    let (ok, check) = run_with(&["check"], &sample(), &dir);
+    let (ok, check) = run_with(&["check"], &sample(&dir), &dir);
     assert!(ok, "{check}");
 
     let (ok, status) = run(&["cache", "status"], &dir);
@@ -152,7 +187,7 @@ fn cache_status_reports_what_the_check_wrote() {
 #[test]
 fn a_failing_suite_names_every_failure_and_exits_non_zero() {
     let dir = tempdir("failing");
-    let (ok, out) = run(&["test", &fixture("failing/bad_test.tl")], &dir);
+    let (ok, out) = run(&["test", &fixture(&dir, "failing", "bad_test.tl")], &dir);
     assert!(!ok, "a suite with failing cases must not exit zero:\n{out}");
     assert!(
         out.contains("fails on purpose: expected 3, got 2"),
@@ -176,7 +211,7 @@ fn a_failing_suite_names_every_failure_and_exits_non_zero() {
 #[test]
 fn a_suite_that_does_not_type_check_is_refused_before_it_runs() {
     let dir = tempdir("typed");
-    let (ok, out) = run(&["test", &fixture("failing/typed_test.tl")], &dir);
+    let (ok, out) = run(&["test", &fixture(&dir, "failing", "typed_test.tl")], &dir);
     assert!(!ok, "a suite that does not type check must fail:\n{out}");
     assert!(
         out.contains("got string \"2\", expected integer"),

@@ -22,7 +22,7 @@
 //!
 //! # Two callers, one implementation
 //!
-//! The bash took five positional arguments because it had two callers. This takes six
+//! The bash took five positional arguments because it had two callers. This takes seven
 //! environment variables for the same reason:
 //!
 //! | Variable | Unset |
@@ -32,13 +32,14 @@
 //! | `HTL_PATCH_CORE` | likewise |
 //! | `HTL_PATCH_MACROS` | likewise |
 //! | `HTL_PATCH_MQ` | likewise |
+//! | `HTL_PATCH_STD` | likewise |
 //! | `HTL_E2E_TARGET` | `<cargo's target directory>/e2e-scaffold` |
 //!
 //! `just e2e` sets none of them: the CLI it builds is this checkout's, and a CLI built
 //! from a checkout pins that checkout (`crates/htl-cli/build.rs`), so the project it
 //! writes builds against this tree with nothing redirected — the manifest a contributor
-//! gets from `cargo run -- new`. `just e2e-scaffold-packaged` sets all six, at a CLI
-//! installed out of a `.crate` tarball and at the four extracted trees beside it: that
+//! gets from `cargo run -- new`. `just e2e-scaffold-packaged` sets all seven, at a CLI
+//! installed out of a `.crate` tarball and at the five extracted trees beside it: that
 //! CLI pins its version, which is not on crates.io while the gate runs, and the patch is
 //! what points the version at the tarballs. The patch variables — three, then — used to
 //! default to this checkout, back when a checkout CLI pinned a release by number and the
@@ -208,11 +209,12 @@ fn cargo_target_dir() -> &'static Path {
 
 /// The crates a caller can redirect, and the variable that redirects each. One list, read
 /// by [`write_patch_config`]; the module doc above says what sets them and why.
-const PATCHES: [(&str, &str); 4] = [
+const PATCHES: [(&str, &str); 5] = [
     ("htl", "HTL_PATCH_HTL"),
     ("htl-core", "HTL_PATCH_CORE"),
     ("htl-macros", "HTL_PATCH_MACROS"),
     ("htl-mq", "HTL_PATCH_MQ"),
+    ("htl-std", "HTL_PATCH_STD"),
 ];
 
 /// The patch a caller asked for, written into the project as `.cargo/config.toml` — and so
@@ -379,6 +381,11 @@ fn unpatched_pin(manifest: &str) -> Result<(), &'static str> {
     if manifest.contains("htl-mq") && !pins(manifest, "htl-mq") {
         return Err("names htl-mq without a pin to build it against");
     }
+    // The bin and window targets pin `htl-std` beside `htl` for the same reason, and the
+    // packaged gate patches it the same way, so it is held to the same rule.
+    if manifest.contains("htl-std") && !pins(manifest, "htl-std") {
+        return Err("names htl-std without a pin to build it against");
+    }
     if manifest.contains("patch.crates-io") {
         return Err("redirects its own pin, so this is not the manifest a user gets");
     }
@@ -413,6 +420,7 @@ const PINNED: &str = "[dependencies]\nhtl = { version = \"0.4\", features = [\"f
 
 /// The window target's pair, in the shape its manifest writes them.
 const PINNED_WINDOW: &str = "[dependencies]\nhtl = \"0.7.0\"\nhtl-mq = \"0.7.0\"\n";
+const PINNED_BIN: &str = "[dependencies]\nhtl = \"0.7.0\"\nhtl-std = \"0.7.0\"\n";
 
 #[test]
 fn a_manifest_naming_no_htl_is_refused() {
@@ -422,6 +430,19 @@ fn a_manifest_naming_no_htl_is_refused() {
     );
     assert_eq!(unpatched_pin(PINNED), Ok(()));
     assert_eq!(unpatched_pin(PINNED_WINDOW), Ok(()));
+    assert_eq!(unpatched_pin(PINNED_BIN), Ok(()));
+}
+
+#[test]
+fn a_bin_manifest_naming_no_htl_std_pin_is_refused() {
+    let sectioned = format!("{PINNED}\n[dependencies.htl-std]\nversion = \"0.7.0\"\n");
+    assert_eq!(
+        unpatched_pin(&sectioned),
+        Err("names htl-std without a pin to build it against")
+    );
+    let std_patched =
+        format!("{PINNED_BIN}\n[patch.crates-io]\nhtl-std = {{ path = \"../..\" }}\n");
+    assert!(unpatched_pin(&std_patched).is_err());
 }
 
 #[test]

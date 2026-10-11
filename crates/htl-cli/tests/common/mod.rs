@@ -54,15 +54,16 @@ pub fn htl_bin() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_htl")))
 }
 
-/// The crates a caller can redirect, and the variable that redirects each: the same four
+/// The crates a caller can redirect, and the variable that redirects each: the same five
 /// pairs, in the same order, as `PATCHES` in `e2e/tests/scaffold_targets.rs`, which is
 /// where the table of what each variable means when unset lives.
 #[allow(dead_code)]
-const PATCHES: [(&str, &str); 4] = [
+const PATCHES: [(&str, &str); 5] = [
     ("htl", "HTL_PATCH_HTL"),
     ("htl-core", "HTL_PATCH_CORE"),
     ("htl-macros", "HTL_PATCH_MACROS"),
     ("htl-mq", "HTL_PATCH_MQ"),
+    ("htl-std", "HTL_PATCH_STD"),
 ];
 
 /// The patch a caller asked for, written into a scaffolded project as `.cargo/config.toml`
@@ -76,13 +77,13 @@ const PATCHES: [(&str, &str); 4] = [
 /// `htl-mq = "<version>"`, which is not on crates.io while the gate runs. The resolve
 /// fails, the declaration is never written, and both Teal files of the scaffold report
 /// `mq` as a module not found: a patch that never arrived, said as a module that is not
-/// there. The recipe sets `HTL_PATCH_HTL`, `HTL_PATCH_CORE`, `HTL_PATCH_MACROS` and
-/// `HTL_PATCH_MQ` to the extracted tarballs, and this turns the ones set into one
-/// `[patch.crates-io]` line each. It is the e2e helper of the same name, for the tests
-/// that `cargo test -p htl-cli` runs on every commit. A path only replaces a pin it
-/// satisfies: pointed at a tree of another version, cargo passes over the patch and fails
-/// the resolve as before (`failed to select a version for the requirement`), which is why
-/// the recipe points them at the tarballs of the version being packaged.
+/// there. The recipe sets `HTL_PATCH_HTL`, `HTL_PATCH_CORE`, `HTL_PATCH_MACROS`,
+/// `HTL_PATCH_MQ` and `HTL_PATCH_STD` to the extracted tarballs, and this turns the ones
+/// set into one `[patch.crates-io]` line each. It is the e2e helper of the same name, for
+/// the tests that `cargo test -p htl-cli` runs on every commit. A path only replaces a
+/// pin it satisfies: pointed at a tree of another version, cargo passes over the patch
+/// and fails the resolve as before (`failed to select a version for the requirement`),
+/// which is why the recipe points them at the tarballs of the version being packaged.
 ///
 /// The patch goes to `.cargo/config.toml` rather than to the manifest so the scaffolded
 /// `Cargo.toml` stays byte for byte the one a user gets — what the scaffold tests and the

@@ -1,7 +1,8 @@
 //! `htl pin <release|main|path:<checkout>> [dir] [--no-update]` through the real binary:
 //! what each pin rewrites in a project `htl new` already wrote — `Cargo.toml`'s `htl` /
-//! `htl-mq` lines, `mise.toml`, `[toolchain] htl` in `htl.toml` — what a line this does
-//! not recognise is refused with, and the one case that actually runs `cargo update`.
+//! `htl-mq` / `htl-std` lines, `mise.toml`, `[toolchain] htl` in `htl.toml` — what a line
+//! this does not recognise is refused with, and the one case that actually runs `cargo
+//! update`.
 
 use std::path::Path;
 use std::process::Command;
@@ -91,9 +92,15 @@ fn pin_path_rewrites_a_release_or_checkout_pin_and_removes_mise_toml() {
         "a release pin writes mise.toml"
     );
     let before = std::fs::read_to_string(&manifest).unwrap();
+    // `--target bin` carries `features = ["async"]` on the `htl` line, which `htl pin`
+    // keeps across the move (`the_cdylib_feature_list_survives_every_pin_kind` holds the
+    // same for `ffi`).
     assert_eq!(
         htl_line(&manifest),
-        format!("htl = \"{}\"", env!("CARGO_PKG_VERSION"))
+        format!(
+            "htl = {{ version = \"{}\", features = [\"async\"] }}",
+            env!("CARGO_PKG_VERSION")
+        )
     );
 
     let checkout = checkout_path();
@@ -101,12 +108,14 @@ fn pin_path_rewrites_a_release_or_checkout_pin_and_removes_mise_toml() {
     assert_eq!(code, Some(0), "{stderr}");
     assert_eq!(
         htl_line(&manifest),
-        format!("htl = {{ path = \"{checkout}/crates/htl\" }}")
+        format!("htl = {{ path = \"{checkout}/crates/htl\", features = [\"async\"] }}")
     );
     assert!(!dir.join("mise.toml").exists(), "{stderr}");
 
     let after = std::fs::read_to_string(&manifest).unwrap();
-    let keep = |l: &&str| !l.starts_with("htl = ");
+    // `htl-std` moves with `htl` too (a `--target bin` sibling, like `htl-mq` under
+    // `window`), so its line is excluded from "the rest" alongside `htl`'s own.
+    let keep = |l: &&str| !l.starts_with("htl = ") && !l.starts_with("htl-std = ");
     assert_eq!(
         before.lines().filter(keep).collect::<Vec<_>>(),
         after.lines().filter(keep).collect::<Vec<_>>(),
@@ -129,7 +138,10 @@ fn pin_release_writes_the_clis_version_and_mise_toml_back() {
     assert_eq!(code, Some(0), "{stderr}");
     assert_eq!(
         htl_line(&dir.join("Cargo.toml")),
-        format!("htl = \"{}\"", env!("CARGO_PKG_VERSION"))
+        format!(
+            "htl = {{ version = \"{}\", features = [\"async\"] }}",
+            env!("CARGO_PKG_VERSION")
+        )
     );
     let mise = std::fs::read_to_string(dir.join("mise.toml")).unwrap();
     assert!(
@@ -191,6 +203,57 @@ fn the_window_targets_htl_mq_line_moves_with_the_htl_line() {
     assert_eq!(
         dep_line(&manifest, "htl-mq"),
         format!("htl-mq = {{ path = \"{checkout}/crates/htl-mq\" }}")
+    );
+}
+
+/// A `--target bin` project's `htl-std` line moves with `htl`'s the same way `htl-mq`'s
+/// does under the window target (the test above): `htl pin release` leaves the bare
+/// version, `htl pin path:<checkout>` leaves the checkout's `crates/htl-std`. This is the
+/// case the `SIBLINGS` loop in `pin.rs` fixes — before it, `htl-std` was left wherever
+/// `htl new` wrote it while `htl` moved beneath it, and `cargo update` then failed on a
+/// stale `htl-std` requirement.
+#[test]
+fn the_bin_targets_htl_std_line_moves_with_the_htl_line() {
+    let root = tempdir("bin-std");
+    let (code, _, stderr) = htl(&["new", "s", "--target", "bin", "--htl", "main"], &root);
+    assert_eq!(code, Some(0), "{stderr}");
+    let dir = root.join("s");
+    let manifest = dir.join("Cargo.toml");
+    assert!(
+        htl_line(&manifest).contains("branch = \"main\""),
+        "{}",
+        htl_line(&manifest)
+    );
+    assert!(
+        dep_line(&manifest, "htl-std").contains("branch = \"main\""),
+        "{}",
+        dep_line(&manifest, "htl-std")
+    );
+
+    let (code, _, stderr) = htl(&["pin", "release", "--no-update"], &dir);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(
+        htl_line(&manifest),
+        format!(
+            "htl = {{ version = \"{}\", features = [\"async\"] }}",
+            env!("CARGO_PKG_VERSION")
+        )
+    );
+    assert_eq!(
+        dep_line(&manifest, "htl-std"),
+        format!("htl-std = \"{}\"", env!("CARGO_PKG_VERSION"))
+    );
+
+    let checkout = checkout_path();
+    let (code, _, stderr) = htl(&["pin", &format!("path:{checkout}"), "--no-update"], &dir);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(
+        htl_line(&manifest),
+        format!("htl = {{ path = \"{checkout}/crates/htl\", features = [\"async\"] }}")
+    );
+    assert_eq!(
+        dep_line(&manifest, "htl-std"),
+        format!("htl-std = {{ path = \"{checkout}/crates/htl-std\" }}")
     );
 }
 
@@ -395,7 +458,7 @@ fn a_relative_path_is_resolved_against_the_current_directory() {
         .to_string();
     assert_eq!(
         htl_line(&sub.join("demo/Cargo.toml")),
-        format!("htl = {{ path = \"{expected}/crates/htl\" }}")
+        format!("htl = {{ path = \"{expected}/crates/htl\", features = [\"async\"] }}")
     );
 }
 
@@ -571,17 +634,25 @@ fn an_htl_line_outside_dependencies_does_not_confuse_the_real_one() {
     // would have left the git pin in place (reading the patch line as already-correct)
     // and the path form only once.
     assert!(!after.contains("branch = \"main\""), "{after}");
-    let path_form = format!("htl = {{ path = \"{checkout}/crates/htl\" }}");
-    assert_eq!(after.matches(&path_form).count(), 2, "{after}");
+    // The `[patch.crates-io]` line is hand-written above and untouched by the move, so
+    // it carries no features; the real `[dependencies]` line does (`--target bin`'s
+    // `features = ["async"]`), so the two are no longer the same string.
+    let patch_path_form = format!("htl = {{ path = \"{checkout}/crates/htl\" }}");
+    let dep_path_form =
+        format!("htl = {{ path = \"{checkout}/crates/htl\", features = [\"async\"] }}");
+    assert_eq!(after.matches(&patch_path_form).count(), 1, "{after}");
+    assert_eq!(after.matches(&dep_path_form).count(), 1, "{after}");
     assert!(
-        after.contains(&format!("[patch.crates-io]\n{path_form}")),
+        after.contains(&format!("[patch.crates-io]\n{patch_path_form}")),
         "{after}"
     );
 
     // And the summary reported the real move (git -> path), not a no-op.
     assert!(stderr.contains("git = "), "{stderr}");
     assert!(
-        stderr.contains(&format!("-> {{ path = \"{checkout}/crates/htl\" }}")),
+        stderr.contains(&format!(
+            "-> {{ path = \"{checkout}/crates/htl\", features = [\"async\"] }}"
+        )),
         "{stderr}"
     );
 }
@@ -591,7 +662,7 @@ fn an_htl_line_outside_dependencies_does_not_confuse_the_real_one() {
 /// first two and silently miss the third.
 #[test]
 fn differently_spaced_htl_lines_all_move() {
-    for prefix in ["htl=\"", "htl   = \"", "\"htl\" = \""] {
+    for prefix in ["htl=", "htl   = ", "\"htl\" = "] {
         let root = tempdir("spacing");
         let (code, _, stderr) = htl(&["new", "a", "--target", "bin", "--htl", "release"], &root);
         assert_eq!(code, Some(0), "{prefix}: {stderr}");
@@ -599,8 +670,12 @@ fn differently_spaced_htl_lines_all_move() {
         let manifest = dir.join("Cargo.toml");
         let original = std::fs::read_to_string(&manifest).unwrap();
         let version = env!("CARGO_PKG_VERSION");
-        let canonical = format!("htl = \"{version}\"");
-        let respaced = format!("{prefix}{version}\"");
+        // `--target bin` writes the table form (`features = ["async"]`), not the bare
+        // string: only the key's spacing varies here, so the value is carried as one
+        // piece into each respelling.
+        let value = format!("{{ version = \"{version}\", features = [\"async\"] }}");
+        let canonical = format!("htl = {value}");
+        let respaced = format!("{prefix}{value}");
         let rewritten = original.replacen(&canonical, &respaced, 1);
         assert_ne!(
             rewritten, original,

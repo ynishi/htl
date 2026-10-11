@@ -136,6 +136,11 @@ pub mod resolve;
 pub mod batteries;
 #[cfg(feature = "async")]
 pub mod task;
+// The seam a binary adds its own libraries through, wherever this crate builds an `Htl`
+// for itself rather than the binary's own: no feature gate, since the mechanism is not
+// mlua-batteries' or the executor's — it exists for whatever else a binary links in,
+// outside this crate's own dependency graph.
+pub mod registry;
 pub mod teal;
 pub mod testing;
 // How much of htl's marker vocabulary a project has written, and where. On the project
@@ -3140,10 +3145,15 @@ fn bundled_declarations() -> Vec<(String, String)> {
 /// handful of builds on one machine apart asks for. Each part is length-prefixed so that
 /// two different lists cannot hash alike by running together: `("ab", "c")` and
 /// `("a", "bc")` are different keys.
-fn declarations_key(decls: &[(String, String)]) -> String {
+///
+/// Generic over the pair rather than `&[(String, String)]` so [`lib_dir`]'s own call
+/// below and [`registry::Htl::install_declarations`](crate::Htl::install_declarations)'s
+/// — which has no reason to allocate a `String` per path and source just to call this —
+/// share the one hashing rule instead of each keeping a copy of it.
+pub(crate) fn declarations_key<'a>(decls: impl IntoIterator<Item = (&'a str, &'a str)>) -> String {
     let mut h = blake3::Hasher::new();
     for (path, source) in decls {
-        for part in [path.as_str(), source.as_str()] {
+        for part in [path, source] {
             h.update(&(part.len() as u64).to_le_bytes());
             h.update(part.as_bytes());
         }
@@ -3169,7 +3179,8 @@ fn declarations_key(decls: &[(String, String)]) -> String {
 pub fn lib_dir() -> PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
-        let key = declarations_key(&bundled_declarations());
+        let decls = bundled_declarations();
+        let key = declarations_key(decls.iter().map(|(p, s)| (p.as_str(), s.as_str())));
         std::env::temp_dir().join(format!("htl-lib-{}-{key}", env!("CARGO_PKG_VERSION")))
     })
     .clone()
@@ -3525,6 +3536,14 @@ mod tests {
         (path.to_string(), source.to_string())
     }
 
+    /// [`declarations_key`] is generic over the pair ([`registry::Htl::install_declarations`]
+    /// calls it with borrowed `&str`s), so the tests below — written against owned
+    /// `(String, String)` pairs, the shape [`bundled_declarations`] returns — go through
+    /// this to borrow each one.
+    fn key(decls: &[(String, String)]) -> String {
+        declarations_key(decls.iter().map(|(p, s)| (p.as_str(), s.as_str())))
+    }
+
     /// The reason the key exists: a build carrying one declaration more than another — a
     /// feature set, a newer mlua-batteries — lands somewhere else, so neither finds the
     /// other's files on its search path.
@@ -3536,12 +3555,12 @@ mod tests {
             "std/json.d.tl",
             "local record json end\nreturn json\n",
         ));
-        assert_ne!(declarations_key(&base), declarations_key(&more));
+        assert_ne!(key(&base), key(&more));
 
         // And a set of the same size whose content moved.
         let mut edited = base.clone();
         edited[0].1.push('\n');
-        assert_ne!(declarations_key(&base), declarations_key(&edited));
+        assert_ne!(key(&base), key(&edited));
     }
 
     /// And the same set is the same key, so a build uses the directory it used last time
@@ -3552,17 +3571,14 @@ mod tests {
             decl("htl/test.d.tl", "local record t end\nreturn t\n"),
             decl("std/json.d.tl", "local record json end\nreturn json\n"),
         ];
-        assert_eq!(declarations_key(&decls), declarations_key(&decls.clone()));
+        assert_eq!(key(&decls), key(&decls.clone()));
     }
 
     /// Length-prefixed: moving a character from a path into the source after it is a
     /// different set of files and reads as one.
     #[test]
     fn the_parts_cannot_run_together() {
-        assert_ne!(
-            declarations_key(&[decl("ab", "c")]),
-            declarations_key(&[decl("a", "bc")])
-        );
+        assert_ne!(key(&[decl("ab", "c")]), key(&[decl("a", "bc")]));
     }
 
     /// The list is what this build writes: `htl.test`'s declaration whatever the features,
@@ -3585,10 +3601,7 @@ mod tests {
         let name = dir.file_name().unwrap().to_string_lossy().into_owned();
         let prefix = format!("htl-lib-{}-", env!("CARGO_PKG_VERSION"));
         assert!(name.starts_with(&prefix), "{name}");
-        assert_eq!(
-            name[prefix.len()..],
-            declarations_key(&bundled_declarations())
-        );
+        assert_eq!(name[prefix.len()..], key(&bundled_declarations()));
         assert_eq!(dir, lib_dir());
     }
 

@@ -384,19 +384,42 @@ pub struct TargetProfile {
 /// entry script. `--target bin`, and `--embed` which is its shorthand, add to the tree:
 ///
 /// ```text
-/// ├── Cargo.toml             htl + anyhow, and [profile.dev.build-override] opt-level = 3
+/// ├── Cargo.toml             htl (features = ["async"]) + htl-std (under the same pin)
+/// │                          + anyhow + tokio (rt, signal), and
+/// │                          [profile.dev.build-override] opt-level = 3
 /// ├── src/lib.rs             #[host_module] Host, its records, the embedded module,
-/// │                          and pub fn preload(&Htl) registering both
+/// │                          and pub fn preload(&Htl) registering both (plus htl-std's
+/// │                          std.fs / std.proc and htl.task)
 /// ├── src/host.d.tl          generated from src/lib.rs — by cargo build, and by
 /// │                          htl dts / htl check without building
-/// └── src/main.rs            the binary: preload, then the bundle of src/main.tl it embeds
+/// └── src/main.rs            the binary: preload, then the bundle of src/main.tl it embeds,
+///                            run on the executor with a Ctrl-C watcher of its own
 ///                            (omitted with --lib)
 /// ```
 const BIN: TargetProfile = TargetProfile {
     target: BuildTarget::Bin,
     deps: &[
-        DepLine::plain("htl", Dep::Htl),
+        DepLine {
+            name: "htl",
+            req: Dep::Htl,
+            // `Htl::install_task_lib` / `call_blocking`, so `src/main.rs` can run its
+            // bundle on the executor the way `htl run` does (issue #474 acceptance 3) —
+            // off by default (see `htl`'s `Cargo.toml`), since a host with no async
+            // method should not pay for mlua's own `async` feature unasked.
+            features: &["async"],
+        },
+        // Under the same pin as `htl`: the asynchronous I/O slice of `std.*`, which this
+        // target's `preload` installs beside `h.install_std()?` (see `templates/rust/lib.rs`).
+        DepLine::plain("htl-std", Dep::Sibling("htl-std")),
         DepLine::plain("anyhow", Dep::Version("1")),
+        DepLine {
+            name: "tokio",
+            req: Dep::Version("1"),
+            // `src/main.rs`'s Ctrl-C watcher: a thread of its own awaiting
+            // `tokio::signal::ctrl_c()`, the way `htl run`'s `run_root` does. `rt` for the
+            // runtime that thread builds to await it on; neither is on by default.
+            features: &["rt", "signal"],
+        },
     ],
     lib: ScaffoldFile {
         path: "src/lib.rs",
@@ -522,6 +545,15 @@ const CDYLIB: TargetProfile = TargetProfile {
 /// ├── src/main.rs            the binary: preload, then htl_mq::run
 /// └── types/htl-mq/mq.d.tl   the dependency's declaration, copied in by htl check
 /// ```
+///
+/// No `htl-std`: every `std.fs` / `std.proc` function is `async`, and nothing in this
+/// target's run is a root the executor runs. `src/main.tl`'s top level runs synchronously
+/// (`htl_mq::run` reads `require('main')` through a plain `eval`), and `update` / `draw`
+/// are `#[teal(noyield)]`, called by macroquad's own loop. An `await` in a callback is
+/// refused by the checker; one at the top level passes `htl check` (the entry is treated
+/// as async there) and then fails at run time, since a `require` reached through `eval`
+/// cannot yield (`htl::lint`'s `await-outside-async` says the same). A target whose loop
+/// can run a root would carry it.
 const WINDOW: TargetProfile = TargetProfile {
     target: BuildTarget::Window,
     deps: &[
@@ -1548,11 +1580,16 @@ mod tests {
         let main = rust_main_rs(&ctx);
         assert!(
             main.contains("include_bundle!(\"src/main.tl\", host = [\"sample\"], debug = true)")
-                && main.contains("h.run_bundle(&Bundle::decode(MAIN)?, &args)?;"),
+                && main.contains("h.load_bundle(&Bundle::decode(MAIN)?, &args)?")
+                && main.contains("h.call_blocking(main, va, &token)"),
             "{main}"
         );
+        // The executor runs the entry, as `htl run app.hb` does: no synchronous call.
         assert!(
-            !main.contains("set_arg") && !main.contains("h.exec(") && !main.contains("{{"),
+            !main.contains("run_bundle")
+                && !main.contains("set_arg")
+                && !main.contains("h.exec(")
+                && !main.contains("{{"),
             "{main}"
         );
     }
@@ -1964,11 +2001,22 @@ mod tests {
         let toml = t_cargo("sample", profile(DEFAULT_TARGET).unwrap(), &release);
         assert!(!toml.contains("[lib]"), "{toml}");
         assert!(toml.contains("anyhow = \"1\"\n"), "{toml}");
-        // A release pin is a plain requirement, so it takes the short form and the
-        // `anyhow` beside it is unchanged by the pin being a table in the other tests.
+        // The bin target's host runs on the executor, so its `htl` carries the `async`
+        // feature and a release pin is the table form; the `anyhow` beside it is unchanged
+        // by the pin being a table.
         assert!(
-            toml.contains(&format!("htl = \"{}\"\n", env!("CARGO_PKG_VERSION"))),
+            toml.contains(&format!(
+                "htl = {{ version = \"{}\", features = [\"async\"] }}\n",
+                env!("CARGO_PKG_VERSION")
+            )),
             "{toml}"
+        );
+        // A release pin with no features is a plain requirement and takes the short form:
+        // the window target's `htl` line.
+        let win = t_cargo("sample", profile(BuildTarget::Window).unwrap(), &release);
+        assert!(
+            win.contains(&format!("htl = \"{}\"\n", env!("CARGO_PKG_VERSION"))),
+            "{win}"
         );
 
         let toml = t_cargo("sample", profile(BuildTarget::Cdylib).unwrap(), &release);

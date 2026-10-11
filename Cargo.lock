@@ -160,6 +160,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
+name = "bytes"
+version = "1.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -583,6 +589,7 @@ dependencies = [
  "clap",
  "criterion",
  "htl",
+ "htl-std",
  "semver",
  "serde",
  "serde_json",
@@ -629,6 +636,17 @@ dependencies = [
  "anyhow",
  "htl",
  "macroquad",
+]
+
+[[package]]
+name = "htl-std"
+version = "0.14.0"
+dependencies = [
+ "anyhow",
+ "htl",
+ "libc",
+ "tokio",
+ "walkdir",
 ]
 
 [[package]]
@@ -1529,6 +1547,7 @@ version = "1.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
 dependencies = [
+ "bytes",
  "libc",
  "mio",
  "pin-project-lite",

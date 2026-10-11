@@ -1754,6 +1754,49 @@ pub struct HostDecl {
     pub record_files: Vec<PathBuf>,
 }
 
+/// Teal's lexer keywords (`crates/htl-core/vendor/tl.lua`'s `keywords` table, copied
+/// rather than read at build time since the vendored file is Lua, not Rust): the words a
+/// Teal identifier may not be spelled, because the grammar reads them as something else
+/// wherever one is expected.
+const TEAL_KEYWORDS: &[&str] = &[
+    "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in",
+    "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
+];
+
+/// `true` for a Teal identifier: starts with a letter or `_`, continues with letters,
+/// digits or `_`, and is not one of [`TEAL_KEYWORDS`].
+fn is_teal_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_') && !TEAL_KEYWORDS.contains(&s)
+}
+
+/// `true` for a `#[host_module(name = "..")]` this macro can declare: one or more
+/// `.`-separated segments, each a [`is_teal_ident`]. Every segment, including the ones
+/// before the last, becomes a directory name under the declaration root (`std.fs` is
+/// `types/std/fs.d.tl`) and a component of the `require` key the dots join back into —
+/// see the `#[host_module]` attribute doc (`htl_macros::host_module`) for the record
+/// identifier the last segment alone becomes.
+fn valid_host_module_name(name: &str) -> bool {
+    !name.is_empty() && name.split('.').all(is_teal_ident)
+}
+
+/// [`host_decl`], for `#[c_export]`'s own breakdown of an `impl` block
+/// (`htl_core::cexport::plan`): the same parse, but without the Teal-name check
+/// `host_decl` applies, since a `#[c_export]`-only impl writes no `.d.tl` — `HostDecl::decl`
+/// is built and then never read — and refusing it over an identifier it never declares
+/// would refuse a C export of, say, `impl End` for a reason that only applies to Teal.
+pub fn host_decl_for_c_export(
+    imp: &ItemImpl,
+    file_items: Option<&[Item]>,
+    file_path: Option<&Path>,
+) -> Result<HostDecl, String> {
+    host_decl_checked(imp, TealAttrs::default(), file_items, file_path, false)
+}
+
 /// Declaration + wrapper plan for a `#[host_module]` impl block. `file_items` (the
 /// enclosing file's items) and `file_path` (that file's own path) are only needed when
 /// `records = [...]` is used — `file_path` only when one of its entries is
@@ -1765,6 +1808,20 @@ pub fn host_decl(
     attrs: TealAttrs,
     file_items: Option<&[Item]>,
     file_path: Option<&Path>,
+) -> Result<HostDecl, String> {
+    host_decl_checked(imp, attrs, file_items, file_path, true)
+}
+
+/// [`host_decl`] and [`host_decl_for_c_export`], the one difference between them being
+/// `check_name`: `true` refuses a `module` [`valid_host_module_name`] rejects before any
+/// of it is spliced into the declaration's grammar; `false` (the c-export path) never
+/// asks the question, since nothing of `module` reaches a `.d.tl` there.
+fn host_decl_checked(
+    imp: &ItemImpl,
+    attrs: TealAttrs,
+    file_items: Option<&[Item]>,
+    file_path: Option<&Path>,
+    check_name: bool,
 ) -> Result<HostDecl, String> {
     let type_name = match &*imp.self_ty {
         Type::Path(p) => p
@@ -1779,12 +1836,42 @@ pub fn host_decl(
         .name
         .clone()
         .unwrap_or_else(|| type_name.to_lowercase());
+    if check_name && !valid_host_module_name(&module) {
+        return Err(match &attrs.name {
+            Some(_) => format!(
+                "host_module: `name` must be one or more `.`-separated Teal identifiers \
+                 (a letter or `_`, then letters, digits or `_`; not a Teal keyword such \
+                 as `end` or `local`), got {module:?}"
+            ),
+            // No `name` was written at all: `module` is the impl target's own name,
+            // lowercased, so the message has to name that rather than talk about a
+            // `name` nobody wrote.
+            None => format!(
+                "host_module: `{type_name}` lowercases to `{module}`, which is not a valid \
+                 Teal identifier{}; give this `#[host_module]` a `name = \"..\"` that is",
+                if TEAL_KEYWORDS.contains(&module.as_str()) {
+                    " — it is a Teal keyword"
+                } else {
+                    ""
+                }
+            ),
+        });
+    }
+    // `module` is `require`'s full key (`std.fs`) and what the macro registers in
+    // `package.preload` under; `ident` is its last segment (`fs`), the identifier the
+    // declaration's grammar actually has room for — `local record <ident>`, every
+    // `self: <ident>`, `return <ident>` (see `htl_macros::host_module`'s doc for why).
+    // The two coincide when `name` has no dot, so a plain `name = "host"` is unaffected.
+    let ident = match module.rsplit_once('.') {
+        Some((_, last)) => last.to_string(),
+        None => module.clone(),
+    };
     let err_mode = match attrs.errors.as_deref() {
         Some("return") => ErrMode::Return,
         _ => ErrMode::Raise,
     };
 
-    let mut body = format!("local record {module}\n");
+    let mut body = format!("local record {ident}\n");
     let (nested, record_files) =
         nested_record_decls(&attrs.records, file_items, file_path, &attrs.uses)?;
     for r in nested {
@@ -1881,7 +1968,7 @@ pub fn host_decl(
                         Pat::Ident(pi) => pi.ident.to_string(),
                         _ => format!("a{}", params.len()),
                     };
-                    let teal = teal_type_in(&owned_ty, &module, &attrs.uses)?;
+                    let teal = teal_type_in(&owned_ty, &ident, &attrs.uses)?;
                     let optional = is_option(&owned_ty);
                     let callback = param_callback_attr(&pt.attrs, &fname, &pname)?;
                     let is_fn = is_function(&owned_ty);
@@ -1934,11 +2021,11 @@ pub fn host_decl(
             teal_params.push(format!("{}{mark}: {}", p.name, p.teal));
         }
         if receiver.is_some() {
-            teal_params.insert(0, format!("self: {module}"));
+            teal_params.insert(0, format!("self: {ident}"));
         }
         let (ret_teal, ret_is_result) = match &f.sig.output {
             ReturnType::Default => (String::new(), false),
-            ReturnType::Type(_, t) => (teal_type_in(t, &module, &attrs.uses)?, is_result(t)),
+            ReturnType::Type(_, t) => (teal_type_in(t, &ident, &attrs.uses)?, is_result(t)),
         };
         let ret_is_unit = ret_teal.is_empty();
         // Teal-side return: `Result` in return mode becomes `T, string` (`boolean, string`
@@ -1989,7 +2076,7 @@ pub fn host_decl(
             lua_param,
         });
     }
-    body.push_str(&format!("end\n\nreturn {module}\n"));
+    body.push_str(&format!("end\n\nreturn {ident}\n"));
     let uses = with_task_default(&format!("host_module `{module}`"), &body, &attrs.uses)?;
     let decl = format!("{}{body}", uses_header(&uses));
 
@@ -2081,7 +2168,7 @@ pub fn scan_rust_file(path: &Path, manifest_dir: &Path) -> Result<Vec<Generated>
                 if let Some(attrs) = crate::cexport::parse_c_export_attr(&imp.attrs)?
                     && attrs.header.is_some()
                 {
-                    let hd = host_decl(imp, TealAttrs::default(), Some(&file.items), Some(path))?;
+                    let hd = host_decl_for_c_export(imp, Some(&file.items), Some(path))?;
                     let plan = crate::cexport::plan(&hd, imp, attrs)?;
                     if let Some(header) = &plan.header_path {
                         out.push(Generated {
@@ -3014,6 +3101,90 @@ mod tests {
             .unwrap();
         let attrs = parse_host_module_attr(&imp.attrs).unwrap().unwrap();
         host_decl(imp, attrs, Some(&file.items), None).unwrap()
+    }
+
+    /// `name = "std.fs"` splits `HostDecl::module` (the whole string) from the
+    /// declaration's record (`fs`, its last segment) — see `htl_macros::host_module`'s
+    /// doc for why.
+    #[test]
+    fn a_dotted_name_declares_the_record_under_its_last_segment() {
+        let hd = host_impl(
+            "pub struct Fs;\n\
+             #[host_module(name = \"std.fs\")]\n\
+             impl Fs {\n\
+             \x20   pub async fn read(&self, path: String) -> String { todo!() }\n\
+             }\n",
+        );
+        assert_eq!(hd.module, "std.fs");
+        assert_eq!(
+            hd.decl,
+            "local record fs\n\
+             \x20  read: function(self: fs, path: string): string ---@async\n\
+             end\n\
+             \n\
+             return fs\n"
+        );
+    }
+
+    /// An undotted `name` is one segment, so it is its own last segment and the
+    /// declaration is byte-identical to before this split existed.
+    #[test]
+    fn an_undotted_name_is_unaffected() {
+        let hd = host_impl(
+            "pub struct Host;\n\
+             #[host_module(name = \"host\")]\n\
+             impl Host {\n\
+             \x20   pub fn ping(&self) -> bool { true }\n\
+             }\n",
+        );
+        assert_eq!(hd.module, "host");
+        assert_eq!(
+            hd.decl,
+            "local record host\n\
+             \x20  ping: function(self: host): boolean\n\
+             end\n\
+             \n\
+             return host\n"
+        );
+    }
+
+    /// Every segment of a dotted `name` has to be a Teal identifier, not only the last
+    /// one: a leading digit, an empty segment (`std..fs`) and a Teal keyword (`end`) are
+    /// all refused, with a message that says what a valid name is.
+    #[test]
+    fn an_invalid_dotted_name_is_refused() {
+        for bad in ["std.1fs", "std..fs", "std.end"] {
+            let e = host_impl_err(&format!(
+                "pub struct Fs;\n\
+                 #[host_module(name = \"{bad}\")]\n\
+                 impl Fs {{\n    pub fn ping(&self) -> bool {{ true }}\n}}\n"
+            ));
+            assert!(
+                e.contains(
+                    "host_module: `name` must be one or more `.`-separated Teal \
+                             identifiers"
+                ) && e.contains(&format!("{bad:?}")),
+                "{bad}: {e}"
+            );
+        }
+    }
+
+    /// No `name` was written at all, and the impl target's own name lowercases to a
+    /// Teal keyword (`End` -> `end`): the message names the type that collided, not a
+    /// `name` nobody wrote, and says what to add.
+    #[test]
+    fn an_omitted_name_that_lowercases_to_a_keyword_names_the_type() {
+        let e = host_impl_err(
+            "pub struct End;\n\
+             #[host_module]\n\
+             impl End {\n    pub fn ping(&self) -> bool { true }\n}\n",
+        );
+        assert!(
+            e.contains("host_module: `End` lowercases to `end`")
+                && e.contains("Teal keyword")
+                && e.contains("give this `#[host_module]` a `name"),
+            "{e}"
+        );
     }
 
     /// An `Option<T>` parameter is what the caller may leave out, and `name?: T` is how

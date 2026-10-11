@@ -38,8 +38,8 @@ impl Fx {
 // htl-mq's, registered by another crate, so it is named.
 const BUNDLE: &[u8] = htl::include_bundle!("src/{{mod}}/init.tl", host = ["mq"]);
 
-/// Register what this crate provides on a fresh `Htl`: `fx`, htl-mq's `mq`, `std.*`, then
-/// the engine as `require("{{mod}}")`.
+/// Register what this crate provides on a fresh `Htl`: `fx`, htl-mq's `mq` and `std.*`,
+/// then the engine as `require("{{mod}}")`.
 pub fn preload(h: &Htl) -> anyhow::Result<()> {
     Fx.htl_preload(h)?;
     htl_mq::Mq.htl_preload(h)?;

@@ -13,8 +13,9 @@
 //! the rewritten files are the thing under review, so read the diff before committing it.
 //!
 //! One kind of line and one file depend on where the binary under test was built. The
-//! line is a dependency on a crate of this repository in `Cargo.toml` — `htl`, and
-//! `htl-mq` in a window project — which is what `--htl` picks and, when it is not given,
+//! line is a dependency on a crate of this repository in `Cargo.toml` — `htl`, `htl-std`
+//! in a bin or window project, and `htl-mq` besides in a window project — which is what
+//! `--htl` picks and, when it is not given,
 //! the htl this CLI was built with: a version on crates.io for a published CLI, this
 //! checkout's path for the one `cargo test` builds. Each is normalised to
 //! `<name> = "{{htl}}"` here so the same snapshot holds for both, and both are normalised
@@ -99,7 +100,7 @@ fn render(root: &Path) -> String {
 /// The crates of this repository a scaffolded project may depend on, as the left-hand side
 /// of the manifest line each gets. Every one of them is pinned by the same `HtlPin`, so
 /// every one of them is normalised the same way.
-const PINNED_DEPS: &[&str] = &["htl", "htl-mq"];
+const PINNED_DEPS: &[&str] = &["htl", "htl-mq", "htl-std"];
 
 /// Pin the htl the scaffold was written by, without pinning where it is: a version, the
 /// repository (`--htl main`) or a checkout's path (the default under `cargo test`, and

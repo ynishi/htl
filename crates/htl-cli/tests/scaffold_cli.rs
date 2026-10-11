@@ -56,13 +56,18 @@ fn new_pins_the_htl_this_binary_was_built_with() {
     let (ok, _, stderr) = htl(&["new", "a", "--target", "bin"], &root);
     assert!(ok, "{stderr}");
     let line = htl_line(&root.join("a/Cargo.toml"));
-    let release = format!("htl = \"{}\"", env!("CARGO_PKG_VERSION"));
+    // `--target bin` also carries `features = ["async"]` (`Htl::install_task_lib` /
+    // `call_blocking`, issue #474 acceptance 3), on every pin kind alike.
+    let release = format!(
+        "htl = {{ version = \"{}\", features = [\"async\"] }}",
+        env!("CARGO_PKG_VERSION")
+    );
     let checkout = std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .unwrap()
         .display()
         .to_string()
         .replace('\\', "/");
-    let path = format!("htl = {{ path = \"{checkout}/crates/htl\" }}");
+    let path = format!("htl = {{ path = \"{checkout}/crates/htl\", features = [\"async\"] }}");
     assert!(
         line == release || line == path,
         "{line}\n  is neither {release} nor {path}"
@@ -82,7 +87,13 @@ fn new_writes_mise_toml_exactly_when_it_pins_a_release() {
     assert!(ok, "{stderr}");
     let line = htl_line(&root.join("a/Cargo.toml"));
     let mise = root.join("a/mise.toml");
-    if line == format!("htl = \"{}\"", env!("CARGO_PKG_VERSION")) {
+    // `--target bin` carries `features = ["async"]` besides the version.
+    if line
+        == format!(
+            "htl = {{ version = \"{}\", features = [\"async\"] }}",
+            env!("CARGO_PKG_VERSION")
+        )
+    {
         let body = std::fs::read_to_string(&mise)
             .unwrap_or_else(|e| panic!("{line}, yet {}: {e}", mise.display()));
         let pin = format!(
@@ -132,7 +143,7 @@ fn new_htl_path_writes_a_path_pin() {
     assert!(ok, "{stderr}");
     assert_eq!(
         htl_line(&root.join("c/Cargo.toml")),
-        "htl = { path = \"../co/crates/htl\" }"
+        "htl = { path = \"../co/crates/htl\", features = [\"async\"] }"
     );
 }
 
@@ -146,7 +157,10 @@ fn new_htl_release_writes_this_clis_own_version() {
     assert!(ok, "{stderr}");
     assert_eq!(
         htl_line(&root.join("r/Cargo.toml")),
-        format!("htl = \"{}\"", env!("CARGO_PKG_VERSION"))
+        format!(
+            "htl = {{ version = \"{}\", features = [\"async\"] }}",
+            env!("CARGO_PKG_VERSION")
+        )
     );
     // A release pin writes `mise.toml`, whatever this binary's own default is.
     let mise = std::fs::read_to_string(root.join("r/mise.toml")).unwrap();
@@ -219,6 +233,77 @@ fn the_window_targets_htl_mq_line_follows_the_pin() {
             .replace("/crates/htl\"", "/crates/htl-mq\""),
         "htl: {htl}"
     );
+}
+
+/// `htl-std` is a crate of this repository too, so a `--target bin` project's manifest
+/// pins it where it pins `htl` — the same shape as `the_window_targets_htl_mq_line_follows_the_pin`
+/// above — and `src/lib.rs`'s `preload` installs it right beside `h.install_std()?`, with
+/// no edit a project author has to make for `std.fs` / `std.proc` to be typed and present.
+///
+/// `htl`'s own line carries `features = ["async"]` besides — off by default, and what
+/// `Htl::install_task_lib` / `Htl::call_blocking` need to exist at all (issue #474
+/// acceptance 3) — so the sibling comparison below drops that feature list before
+/// swapping the crate name and path, the way `the_cdylib_feature_list_survives_every_pin_kind`
+/// in `pin_cli.rs` reads the `ffi` one back out rather than assuming it propagates.
+#[test]
+fn the_bin_targets_htl_std_line_follows_the_pin_and_preload_installs_it() {
+    let root = tempdir("bin-std");
+    let (ok, _, stderr) = htl(&["new", "s", "--target", "bin"], &root);
+    assert!(ok, "{stderr}");
+    let manifest = root.join("s/Cargo.toml");
+    let htl = htl_line(&manifest);
+    assert!(htl.contains("features = [\"async\"]"), "htl: {htl}");
+    let std_line = dep_line(&manifest, "htl-std");
+    let expected = htl
+        .replace(", features = [\"async\"]", "")
+        .replacen("htl = ", "htl-std = ", 1)
+        .replace("/crates/htl\"", "/crates/htl-std\"");
+    // With the feature list gone, a release pin is a bare version, which the scaffold
+    // writes in the short form (`htl-std = "0.7.0"`), not as a one-key table.
+    let expected = match expected
+        .strip_prefix("htl-std = { version = ")
+        .and_then(|rest| rest.strip_suffix(" }"))
+    {
+        Some(version) => format!("htl-std = {version}"),
+        None => expected,
+    };
+    assert_eq!(std_line, expected, "htl: {htl}");
+    let lib_rs = std::fs::read_to_string(root.join("s/src/lib.rs")).unwrap();
+    assert!(lib_rs.contains("h.install_std()?;"), "{lib_rs}");
+    assert!(lib_rs.contains("htl_std::install(h)?;"), "{lib_rs}");
+    assert!(lib_rs.contains("h.install_task_lib()?;"), "{lib_rs}");
+
+    // `src/main.rs` runs the bundle on the executor the way `htl run app.hb` does —
+    // `load_bundle` then `call_blocking` — rather than the synchronous `run_bundle`,
+    // which is what left a program with a task or an await unable to run under this
+    // binary at all before this change.
+    let main_rs = std::fs::read_to_string(root.join("s/src/main.rs")).unwrap();
+    assert!(main_rs.contains("h.load_bundle("), "{main_rs}");
+    assert!(main_rs.contains("h.call_blocking("), "{main_rs}");
+    assert!(!main_rs.contains("run_bundle"), "{main_rs}");
+}
+
+/// `src/main.rs` watches Ctrl-C from a thread of its own, the way `htl run`'s `run_root`
+/// does — the first cancels the token (so a `std.proc` child in its own process group is
+/// killed by the drop guard rather than left running past the host's own exit), the
+/// second ends the process outright — and `tokio` with `rt` / `signal` is what that watcher
+/// needs to exist at all, so the manifest carries it beside `htl`.
+#[test]
+fn the_bin_targets_main_rs_watches_ctrl_c_and_the_manifest_carries_tokio() {
+    let root = tempdir("bin-ctrlc");
+    let (ok, _, stderr) = htl(&["new", "s", "--target", "bin"], &root);
+    assert!(ok, "{stderr}");
+    let manifest = root.join("s/Cargo.toml");
+    assert_eq!(
+        dep_line(&manifest, "tokio"),
+        "tokio = { version = \"1\", features = [\"rt\", \"signal\"] }"
+    );
+    let main_rs = std::fs::read_to_string(root.join("s/src/main.rs")).unwrap();
+    assert!(main_rs.contains("tokio::signal::ctrl_c()"), "{main_rs}");
+    assert!(main_rs.contains("token.cancel()"), "{main_rs}");
+    assert!(main_rs.contains("std::process::exit(130)"), "{main_rs}");
+    assert!(main_rs.contains("htl::is_cancelled(&e)"), "{main_rs}");
+    assert!(main_rs.contains("ExitCode::from(130)"), "{main_rs}");
 }
 
 /// The frame loop is handed the table `src/main.tl` returns, so the window target refuses
@@ -371,10 +456,12 @@ fn embed_scaffold_optimises_the_proc_macro_build() {
     );
 }
 
-/// The script reads `arg[1]`, and the binary runs it through `run_bundle`, which fills
-/// `arg` the way `htl run` does before the entry runs — so the same `main.tl` runs
-/// unchanged both ways. The e2e `the_bin_target_builds_tests_and_greets` is where the
-/// argument actually crosses (`cargo run -- Ada`); this holds the shape that makes it.
+/// The script reads `arg[1]`, and the binary runs it through `load_bundle` then
+/// `call_blocking`, which fills `arg` and runs the entry on the executor the way `htl run`
+/// does — so the same `main.tl` runs unchanged both ways, and a `task` / `await` in it
+/// resolves under this binary too (issue #474 acceptance 3). The e2e
+/// `the_bin_target_builds_tests_and_greets` is where the argument actually crosses
+/// (`cargo run -- Ada`); this holds the shape that makes it.
 #[test]
 fn embed_scaffold_runs_main_as_a_bundle_that_fills_arg() {
     let root = tempdir("arg");
@@ -391,11 +478,21 @@ fn embed_scaffold_runs_main_as_a_bundle_that_fills_arg() {
         "the entry's closure is the bundle, minus what the library provides:\n{main_rs}"
     );
     assert!(
-        main_rs.contains("h.run_bundle(&Bundle::decode(MAIN)?, &args)?"),
-        "run_bundle fills arg and passes ...:\n{main_rs}"
+        main_rs.contains("h.load_bundle(&Bundle::decode(MAIN)?, &args)?"),
+        "load_bundle fills arg and hands back the entry:\n{main_rs}"
     );
     assert!(
-        !main_rs.contains("set_arg") && !main_rs.contains("h.exec("),
+        main_rs.contains("h.call_blocking(main, va, &token)"),
+        "call_blocking passes the args and runs the entry on the executor:\n{main_rs}"
+    );
+    assert!(
+        main_rs.contains("htl::is_cancelled(&e)"),
+        "a Ctrl-C cancel exits 130 rather than being reported as a failure:\n{main_rs}"
+    );
+    assert!(
+        !main_rs.contains("set_arg")
+            && !main_rs.contains("h.exec(")
+            && !main_rs.contains("run_bundle"),
         "nothing fills arg or runs the entry a second way:\n{main_rs}"
     );
 }

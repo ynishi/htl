@@ -283,6 +283,56 @@ fn a_dts_root_keeps_the_namespace_and_require_reads_it() {
     );
 }
 
+/// The exact shape `htl-std` ships: `dts_root = "dts"` beside `dts = ["dts/std/fs.d.tl"]`
+/// for a `#[host_module(name = "std.fs", ..)]`, whose record is `fs` (the dotted name's
+/// last segment) but whose path below `dts_root` keeps the whole `std/fs.d.tl`. Without
+/// `dts_root` the entry would carry only its file name, landing at `types/dep/fs.d.tl` —
+/// a declaration of `fs`, not `std.fs` — which is exactly the bug this crate's own
+/// `Cargo.toml` had before `dts_root` was added beside its `dts` entry.
+#[test]
+fn a_dotted_host_module_s_dts_root_lands_under_its_namespace() {
+    let (_dir, root) = project("dts-root-dotted");
+    let dep = root.parent().unwrap().join("dep");
+    write(
+        &dep.join("Cargo.toml"),
+        "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+         [package.metadata.htl]\ndts_root = \"dts\"\ndts = [\"dts/std/fs.d.tl\"]\n",
+    );
+    write(
+        &dep.join("dts/std/fs.d.tl"),
+        "local record fs\n   read: function(path: string): string ---@async\nend\n\nreturn fs\n",
+    );
+    let out = htl(&root, &["dts"]);
+    let msg = err(&out);
+    assert!(out.status.success(), "{msg}");
+    assert!(msg.contains("wrote     types/dep/std/fs.d.tl"), "{msg}");
+    assert!(root.join("types/dep/std/fs.d.tl").is_file(), "{msg}");
+    assert!(!root.join("types/dep/fs.d.tl").exists(), "{msg}");
+    let note = std::fs::read_to_string(root.join("types/dep/.htl-dts")).unwrap();
+    assert!(note.contains("files = [\"std/fs.d.tl\"]"), "{note}");
+
+    write(
+        &root.join("src/main.tl"),
+        "local fs = require(\"std.fs\")\n\nreturn fs\n",
+    );
+    let out = htl(&root, &["check", "src/main.tl", "--no-cache"]);
+    assert!(out.status.success(), "{}", err(&out));
+
+    // Without the root the file would have been named for its last segment alone, and
+    // that name is not a module here.
+    write(
+        &root.join("src/main.tl"),
+        "local fs = require(\"fs\")\n\nreturn fs\n",
+    );
+    let out = htl(&root, &["check", "src/main.tl", "--no-cache"]);
+    assert!(!out.status.success(), "{}", err(&out));
+    assert!(
+        err(&out).contains("module not found: 'fs'"),
+        "{}",
+        err(&out)
+    );
+}
+
 /// Two modules of the same name in two namespaces are two files, where before the root
 /// they were one target and the second was a duplicate.
 #[test]
