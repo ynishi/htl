@@ -14,10 +14,15 @@
 //!   is an `async fn`, and the Teal awaits two of them side by side with `async local` /
 //!   `await` (`[lang] async` in `htl.toml`). A task the Teal leaves behind is cancelled
 //!   when its scope ends, and the host sees its future dropped.
+//! - `--ask` runs `scripts/ask.tl`, a loop that answers the host's questions: the host
+//!   asks from a thread of its own through an `htl::task::Asker` with the kind's deadline,
+//!   Teal takes each one from `gate:calls()` and replies, and an ask that fails — here the
+//!   one Teal answers too late — becomes the safe side (deny) in one place.
 
 use anyhow::Result;
+use htl::task::{Ask, Asker, RecvChannel, Request};
 use htl::{Htl, TealRecord, host_module, include_tl, include_tl_bytes};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[derive(TealRecord, Debug, Clone)]
 pub struct Point {
@@ -167,6 +172,47 @@ impl Http {
     }
 }
 
+/// What the host asks Teal: may `path` be served?
+#[derive(TealRecord, Debug, Clone)]
+pub struct Call {
+    pub path: String,
+}
+
+/// Teal's answer. `reason` says why a path is denied, and is empty when it is allowed.
+#[derive(TealRecord, Debug, Clone)]
+pub struct Decision {
+    pub allow: bool,
+    pub reason: String,
+}
+
+/// A host that keeps its entry points in Rust and asks Teal for the decision. It holds the
+/// `Ask`, Teal's end of the one kind of question; the `Asker` goes to the handler's thread.
+pub struct Gate {
+    calls: Ask<Call, Decision>,
+}
+
+#[host_module(name = "gate", dts = "scripts/gate.d.tl", records = [Call, Decision])]
+impl Gate {
+    /// The questions, declared `task.RecvChannel<task.Request<gate.Call, gate.Decision>>`:
+    /// Teal receives each one and answers it with `req:reply`.
+    pub fn calls(&self) -> RecvChannel<Request<Call, Decision>> {
+        self.calls.channel()
+    }
+}
+
+/// The one place an ask that has no answer becomes the safe side: whatever the reason —
+/// a timeout, a closed loop, a request left unanswered — the path is denied, and the
+/// error's text is kept as the reason for the log.
+async fn ask_gate(asker: &Asker<Call, Decision>, path: &str) -> Decision {
+    let call = Call {
+        path: path.to_string(),
+    };
+    asker.ask(call).await.unwrap_or_else(|e| Decision {
+        allow: false,
+        reason: e.to_string(),
+    })
+}
+
 // `include_tl!` below regenerates every `#[host_module]`'s `.d.tl` in this crate from
 // the Rust source before checking against it (the same scan `htl dts` runs), so it does
 // not depend on `#[host_module]` having already expanded above it — in this file, or,
@@ -181,6 +227,9 @@ const BUNDLE: &[u8] = htl::include_bundle!("scripts/main.tl");
 // The async walk, run with `--async` — on the executor, since a plain `exec` has nothing
 // for an `async fn` to suspend to.
 const PAIR: &str = include_tl!("scripts/pair.tl");
+
+// The gate's loop, run with `--ask` — on the executor, since the loop waits on the channel.
+const ASK: &str = include_tl!("scripts/ask.tl");
 
 // `cargo build -p embed --features bad` -> Teal type error surfaces as a Rust compile error.
 #[cfg(feature = "bad")]
@@ -205,6 +254,34 @@ fn main() -> Result<()> {
         // run resolves when the program and every task it started have ended.
         let token = htl::mlua_isle::runtime::CancelToken::new();
         h.run_blocking(PAIR, "@scripts/pair.tl", &[], &token)?;
+        return Ok(());
+    }
+    if args.first().is_some_and(|a| a == "--ask") {
+        h.install_task_lib()?;
+        // One kind of question, with its deadline: there is no library default.
+        let (asker, calls) = Ask::<Call, Decision>::new(h.lua(), 1, Duration::from_millis(200))?;
+        Gate { calls }.htl_preload(&h)?;
+        // The handler is on a thread and a runtime of its own, as an HTTP route or a tool
+        // call would be. It asks in order, prints each answer, and drops the asker, which
+        // closes the channel for Teal and so ends the loop.
+        let handler = std::thread::spawn(move || -> Result<()> {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()?;
+            for path in ["/public/index", "/admin", "/slow"] {
+                let d = rt.block_on(ask_gate(&asker, path));
+                if d.allow {
+                    println!("gate {path} -> allow");
+                } else {
+                    println!("gate {path} -> deny ({})", d.reason);
+                }
+            }
+            drop(asker);
+            Ok(())
+        });
+        let token = htl::mlua_isle::runtime::CancelToken::new();
+        h.run_blocking(ASK, "@scripts/ask.tl", &[], &token)?;
+        handler.join().expect("the handler thread panicked")?;
         return Ok(());
     }
     if args.first().is_some_and(|a| a == "--bundle") {

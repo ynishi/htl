@@ -98,6 +98,9 @@ e2e:
     # The async walk: two `async fn` calls awaited side by side, asserted under 400 ms by
     # the script itself, and a task left behind whose host future the host sees dropped.
     cargo run -q -p embed -- --async
+    # A host asks Teal: three questions from a thread of its own, each within the kind's
+    # deadline, and the one Teal answers too late denied by the default taken in one place.
+    cargo run -q -p embed -- --ask
     cargo run -q -p resolver
     # `embed`'s `bad` feature adds an `include_tl!` of a module that does not type check,
     # and its manifest says so — "demonstrates a Teal type error failing the Rust build".
