@@ -36,6 +36,9 @@
 //! | `enum Shape { Dot, Circle(f64), Rect { w: f64, h: f64 } }` | `record Shape_Dot`, `record Shape_Circle`, `record Shape_Rect`, each `where self.kind == "…"`, and `type Shape = Shape_Dot \| Shape_Circle \| Shape_Rect` | a table with `kind`; a newtype payload under `value`, struct fields under their names; `union-exhaustive` counts the variants, and a missing field reads `Shape.Rect.h: expected number, got nil` |
 //! | `#[teal(rename_all = "snake_case")] enum State { Open, InReview }` | `enum State "open" "in_review" end` | the renamed word: `"open"` is accepted, `"Open"` is refused (`State: expected one of "open", "in_review", got "Open"`) |
 //! | `#[serde(rename_all = "camelCase")] struct Call { #[serde(rename = "callId")] call_id: String, retry_count: u32, #[serde(alias = "msg")] message: String }` | `record Call` with `callId: string`, `retryCount: integer`, `message: string`; a name that is not a Teal identifier is declared `["call-id"]: string` | a table keyed as `serde_json` keys the object; `msg` is also read for `message` on the way in, and a missing field reads `Call.callId: expected string, got nil` |
+//! | `struct Job { #[serde(skip)] cache: Cache, #[serde(default)] retries: u32, #[serde(default, skip_serializing_if = "Vec::is_empty")] tags: Vec<String> }` | `record Job` with `retries: integer` and `tags: {string}`; `cache` is not declared | `cache` is never written, and filled with its `Default` on the way in; a nil `retries` reads as `0`; `tags` is left out of the table when empty, as `serde_json` leaves it out of the object |
+//! | `#[serde(transparent)] struct Tag { text: String, #[serde(skip)] seen: u32 }` | `type Tag = string` | the `text` value itself; a refused read is `Tag: expected string, got table` |
+//! | `struct Call { call_id: String, #[serde(flatten)] meta: Meta }`, `Meta` a `TealRecord` struct in the same file | `record Call` with `call_id` and then `Meta`'s fields, under `Meta`'s own names | one table, `Meta`'s keys at its top beside `call_id`; a wrong one reads `Call.trace: expected string, got table` |
 //! | `struct Label(String)` | `type Label = string` | whatever the inner type crosses as |
 //! | `Option<T>` | `T` as a field and as a return, `name?: T` as a method parameter | nil where the Rust side has `None`; the mark on a parameter is what lets a caller write `api:find("x")` |
 //! | `Vec<T>` / `&[T]` / `[T; N]` / `VecDeque<T>` / `HashSet<T>` | `{T}` | a table used as a sequence |
@@ -75,24 +78,47 @@
 //! `Deserialize` beside `TealRecord` is declared and crosses under the names serde gives
 //! it, and the keys of the Lua table are the keys `serde_json` writes:
 //!
-//! - read: `rename_all` (a struct's fields, an enum's variants), `rename_all_fields` (on an
-//!   enum, the fields of its struct variants), `rename` (a field, a variant) and `alias` (a
-//!   field: one more key `from_lua` reads when the field's own is nil, never declared and
-//!   never written). A name that is not a Teal identifier (`call-id`, `end`) is declared
-//!   with Teal's key syntax, `["call-id"]: string`; one holding a `"`, a `\` or a control
-//!   character is refused.
+//! - read, the names: `rename_all` (a struct's fields, an enum's variants),
+//!   `rename_all_fields` (on an enum, the fields of its struct variants), `rename` (a field,
+//!   a variant) and `alias` (a field: one more key `from_lua` reads when the field's own is
+//!   nil, never declared and never written). A name that is not a Teal identifier
+//!   (`call-id`, `end`) is declared with Teal's key syntax, `["call-id"]: string`; one
+//!   holding a `"`, a `\` or a control character is refused.
+//! - read, whether a field is there, on a field of a struct ([`Crossing`]): `skip` (not
+//!   declared, not written; filled on the way in from its `default`, else the struct's,
+//!   else `Default::default()`, which rustc then asks of the field's type at the field);
+//!   `default` / `default = "path"` on a field or on the struct (declared `T` as any field —
+//!   a Teal record field is nilable already — and a nil key reads as the default; the
+//!   struct's fills a field from `Self::default()`); `skip_serializing_if = "path"` beside a
+//!   `default` (the field's or the struct's) or on an `Option` field, which reads nil as
+//!   `None` (`into_lua` leaves the key out when `path(&self.field)` holds); `flatten` of a
+//!   struct that derives `TealRecord` and is declared in the same file — its fields join the
+//!   record under its own names, and the conversion writes and reads them in the one table
+//!   ([`crate::teal::TealFields`]). The declaration needs the flattened struct's fields,
+//!   which nothing in a derive can see, so they are read from source: the file the derive
+//!   expands in, the file `htl dts` scans, the module a `records = [..]` entry names. A
+//!   value that does not fit a flattened field is reported under the record the table is
+//!   declared as, `Call.trace`: the Teal side has no level for the inner struct.
+//! - read, on a struct: `transparent` — declared `type N = T`, `T` its one field that is
+//!   not skipped, and crossing as that field's value.
 //! - precedence: the word on the field or variant beats the rule on the type, and at each
 //!   level `teal` beats `serde` — `#[teal(name)]` over `#[serde(rename)]` on a variant,
 //!   `#[teal(rename_all)]` over `#[serde(rename_all)]` on the type.
 //! - refused, saying why: a name that differs by direction (`rename(serialize = "a",
 //!   deserialize = "b")`, or one side alone; `rename_all` the same) — one type cannot carry
-//!   two names; and every word that changes the shape and is not read yet: `skip`,
-//!   `skip_serializing`, `skip_deserializing`, `skip_serializing_if`, `default`, `flatten`,
-//!   `tag`, `content`, `untagged`, `transparent`, `with`, `serialize_with`,
-//!   `deserialize_with`, `from`, `into`, `try_from`, `remote`, `other`, `borrow`, `getter`,
-//!   `variant_identifier`, `field_identifier`. A declaration that ignored one would state a
-//!   shape the value does not have. `alias` / `rename_all` on a variant and an attribute
-//!   the reader cannot parse are refused too, the latter quoting it.
+//!   two names; a field present one way only — `skip_serializing` or `skip_deserializing`
+//!   alone, or `skip_serializing_if` with no `default` on a field that is not an `Option`
+//!   (ts-rs v8 and v11's rules); `flatten` of a map, an `Option`, an enum, a struct not in
+//!   the same file or named by a path, one not deriving `TealRecord`, or two flattened
+//!   fields bringing one name; `transparent` over other than one field that is neither
+//!   skipped nor defaulted (serde's rule, quoted); the presence words on a field of an enum
+//!   variant; and every word that changes the shape and is not read yet: `tag`, `content`,
+//!   `untagged`, `with`, `serialize_with`, `deserialize_with`, `from`, `into`, `try_from`,
+//!   `remote`, `other`, `borrow`, `getter`, `variant_identifier`, `field_identifier`. A
+//!   declaration that ignored one would state a shape the value does not have. A read word
+//!   where it is not read (`alias` on a variant, `skip` on a type, `transparent` on a
+//!   field) and an attribute the reader cannot parse are refused too, the latter quoting
+//!   it. Each refusal names the rule and a way out.
 //! - passed through to serde, as they keep the shape: `crate`, `bound`,
 //!   `deny_unknown_fields`, `expecting`, and `rename` on the type itself (the Teal name is
 //!   `#[teal(name)]`).
@@ -1006,6 +1032,12 @@ pub enum RecordKind {
         /// bare when it is a Teal identifier and as `["name"]` when it is not. `as` says
         /// what a field is declared as, never what it is called. A field's `#[teal(..)]`
         /// takes `as` and the one word below; anything else is refused rather than ignored.
+        ///
+        /// These are the fields the *table* has, which serde decides as much as the
+        /// struct does: a `#[serde(skip)]` field is not among them, and a
+        /// `#[serde(flatten)]` field is replaced by the flattened struct's own fields, where
+        /// it sits. So they do not pair with the Rust fields by position;
+        /// [`RecordDecl::conversion`] does, one [`Crossing`] per Rust field.
         fields: Vec<(String, String)>,
         /// The fields marked `#[teal(noyield)]`, by the name in `fields`, in declaration
         /// order: each is declared
@@ -1013,7 +1045,8 @@ pub enum RecordKind {
         /// and calls it from C; the `host_module` macro doc states the rule).
         noyield: Vec<String>,
     },
-    /// `struct N(T)`: `type N = T`, crossing as `T` does.
+    /// `struct N(T)`, or a `#[serde(transparent)]` struct with one field that is not
+    /// skipped: `type N = T`, crossing as `T` does.
     Alias {
         /// The Teal type of the one field — already mapped, so `struct Id(String)` holds
         /// `string` rather than `String`.
@@ -1079,6 +1112,9 @@ pub struct RecordDecl {
     /// how variants are spelled. Carried so the caller can act on them without parsing
     /// the attribute a second time.
     pub attrs: TealAttrs,
+    /// How a struct's fields cross, read in the same pass as `kind`: what the derive's
+    /// `IntoLua` / `FromLua` are built from. Empty for an enum and a tuple newtype.
+    pub conversion: RecordConversion,
 }
 
 impl RecordDecl {
@@ -1094,19 +1130,127 @@ impl RecordDecl {
     }
 }
 
-/// `(field, teal type)` in declaration order, and the fields marked `#[teal(noyield)]`.
-type Fields = (Vec<(String, String)>, Vec<String>);
+/// How a struct's Rust fields cross, beside its declaration: what the derived `IntoLua` /
+/// `FromLua` are built from. It is read from the same `#[serde(..)]` as the declaration, in
+/// the same pass, so the table the conversion makes and the record the `.d.tl` declares
+/// cannot disagree. Empty for an enum and for a tuple newtype, whose conversion the
+/// [`RecordKind`] says all of.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecordConversion {
+    /// One per Rust field of a struct with named fields, in declaration order — skipped and
+    /// flattened fields included, so the derive pairs them with the struct's fields by
+    /// position.
+    pub fields: Vec<Crossing>,
+    /// The struct's own `#[serde(default)]` / `#[serde(default = "path")]`: every field the
+    /// table leaves nil, and every skipped field, takes the same field of this `Self`
+    /// unless it names a default of its own ([`WhenNil::Struct`]). The struct then needs
+    /// `Default` (or the path has to return `Self`), as serde requires.
+    pub default: Option<DefaultFrom>,
+}
+
+/// Where a default comes from: `#[serde(default)]` (`Default::default()`) or
+/// `#[serde(default = "path")]` (`path()`, the path as written).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefaultFrom {
+    /// `Default::default()` of the type at hand: the field's, or the struct's.
+    Trait,
+    /// A function called with no argument, named as serde names it, a path in a string.
+    Path(String),
+}
+
+/// What the derived `from_lua` does when a field's key (and each alias) is nil, and what a
+/// skipped field is filled with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WhenNil {
+    /// Hand nil to the field type's own `FromLua`: `None` for an `Option`, a `FieldError`
+    /// (`Rec.x: expected number, got nil`) for a type that refuses it.
+    Convert,
+    /// The field's own `#[serde(default)]` / `default = "path"` (for a skipped field with
+    /// neither that nor the struct's, `Default::default()`, as serde fills it).
+    Own(DefaultFrom),
+    /// The struct's `#[serde(default)]`: the same field of the struct's default value.
+    Struct,
+}
+
+/// How one Rust field of a struct crosses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Crossing {
+    /// Declared, written and read under `name` — the field's Teal name, as
+    /// [`RecordKind::Record`]'s `fields` holds it.
+    Key {
+        /// The key in the table, and the name in the declaration and in a `FieldError`.
+        name: String,
+        /// The Teal type declared for it, which a `FieldError` says was expected.
+        teal: String,
+        /// `#[serde(alias = "..")]`, in the order written: read, in turn, while the key is
+        /// nil; never declared nor written.
+        aliases: Vec<String>,
+        /// What a nil key reads as.
+        nil: WhenNil,
+        /// `#[serde(skip_serializing_if = "path")]`: `into_lua` leaves the key out when
+        /// `path(&self.field)` holds, as serde leaves it out of the object.
+        skip_if: Option<String>,
+    },
+    /// `#[serde(skip)]`: not declared, not written, and filled on the way in as `nil` says
+    /// (never [`WhenNil::Convert`]).
+    Skip {
+        /// Where the value comes from.
+        nil: WhenNil,
+    },
+    /// `#[serde(flatten)]` of `record`, a struct deriving `TealRecord` declared in the same
+    /// file: its fields are declared in this record, and the conversion writes and reads
+    /// them in this table through the inner type's [`crate::teal::TealFields`].
+    Flatten {
+        /// The flattened struct's Rust name.
+        record: String,
+    },
+}
+
+/// A struct record's fields as one reading gives them to both halves of the derive.
+struct ReadFields {
+    /// `(field, teal type)` in declaration order, a flattened struct's own fields spliced
+    /// in where its field sits.
+    fields: Vec<(String, String)>,
+    /// The declared fields marked `#[teal(noyield)]`, by their name in `fields`.
+    noyield: Vec<String>,
+    /// One per Rust field, in declaration order.
+    crossings: Vec<Crossing>,
+    /// `(alias, Record.field)` for every `#[serde(alias)]` among them (a flattened struct's
+    /// included): an alias may not be a declared name.
+    aliases: Vec<(String, String)>,
+}
+
+/// Where a flattened struct is looked up: the items of the file being read — the one the
+/// derive expands in, the one `htl dts` scans, or the module a `records = [..]` entry
+/// names — and the structs already being flattened into one another on the way here, so a
+/// cycle is refused instead of recursed into.
+#[derive(Clone, Copy)]
+struct Scope<'a> {
+    /// `None` when no source is at hand (a derive whose file the compiler does not say).
+    items: Option<&'a [Item]>,
+    /// The structs flattening into one another down to the one being read, outermost first.
+    within: &'a [String],
+}
+
+impl Scope<'_> {
+    /// No file: a `flatten` is refused, saying so.
+    const NONE: Scope<'static> = Scope {
+        items: None,
+        within: &[],
+    };
+}
 
 // ---------------------------------------------------------------- serde attributes
 //
 // What `#[derive(TealRecord)]` reads of an item's `#[serde(..)]`, and *every* refusal it
 // makes of one. The refusals are kept together here on purpose: each later step of the
 // serde work widens the read set by moving a word out of `SERDE_NOT_READ`, and the
-// step that adds the remaining refusals (`with` and friends, one-way `skip`) gathers them
-// in this same spot, so one place says what a serde type may and may not carry.
+// step that adds the remaining refusals (`with` and friends) gathers them in this same
+// spot, so one place says what a serde type may and may not carry.
 
 /// The serde words read, as a refusal lists them.
-const SERDE_READ: &str = "rename_all, rename, alias, rename_all_fields";
+const SERDE_READ: &str = "rename_all, rename, alias, rename_all_fields, skip, default, \
+                          skip_serializing_if (with default), transparent, flatten";
 
 /// serde words that do not change the shape of what crosses, accepted and left to serde.
 const SERDE_PASS: &[&str] = &["crate", "bound", "deny_unknown_fields", "expecting"];
@@ -1115,16 +1259,9 @@ const SERDE_PASS: &[&str] = &["crate", "bound", "deny_unknown_fields", "expectin
 /// carries one is refused: a declaration that ignored it would say a shape the value does
 /// not have.
 const SERDE_NOT_READ: &[&str] = &[
-    "skip",
-    "skip_serializing",
-    "skip_deserializing",
-    "skip_serializing_if",
-    "default",
-    "flatten",
     "tag",
     "content",
     "untagged",
-    "transparent",
     "with",
     "serialize_with",
     "deserialize_with",
@@ -1147,9 +1284,9 @@ enum SerdePlace {
     Variant,
 }
 
-/// The names one `#[serde(..)]` (or several, merged) says.
+/// What one `#[serde(..)]` (or several, merged) says, of the words read.
 #[derive(Default)]
-struct SerdeNames {
+struct SerdeWords {
     /// `rename = ".."` on a field or a variant.
     rename: Option<String>,
     /// `rename_all = ".."` on a struct (its fields) or an enum (its variants).
@@ -1158,7 +1295,56 @@ struct SerdeNames {
     rename_all_fields: Option<RenameRule>,
     /// `alias = ".."` on a field, in the order written: extra keys accepted on the way in.
     aliases: Vec<String>,
+    /// `skip` on a field: neither declared, written nor read.
+    skip: bool,
+    /// `skip_serializing` on a field: read alone it is refused ([`SERDE_ONE_WAY_SER`]);
+    /// beside `skip_deserializing` the two are `skip`.
+    skip_serializing: bool,
+    /// `skip_deserializing` on a field, the other half of the above.
+    skip_deserializing: bool,
+    /// `default` / `default = "path"` on a field or a struct.
+    default: Option<DefaultFrom>,
+    /// `skip_serializing_if = "path"` on a field; read only beside a `default`.
+    skip_serializing_if: Option<String>,
+    /// `flatten` on a field.
+    flatten: bool,
+    /// `transparent` on a struct.
+    transparent: bool,
 }
+
+impl SerdeWords {
+    /// The first word given that decides whether or how a field is present — what a field
+    /// of an enum variant may not carry yet.
+    fn presence_word(&self) -> Option<&'static str> {
+        [
+            ("skip", self.skip),
+            ("skip_serializing", self.skip_serializing),
+            ("skip_deserializing", self.skip_deserializing),
+            ("default", self.default.is_some()),
+            ("skip_serializing_if", self.skip_serializing_if.is_some()),
+            ("flatten", self.flatten),
+        ]
+        .into_iter()
+        .find_map(|(w, on)| on.then_some(w))
+    }
+}
+
+/// `skip_serializing` without `skip_deserializing` (ts-rs dropped reading the one-way
+/// words in v8 for this reason).
+const SERDE_ONE_WAY_SER: &str = "`skip_serializing` alone: the field would be read on the \
+     way in and missing on the way out, and one type cannot state both directions (the \
+     `.d.tl` declares one); use `#[serde(skip)]`, or write two types";
+
+/// `skip_deserializing` without `skip_serializing`.
+const SERDE_ONE_WAY_DE: &str = "`skip_deserializing` alone: the field would be written on \
+     the way out and never read on the way in, and one type cannot state both directions \
+     (the `.d.tl` declares one); use `#[serde(skip)]`, or write two types";
+
+/// `skip_serializing_if` with no `default` on the field or the struct (ts-rs v11's rule): a
+/// field `into_lua` leaves out has to be one `from_lua` can do without.
+const SERDE_SKIP_IF_ALONE: &str = "`skip_serializing_if` without `default`: a value omitted \
+     on the way out would be missing on the way in; add `#[serde(default)]`, or use \
+     `Option<T>`";
 
 /// `#[serde(..)]` word `word` naming the type one way and another the other way.
 fn serde_two_names(word: &str, ser: Option<&str>, de: Option<&str>) -> String {
@@ -1193,6 +1379,17 @@ fn serde_misplaced(word: &str, place: SerdePlace) -> String {
             "the struct or the enum (`rename_all_fields` on the enum renames the fields of its struct variants)",
         ),
         ("rename_all" | "rename_all_fields", _) => ("a field", "the struct or the enum"),
+        (
+            "skip" | "skip_serializing" | "skip_deserializing" | "skip_serializing_if" | "flatten",
+            SerdePlace::Variant,
+        ) => ("a variant", "a field of a struct"),
+        (
+            "skip" | "skip_serializing" | "skip_deserializing" | "skip_serializing_if" | "flatten",
+            _,
+        ) => ("a type", "a field of a struct"),
+        ("default", _) => ("a variant", "a field of a struct, or the struct itself"),
+        ("transparent", SerdePlace::Field) => ("a field", "a struct"),
+        ("transparent", _) => ("a variant", "a struct"),
         _ => ("here", "elsewhere"),
     };
     format!("`#[serde({word})]` on {here} is not read by TealRecord; it reads it on {goes}")
@@ -1235,6 +1432,16 @@ fn serde_name_value(meta: &syn::meta::ParseNestedMeta, word: &str) -> syn::Resul
     Err(meta.error(format!("`{word}` takes a string: `{word} = \"..\"`")))
 }
 
+/// `word = "path"`: a Rust path in a string, as serde takes `default` and
+/// `skip_serializing_if`. Checked to parse as a path, so the derive can call it.
+fn serde_path_value(meta: &syn::meta::ParseNestedMeta, word: &str) -> Result<String, String> {
+    let bad = || format!("`{word}` takes a path as a string: `{word} = \"path\"`");
+    let s: syn::LitStr = meta.value().and_then(|v| v.parse()).map_err(|_| bad())?;
+    let p = s.value();
+    syn::parse_str::<syn::ExprPath>(&p).map_err(|_| bad())?;
+    Ok(p)
+}
+
 /// Consume a passed-through word's value, whatever form serde gives it.
 fn serde_skip_value(meta: &syn::meta::ParseNestedMeta) -> syn::Result<()> {
     if meta.input.peek(Token![=]) {
@@ -1248,8 +1455,8 @@ fn serde_skip_value(meta: &syn::meta::ParseNestedMeta) -> syn::Result<()> {
 /// Every `#[serde(..)]` in `attrs`, read for names at `place`; `at` names the item in a
 /// refusal (`Call`, `Call.call_id`, `State::InReview`). See the section comment above for
 /// which words are read, passed through and refused.
-fn serde_names(attrs: &[Attribute], place: SerdePlace, at: &str) -> Result<SerdeNames, String> {
-    let mut out = SerdeNames::default();
+fn serde_words(attrs: &[Attribute], place: SerdePlace, at: &str) -> Result<SerdeWords, String> {
+    let mut out = SerdeWords::default();
     for a in attrs.iter().filter(|a| a.path().is_ident("serde")) {
         let Meta::List(list) = &a.meta else {
             return Err(format!(
@@ -1304,9 +1511,58 @@ fn serde_names(attrs: &[Attribute], place: SerdePlace, at: &str) -> Result<Serde
                     out.aliases.push(s.value());
                     Ok(())
                 }
-                ("alias" | "rename_all" | "rename_all_fields", _) => {
-                    refuse(serde_misplaced(&word, place))
+                (
+                    "skip" | "skip_serializing" | "skip_deserializing" | "flatten",
+                    SerdePlace::Field,
+                )
+                | ("transparent", SerdePlace::Container) => {
+                    if !(meta.input.is_empty() || meta.input.peek(Token![,])) {
+                        return refuse(format!("`{word}` takes no value: `#[serde({word})]`"));
+                    }
+                    *match word.as_str() {
+                        "skip" => &mut out.skip,
+                        "skip_serializing" => &mut out.skip_serializing,
+                        "skip_deserializing" => &mut out.skip_deserializing,
+                        "flatten" => &mut out.flatten,
+                        _ => &mut out.transparent,
+                    } = true;
+                    Ok(())
                 }
+                ("default", SerdePlace::Field | SerdePlace::Container) => {
+                    if meta.input.is_empty() || meta.input.peek(Token![,]) {
+                        out.default = Some(DefaultFrom::Trait);
+                        return Ok(());
+                    }
+                    match serde_path_value(&meta, "default") {
+                        Ok(p) => {
+                            out.default = Some(DefaultFrom::Path(p));
+                            Ok(())
+                        }
+                        Err(e) => refuse(e),
+                    }
+                }
+                ("skip_serializing_if", SerdePlace::Field) => {
+                    match serde_path_value(&meta, "skip_serializing_if") {
+                        Ok(p) => {
+                            out.skip_serializing_if = Some(p);
+                            Ok(())
+                        }
+                        Err(e) => refuse(e),
+                    }
+                }
+                (
+                    "alias"
+                    | "rename_all"
+                    | "rename_all_fields"
+                    | "skip"
+                    | "skip_serializing"
+                    | "skip_deserializing"
+                    | "skip_serializing_if"
+                    | "flatten"
+                    | "default"
+                    | "transparent",
+                    _,
+                ) => refuse(serde_misplaced(&word, place)),
                 (w, _) if SERDE_PASS.contains(&w) => serde_skip_value(&meta),
                 (w, _) if SERDE_NOT_READ.contains(&w) => refuse(serde_not_read(w)),
                 (w, _) => refuse(format!(
@@ -1334,9 +1590,23 @@ fn serde_names(attrs: &[Attribute], place: SerdePlace, at: &str) -> Result<Serde
 /// declared and never written. Empty for a field without one (and for a `#[serde(..)]`
 /// [`record_decl`] would refuse, which never reaches the code that asks).
 pub fn serde_aliases(attrs: &[Attribute]) -> Vec<String> {
-    serde_names(attrs, SerdePlace::Field, "")
+    serde_words(attrs, SerdePlace::Field, "")
         .map(|n| n.aliases)
         .unwrap_or_default()
+}
+
+/// `true` when reading `item` needs the source it sits in: a field of a struct says
+/// `#[serde(flatten)]`, and the flattened struct's fields are read from its definition
+/// ([`record_decl_in`]). The derive reads its file only then.
+pub fn needs_source(item: &Item) -> bool {
+    let Item::Struct(st) = item else {
+        return false;
+    };
+    st.fields.iter().any(|f| {
+        serde_words(&f.attrs, SerdePlace::Field, "")
+            .map(|w| w.flatten)
+            .unwrap_or(false)
+    })
 }
 
 /// A Rust identifier's name as serde reads it: `r#type` is `type`.
@@ -1366,88 +1636,309 @@ fn teal_field_key(name: &str) -> String {
     }
 }
 
-/// The fields of a struct record (`struct_record` = `true`) or of a data variant, and which
-/// of them carry `#[teal(noyield)]` (always none for a variant, whose fields cannot take it).
-/// `uses` is what a qualified field type crosses dotted against ([`teal_type_in`]): the
-/// record's own at the top level, the host's for one nested through `records = [..]`.
+/// The fields of a struct record (`struct_record` = `true`) or of a data variant: what is
+/// declared, which of them carry `#[teal(noyield)]` (always none for a variant, whose fields
+/// cannot take it), and how each Rust field crosses ([`Crossing`]). `uses` is what a
+/// qualified field type crosses dotted against ([`teal_type_in`]): the record's own at the
+/// top level, the host's for one nested through `records = [..]`.
 ///
 /// Each field is named as serde names it: its `#[serde(rename = "..")]`, else `rule` (the
 /// struct's `#[teal(rename_all)]` / `#[serde(rename_all)]`, or the enum's
 /// `#[serde(rename_all_fields)]` for a variant) applied to the Rust name, else the Rust
-/// name. Two fields under one name, or an alias that is another field's name, are refused.
+/// name. Two fields under one name, or an alias that is another field's name, are refused —
+/// a flattened struct's fields and aliases counted with the record's own.
 ///
 /// A field's Teal type is the one [`teal_type_in`] maps its Rust type to, unless the field
 /// says `#[teal(as = "..")]`: then it is that text, written as given, and the Rust type is
 /// not mapped at all — the attribute is for the type whose `IntoLua` / `FromLua` the host
 /// wrote itself, which the type table cannot see into.
+///
+/// Whether and how a field is present is serde's too, on a struct's fields (a variant's
+/// field carrying one of these words is refused; that is the enum step's):
+///
+/// - `skip` (or `skip_serializing` and `skip_deserializing` together): not declared, not
+///   written; filled on the way in from its `default`, else the struct's, else
+///   `Default::default()`. Either one-way word alone is refused ([`SERDE_ONE_WAY_SER`]).
+/// - `default` / `default = "path"` on the field, or `default` on the struct
+///   (`struct_default`): declared `T` as before — a Teal record field is nilable already —
+///   and a nil key reads as the default instead of reaching the type's `FromLua`.
+/// - `skip_serializing_if = "path"`: read only where a nil key has somewhere to go — a
+///   `default` on the field or the struct, or an `Option` field, which reads nil as `None`
+///   as serde reads a missing one; anywhere else it is refused ([`SERDE_SKIP_IF_ALONE`]).
+/// - `flatten`: the field's struct's own fields join this record ([`flattened`]), under
+///   that struct's names; the field itself has no key, so it takes no other word.
 fn record_fields(
     fields: &syn::FieldsNamed,
     self_name: &str,
     struct_record: bool,
     rule: Option<RenameRule>,
+    struct_default: bool,
     uses: &[Use],
-) -> Result<Fields, String> {
-    let mut out: Vec<(String, String)> = Vec::new();
-    let mut noyield = Vec::new();
-    let mut aliases: Vec<(String, String)> = Vec::new();
+    scope: Scope,
+) -> Result<ReadFields, String> {
+    let mut out = ReadFields {
+        fields: Vec::new(),
+        noyield: Vec::new(),
+        crossings: Vec::new(),
+        aliases: Vec::new(),
+    };
     for f in &fields.named {
         let ident = f.ident.as_ref().unwrap();
         let fi = unraw(ident);
+        let at = format!("{self_name}.{fi}");
+        let refuse = |msg: &str| Err(format!("TealRecord: {at}: {msg}"));
         let fa = field_attrs(&f.attrs, self_name, &fi)?;
-        let sn = serde_names(&f.attrs, SerdePlace::Field, &format!("{self_name}.{fi}"))?;
-        let name = match sn.rename {
+        let sw = serde_words(&f.attrs, SerdePlace::Field, &at)?;
+        if !struct_record && let Some(w) = sw.presence_word() {
+            return refuse(&format!(
+                "`#[serde({w})]` on a field of an enum variant is not read by TealRecord; it \
+                 reads it on a field of a struct"
+            ));
+        }
+        if sw.flatten {
+            if sw.skip
+                || sw.skip_serializing
+                || sw.skip_deserializing
+                || sw.default.is_some()
+                || sw.skip_serializing_if.is_some()
+                || sw.rename.is_some()
+                || !sw.aliases.is_empty()
+                || fa.as_type.is_some()
+                || fa.noyield
+            {
+                return refuse(
+                    "`#[serde(flatten)]` takes no other word on the field: the field has no key \
+                     of its own, the flattened struct's fields do; put the word on those fields",
+                );
+            }
+            let (record, inner) = flattened(&f.ty, self_name, &at, uses, scope)?;
+            for (n, t) in inner.fields {
+                if out.fields.iter().any(|(m, _)| *m == n) {
+                    return refuse(&format!(
+                        "the flattened `{record}` brings {n:?}, which `{self_name}` already \
+                         declares; give one a `#[serde(rename = \"..\")]` of its own"
+                    ));
+                }
+                out.fields.push((n, t));
+            }
+            out.noyield.extend(inner.noyield);
+            out.aliases.extend(inner.aliases);
+            out.crossings.push(Crossing::Flatten { record });
+            continue;
+        }
+        let skip = sw.skip || (sw.skip_serializing && sw.skip_deserializing);
+        if !skip && sw.skip_serializing {
+            return refuse(SERDE_ONE_WAY_SER);
+        }
+        if !skip && sw.skip_deserializing {
+            return refuse(SERDE_ONE_WAY_DE);
+        }
+        let nil = match sw.default {
+            Some(d) => WhenNil::Own(d),
+            None if struct_default => WhenNil::Struct,
+            None => WhenNil::Convert,
+        };
+        if skip {
+            if fa.as_type.is_some() || fa.noyield {
+                return refuse(
+                    "a `#[serde(skip)]` field is not declared, so `#[teal(..)]` on it says \
+                     nothing; drop the `#[teal(..)]`",
+                );
+            }
+            let nil = match nil {
+                WhenNil::Convert => WhenNil::Own(DefaultFrom::Trait),
+                other => other,
+            };
+            out.crossings.push(Crossing::Skip { nil });
+            continue;
+        }
+        if sw.skip_serializing_if.is_some() && nil == WhenNil::Convert && !is_option(&f.ty) {
+            return refuse(SERDE_SKIP_IF_ALONE);
+        }
+        let name = match sw.rename {
             Some(n) => n,
             None => rule.map_or_else(|| fi.clone(), |r| r.apply_to_field(&fi)),
         };
-        for n in std::iter::once(&name).chain(&sn.aliases) {
+        for n in std::iter::once(&name).chain(&sw.aliases) {
             if !representable_key(n) {
-                return Err(format!(
-                    "TealRecord: {self_name}.{fi}: {}",
-                    serde_unrepresentable(n)
-                ));
+                return refuse(&serde_unrepresentable(n));
             }
         }
-        if let Some((other, _)) = out.iter().find(|(n, _)| *n == name) {
-            return Err(format!(
-                "TealRecord: {self_name}.{fi}: crosses as {name:?}, which another field \
-                 (`{other}`) already does; give one a `#[serde(rename = \"..\")]` of its own"
+        if let Some((other, _)) = out.fields.iter().find(|(n, _)| *n == name) {
+            return refuse(&format!(
+                "crosses as {name:?}, which another field (`{other}`) already does; give one a \
+                 `#[serde(rename = \"..\")]` of its own"
             ));
         }
         if fa.noyield {
             // A variant's field is never called through by the host: the table the host
             // reads a callback off is a record it was handed, not one variant of a union.
             if !struct_record {
-                return Err(format!(
-                    "TealRecord: {self_name}.{fi}: `#[teal(noyield)]` applies to a field of a struct \
-                     record; a variant's fields take only `as`"
-                ));
+                return refuse(
+                    "`#[teal(noyield)]` applies to a field of a struct record; a variant's \
+                     fields take only `as`",
+                );
             }
             if !is_function(&f.ty) {
-                return Err(format!(
-                    "TealRecord: {self_name}.{fi}: `#[teal(noyield)]` on a field that is not a \
-                     `Function`: the word says the host calls the Lua function it reads from the field from C"
-                ));
+                return refuse(
+                    "`#[teal(noyield)]` on a field that is not a `Function`: the word says the \
+                     host calls the Lua function it reads from the field from C",
+                );
             }
-            noyield.push(name.clone());
+            out.noyield.push(name.clone());
         }
         let tt = match fa.as_type {
             Some(t) => t,
             None => teal_type_in(&f.ty, self_name, uses)?,
         };
-        aliases.extend(sn.aliases.into_iter().map(|a| (a, fi.clone())));
-        out.push((name, tt));
+        out.aliases
+            .extend(sw.aliases.iter().map(|a| (a.clone(), at.clone())));
+        out.fields.push((name.clone(), tt.clone()));
+        out.crossings.push(Crossing::Key {
+            name,
+            teal: tt,
+            aliases: sw.aliases,
+            nil,
+            skip_if: sw.skip_serializing_if,
+        });
     }
     // An alias is read only when the field's own key is nil, so one equal to another
     // field's name would hand that field's value to this one.
-    for (a, fi) in &aliases {
-        if out.iter().any(|(n, _)| n == a) {
+    for (a, owner) in &out.aliases {
+        if out.fields.iter().any(|(n, _)| n == a) {
             return Err(format!(
-                "TealRecord: {self_name}.{fi}: `#[serde(alias = {a:?})]` is the name another \
+                "TealRecord: {owner}: `#[serde(alias = {a:?})]` is the name another \
                  field crosses as; an alias has to be a key no field is declared under"
             ));
         }
     }
-    Ok((out, noyield))
+    Ok(out)
+}
+
+/// The struct a `#[serde(flatten)]` field of `outer` (the field reported as `at`) names, and
+/// its fields as [`record_fields`] reads them — under its own `rename_all` and `default`,
+/// against `outer`'s `uses`, as a nested record's are.
+///
+/// The declaration lists the flattened fields, and nothing in a derive can see another
+/// type's definition, so they are read from source: the struct has to be declared in the
+/// file being read (`scope`; [`find_item`], so the first of that name, inline modules
+/// included), named by its bare name, and derive `TealRecord` — its derive writes the
+/// [`crate::teal::TealFields`] the conversion calls. Refused, naming the rule: a map
+/// (`HashMap` / `BTreeMap`: a flattened map takes the keys no field names, which a record
+/// cannot declare — schemars #259 and ts-rs refuse it too), an `Option`, an enum, a path or
+/// a type with arguments, a struct not in the file, one without named fields, a
+/// `transparent` one, and a struct flattened into itself.
+fn flattened(
+    ty: &Type,
+    outer: &str,
+    at: &str,
+    uses: &[Use],
+    scope: Scope,
+) -> Result<(String, ReadFields), String> {
+    let refuse = |msg: String| Err(format!("TealRecord: {at}: {msg}"));
+    let Type::Path(p) = ty else {
+        return refuse(
+            "`#[serde(flatten)]` of a type that is not a named struct; TealRecord flattens a \
+             struct declared in this same file, named by its bare name"
+                .into(),
+        );
+    };
+    let Some(seg) = p.path.segments.last() else {
+        return refuse("`#[serde(flatten)]` of an empty type path".into());
+    };
+    let id = seg.ident.to_string();
+    match id.as_str() {
+        "HashMap" | "BTreeMap" | "IndexMap" => {
+            return refuse(format!(
+                "`#[serde(flatten)]` of a map (`{id}`) is not read by TealRecord: a flattened \
+                 map takes every key no field names, which a Teal record cannot declare; give \
+                 the map a field of its own"
+            ));
+        }
+        "Option" => {
+            return refuse(
+                "`#[serde(flatten)]` of an `Option` is not read by TealRecord: the flattened \
+                 fields would all be there or all be missing, which a Teal record cannot say; \
+                 flatten the struct itself and make its fields `Option`s"
+                    .into(),
+            );
+        }
+        _ => {}
+    }
+    if p.qself.is_some() || p.path.segments.len() != 1 || !seg.arguments.is_none() {
+        return refuse(format!(
+            "`#[serde(flatten)]` of `{id}` named by a path or with type arguments is not read \
+             by TealRecord: it flattens a struct declared in this same file, named by its bare \
+             name; name it so, or write its fields out"
+        ));
+    }
+    let Some(items) = scope.items else {
+        return refuse(format!(
+            "`#[serde(flatten)]` needs the source of `{id}` to declare its fields, and this \
+             expansion has no source file; write the fields out"
+        ));
+    };
+    if id == outer || scope.within.contains(&id) {
+        return refuse(format!(
+            "`#[serde(flatten)]` of `{id}` inside `{id}`: a struct cannot hold its own fields"
+        ));
+    }
+    let Some(it) = find_item(items, &id) else {
+        return refuse(format!(
+            "`#[serde(flatten)]` of `{id}`, which is not declared in this file: the \
+             declaration lists a flattened struct's fields, read from its source; put `{id}` \
+             in the same file as `{outer}`, or write its fields out"
+        ));
+    };
+    let st = match it {
+        Item::Struct(st) => st,
+        _ => {
+            return refuse(format!(
+                "`#[serde(flatten)]` of an enum (`{id}`) is not read by TealRecord: one \
+                 variant's keys or another's would join the record, which a Teal record \
+                 cannot declare; give it a field of its own"
+            ));
+        }
+    };
+    if !derives_teal_record(&st.attrs) {
+        return refuse(format!(
+            "`#[serde(flatten)]` of `{id}`, which does not derive TealRecord: its fields cross \
+             through the conversion that derive writes; add `#[derive(TealRecord)]` to `{id}`"
+        ));
+    }
+    let syn::Fields::Named(named) = &st.fields else {
+        return refuse(format!(
+            "`#[serde(flatten)]` of `{id}`, which has no named fields to bring; flatten a \
+             struct with named fields"
+        ));
+    };
+    let teal = parse_teal_attrs(&st.attrs).map_err(|e| format!("TealRecord: {id}: {e}"))?;
+    let sw = serde_words(&st.attrs, SerdePlace::Container, &id)?;
+    if sw.transparent {
+        return refuse(format!(
+            "`#[serde(flatten)]` of `{id}`, which is `#[serde(transparent)]`: it crosses as \
+             its one field's value, not as fields; give it a field of its own"
+        ));
+    }
+    let within: Vec<String> = scope
+        .within
+        .iter()
+        .cloned()
+        .chain([outer.to_string()])
+        .collect();
+    let fields = record_fields(
+        named,
+        &id,
+        true,
+        teal.rename_all.or(sw.rename_all),
+        sw.default.is_some(),
+        uses,
+        Scope {
+            items: Some(items),
+            within: &within,
+        },
+    )?;
+    Ok((id, fields))
 }
 
 /// What a record field's `#[teal(..)]` says.
@@ -1540,22 +2031,51 @@ fn field_attrs(attrs: &[Attribute], rec: &str, fname: &str) -> Result<FieldAttrs
     Ok(out)
 }
 
-/// The kind a struct lowers to: named fields -> record, one unnamed field -> alias. `rule`
-/// renames the fields ([`record_fields`]).
+/// The kind a struct lowers to, and how its fields cross: named fields -> record, one
+/// unnamed field -> alias, and a `#[serde(transparent)]` struct with named fields -> alias
+/// too ([`transparent_kind`]). `rule` renames the fields ([`record_fields`]); `sw` is what
+/// the struct's own `#[serde(..)]` says.
 fn struct_kind(
     st: &ItemStruct,
     name: &str,
     rule: Option<RenameRule>,
+    sw: &SerdeWords,
     uses: &[Use],
-) -> Result<RecordKind, String> {
+    scope: Scope,
+) -> Result<(RecordKind, RecordConversion), String> {
     match &st.fields {
         syn::Fields::Named(fields) => {
-            let (fields, noyield) = record_fields(fields, name, true, rule, uses)?;
-            Ok(RecordKind::Record { fields, noyield })
+            let rf = record_fields(fields, name, true, rule, sw.default.is_some(), uses, scope)?;
+            let conv = RecordConversion {
+                fields: rf.crossings,
+                default: sw.default.clone(),
+            };
+            if sw.transparent {
+                return transparent_kind(name, &rf.noyield, conv);
+            }
+            Ok((
+                RecordKind::Record {
+                    fields: rf.fields,
+                    noyield: rf.noyield,
+                },
+                conv,
+            ))
         }
-        syn::Fields::Unnamed(u) if u.unnamed.len() == 1 => Ok(RecordKind::Alias {
-            inner: teal_type_in(&u.unnamed[0].ty, name, uses)?,
-        }),
+        syn::Fields::Unnamed(u) if u.unnamed.len() == 1 => {
+            if sw.default.is_some() {
+                return Err(format!(
+                    "TealRecord: {name}: `#[serde(default)]` on a newtype is not read by \
+                     TealRecord (it crosses as its one field's value, with no key to be \
+                     missing); it reads it on a struct with named fields"
+                ));
+            }
+            Ok((
+                RecordKind::Alias {
+                    inner: teal_type_in(&u.unnamed[0].ty, name, uses)?,
+                },
+                RecordConversion::default(),
+            ))
+        }
         syn::Fields::Unnamed(_) => Err(format!(
             "TealRecord: `{name}` is a tuple struct with more than one field; only a newtype (`struct {name}(T)`) lowers to a Teal type"
         )),
@@ -1563,6 +2083,72 @@ fn struct_kind(
             "TealRecord: `{name}` is a unit struct and has nothing to declare"
         )),
     }
+}
+
+/// `#[serde(transparent)]` on a struct with named fields: declared `type N = T`, `T` the
+/// Teal type of its one field that is not skipped, and crossing as that field's value. The
+/// rule is serde's, quoted: exactly one field neither `skip` nor `default`; the others are
+/// skipped, and filled as a skipped field is. A `flatten`, `skip_serializing_if` (the
+/// whole value cannot be left out) or `noyield` (`type N = function` has no field to mark)
+/// on it is refused.
+fn transparent_kind(
+    name: &str,
+    noyield: &[String],
+    conv: RecordConversion,
+) -> Result<(RecordKind, RecordConversion), String> {
+    let refuse = |msg: &str| Err(format!("TealRecord: {name}: {msg}"));
+    let kept: Vec<&Crossing> = conv
+        .fields
+        .iter()
+        .filter(|c| !matches!(c, Crossing::Skip { .. }))
+        .collect();
+    let inner = match kept.as_slice() {
+        [] => {
+            return refuse(
+                "#[serde(transparent)] requires at least one field that is not skipped \
+                 (serde's rule): a transparent struct crosses as that field's value",
+            );
+        }
+        [
+            Crossing::Key {
+                teal, nil, skip_if, ..
+            },
+        ] => {
+            if matches!(nil, WhenNil::Own(_)) {
+                return refuse(
+                    "#[serde(transparent)] requires at least one field that is neither skipped \
+                     nor has a default (serde's rule); drop the field's `default`",
+                );
+            }
+            if skip_if.is_some() {
+                return refuse(
+                    "`skip_serializing_if` on a transparent struct's field would leave out the \
+                     whole value, which nothing can declare; drop it",
+                );
+            }
+            if !noyield.is_empty() {
+                return refuse(
+                    "`#[teal(noyield)]` on a transparent struct's field: it is declared \
+                     `type N = function`, which has no field to mark; drop `transparent` or \
+                     the `noyield`",
+                );
+            }
+            teal.clone()
+        }
+        [Crossing::Flatten { .. }] => {
+            return refuse(
+                "#[serde(transparent)] over a `#[serde(flatten)]` field is not read by \
+                 TealRecord; flatten the struct where it is used instead",
+            );
+        }
+        _ => {
+            return refuse(
+                "#[serde(transparent)] requires struct to have at most one transparent field \
+                 (serde's rule): it crosses as that field's value; `#[serde(skip)]` the others",
+            );
+        }
+    };
+    Ok((RecordKind::Alias { inner }, conv))
 }
 
 /// The Teal spelling of one variant: `#[teal(name = "..")]` on it, else its
@@ -1578,7 +2164,7 @@ fn variant_word(
 ) -> Result<String, String> {
     let attrs = parse_teal_attrs(&v.attrs)
         .map_err(|e| format!("TealRecord: {enum_name}::{}: {e}", v.ident))?;
-    let sn = serde_names(
+    let sn = serde_words(
         &v.attrs,
         SerdePlace::Variant,
         &format!("{enum_name}::{}", v.ident),
@@ -1664,7 +2250,8 @@ fn enum_kind(
                 );
             }
             syn::Fields::Named(fields) => {
-                let fs = record_fields(fields, name, false, fields_rule, uses)?.0;
+                let fs = record_fields(fields, name, false, fields_rule, false, uses, Scope::NONE)?
+                    .fields;
                 // The tag is `kind`, on every variant record; a payload field crossing
                 // under that name would be declared twice and could not survive a round
                 // trip.
@@ -1697,45 +2284,64 @@ fn record_attrs(item: &Item) -> Result<(TealAttrs, String), String> {
     }
 }
 
-/// The [`RecordKind`] `item` (named `name`) lowers to, its field types resolved against
-/// `uses` ([`teal_type_in`]). `rename_all` is the item's `#[teal(rename_all)]`, which wins
-/// over its `#[serde(rename_all)]` (read here): on a struct it spells the fields, on an
-/// enum the variants.
+/// The [`RecordKind`] `item` (named `name`) lowers to and how its fields cross, its field
+/// types resolved against `uses` ([`teal_type_in`]) and a flattened struct looked up in
+/// `scope`. `rename_all` is the item's `#[teal(rename_all)]`, which wins over its
+/// `#[serde(rename_all)]` (read here): on a struct it spells the fields, on an enum the
+/// variants.
 fn record_kind(
     item: &Item,
     name: &str,
     rename_all: Option<RenameRule>,
     uses: &[Use],
-) -> Result<RecordKind, String> {
+    scope: Scope,
+) -> Result<(RecordKind, RecordConversion), String> {
     let attrs = match item {
         Item::Struct(st) => &st.attrs,
         Item::Enum(en) => &en.attrs,
         _ => unreachable!(),
     };
-    let sn = serde_names(attrs, SerdePlace::Container, name)?;
-    let rule = rename_all.or(sn.rename_all);
+    let sw = serde_words(attrs, SerdePlace::Container, name)?;
+    let rule = rename_all.or(sw.rename_all);
     match item {
         Item::Struct(st) => {
-            if sn.rename_all_fields.is_some() {
+            if sw.rename_all_fields.is_some() {
                 return Err(format!(
                     "TealRecord: {name}: `#[serde(rename_all_fields)]` is an enum's (the fields \
                      of its struct variants); on a struct, `rename_all` renames the fields"
                 ));
             }
-            struct_kind(st, name, rule, uses)
+            struct_kind(st, name, rule, &sw, uses, scope)
         }
-        Item::Enum(en) => enum_kind(en, name, rule, sn.rename_all_fields, uses),
+        Item::Enum(en) => {
+            for (w, on) in [
+                ("transparent", sw.transparent),
+                ("default", sw.default.is_some()),
+            ] {
+                if on {
+                    return Err(format!(
+                        "TealRecord: {name}: `#[serde({w})]` on an enum is not read by \
+                         TealRecord; it reads it on a struct"
+                    ));
+                }
+            }
+            let kind = enum_kind(en, name, rule, sw.rename_all_fields, uses)?;
+            Ok((kind, RecordConversion::default()))
+        }
         _ => unreachable!(),
     }
 }
 
-/// Name, attributes and kind of a `#[derive(TealRecord)]` item, its own `uses` resolving
-/// its field types.
-fn record_parts(item: &Item) -> Result<(String, TealAttrs, RecordKind), String> {
+/// Name, attributes, kind and conversion of a `#[derive(TealRecord)]` item, its own `uses`
+/// resolving its field types.
+fn record_parts(
+    item: &Item,
+    scope: Scope,
+) -> Result<(String, TealAttrs, RecordKind, RecordConversion), String> {
     let (attrs, ident) = record_attrs(item)?;
     let name = attrs.name.clone().unwrap_or(ident);
-    let kind = record_kind(item, &name, attrs.rename_all, &attrs.uses)?;
-    Ok((name, attrs, kind))
+    let (kind, conv) = record_kind(item, &name, attrs.rename_all, &attrs.uses, scope)?;
+    Ok((name, attrs, kind, conv))
 }
 
 /// Field lines of a variant record: `kind` first, then what the variant carries.
@@ -1800,13 +2406,26 @@ fn kind_decl(name: &str, kind: &RecordKind, indent: &str) -> String {
     s
 }
 
-/// Declaration for a `#[derive(TealRecord)]` struct or enum.
+/// Declaration for a `#[derive(TealRecord)]` struct or enum, read with no source around it:
+/// [`record_decl_in`] with no file, so a `#[serde(flatten)]` field is refused.
+pub fn record_decl(item: &Item) -> Result<RecordDecl, String> {
+    record_decl_in(item, None)
+}
+
+/// Declaration for a `#[derive(TealRecord)]` struct or enum, `file` being the items of the
+/// file it is declared in, where a `#[serde(flatten)]` field's struct is looked up (by its
+/// bare name, inline modules included) — the derive passes its own file's when [`needs_source`] says so, `htl
+/// dts` the file it scans, so the two read the same fields.
 ///
 /// The text is the module form (`local ... return NAME`). A data-carrying enum gets it
 /// too — it is what its `DECL` constant holds — but asking for it as a file
 /// (`#[teal(dts = ..)]`) is refused: see the module docs for why it has to be nested.
-pub fn record_decl(item: &Item) -> Result<RecordDecl, String> {
-    let (name, attrs, kind) = record_parts(item)?;
+pub fn record_decl_in(item: &Item, file: Option<&[Item]>) -> Result<RecordDecl, String> {
+    let scope = Scope {
+        items: file,
+        within: &[],
+    };
+    let (name, attrs, kind, conversion) = record_parts(item, scope)?;
     if attrs.dts.is_some() && matches!(kind, RecordKind::Union { .. }) {
         return Err(format!(
             "TealRecord: `{name}` has data-carrying variants and cannot be a `.d.tl` module of its own \
@@ -1823,6 +2442,7 @@ pub fn record_decl(item: &Item) -> Result<RecordDecl, String> {
         kind,
         decl,
         attrs,
+        conversion,
     })
 }
 
@@ -1869,7 +2489,7 @@ fn find_item_direct<'a>(items: &'a [Item], name: &str) -> Option<&'a Item> {
 /// way whichever `#[host_module]` method also returns it. A `#[teal(uses = ..)]` on the
 /// nested item itself writes no import line of its own either way: only the host
 /// module's `uses_header` is ever emitted, once, at the top of the file.
-fn nested_item_decl(it: &Item, name: &str, uses: &[Use]) -> Result<String, String> {
+fn nested_item_decl(it: &Item, name: &str, uses: &[Use], file: &[Item]) -> Result<String, String> {
     let (attrs, ident) = record_attrs(it)?;
     let renamed = attrs.name.clone().unwrap_or(ident);
     if attrs.name.is_some() {
@@ -1879,7 +2499,11 @@ fn nested_item_decl(it: &Item, name: &str, uses: &[Use]) -> Result<String, Strin
              `.d.tl` of its own (`#[teal(dts = ..)]`) and import it with `uses = [{renamed}]`"
         ));
     }
-    let kind = record_kind(it, &renamed, attrs.rename_all, uses)?;
+    let scope = Scope {
+        items: Some(file),
+        within: &[],
+    };
+    let (kind, _) = record_kind(it, &renamed, attrs.rename_all, uses, scope)?;
     Ok(kind_decl(name, &kind, "   "))
 }
 
@@ -2084,7 +2708,12 @@ fn nested_record_decls(
                     })?
             }
         };
-        out.push(nested_item_decl(&it, &r.name, uses)?);
+        // A `flatten` inside the record is looked up where the record was found.
+        let scope: &[Item] = match &r.module {
+            None => items,
+            Some(module) => &modules[module].0,
+        };
+        out.push(nested_item_decl(&it, &r.name, uses, scope)?);
     }
     Ok((out, record_files))
 }
@@ -2698,7 +3327,7 @@ pub fn scan_rust_file(path: &Path, manifest_dir: &Path) -> Result<Vec<Generated>
             Item::Struct(ItemStruct { attrs, .. }) | Item::Enum(ItemEnum { attrs, .. })
                 if derives_teal_record(attrs) =>
             {
-                let rd = record_decl(it)?;
+                let rd = record_decl_in(it, Some(&file.items))?;
                 if let Some(dts) = &rd.attrs.dts {
                     out.push(Generated {
                         target: manifest_dir.join(dts),
@@ -3171,14 +3800,15 @@ mod tests {
     #[test]
     fn a_serde_word_not_read_is_refused_and_one_keeping_the_shape_passes() {
         let e = record_decl(&item(
-            "#[derive(TealRecord)] pub struct P { #[serde(skip)] pub x: f64 }",
+            "#[derive(TealRecord)] pub struct P { #[serde(with = \"m\")] pub x: f64 }",
         ))
         .unwrap_err();
         assert_eq!(
             e,
-            "TealRecord: P.x: `#[serde(skip)]` is not read by TealRecord; the attributes it reads \
-             are rename_all, rename, alias, rename_all_fields (and it leaves crate, bound, \
-             deny_unknown_fields, expecting to serde)"
+            "TealRecord: P.x: `#[serde(with)]` is not read by TealRecord; the attributes it reads \
+             are rename_all, rename, alias, rename_all_fields, skip, default, \
+             skip_serializing_if (with default), transparent, flatten (and it leaves crate, \
+             bound, deny_unknown_fields, expecting to serde)"
         );
         let e = record_decl(&item(
             "#[derive(TealRecord)] #[serde(tag = \"type\")] pub enum S { A { x: f64 } }",
@@ -3194,6 +3824,416 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(rd.decl, "local record P\n   x: number\nend\n\nreturn P\n");
+    }
+
+    /// The items of a file, for a declaration whose `flatten` is looked up in it.
+    fn file(src: &str) -> Vec<Item> {
+        syn::parse_file(src).unwrap().items
+    }
+
+    /// `record_decl_in` of the struct `name` in `items`.
+    fn decl_in(items: &[Item], name: &str) -> Result<RecordDecl, String> {
+        record_decl_in(find_item(items, name).unwrap(), Some(items))
+    }
+
+    /// `skip` leaves a field out of the declaration and the conversion fills it; `default`
+    /// keeps the field `T`; `skip_serializing_if` is read beside a default (the field's or
+    /// the struct's) or on an `Option`.
+    #[test]
+    fn skip_default_and_skip_serializing_if_shape_the_record() {
+        let rd = record_decl(&item(
+            "#[derive(TealRecord)] #[serde(rename_all = \"camelCase\")] pub struct P { \
+             pub call_id: String, #[serde(skip)] pub cache: Vec<u8>, \
+             #[serde(default)] pub retry_count: u32, \
+             #[serde(default = \"one\", skip_serializing_if = \"is_one\")] pub width: u32, \
+             #[serde(skip_serializing_if = \"Option::is_none\")] pub note: Option<String> }",
+        ))
+        .unwrap();
+        assert_eq!(
+            rd.decl,
+            "local record P\n   callId: string\n   retryCount: integer\n   width: integer\n   \
+             note: string\nend\n\nreturn P\n"
+        );
+        assert_eq!(
+            rd.conversion.fields[1],
+            Crossing::Skip {
+                nil: WhenNil::Own(DefaultFrom::Trait)
+            }
+        );
+        assert_eq!(
+            rd.conversion.fields[3],
+            Crossing::Key {
+                name: "width".into(),
+                teal: "integer".into(),
+                aliases: vec![],
+                nil: WhenNil::Own(DefaultFrom::Path("one".into())),
+                skip_if: Some("is_one".into()),
+            }
+        );
+        let rd = record_decl(&item(
+            "#[derive(TealRecord)] #[serde(default)] pub struct P { pub a: u32, \
+             #[serde(skip_serializing_if = \"is_zero\")] pub b: u32, #[serde(skip)] pub c: u32 }",
+        ))
+        .unwrap();
+        assert_eq!(rd.conversion.default, Some(DefaultFrom::Trait));
+        assert!(matches!(
+            rd.conversion.fields[1],
+            Crossing::Key {
+                nil: WhenNil::Struct,
+                ..
+            }
+        ));
+        assert_eq!(
+            rd.conversion.fields[2],
+            Crossing::Skip {
+                nil: WhenNil::Struct
+            }
+        );
+    }
+
+    /// The one-way words alone, and `skip_serializing_if` with nowhere for the omitted value
+    /// to come from, are refused naming the rule; the two one-way words together are `skip`.
+    #[test]
+    fn one_way_skips_are_refused_naming_the_rule() {
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] pub struct P { #[serde(skip_serializing_if = \"is_zero\")] pub x: u32 }",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "TealRecord: P.x: `skip_serializing_if` without `default`: a value omitted on the way \
+             out would be missing on the way in; add `#[serde(default)]`, or use `Option<T>`"
+        );
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] pub struct P { #[serde(skip_serializing)] pub x: u32 }",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "TealRecord: P.x: `skip_serializing` alone: the field would be read on the way in \
+             and missing on the way out, and one type cannot state both directions (the \
+             `.d.tl` declares one); use `#[serde(skip)]`, or write two types"
+        );
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] pub struct P { #[serde(skip_deserializing)] pub x: u32 }",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "TealRecord: P.x: `skip_deserializing` alone: the field would be written on the way \
+             out and never read on the way in, and one type cannot state both directions (the \
+             `.d.tl` declares one); use `#[serde(skip)]`, or write two types"
+        );
+        let rd = record_decl(&item(
+            "#[derive(TealRecord)] pub struct P { pub a: u32, \
+             #[serde(skip_serializing, skip_deserializing)] pub x: u32 }",
+        ))
+        .unwrap();
+        assert_eq!(rd.decl, "local record P\n   a: integer\nend\n\nreturn P\n");
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] pub enum S { A { #[serde(default)] x: u32 } }",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "TealRecord: S.x: `#[serde(default)]` on a field of an enum variant is not read by \
+             TealRecord; it reads it on a field of a struct"
+        );
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] #[serde(skip)] pub struct P { pub x: u32 }",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "TealRecord: P: `#[serde(skip)]` on a type is not read by TealRecord; it reads it on \
+             a field of a struct"
+        );
+    }
+
+    /// A transparent struct is declared as its one field's type; serde's own rule on how
+    /// many fields it may have is quoted when broken.
+    #[test]
+    fn a_transparent_struct_is_an_alias_of_its_one_field() {
+        let rd = record_decl(&item(
+            "#[derive(TealRecord)] #[serde(transparent)] pub struct L { pub text: String, \
+             #[serde(skip)] pub n: u32 }",
+        ))
+        .unwrap();
+        assert_eq!(rd.decl, "local type L = string\n\nreturn L\n");
+        assert_eq!(
+            rd.kind,
+            RecordKind::Alias {
+                inner: "string".into()
+            }
+        );
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] #[serde(transparent)] pub struct L { pub a: String, pub b: u32 }",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "TealRecord: L: #[serde(transparent)] requires struct to have at most one \
+             transparent field (serde's rule): it crosses as that field's value; \
+             `#[serde(skip)]` the others"
+        );
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] #[serde(transparent)] pub struct L { #[serde(skip)] pub a: String }",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "TealRecord: L: #[serde(transparent)] requires at least one field that is not \
+             skipped (serde's rule): a transparent struct crosses as that field's value"
+        );
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] #[serde(transparent)] pub enum E { A }",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "TealRecord: E: `#[serde(transparent)]` on an enum is not read by TealRecord; it \
+             reads it on a struct"
+        );
+    }
+
+    /// A flattened struct in the same file: its fields join the record under its own
+    /// names, where the field sits, two levels deep as well; without the file it is refused.
+    #[test]
+    fn a_flattened_struct_in_the_same_file_joins_the_record() {
+        let src = "#[derive(TealRecord)] #[serde(rename_all = \"camelCase\")] \
+                   pub struct Meta { #[serde(rename = \"trace\")] pub trace_id: String, \
+                   pub span_count: u32, #[serde(alias = \"t\")] pub tag: String }\n\
+                   #[derive(TealRecord)] #[serde(rename_all = \"SCREAMING_SNAKE_CASE\")] \
+                   pub struct Call { pub call_id: String, #[serde(flatten)] pub meta: Meta, \
+                   pub done: bool }";
+        let items = file(src);
+        let rd = decl_in(&items, "Call").unwrap();
+        assert_eq!(
+            rd.decl,
+            "local record Call\n   CALL_ID: string\n   trace: string\n   spanCount: integer\n   \
+             tag: string\n   DONE: boolean\nend\n\nreturn Call\n"
+        );
+        assert_eq!(
+            rd.conversion.fields[1],
+            Crossing::Flatten {
+                record: "Meta".into()
+            }
+        );
+        // Without the file, the fields cannot be read.
+        let e = record_decl(find_item(&items, "Call").unwrap()).unwrap_err();
+        assert_eq!(
+            e,
+            "TealRecord: Call.meta: `#[serde(flatten)]` needs the source of `Meta` to declare \
+             its fields, and this expansion has no source file; write the fields out"
+        );
+        // Two levels: the innermost fields reach the top.
+        let items = file(
+            "#[derive(TealRecord)] pub struct A { pub a: u32 }\n\
+             #[derive(TealRecord)] pub struct B { #[serde(flatten)] pub a: A, pub b: u32 }\n\
+             #[derive(TealRecord)] pub struct C { #[serde(flatten)] pub b: B, pub c: u32 }",
+        );
+        assert_eq!(
+            decl_in(&items, "C").unwrap().decl,
+            "local record C\n   a: integer\n   b: integer\n   c: integer\nend\n\nreturn C\n"
+        );
+    }
+
+    /// `Call` of `crates/htl/tests/record_serde_shape.rs` (and its `Meta` / `Label`), with a
+    /// host module nesting it: what `htl dts` scans.
+    const SHAPE_SRC: &str = "\
+#[derive(TealRecord)] #[serde(rename_all = \"camelCase\")]
+pub struct Meta { #[serde(rename = \"trace\")] pub trace_id: String, pub span_count: u32 }
+
+#[derive(TealRecord)] #[serde(transparent)]
+pub struct Label { pub text: String, #[serde(skip)] pub shown: u32 }
+
+#[derive(TealRecord)] #[serde(rename_all = \"camelCase\")]
+pub struct Call {
+    pub call_id: String,
+    #[serde(skip)] pub secret: String,
+    #[serde(default)] pub retry_count: u32,
+    #[serde(default, skip_serializing_if = \"Vec::is_empty\")] pub tags: Vec<String>,
+    #[serde(skip_serializing_if = \"Option::is_none\")] pub note: Option<String>,
+    #[serde(flatten)] pub meta: Meta,
+    pub label: Label,
+}
+
+pub struct Api;
+
+#[host_module(name = \"api\", dts = \"types/api.d.tl\", records = [Call, Label])]
+impl Api {
+    pub fn get(&self) -> Call { todo!() }
+}
+";
+
+    /// `htl dts`'s entry (`scan_rust_file`) on a file whose host module nests a record
+    /// using `skip`, `default`, `skip_serializing_if`, `flatten` and a `transparent` field
+    /// type: the nested `Call` has the same lines, indented, as the `Call` the derive
+    /// declares from the same file (`record_decl_in` with the file is what the derive
+    /// runs). This test and `record_serde_shape.rs`'s
+    /// `the_declaration_leaves_out_the_skipped_field_and_lists_the_flattened_ones` assert
+    /// the same text for `Call` and `Label` — the one the macro writes in `DECL`.
+    #[test]
+    fn htl_dts_nests_the_serde_shaped_record_as_the_derive_declares_it() {
+        let dir = core_common::tempdir("htl-dts-serde-shape", "default");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let lib = dir.join("src/lib.rs");
+        std::fs::write(&lib, SHAPE_SRC).unwrap();
+        let generated = scan_rust_file(&lib, &dir).unwrap();
+        assert_eq!(generated.len(), 1);
+        assert_eq!(generated[0].target, dir.join("types/api.d.tl"));
+        assert_eq!(
+            generated[0].text,
+            "local record api\n   record Call\n      callId: string\n      \
+             retryCount: integer\n      tags: {string}\n      note: string\n      \
+             trace: string\n      spanCount: integer\n      label: Label\n   end\n   \
+             type Label = string\n   get: function(self: api): Call\nend\n\nreturn api\n"
+        );
+        // The derive's own declarations, from the same file: the same lines.
+        let items = file(SHAPE_SRC);
+        let call = decl_in(&items, "Call").unwrap().decl;
+        assert_eq!(
+            call,
+            "local record Call\n   callId: string\n   retryCount: integer\n   tags: {string}\n   \
+             note: string\n   trace: string\n   spanCount: integer\n   label: Label\nend\n\n\
+             return Call\n"
+        );
+        let body: String = call
+            .lines()
+            .skip(1)
+            .take_while(|l| *l != "end")
+            .map(|l| format!("   {l}\n"))
+            .collect();
+        assert!(generated[0].text.contains(&body), "{body}");
+        assert_eq!(
+            decl_in(&items, "Label").unwrap().decl,
+            "local type Label = string\n\nreturn Label\n"
+        );
+    }
+
+    /// A record nested from another file, `records = [meta::Call]` for a `mod meta;`: the
+    /// flattened struct is looked up in the file the record is declared in — `meta.rs` —
+    /// which is also the file the derive expands in and reads. So a `Meta` beside `Call` in
+    /// `meta.rs` is inlined, and a `Meta` in the host's own file is refused on both roads,
+    /// the same message: the rule is the record's file, not the host's.
+    #[test]
+    fn a_record_nested_from_a_module_file_flattens_what_its_own_file_declares() {
+        let host = "mod meta;\n\
+                    pub struct Api;\n\
+                    #[host_module(name = \"api\", dts = \"types/api.d.tl\", records = [meta::Call])]\n\
+                    impl Api {\n    pub fn get(&self) -> meta::Call { todo!() }\n}\n";
+        let inner = "#[derive(TealRecord)] pub struct Meta { pub trace: String }\n";
+        let call = "#[derive(TealRecord)] pub struct Call { pub id: String, \
+                    #[serde(flatten)] pub meta: Meta }\n";
+
+        let dir = core_common::tempdir("htl-dts-serde-flatten-mod", "beside");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let lib = dir.join("src/lib.rs");
+        std::fs::write(&lib, host).unwrap();
+        let meta_rs = format!("{inner}{call}");
+        std::fs::write(dir.join("src/meta.rs"), &meta_rs).unwrap();
+        let generated = scan_rust_file(&lib, &dir).unwrap();
+        assert_eq!(
+            generated[0].text,
+            "local record api\n   record Call\n      id: string\n      trace: string\n   end\n   \
+             get: function(self: api): Call\nend\n\nreturn api\n"
+        );
+        // What the derive of `Call` reads: its own file, `meta.rs`.
+        assert!(decl_in(&file(&meta_rs), "Call").is_ok());
+
+        let dir = core_common::tempdir("htl-dts-serde-flatten-mod", "host-file");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let lib = dir.join("src/lib.rs");
+        std::fs::write(&lib, format!("{inner}{host}")).unwrap();
+        std::fs::write(dir.join("src/meta.rs"), call).unwrap();
+        let want = "TealRecord: Call.meta: `#[serde(flatten)]` of `Meta`, which is not declared \
+                    in this file: the declaration lists a flattened struct's fields, read from \
+                    its source; put `Meta` in the same file as `Call`, or write its fields out";
+        assert_eq!(scan_rust_file(&lib, &dir).unwrap_err(), want);
+        assert_eq!(decl_in(&file(call), "Call").unwrap_err(), want);
+    }
+
+    /// `flatten` of what a record cannot declare as fields is refused naming the rule.
+    #[test]
+    fn a_flatten_teal_cannot_declare_is_refused() {
+        let items = file(
+            "use std::collections::HashMap;\n\
+             #[derive(TealRecord)] pub enum Mode { A { x: u32 } }\n\
+             pub struct Plain { pub x: u32 }\n\
+             #[derive(TealRecord)] pub struct P { pub x: u32 }\n\
+             #[derive(TealRecord)] pub struct Q { pub x: u32 }\n\
+             #[derive(TealRecord)] pub struct En { #[serde(flatten)] pub m: Mode }\n\
+             #[derive(TealRecord)] pub struct Map { #[serde(flatten)] pub m: HashMap<String, u32> }\n\
+             #[derive(TealRecord)] pub struct Opt { #[serde(flatten)] pub m: Option<P> }\n\
+             #[derive(TealRecord)] pub struct Far { #[serde(flatten)] pub m: Elsewhere }\n\
+             #[derive(TealRecord)] pub struct Qual { #[serde(flatten)] pub m: other::P }\n\
+             #[derive(TealRecord)] pub struct NoDerive { #[serde(flatten)] pub m: Plain }\n\
+             #[derive(TealRecord)] pub struct Both { #[serde(flatten)] pub p: P, #[serde(flatten)] pub q: Q }\n\
+             #[derive(TealRecord)] pub struct Own { pub x: u32, #[serde(flatten)] pub p: P }\n\
+             #[derive(TealRecord)] pub struct Worded { #[serde(flatten, default)] pub p: P }",
+        );
+        let e = |n| decl_in(&items, n).unwrap_err();
+        assert_eq!(
+            e("En"),
+            "TealRecord: En.m: `#[serde(flatten)]` of an enum (`Mode`) is not read by TealRecord: \
+             one variant's keys or another's would join the record, which a Teal record cannot \
+             declare; give it a field of its own"
+        );
+        assert_eq!(
+            e("Map"),
+            "TealRecord: Map.m: `#[serde(flatten)]` of a map (`HashMap`) is not read by \
+             TealRecord: a flattened map takes every key no field names, which a Teal record \
+             cannot declare; give the map a field of its own"
+        );
+        assert_eq!(
+            e("Opt"),
+            "TealRecord: Opt.m: `#[serde(flatten)]` of an `Option` is not read by TealRecord: \
+             the flattened fields would all be there or all be missing, which a Teal record \
+             cannot say; flatten the struct itself and make its fields `Option`s"
+        );
+        assert_eq!(
+            e("Far"),
+            "TealRecord: Far.m: `#[serde(flatten)]` of `Elsewhere`, which is not declared in this \
+             file: the declaration lists a flattened struct's fields, read from its source; put \
+             `Elsewhere` in the same file as `Far`, or write its fields out"
+        );
+        assert_eq!(
+            e("Qual"),
+            "TealRecord: Qual.m: `#[serde(flatten)]` of `P` named by a path or with type \
+             arguments is not read by TealRecord: it flattens a struct declared in this same \
+             file, named by its bare name; name it so, or write its fields out"
+        );
+        assert_eq!(
+            e("NoDerive"),
+            "TealRecord: NoDerive.m: `#[serde(flatten)]` of `Plain`, which does not derive \
+             TealRecord: its fields cross through the conversion that derive writes; add \
+             `#[derive(TealRecord)]` to `Plain`"
+        );
+        assert_eq!(
+            e("Both"),
+            "TealRecord: Both.q: the flattened `Q` brings \"x\", which `Both` already declares; \
+             give one a `#[serde(rename = \"..\")]` of its own"
+        );
+        assert_eq!(
+            e("Own"),
+            "TealRecord: Own.p: the flattened `P` brings \"x\", which `Own` already declares; \
+             give one a `#[serde(rename = \"..\")]` of its own"
+        );
+        assert_eq!(
+            e("Worded"),
+            "TealRecord: Worded.p: `#[serde(flatten)]` takes no other word on the field: the \
+             field has no key of its own, the flattened struct's fields do; put the word on \
+             those fields"
+        );
+        let items = file(
+            "#[derive(TealRecord)] pub struct A { #[serde(flatten)] pub b: B }\n\
+             #[derive(TealRecord)] pub struct B { #[serde(flatten)] pub a: A }",
+        );
+        assert_eq!(
+            decl_in(&items, "A").unwrap_err(),
+            "TealRecord: B.a: `#[serde(flatten)]` of `A` inside `A`: a struct cannot hold its own \
+             fields"
+        );
     }
 
     /// What the reader cannot parse is quoted; a read word in the wrong place says where it
