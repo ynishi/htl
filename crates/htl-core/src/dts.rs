@@ -35,6 +35,7 @@
 //! | `enum Mode { Fast, Careful }` | `enum Mode "Fast" "Careful" end` | the variant name, a string; any other string is refused: `Mode: expected one of "Fast", "Careful", got "fst"` |
 //! | `enum Shape { Dot, Circle(f64), Rect { w: f64, h: f64 } }` | `record Shape_Dot`, `record Shape_Circle`, `record Shape_Rect`, each `where self.kind == "…"`, and `type Shape = Shape_Dot \| Shape_Circle \| Shape_Rect` | a table with `kind`; a newtype payload under `value`, struct fields under their names; `union-exhaustive` counts the variants, and a missing field reads `Shape.Rect.h: expected number, got nil` |
 //! | `#[teal(rename_all = "snake_case")] enum State { Open, InReview }` | `enum State "open" "in_review" end` | the renamed word: `"open"` is accepted, `"Open"` is refused (`State: expected one of "open", "in_review", got "Open"`) |
+//! | `#[serde(rename_all = "camelCase")] struct Call { #[serde(rename = "callId")] call_id: String, retry_count: u32, #[serde(alias = "msg")] message: String }` | `record Call` with `callId: string`, `retryCount: integer`, `message: string`; a name that is not a Teal identifier is declared `["call-id"]: string` | a table keyed as `serde_json` keys the object; `msg` is also read for `message` on the way in, and a missing field reads `Call.callId: expected string, got nil` |
 //! | `struct Label(String)` | `type Label = string` | whatever the inner type crosses as |
 //! | `Option<T>` | `T` as a field and as a return, `name?: T` as a method parameter | nil where the Rust side has `None`; the mark on a parameter is what lets a caller write `api:find("x")` |
 //! | `Vec<T>` / `&[T]` / `[T; N]` / `VecDeque<T>` / `HashSet<T>` | `{T}` | a table used as a sequence |
@@ -62,12 +63,39 @@
 //! name `task` for `htl.task` itself is accepted in the default's place (no second line);
 //! one that names `task` for a different module, where the declaration also needs
 //! `htl.task`, is refused, naming both; see [`TealAttrs::uses`].
-//! `#[teal(rename_all = "..")]` on an enum takes serde's set — `lowercase`, `UPPERCASE`,
+//! `#[teal(rename_all = "..")]` takes serde's set — `lowercase`, `UPPERCASE`,
 //! `PascalCase`, `camelCase`, `snake_case`, `SCREAMING_SNAKE_CASE`, `kebab-case`,
-//! `SCREAMING-KEBAB-CASE` — and `#[teal(name = "..")]` on one variant overrides it. A
-//! table coming back that does not fit says which record, which field, what was declared
-//! and what arrived ([`crate::teal::FieldError`]): `Outcome.cause: expected string, got
-//! nil`.
+//! `SCREAMING-KEBAB-CASE` — applied serde's way ([`RenameRule`]): on an enum it spells the
+//! variants, on a struct the fields, and `#[teal(name = "..")]` on one variant overrides
+//! it. A table coming back that does not fit says which record, which field (as the Teal
+//! side names it), what was declared and what arrived ([`crate::teal::FieldError`]):
+//! `Outcome.cause: expected string, got nil`.
+//!
+//! **What a type's `#[serde(..)]` says is read**, so a type deriving `Serialize` /
+//! `Deserialize` beside `TealRecord` is declared and crosses under the names serde gives
+//! it, and the keys of the Lua table are the keys `serde_json` writes:
+//!
+//! - read: `rename_all` (a struct's fields, an enum's variants), `rename_all_fields` (on an
+//!   enum, the fields of its struct variants), `rename` (a field, a variant) and `alias` (a
+//!   field: one more key `from_lua` reads when the field's own is nil, never declared and
+//!   never written). A name that is not a Teal identifier (`call-id`, `end`) is declared
+//!   with Teal's key syntax, `["call-id"]: string`; one holding a `"`, a `\` or a control
+//!   character is refused.
+//! - precedence: the word on the field or variant beats the rule on the type, and at each
+//!   level `teal` beats `serde` — `#[teal(name)]` over `#[serde(rename)]` on a variant,
+//!   `#[teal(rename_all)]` over `#[serde(rename_all)]` on the type.
+//! - refused, saying why: a name that differs by direction (`rename(serialize = "a",
+//!   deserialize = "b")`, or one side alone; `rename_all` the same) — one type cannot carry
+//!   two names; and every word that changes the shape and is not read yet: `skip`,
+//!   `skip_serializing`, `skip_deserializing`, `skip_serializing_if`, `default`, `flatten`,
+//!   `tag`, `content`, `untagged`, `transparent`, `with`, `serialize_with`,
+//!   `deserialize_with`, `from`, `into`, `try_from`, `remote`, `other`, `borrow`, `getter`,
+//!   `variant_identifier`, `field_identifier`. A declaration that ignored one would state a
+//!   shape the value does not have. `alias` / `rename_all` on a variant and an attribute
+//!   the reader cannot parse are refused too, the latter quoting it.
+//! - passed through to serde, as they keep the shape: `crate`, `bound`,
+//!   `deny_unknown_fields`, `expecting`, and `rename` on the type itself (the Teal name is
+//!   `#[teal(name)]`).
 //!
 //! # Why `#[derive(TealRecord)]` lowers the way it does
 //!
@@ -99,12 +127,14 @@
 //!   holds `"open"` in its store should not have to become `"Open"` to move its enum to
 //!   the host. What the rule does *not* touch is the union's record names
 //!   (`Shape_InReview` stays): those are Teal identifiers, and `kebab-case` is not one.
-//!   Record fields are declared under their Rust names. A field's `#[teal(..)]` takes two
-//!   words, neither of which spells it: `as = "<teal type>"`, the type it is declared as
-//!   when its Rust type does not say (below), and `noyield`, on a `Function` /
+//!   A record field is declared under its Rust name unless serde names it otherwise
+//!   (`#[serde(rename)]`, the type's `rename_all`; see above). A field's `#[teal(..)]`
+//!   takes two words, neither of which spells it: `as = "<teal type>"`, the type it is
+//!   declared as when its Rust type does not say (below), and `noyield`, on a `Function` /
 //!   `Option<Function>` field of a struct, which says how the host calls it. Anything else
 //!   in a field's `#[teal(..)]` is refused. Renaming a field is not `as`'s job: `as` says
-//!   the type, and the name stays the Rust one.
+//!   the type, and the name is serde's when serde says one, the Rust one otherwise; the
+//!   two compose, a renamed field carrying `as` too.
 //! - **`#[teal(as = "..")]` declares; it does not convert.** The field is written as the
 //!   given Teal text, verbatim (`"string"`, `"{string}"`, `"geom.Point"`), and the Rust type
 //!   is not mapped; the value still crosses by the field type's own `IntoLua` / `FromLua`,
@@ -349,13 +379,16 @@ pub fn is_result(ty: &Type) -> bool {
 
 // ---------------------------------------------------------------- attributes
 
-/// How an enum variant's Rust name is spelled on the Teal side: `#[teal(rename_all =
-/// "..")]`, serde's set and serde's spellings of it, so a type that is also `Serialize`
-/// can say the same thing twice and the two agree.
+/// How a Rust name is spelled on the Teal side: `#[teal(rename_all = "..")]` /
+/// `#[serde(rename_all = "..")]`, serde's set and serde's spellings of it, so a type that
+/// is also `Serialize` says the same thing once and the two agree.
 ///
-/// The rules are serde's, applied to a variant name (`InReview`): `lowercase` lowers the
-/// whole word, `snake_case` breaks it at each capital, and the rest follow from those
-/// two.
+/// The rules are serde's, and serde applies them two ways. To a variant name (`InReview`,
+/// [`apply`](Self::apply)): `lowercase` lowers the whole word, `snake_case` breaks it at
+/// each capital, and the rest follow from those two. To a field name (`call_id`,
+/// [`apply_to_field`](Self::apply_to_field)), which Rust already writes in `snake_case`:
+/// `lowercase` and `snake_case` leave it, `camelCase` / `PascalCase` join it at each `_`,
+/// and the rest change the case or the separator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenameRule {
     /// `InReview` -> `inreview`.
@@ -445,6 +478,41 @@ impl RenameRule {
             Self::ScreamingKebab => snake().to_ascii_uppercase().replace('_', "-"),
         }
     }
+
+    /// Apply the rule to a field name written in Rust's `snake_case`, as serde does
+    /// (`call_id` -> `callId` under `camelCase`).
+    pub fn apply_to_field(self, field: &str) -> String {
+        let pascal = || {
+            let mut s = String::new();
+            let mut capitalize = true;
+            for ch in field.chars() {
+                if ch == '_' {
+                    capitalize = true;
+                } else if capitalize {
+                    s.push(ch.to_ascii_uppercase());
+                    capitalize = false;
+                } else {
+                    s.push(ch);
+                }
+            }
+            s
+        };
+        match self {
+            Self::Lower | Self::Snake => field.to_string(),
+            Self::Upper | Self::ScreamingSnake => field.to_ascii_uppercase(),
+            Self::Pascal => pascal(),
+            Self::Camel => {
+                let p = pascal();
+                let mut c = p.chars();
+                match c.next() {
+                    Some(first) => first.to_ascii_lowercase().to_string() + c.as_str(),
+                    None => String::new(),
+                }
+            }
+            Self::Kebab => field.replace('_', "-"),
+            Self::ScreamingKebab => field.to_ascii_uppercase().replace('_', "-"),
+        }
+    }
 }
 
 /// One `uses` entry: the local name a `.d.tl` imports a module's type under, and the
@@ -511,10 +579,11 @@ pub struct TealAttrs {
     /// on a record reached through `records = [..]`, where the host's own signatures
     /// already spell the Rust name.
     pub name: Option<String>,
-    /// `#[teal(rename_all = "..")]` on an enum: how its variants are spelled on the Teal
-    /// side. The Rust names are unchanged, and so are the union's variant record names
-    /// (`Shape_InReview`) — a Teal identifier cannot be `kebab-case`; what the rule
-    /// spells is the word that crosses.
+    /// `#[teal(rename_all = "..")]`: on an enum, how its variants are spelled on the Teal
+    /// side; on a struct, how its fields are. It wins over the type's
+    /// `#[serde(rename_all)]`. The Rust names are unchanged, and so are the union's variant
+    /// record names (`Shape_InReview`) — a Teal identifier cannot be `kebab-case`; what the
+    /// rule spells is the word that crosses.
     pub rename_all: Option<RenameRule>,
     /// `.d.tl` output path, relative to the crate's `CARGO_MANIFEST_DIR`.
     pub dts: Option<String>,
@@ -929,14 +998,17 @@ pub enum RecordKind {
     /// A struct with named fields: `record N` with `(field, teal type)` in declaration
     /// order, crossing as a plain table.
     Record {
-        /// Rust field name and the Teal type it maps to — or, for a field marked
-        /// `#[teal(as = "..")]`, the text it gives. The name is the Rust one: `rename_all`
-        /// spells variants, and `as` says what a field is declared as, never what it is
-        /// called (renaming is `#[serde(rename)]`'s job, which this derive does not read
-        /// yet). A field's `#[teal(..)]` takes `as` and the one word below; anything else is
-        /// refused rather than ignored.
+        /// The field's name on the Teal side and the Teal type it maps to — or, for a field
+        /// marked `#[teal(as = "..")]`, the text it gives. The name is serde's: the field's
+        /// `#[serde(rename)]`, else the type's `#[teal(rename_all)]` / `#[serde(rename_all)]`
+        /// applied to the Rust name, else the Rust name (`r#type` read as `type`). It is the
+        /// key the table carries and what a `FieldError` names; the declaration writes it
+        /// bare when it is a Teal identifier and as `["name"]` when it is not. `as` says
+        /// what a field is declared as, never what it is called. A field's `#[teal(..)]`
+        /// takes `as` and the one word below; anything else is refused rather than ignored.
         fields: Vec<(String, String)>,
-        /// The fields marked `#[teal(noyield)]`, in declaration order: each is declared
+        /// The fields marked `#[teal(noyield)]`, by the name in `fields`, in declaration
+        /// order: each is declared
         /// with a trailing bare `---@noyield` (the host reads the function off the table
         /// and calls it from C; the `host_module` macro doc states the rule).
         noyield: Vec<String>,
@@ -1025,10 +1097,284 @@ impl RecordDecl {
 /// `(field, teal type)` in declaration order, and the fields marked `#[teal(noyield)]`.
 type Fields = (Vec<(String, String)>, Vec<String>);
 
+// ---------------------------------------------------------------- serde attributes
+//
+// What `#[derive(TealRecord)]` reads of an item's `#[serde(..)]`, and *every* refusal it
+// makes of one. The refusals are kept together here on purpose: each later step of the
+// serde work widens the read set by moving a word out of `SERDE_NOT_READ`, and the
+// step that adds the remaining refusals (`with` and friends, one-way `skip`) gathers them
+// in this same spot, so one place says what a serde type may and may not carry.
+
+/// The serde words read, as a refusal lists them.
+const SERDE_READ: &str = "rename_all, rename, alias, rename_all_fields";
+
+/// serde words that do not change the shape of what crosses, accepted and left to serde.
+const SERDE_PASS: &[&str] = &["crate", "bound", "deny_unknown_fields", "expecting"];
+
+/// serde words that change the shape of what crosses and are not read yet. A type that
+/// carries one is refused: a declaration that ignored it would say a shape the value does
+/// not have.
+const SERDE_NOT_READ: &[&str] = &[
+    "skip",
+    "skip_serializing",
+    "skip_deserializing",
+    "skip_serializing_if",
+    "default",
+    "flatten",
+    "tag",
+    "content",
+    "untagged",
+    "transparent",
+    "with",
+    "serialize_with",
+    "deserialize_with",
+    "from",
+    "into",
+    "try_from",
+    "remote",
+    "other",
+    "borrow",
+    "getter",
+    "variant_identifier",
+    "field_identifier",
+];
+
+/// Where a `#[serde(..)]` sits, which decides which of the read words it may carry.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SerdePlace {
+    Container,
+    Field,
+    Variant,
+}
+
+/// The names one `#[serde(..)]` (or several, merged) says.
+#[derive(Default)]
+struct SerdeNames {
+    /// `rename = ".."` on a field or a variant.
+    rename: Option<String>,
+    /// `rename_all = ".."` on a struct (its fields) or an enum (its variants).
+    rename_all: Option<RenameRule>,
+    /// `rename_all_fields = ".."` on an enum: the fields of its struct variants.
+    rename_all_fields: Option<RenameRule>,
+    /// `alias = ".."` on a field, in the order written: extra keys accepted on the way in.
+    aliases: Vec<String>,
+}
+
+/// `#[serde(..)]` word `word` naming the type one way and another the other way.
+fn serde_two_names(word: &str, ser: Option<&str>, de: Option<&str>) -> String {
+    let said = |v: Option<&str>| match v {
+        Some(v) => format!("{v:?}"),
+        None => "nothing (so the Rust name)".to_string(),
+    };
+    format!(
+        "`{word}` says serialize = {} and deserialize = {}: one type cannot carry two names \
+         (the `.d.tl` declares one); write two types, or one name: `{word} = \"..\"`",
+        said(ser),
+        said(de)
+    )
+}
+
+/// A serde word that changes the shape and is not read yet.
+fn serde_not_read(word: &str) -> String {
+    format!(
+        "`#[serde({word})]` is not read by TealRecord; the attributes it reads are {SERDE_READ} \
+         (and it leaves {} to serde)",
+        SERDE_PASS.join(", ")
+    )
+}
+
+/// A read serde word written where TealRecord does not read it.
+fn serde_misplaced(word: &str, place: SerdePlace) -> String {
+    let (here, goes) = match (word, place) {
+        ("alias", SerdePlace::Variant) => ("a variant", "a field"),
+        ("alias", _) => ("a type", "a field"),
+        ("rename_all", SerdePlace::Variant) => (
+            "a variant",
+            "the struct or the enum (`rename_all_fields` on the enum renames the fields of its struct variants)",
+        ),
+        ("rename_all" | "rename_all_fields", _) => ("a field", "the struct or the enum"),
+        _ => ("here", "elsewhere"),
+    };
+    format!("`#[serde({word})]` on {here} is not read by TealRecord; it reads it on {goes}")
+}
+
+/// A renamed field whose name a Teal record cannot hold as a key.
+fn serde_unrepresentable(name: &str) -> String {
+    format!(
+        "the field crosses as {name:?}, which a Teal record cannot declare: a key that is not a \
+         Teal identifier is written `[\"..\"]`, and that form holds no `\"`, `\\` or control \
+         character and is not empty; rename it to a name without them"
+    )
+}
+
+/// `rename = ".."` / `rename_all = ".."`, or the `(serialize = .., deserialize = ..)` form
+/// when both sides say the same word; anything else is refused.
+fn serde_name_value(meta: &syn::meta::ParseNestedMeta, word: &str) -> syn::Result<String> {
+    if meta.input.peek(Token![=]) {
+        let s: syn::LitStr = meta.value()?.parse()?;
+        return Ok(s.value());
+    }
+    if meta.input.peek(syn::token::Paren) {
+        let (mut ser, mut de) = (None, None);
+        meta.parse_nested_meta(|m| {
+            let s: syn::LitStr = m.value()?.parse()?;
+            if m.path.is_ident("serialize") {
+                ser = Some(s.value());
+            } else if m.path.is_ident("deserialize") {
+                de = Some(s.value());
+            } else {
+                return Err(m.error("expected `serialize` or `deserialize`"));
+            }
+            Ok(())
+        })?;
+        return match (ser, de) {
+            (Some(a), Some(b)) if a == b => Ok(a),
+            (a, b) => Err(meta.error(serde_two_names(word, a.as_deref(), b.as_deref()))),
+        };
+    }
+    Err(meta.error(format!("`{word}` takes a string: `{word} = \"..\"`")))
+}
+
+/// Consume a passed-through word's value, whatever form serde gives it.
+fn serde_skip_value(meta: &syn::meta::ParseNestedMeta) -> syn::Result<()> {
+    if meta.input.peek(Token![=]) {
+        meta.value()?.parse::<Expr>()?;
+    } else if meta.input.peek(syn::token::Paren) {
+        meta.parse_nested_meta(|m| serde_skip_value(&m))?;
+    }
+    Ok(())
+}
+
+/// Every `#[serde(..)]` in `attrs`, read for names at `place`; `at` names the item in a
+/// refusal (`Call`, `Call.call_id`, `State::InReview`). See the section comment above for
+/// which words are read, passed through and refused.
+fn serde_names(attrs: &[Attribute], place: SerdePlace, at: &str) -> Result<SerdeNames, String> {
+    let mut out = SerdeNames::default();
+    for a in attrs.iter().filter(|a| a.path().is_ident("serde")) {
+        let Meta::List(list) = &a.meta else {
+            return Err(format!(
+                "TealRecord: {at}: cannot read `{}`: serde's attribute takes a list, `#[serde(..)]`",
+                if matches!(a.meta, Meta::Path(_)) {
+                    "#[serde]".to_string()
+                } else {
+                    "#[serde = ..]".to_string()
+                }
+            ));
+        };
+        // A refusal of ours is carried out of the parser here, so it is told apart from a
+        // syntax error, which is reported quoting the attribute instead.
+        let mut refused: Option<String> = None;
+        let parsed = a.parse_nested_meta(|meta| {
+            let word = meta
+                .path
+                .get_ident()
+                .map(|i| i.to_string())
+                .unwrap_or_default();
+            let mut refuse = |msg: String| {
+                refused = Some(msg.clone());
+                Err(meta.error(msg))
+            };
+            match (word.as_str(), place) {
+                ("rename", SerdePlace::Container) => serde_skip_value(&meta),
+                ("rename", _) => match serde_name_value(&meta, "rename") {
+                    Ok(n) => {
+                        out.rename = Some(n);
+                        Ok(())
+                    }
+                    Err(e) => refuse(e.to_string()),
+                },
+                ("rename_all", SerdePlace::Container)
+                | ("rename_all_fields", SerdePlace::Container) => {
+                    let rule = match serde_name_value(&meta, &word) {
+                        Ok(n) => n,
+                        Err(e) => return refuse(e.to_string()),
+                    };
+                    match RenameRule::parse(&rule) {
+                        Ok(r) if word == "rename_all" => out.rename_all = Some(r),
+                        Ok(r) => out.rename_all_fields = Some(r),
+                        Err(e) => return refuse(e.replace("`rename_all`", &format!("`{word}`"))),
+                    }
+                    Ok(())
+                }
+                ("alias", SerdePlace::Field) => {
+                    if !meta.input.peek(Token![=]) {
+                        return refuse("`alias` takes a string: `alias = \"..\"`".into());
+                    }
+                    let s: syn::LitStr = meta.value()?.parse()?;
+                    out.aliases.push(s.value());
+                    Ok(())
+                }
+                ("alias" | "rename_all" | "rename_all_fields", _) => {
+                    refuse(serde_misplaced(&word, place))
+                }
+                (w, _) if SERDE_PASS.contains(&w) => serde_skip_value(&meta),
+                (w, _) if SERDE_NOT_READ.contains(&w) => refuse(serde_not_read(w)),
+                (w, _) => refuse(format!(
+                    "`#[serde({w})]` is not a serde word TealRecord knows; the attributes it reads \
+                     are {SERDE_READ} (and it leaves {} to serde)",
+                    SERDE_PASS.join(", ")
+                )),
+            }
+        });
+        if let Err(e) = parsed {
+            return Err(match refused {
+                Some(msg) => format!("TealRecord: {at}: {msg}"),
+                None => format!(
+                    "TealRecord: {at}: cannot read `#[serde({})]`: {e}",
+                    list.tokens
+                ),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// The keys a field's `#[serde(alias = "..")]` adds on the way in, in the order written:
+/// what the derived `from_lua` tries, after the field's own name, when that is nil. Not
+/// declared and never written. Empty for a field without one (and for a `#[serde(..)]`
+/// [`record_decl`] would refuse, which never reaches the code that asks).
+pub fn serde_aliases(attrs: &[Attribute]) -> Vec<String> {
+    serde_names(attrs, SerdePlace::Field, "")
+        .map(|n| n.aliases)
+        .unwrap_or_default()
+}
+
+/// A Rust identifier's name as serde reads it: `r#type` is `type`.
+fn unraw(ident: &syn::Ident) -> String {
+    let s = ident.to_string();
+    s.strip_prefix("r#").map(str::to_string).unwrap_or(s)
+}
+
+/// `true` for a name a Teal record can hold as a key: a Teal identifier is written bare,
+/// anything else as `["name"]`, which takes any text but a `"`, a `\` or a control
+/// character (the declaration writes the text as it is, with no escapes).
+fn representable_key(name: &str) -> bool {
+    !name.is_empty()
+        && !name
+            .chars()
+            .any(|c| c == '"' || c == '\\' || c.is_control())
+}
+
+/// How a field is written in a record body: `name` when it is a Teal identifier,
+/// `["name"]` otherwise (Teal's own syntax for a key that is not one, `tl.lua`'s record
+/// body parser).
+fn teal_field_key(name: &str) -> String {
+    if is_teal_ident(name) {
+        name.to_string()
+    } else {
+        format!("[\"{name}\"]")
+    }
+}
+
 /// The fields of a struct record (`struct_record` = `true`) or of a data variant, and which
 /// of them carry `#[teal(noyield)]` (always none for a variant, whose fields cannot take it).
 /// `uses` is what a qualified field type crosses dotted against ([`teal_type_in`]): the
 /// record's own at the top level, the host's for one nested through `records = [..]`.
+///
+/// Each field is named as serde names it: its `#[serde(rename = "..")]`, else `rule` (the
+/// struct's `#[teal(rename_all)]` / `#[serde(rename_all)]`, or the enum's
+/// `#[serde(rename_all_fields)]` for a variant) applied to the Rust name, else the Rust
+/// name. Two fields under one name, or an alias that is another field's name, are refused.
 ///
 /// A field's Teal type is the one [`teal_type_in`] maps its Rust type to, unless the field
 /// says `#[teal(as = "..")]`: then it is that text, written as given, and the Rust type is
@@ -1038,13 +1384,35 @@ fn record_fields(
     fields: &syn::FieldsNamed,
     self_name: &str,
     struct_record: bool,
+    rule: Option<RenameRule>,
     uses: &[Use],
 ) -> Result<Fields, String> {
-    let mut out = Vec::new();
+    let mut out: Vec<(String, String)> = Vec::new();
     let mut noyield = Vec::new();
+    let mut aliases: Vec<(String, String)> = Vec::new();
     for f in &fields.named {
-        let fi = f.ident.as_ref().unwrap().to_string();
+        let ident = f.ident.as_ref().unwrap();
+        let fi = unraw(ident);
         let fa = field_attrs(&f.attrs, self_name, &fi)?;
+        let sn = serde_names(&f.attrs, SerdePlace::Field, &format!("{self_name}.{fi}"))?;
+        let name = match sn.rename {
+            Some(n) => n,
+            None => rule.map_or_else(|| fi.clone(), |r| r.apply_to_field(&fi)),
+        };
+        for n in std::iter::once(&name).chain(&sn.aliases) {
+            if !representable_key(n) {
+                return Err(format!(
+                    "TealRecord: {self_name}.{fi}: {}",
+                    serde_unrepresentable(n)
+                ));
+            }
+        }
+        if let Some((other, _)) = out.iter().find(|(n, _)| *n == name) {
+            return Err(format!(
+                "TealRecord: {self_name}.{fi}: crosses as {name:?}, which another field \
+                 (`{other}`) already does; give one a `#[serde(rename = \"..\")]` of its own"
+            ));
+        }
         if fa.noyield {
             // A variant's field is never called through by the host: the table the host
             // reads a callback off is a record it was handed, not one variant of a union.
@@ -1060,13 +1428,24 @@ fn record_fields(
                      `Function`: the word says the host calls the Lua function it reads from the field from C"
                 ));
             }
-            noyield.push(fi.clone());
+            noyield.push(name.clone());
         }
         let tt = match fa.as_type {
             Some(t) => t,
             None => teal_type_in(&f.ty, self_name, uses)?,
         };
-        out.push((fi, tt));
+        aliases.extend(sn.aliases.into_iter().map(|a| (a, fi.clone())));
+        out.push((name, tt));
+    }
+    // An alias is read only when the field's own key is nil, so one equal to another
+    // field's name would hand that field's value to this one.
+    for (a, fi) in &aliases {
+        if out.iter().any(|(n, _)| n == a) {
+            return Err(format!(
+                "TealRecord: {self_name}.{fi}: `#[serde(alias = {a:?})]` is the name another \
+                 field crosses as; an alias has to be a key no field is declared under"
+            ));
+        }
     }
     Ok((out, noyield))
 }
@@ -1086,8 +1465,8 @@ const FIELD_WORDS: &str = "`as = \"<teal type>\"` or `noyield`";
 /// `#[teal(..)]` on field `fname` of `rec`. A field takes two words: `as = ".."`, the Teal
 /// type it is declared as when the Rust type does not say (see [`record_fields`]), and
 /// `noyield`. Any other word, a word in the wrong form, or the attribute with no word is
-/// refused: a word nobody reads is worse than a refusal. Names are not among them —
-/// a field is declared under its Rust name.
+/// refused: a word nobody reads is worse than a refusal. Names are not among them — a
+/// field is named by `#[serde(rename)]` / `rename_all` ([`record_fields`]).
 fn field_attrs(attrs: &[Attribute], rec: &str, fname: &str) -> Result<FieldAttrs, String> {
     let mut out = FieldAttrs::default();
     let mut found = false;
@@ -1161,11 +1540,17 @@ fn field_attrs(attrs: &[Attribute], rec: &str, fname: &str) -> Result<FieldAttrs
     Ok(out)
 }
 
-/// The kind a struct lowers to: named fields -> record, one unnamed field -> alias.
-fn struct_kind(st: &ItemStruct, name: &str, uses: &[Use]) -> Result<RecordKind, String> {
+/// The kind a struct lowers to: named fields -> record, one unnamed field -> alias. `rule`
+/// renames the fields ([`record_fields`]).
+fn struct_kind(
+    st: &ItemStruct,
+    name: &str,
+    rule: Option<RenameRule>,
+    uses: &[Use],
+) -> Result<RecordKind, String> {
     match &st.fields {
         syn::Fields::Named(fields) => {
-            let (fields, noyield) = record_fields(fields, name, true, uses)?;
+            let (fields, noyield) = record_fields(fields, name, true, rule, uses)?;
             Ok(RecordKind::Record { fields, noyield })
         }
         syn::Fields::Unnamed(u) if u.unnamed.len() == 1 => Ok(RecordKind::Alias {
@@ -1180,10 +1565,12 @@ fn struct_kind(st: &ItemStruct, name: &str, uses: &[Use]) -> Result<RecordKind, 
     }
 }
 
-/// The Teal spelling of one variant: `#[teal(name = "..")]` on it, else the enum's
-/// `#[teal(rename_all = "..")]`, else the Rust name. `name` on a variant is the override,
-/// so it wins; nothing else may be written there (a variant has no `.d.tl` of its own to
-/// ask for, and `rename_all` over one variant is what `name` already is).
+/// The Teal spelling of one variant: `#[teal(name = "..")]` on it, else its
+/// `#[serde(rename = "..")]`, else `rule` (the enum's `#[teal(rename_all)]`, else its
+/// `#[serde(rename_all)]`), else the Rust name. The word on the variant beats the enum's
+/// rule, and at each level `teal` beats `serde`. Nothing but `name` may be written in a
+/// variant's `#[teal(..)]` (a variant has no `.d.tl` of its own to ask for, and
+/// `rename_all` over one variant is what `name` already is).
 fn variant_word(
     v: &syn::Variant,
     rule: Option<RenameRule>,
@@ -1191,6 +1578,11 @@ fn variant_word(
 ) -> Result<String, String> {
     let attrs = parse_teal_attrs(&v.attrs)
         .map_err(|e| format!("TealRecord: {enum_name}::{}: {e}", v.ident))?;
+    let sn = serde_names(
+        &v.attrs,
+        SerdePlace::Variant,
+        &format!("{enum_name}::{}", v.ident),
+    )?;
     if attrs.rename_all.is_some()
         || attrs.dts.is_some()
         || !attrs.uses.is_empty()
@@ -1203,11 +1595,11 @@ fn variant_word(
             v.ident
         ));
     }
-    Ok(match attrs.name {
+    Ok(match attrs.name.or(sn.rename) {
         Some(n) => n,
         None => match rule {
-            Some(r) => r.apply(&v.ident.to_string()),
-            None => v.ident.to_string(),
+            Some(r) => r.apply(&unraw(&v.ident)),
+            None => unraw(&v.ident),
         },
     })
 }
@@ -1229,12 +1621,14 @@ fn reject_duplicate_words(en: &ItemEnum, words: &[String], enum_name: &str) -> R
 }
 
 /// The kind an enum lowers to: all unit variants -> `enum`, otherwise a union of
-/// `where`-discriminated records. `uses` is what a variant's field types cross dotted
-/// against ([`teal_type_in`]).
+/// `where`-discriminated records. `rule` spells the variants ([`variant_word`]),
+/// `fields_rule` (`#[serde(rename_all_fields)]`) the fields of its struct variants. `uses`
+/// is what a variant's field types cross dotted against ([`teal_type_in`]).
 fn enum_kind(
     en: &ItemEnum,
     name: &str,
     rule: Option<RenameRule>,
+    fields_rule: Option<RenameRule>,
     uses: &[Use],
 ) -> Result<RecordKind, String> {
     if en.variants.is_empty() {
@@ -1270,18 +1664,16 @@ fn enum_kind(
                 );
             }
             syn::Fields::Named(fields) => {
-                // The tag is `kind`, on every variant record; a payload field of that
-                // name would be declared twice and could not survive a round trip.
-                if fields
-                    .named
-                    .iter()
-                    .any(|f| f.ident.as_ref().is_some_and(|i| i == "kind"))
-                {
+                let fs = record_fields(fields, name, false, fields_rule, uses)?.0;
+                // The tag is `kind`, on every variant record; a payload field crossing
+                // under that name would be declared twice and could not survive a round
+                // trip.
+                if fs.iter().any(|(f, _)| f == "kind") {
                     return Err(format!(
                         "TealRecord: {name}::{vname}: a field named `kind` collides with the variant tag"
                     ));
                 }
-                VariantShape::Struct(record_fields(fields, name, false, uses)?.0)
+                VariantShape::Struct(fs)
             }
         };
         variants.push(UnionVariant {
@@ -1305,27 +1697,34 @@ fn record_attrs(item: &Item) -> Result<(TealAttrs, String), String> {
     }
 }
 
-/// The [`RecordKind`] `item` (named `name`, with enum variants spelled by `rename_all`)
-/// lowers to, its field types resolved against `uses` ([`teal_type_in`]).
+/// The [`RecordKind`] `item` (named `name`) lowers to, its field types resolved against
+/// `uses` ([`teal_type_in`]). `rename_all` is the item's `#[teal(rename_all)]`, which wins
+/// over its `#[serde(rename_all)]` (read here): on a struct it spells the fields, on an
+/// enum the variants.
 fn record_kind(
     item: &Item,
     name: &str,
     rename_all: Option<RenameRule>,
     uses: &[Use],
 ) -> Result<RecordKind, String> {
+    let attrs = match item {
+        Item::Struct(st) => &st.attrs,
+        Item::Enum(en) => &en.attrs,
+        _ => unreachable!(),
+    };
+    let sn = serde_names(attrs, SerdePlace::Container, name)?;
+    let rule = rename_all.or(sn.rename_all);
     match item {
         Item::Struct(st) => {
-            // `rename_all` spells variants, and a struct has none. Field renaming is a
-            // separate decision, so this is refused rather than silently ignored.
-            if rename_all.is_some() {
+            if sn.rename_all_fields.is_some() {
                 return Err(format!(
-                    "TealRecord: `{name}`: `rename_all` applies to enum variants; \
-                     record fields are declared under their Rust names"
+                    "TealRecord: {name}: `#[serde(rename_all_fields)]` is an enum's (the fields \
+                     of its struct variants); on a struct, `rename_all` renames the fields"
                 ));
             }
-            struct_kind(st, name, uses)
+            struct_kind(st, name, rule, uses)
         }
-        Item::Enum(en) => enum_kind(en, name, rename_all, uses),
+        Item::Enum(en) => enum_kind(en, name, rule, sn.rename_all_fields, uses),
         _ => unreachable!(),
     }
 }
@@ -1365,7 +1764,7 @@ fn kind_decl(name: &str, kind: &RecordKind, indent: &str) -> String {
                 } else {
                     ""
                 };
-                s.push_str(&format!("{inner}{f}: {t}{marker}\n"));
+                s.push_str(&format!("{inner}{}: {t}{marker}\n", teal_field_key(f)));
             }
             s.push_str(&format!("{indent}end\n"));
         }
@@ -1384,7 +1783,7 @@ fn kind_decl(name: &str, kind: &RecordKind, indent: &str) -> String {
                 s.push_str(&format!("{indent}{local}record {name}_{}\n", v.name));
                 s.push_str(&format!("{inner}where self.kind == \"{}\"\n", v.word));
                 for (f, t) in variant_fields(v) {
-                    s.push_str(&format!("{inner}{f}: {t}\n"));
+                    s.push_str(&format!("{inner}{}: {t}\n", teal_field_key(&f)));
                 }
                 s.push_str(&format!("{indent}end\n"));
             }
@@ -2702,15 +3101,29 @@ mod tests {
         assert!(e.contains("State::Open and State::Closed"), "{e}");
     }
 
-    /// Fields are declared under their Rust names: `rename_all` on a struct and a naming
-    /// word in a field's `#[teal(..)]` are refused rather than quietly ignored.
+    /// Fields are named by `#[serde(rename)]` and `rename_all` — `#[teal(rename_all)]` on
+    /// a struct included — and a naming word in a field's `#[teal(..)]` is refused rather
+    /// than quietly ignored.
     #[test]
-    fn renaming_record_fields_is_refused_not_ignored() {
-        let e = record_decl(&item(
-            "#[derive(TealRecord)] #[teal(rename_all = \"snake_case\")] pub struct P { pub x: f64 }",
+    fn record_fields_are_named_by_rename_all_and_serde_rename() {
+        let rd = record_decl(&item(
+            "#[derive(TealRecord)] #[teal(rename_all = \"camelCase\")] pub struct P { pub call_id: f64 }",
         ))
-        .unwrap_err();
-        assert!(e.contains("`rename_all` applies to enum variants"), "{e}");
+        .unwrap();
+        assert_eq!(
+            rd.decl,
+            "local record P\n   callId: number\nend\n\nreturn P\n"
+        );
+        // `teal` wins over `serde` on the struct; a field's own `rename` wins over both.
+        let rd = record_decl(&item(
+            "#[derive(TealRecord)] #[serde(rename_all = \"kebab-case\")] #[teal(rename_all = \"PascalCase\")] \
+             pub struct P { pub call_id: f64, #[serde(rename = \"t\")] pub retry_count: u8 }",
+        ))
+        .unwrap();
+        assert_eq!(
+            rd.decl,
+            "local record P\n   CallId: number\n   t: integer\nend\n\nreturn P\n"
+        );
         let e = record_decl(&item(
             "#[derive(TealRecord)] pub struct P { #[teal(name = \"ex\")] pub x: f64 }",
         ))
@@ -2718,6 +3131,133 @@ mod tests {
         assert_eq!(
             e,
             "TealRecord: P.x: `#[teal(..)]` on a record field takes `as = \"<teal type>\"` or `noyield`, got `name`"
+        );
+    }
+
+    /// A rename that differs by direction is refused, naming both words: the `.d.tl`
+    /// declares one name. The same word both ways is one name, and is read.
+    #[test]
+    fn an_asymmetric_rename_is_refused_naming_both() {
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] pub struct P { #[serde(rename(serialize = \"a\", deserialize = \"b\"))] pub x: f64 }",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "TealRecord: P.x: `rename` says serialize = \"a\" and deserialize = \"b\": one type \
+             cannot carry two names (the `.d.tl` declares one); write two types, or one name: \
+             `rename = \"..\"`"
+        );
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] #[serde(rename_all(serialize = \"camelCase\"))] pub struct P { pub x: f64 }",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "TealRecord: P: `rename_all` says serialize = \"camelCase\" and deserialize = \
+             nothing (so the Rust name): one type cannot carry two names (the `.d.tl` declares \
+             one); write two types, or one name: `rename_all = \"..\"`"
+        );
+        let rd = record_decl(&item(
+            "#[derive(TealRecord)] #[serde(rename_all(serialize = \"camelCase\", deserialize = \"camelCase\"))] \
+             pub struct P { pub call_id: f64 }",
+        ))
+        .unwrap();
+        assert!(rd.decl.contains("   callId: number\n"), "{}", rd.decl);
+    }
+
+    /// A serde word that changes the shape and is not read yet is refused, listing what is
+    /// read; a word that keeps the shape is passed through to serde.
+    #[test]
+    fn a_serde_word_not_read_is_refused_and_one_keeping_the_shape_passes() {
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] pub struct P { #[serde(skip)] pub x: f64 }",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "TealRecord: P.x: `#[serde(skip)]` is not read by TealRecord; the attributes it reads \
+             are rename_all, rename, alias, rename_all_fields (and it leaves crate, bound, \
+             deny_unknown_fields, expecting to serde)"
+        );
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] #[serde(tag = \"type\")] pub enum S { A { x: f64 } }",
+        ))
+        .unwrap_err();
+        assert!(
+            e.starts_with("TealRecord: S: `#[serde(tag)]` is not read"),
+            "{e}"
+        );
+        let rd = record_decl(&item(
+            "#[derive(TealRecord)] #[serde(deny_unknown_fields, crate = \"htl::serde\", \
+             bound(serialize = \"\"), expecting = \"a P\")] pub struct P { #[serde(bound = \"\")] pub x: f64 }",
+        ))
+        .unwrap();
+        assert_eq!(rd.decl, "local record P\n   x: number\nend\n\nreturn P\n");
+    }
+
+    /// What the reader cannot parse is quoted; a read word in the wrong place says where it
+    /// goes; a name a Teal record cannot hold is refused; two fields under one name are.
+    #[test]
+    fn serde_names_the_reader_cannot_use_are_refused() {
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] #[serde(rename_all = \"camelCase\" deny_unknown_fields)] pub struct P { pub x: f64 }",
+        ))
+        .unwrap_err();
+        assert!(
+            e.starts_with(
+                "TealRecord: P: cannot read `#[serde(rename_all = \"camelCase\" deny_unknown_fields)]`: "
+            ),
+            "{e}"
+        );
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] pub enum S { #[serde(alias = \"a\")] A, B }",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "TealRecord: S::A: `#[serde(alias)]` on a variant is not read by TealRecord; it reads it on a field"
+        );
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] pub struct P { #[serde(rename = \"a\\\"b\")] pub x: f64 }",
+        ))
+        .unwrap_err();
+        assert!(
+            e.starts_with("TealRecord: P.x: the field crosses as \"a\\\"b\", which a Teal record cannot declare"),
+            "{e}"
+        );
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] pub struct P { pub x: f64, #[serde(rename = \"x\")] pub y: f64 }",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "TealRecord: P.y: crosses as \"x\", which another field (`x`) already does; give one \
+             a `#[serde(rename = \"..\")]` of its own"
+        );
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] pub enum S { A { #[serde(rename = \"kind\")] k: f64 } }",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "TealRecord: S::A: a field named `kind` collides with the variant tag"
+        );
+    }
+
+    /// serde's rename on a variant spells its word; `#[teal(name)]` wins over it.
+    #[test]
+    fn a_variant_is_spelled_by_serde_rename_under_teal_name() {
+        let rd = record_decl(&item(
+            "#[derive(TealRecord)] #[serde(rename_all = \"snake_case\")] pub enum S { \
+             #[serde(rename = \"o\")] Open, #[serde(rename = \"x\")] #[teal(name = \"R\")] InReview, Done }",
+        ))
+        .unwrap();
+        assert_eq!(
+            rd.kind,
+            RecordKind::Enum {
+                variants: vec!["o".into(), "R".into(), "done".into()]
+            }
         );
     }
 
