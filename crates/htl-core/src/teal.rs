@@ -145,6 +145,18 @@ pub fn enum_error(name: &str, variants: &[&str], got: &str) -> mlua::Error {
     })
 }
 
+/// Name the untagged union a value did not belong to, listing the Teal types it is a union
+/// of: `Shape: expected one of string, number, Shape_Rect, got boolean`. An untagged
+/// enum's variants carry no word to quote; what tells them apart is the Lua type, so that
+/// is what is listed and what `got` names.
+pub fn union_error(name: &str, members: &[&str], got: &str) -> mlua::Error {
+    mlua::Error::external(FieldError {
+        path: name.to_string(),
+        expected: format!("one of {}", members.join(", ")),
+        got: got.to_string(),
+    })
+}
+
 /// A host parameter that takes the Lua kind its Teal type names, and converts nothing.
 ///
 /// mlua's `FromLua` for `i64` accepts a Lua string and coerces it (`"10"` arrives as

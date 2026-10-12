@@ -48,9 +48,11 @@ struct Kebab {
     end: u32,
 }
 
-/// `rename_all_fields` on an enum renames the fields of its struct variants.
+/// `rename_all_fields` on an enum renames the fields of its struct variants. `tag = "kind"`
+/// makes serde write the `kind` form htl declares (without it serde writes the enum
+/// externally tagged, and the derive refuses it).
 #[derive(Serialize, Deserialize, TealRecord, Debug, Clone, PartialEq)]
-#[serde(rename_all_fields = "camelCase")]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
 enum Ev {
     Hit { call_id: String },
     Stop,
