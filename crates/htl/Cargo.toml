@@ -32,6 +32,10 @@ pkg = ["htl-core/pkg"]
 # it (as it sees `htl.test`), so a host that leaves it off does so knowingly, with
 # `default-features = false`. Its cost is serde_json, which htl-core already builds.
 std = ["htl-core/std"]
+# `#[teal(serde)]` on a `#[derive(TealRecord)]` field: the field crosses through mlua's
+# serde. `std` (on by default) turns it on too; a host with `default-features = false`
+# names it to use the attribute, and the attribute without it fails to compile saying so.
+serde = ["htl-core/serde"]
 # htl::dts (.d.tl generation from Rust source; `htl dts`)
 dts = ["htl-core/dts"]
 # `async fn` in a `#[host_module]` impl, and the executor that runs a program calling one
@@ -48,7 +52,7 @@ ffi = ["htl-core/ffi"]
 # code needs the runtime they call. A crate cannot turn on its own feature for its tests
 # any other way, and leaving them out of `cargo test --workspace` would mean the ABI is
 # only ever exercised by hand.
-htl = { path = ".", features = ["ffi", "dts", "async"] }
+htl = { path = ".", features = ["ffi", "dts", "async", "serde"] }
 # The executor tests read `Htl::run_blocking`'s error, which is this crate's.
 anyhow = { workspace = true }
 # The C ABI test declares the record a method hands back as JSON, and reads it back.

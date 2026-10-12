@@ -37,7 +37,15 @@ async = ["mlua/async", "mlua-isle/tokio", "dep:tokio"]
 # as `require("std.json")`, `std.string` and so on. htl-std's async I/O modules are not
 # this feature: a host calls `htl_std::install`, a binary also registers it through
 # `registry` — `batteries.rs`'s module doc has the rest.
-std = ["dep:mlua-batteries"]
+# It implies `serde`: mlua-batteries turns `mlua/serialize` on already, so the feature
+# costs a host with `std` nothing.
+std = ["dep:mlua-batteries", "serde"]
+# `#[teal(serde)]` on a `#[derive(TealRecord)]` field: the field crosses through mlua's
+# serde (`LuaSerdeExt`) with the options `htl::teal::serde_field` fixes, for a type that has
+# `Serialize` / `Deserialize` and no `IntoLua` / `FromLua`. It is mlua's `serialize`
+# feature, which builds no new crate (`serde` is a dependency here already). Without it a
+# field that says `#[teal(serde)]` fails to compile with an error naming this feature.
+serde = ["mlua/serialize"]
 
 [dependencies]
 mlua = { workspace = true }

@@ -720,10 +720,26 @@ fn write_dts(rel: &str, text: &str) -> Result<(), String> {
 ///   cannot see into (a `Stamp(u64)` that crosses as a string). It goes on a field of a
 ///   struct or of a data enum's struct variant;
 /// - on a field: `noyield`, on a `Function` / `Option<Function>` field of a struct (see
-///   `host_module`, *A Lua function as a parameter*).
+///   `host_module`, *A Lua function as a parameter*);
+/// - on a field of a struct: `serde` — the field crosses through mlua's serde instead of
+///   `IntoLua` / `FromLua`, for a type with `Serialize` / `Deserialize` and no Lua
+///   conversion of its own, with the options `htl::teal::serde_field` fixes (`None` is
+///   `nil`, a sequence carries the array metatable, an empty table reads as the field's
+///   Rust type says, a mixed table is refused at the field). It is declared as `as` says, or
+///   as the type table maps the Rust type when every name in it is one the table knows
+///   (`Vec<String>` is `{string}`); a type it does not know has to say `as`. The field's
+///   `#[serde(with)]` is read beside `serde` and `as`, and the derive calls it. It needs
+///   htl's `serde` feature (on with the default `std`); without it rustc refuses the field
+///   naming the feature;
+/// - on a field of a struct: `skip` — htl does not carry the field: not declared, not
+///   written, read as `Default` (the struct's `#[serde(default)]` when it has one), and its
+///   `#[serde(..)]` is not read, which makes it the way out for a field Lua need not see
+///   that carries a word htl refuses (`borrow`, `with`, `flatten` of a map).
 ///
 /// Anything else is refused at compile time rather than ignored, as is `as` anywhere but
-/// on a field. `as` does not rename a field.
+/// on a named field — `#[teal(..)]` on a newtype's one field is refused too (a newtype
+/// crosses as that value; name the field under `#[serde(transparent)]` to say `as`). `as`
+/// does not rename a field.
 ///
 /// The type's `#[serde(..)]` is read too, so a type deriving `Serialize` / `Deserialize`
 /// beside `TealRecord` crosses under serde's names, and the keys of the table `into_lua`
@@ -757,15 +773,18 @@ fn write_dts(rel: &str, text: &str) -> Result<(), String> {
 ///   serde writes it externally tagged, htl declares the `kind` form; write
 ///   `#[serde(tag = "kind")]` to make the two agree. An enum with no `#[serde(..)]` keeps
 ///   the `kind` form, and a unit-only enum is a string on both sides either way.
-/// - refused at compile time, naming the rule and the way out: a name that differs by
-///   direction (`rename(serialize = "a", deserialize = "b")`, or one side alone;
+/// - refused at compile time, each message naming the rule and its escape —
+///   `#[teal(serde, as = "..")]`, `#[teal(skip)]`, `#[serde(tag = ..)]` or "write two
+///   types" (the table, with every escape, is in `htl::dts`'s module doc): a name that
+///   differs by direction (`rename(serialize = "a", deserialize = "b")`, or one side alone;
 ///   `rename_all` the same); `skip_serializing` / `skip_deserializing` alone and
 ///   `skip_serializing_if` with nowhere for the omitted value to come from; `flatten` of a
 ///   map, an `Option`, an enum, or a struct the derive cannot read in this file;
 ///   `transparent` over other than one field; `content` without `tag`; `untagged` over a
 ///   unit variant or two variants crossing as tables (Teal cannot tell them apart; use
-///   `tag`); and the words that change the shape and are not read yet — `with`,
-///   `serialize_with`, `deserialize_with`, `from`, `into`, `try_from`, `remote`, `other`,
+///   `tag`); an `Option` inside a sequence (`Vec<Option<T>>`: a Lua sequence cannot hold
+///   nil) without `#[teal(serde)]`; `with`, `serialize_with`, `deserialize_with` except
+///   beside `#[teal(serde, as = "..")]`; and `from`, `into`, `try_from`, `remote`, `other`,
 ///   `borrow`, `getter`, `variant_identifier`, `field_identifier`; nothing is silently
 ///   ignored. A data enum's variants' fields do not take the presence words yet.
 /// - passed through to serde: `crate`, `bound`, `deny_unknown_fields`, `expecting`, and
@@ -830,12 +849,32 @@ fn write_dts(rel: &str, text: &str) -> Result<(), String> {
 /// //    text: string
 /// // end
 /// ```
+///
+/// ```rust,ignore
+/// #[derive(Serialize, Deserialize)]
+/// struct Options { limit: Option<u32>, list: Vec<String> } // serde only, no IntoLua
+///
+/// #[derive(TealRecord)]
+/// struct Job {
+///     #[teal(serde, as = "{string: any}")] opts: Options,
+///     #[teal(serde)] tags: Vec<String>,   // mapped: {string}
+///     #[teal(skip)] scratch: Vec<u8>,     // not declared, read as Default
+/// }
+/// // local record Job
+/// //    opts: {string: any}
+/// //    tags: {string}
+/// // end
+/// ```
 #[proc_macro_derive(TealRecord, attributes(teal))]
 pub fn derive_teal_record(input: TokenStream) -> TokenStream {
     let item = parse_macro_input!(input as Item);
     match expand_record(&item) {
         Ok(ts) => ts,
-        Err(msg) => quote! { compile_error!(#msg) }.into(),
+        // In item position the `;` is part of the macro call: without it rustc adds "macros
+        // that expand to items must be delimited with braces or followed by a semicolon"
+        // and "proc-macro derive produced unparsable tokens" after every refusal. (The
+        // `include_*!` macros expand in expression position and must not have it.)
+        Err(msg) => quote! { compile_error!(#msg); }.into(),
     }
 }
 
@@ -860,7 +899,7 @@ fn expand_record(item: &Item) -> Result<TokenStream, String> {
     let (ident, into, from) = match (item, &rd.kind) {
         (Item::Struct(st), dts::RecordKind::Record { .. }) => {
             let ident = &st.ident;
-            let write = record_write(st, &rd.conversion)?;
+            let write = record_write(st, name, &rd.conversion)?;
             let read = record_read(st, &rd.conversion)?;
             fields_impl = quote! {
                 impl ::htl::teal::TealFields for #ident {
@@ -961,7 +1000,7 @@ fn field_reads(
         .map(|(f, (fname, fteal))| {
             let id = f.ident.as_ref().unwrap();
             let aliases = dts::serde_aliases(&f.attrs);
-            let read = field_read(&quote!(#path), fname, &aliases, &f.ty, fteal, None);
+            let read = field_read(&quote!(#path), fname, &aliases, &f.ty, fteal, None, None);
             quote! { #id: #read }
         })
         .collect()
@@ -971,7 +1010,9 @@ fn field_reads(
 /// `aliases` in turn — reporting a failure as `path.fname` (`path` an expression giving a
 /// `&str`: a literal, or `read_fields`'s own `path`) with the Teal type `fteal` the
 /// declaration promised. `nil`, when given, is what a key still nil after the aliases
-/// reads as (a `#[serde(default)]`) instead of reaching the type's `FromLua`.
+/// reads as (a `#[serde(default)]`) instead of reaching the type's `FromLua`. `serde`, when
+/// given (`#[teal(serde)]`), reads the value through `htl::teal::serde_field` instead of
+/// `FromLua`, which reports at the same `path.fname`.
 fn field_read(
     path: &TokenStream2,
     fname: &str,
@@ -979,13 +1020,46 @@ fn field_read(
     ty: &syn::Type,
     fteal: &str,
     nil: Option<TokenStream2>,
+    serde: Option<&dts::SerdeCross>,
 ) -> TokenStream2 {
-    let convert = quote! {
-        {
-            let got = v.type_name();
-            <#ty as ::htl::mlua::FromLua>::from_lua(v, lua).map_err(|e| {
-                ::htl::teal::field_error(#path, #fname, #fteal, got, e)
-            })?
+    let convert = match serde {
+        None => quote! {
+            {
+                let got = v.type_name();
+                <#ty as ::htl::mlua::FromLua>::from_lua(v, lua).map_err(|e| {
+                    ::htl::teal::field_error(#path, #fname, #fteal, got, e)
+                })?
+            }
+        },
+        // Spanned at the field's type: without htl's `serde` feature the call's bound is
+        // what rustc reports, and it is reported there.
+        Some(sc) => {
+            let empty = sc.empty_as_array;
+            match &sc.de_with {
+                None => quote_spanned! {ty.span()=>
+                    ::htl::teal::serde_field::from_lua::<#ty>(lua, v, #path, #fname, #fteal, #empty)?
+                },
+                // `#[serde(with)]`: a local type whose `Deserialize` is the named function,
+                // which serde itself calls only inside the struct's own `Deserialize`.
+                Some(p) => {
+                    let Ok(p) = syn::parse_str::<syn::ExprPath>(p) else {
+                        return quote! { compile_error!("TealRecord: cannot read a `with` path"); };
+                    };
+                    quote_spanned! {ty.span()=>
+                        {
+                            struct __HtlDe(#ty);
+                            impl<'de> ::htl::serde::Deserialize<'de> for __HtlDe {
+                                fn deserialize<D: ::htl::serde::Deserializer<'de>>(
+                                    d: D,
+                                ) -> ::core::result::Result<Self, D::Error> {
+                                    #p(d).map(__HtlDe)
+                                }
+                            }
+                            ::htl::teal::serde_field::from_lua::<__HtlDe>(lua, v, #path, #fname, #fteal, #empty)?.0
+                        }
+                    }
+                }
+            }
         }
     };
     let value = match nil {
@@ -1074,8 +1148,14 @@ fn record_from(name: &str) -> TokenStream2 {
 /// `write_fields`' body: each field under the key `dts` declared it as (from the one
 /// reading, [`dts::Crossing`], paired with the Rust fields by position). A skipped field
 /// is left out, one whose `skip_serializing_if` holds is too (called as serde calls it,
-/// `path(&self.field)`), and a flattened struct writes its own fields into this table.
-fn record_write(st: &ItemStruct, conv: &dts::RecordConversion) -> Result<TokenStream2, String> {
+/// `path(&self.field)`), and a flattened struct writes its own fields into this table. A
+/// `#[teal(serde)]` field is written through `htl::teal::serde_field`, a failure named
+/// `record.field` (`record` the struct's Teal name).
+fn record_write(
+    st: &ItemStruct,
+    record: &str,
+    conv: &dts::RecordConversion,
+) -> Result<TokenStream2, String> {
     let mut out = Vec::new();
     for (f, c) in named_fields(st).named.iter().zip(&conv.fields) {
         let id = f.ident.as_ref().unwrap();
@@ -1083,16 +1163,47 @@ fn record_write(st: &ItemStruct, conv: &dts::RecordConversion) -> Result<TokenSt
         out.push(match c {
             dts::Crossing::Key {
                 name,
-                skip_if: None,
-                ..
-            } => quote! { t.set(#name, self.#id)?; },
-            dts::Crossing::Key {
-                name,
-                skip_if: Some(p),
+                skip_if,
+                serde,
                 ..
             } => {
-                let p = serde_path(p)?;
-                quote! { if !#p(&self.#id) { t.set(#name, self.#id)?; } }
+                let value = match serde {
+                    None => quote! { self.#id },
+                    Some(sc) => {
+                        let none_to_null = sc.none_to_null;
+                        match &sc.ser_with {
+                            None => quote_spanned! {ty.span()=>
+                                ::htl::teal::serde_field::to_lua(lua, &self.#id, #record, #name, #none_to_null)?
+                            },
+                            // `#[serde(with)]`: a local type whose `Serialize` is the named
+                            // function (see `field_read`).
+                            Some(p) => {
+                                let p = serde_path(p)?;
+                                quote_spanned! {ty.span()=>
+                                    {
+                                        struct __HtlSer<'a>(&'a #ty);
+                                        impl ::htl::serde::Serialize for __HtlSer<'_> {
+                                            fn serialize<S: ::htl::serde::Serializer>(
+                                                &self,
+                                                s: S,
+                                            ) -> ::core::result::Result<S::Ok, S::Error> {
+                                                #p(self.0, s)
+                                            }
+                                        }
+                                        ::htl::teal::serde_field::to_lua(lua, &__HtlSer(&self.#id), #record, #name, #none_to_null)?
+                                    }
+                                }
+                            }
+                        }
+                    }
+                };
+                match skip_if {
+                    None => quote! { t.set(#name, #value)?; },
+                    Some(p) => {
+                        let p = serde_path(p)?;
+                        quote! { if !#p(&self.#id) { t.set(#name, #value)?; } }
+                    }
+                }
             }
             dts::Crossing::Skip { .. } => quote! {},
             dts::Crossing::Flatten { .. } => quote! {
@@ -1117,6 +1228,7 @@ fn record_read(st: &ItemStruct, conv: &dts::RecordConversion) -> Result<TokenStr
                 teal,
                 aliases,
                 nil,
+                serde,
                 ..
             } => field_read(
                 &quote!(path),
@@ -1125,6 +1237,7 @@ fn record_read(st: &ItemStruct, conv: &dts::RecordConversion) -> Result<TokenStr
                 ty,
                 teal,
                 nil_value(nil, id, ty)?,
+                serde.as_ref(),
             ),
             dts::Crossing::Skip { nil } => nil_value(nil, id, ty)?
                 .ok_or("TealRecord: a skipped field has to be filled from a default")?,
@@ -1368,7 +1481,8 @@ fn union_from(
                 (syn::Fields::Unit, _) => quote! { #vname => Ok(Self::#id), },
                 (syn::Fields::Unnamed(u), dts::VariantShape::Newtype(teal)) => {
                     let key = content.unwrap_or("value");
-                    let read = field_read(&quote!(#path), key, &[], &u.unnamed[0].ty, teal, None);
+                    let read =
+                        field_read(&quote!(#path), key, &[], &u.unnamed[0].ty, teal, None, None);
                     quote! { #vname => Ok(Self::#id(#read)), }
                 }
                 (syn::Fields::Unnamed(u), dts::VariantShape::Inline { .. }) => {
@@ -1703,13 +1817,13 @@ pub fn host_module(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(m) => m,
         Err(e) => {
             let msg = e.to_string();
-            return quote! { compile_error!(#msg) }.into();
+            return quote! { compile_error!(#msg); }.into();
         }
     };
     let imp = parse_macro_input!(item as ItemImpl);
     match expand_host_module(metas, &imp) {
         Ok(ts) => ts,
-        Err(msg) => quote! { compile_error!(#msg) }.into(),
+        Err(msg) => quote! { compile_error!(#msg); }.into(),
     }
 }
 
@@ -1944,7 +2058,7 @@ pub fn c_export(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(m) => m,
         Err(e) => {
             let msg = e.to_string();
-            return quote! { compile_error!(#msg) }.into();
+            return quote! { compile_error!(#msg); }.into();
         }
     };
     let imp = parse_macro_input!(item as ItemImpl);
