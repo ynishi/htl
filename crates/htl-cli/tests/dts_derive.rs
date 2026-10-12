@@ -375,3 +375,74 @@ fn dts_refuses_a_module_qualified_record_naming_the_missing_module_or_record() {
     assert!(err.contains("geom.rs"), "{err}");
     assert!(!root.join("types/host.d.tl").exists());
 }
+
+/// `#[serde(..)]`'s `skip`, `default`, `skip_serializing_if`, `flatten` and `transparent`
+/// reach the `.d.tl` the CLI writes from the source alone — the same text the macro writes
+/// (`crates/htl/tests/record_serde_shape.rs` asserts `Call::DECL`, and `htl_core::dts`'s
+/// `htl_dts_nests_the_serde_shaped_record_as_the_derive_declares_it` this host text) — and
+/// the checker holds it: a flattened field is read at the top of the record, the
+/// transparent one as its value, and the skipped and flattening fields do not exist.
+#[test]
+fn dts_writes_a_serde_shaped_record_as_the_derive_declares_it() {
+    let root = tempdir("serde-shape");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    );
+    write(&root.join("htl.toml"), "");
+    write(
+        &root.join("src/main.rs"),
+        "use htl::{TealRecord, host_module};\n\
+         use serde::{Deserialize, Serialize};\n\n\
+         #[derive(Serialize, Deserialize, TealRecord)]\n#[serde(rename_all = \"camelCase\")]\n\
+         pub struct Meta { #[serde(rename = \"trace\")] pub trace_id: String, pub span_count: u32 }\n\n\
+         #[derive(Serialize, Deserialize, TealRecord)]\n#[serde(transparent)]\n\
+         pub struct Label { pub text: String, #[serde(skip)] pub shown: u32 }\n\n\
+         #[derive(Serialize, Deserialize, TealRecord)]\n#[serde(rename_all = \"camelCase\")]\n\
+         pub struct Call {\n    pub call_id: String,\n    #[serde(skip)] pub secret: String,\n    \
+         #[serde(default)] pub retry_count: u32,\n    \
+         #[serde(default, skip_serializing_if = \"Vec::is_empty\")] pub tags: Vec<String>,\n    \
+         #[serde(skip_serializing_if = \"Option::is_none\")] pub note: Option<String>,\n    \
+         #[serde(flatten)] pub meta: Meta,\n    pub label: Label,\n}\n\n\
+         pub struct Api;\n\n\
+         #[host_module(name = \"api\", dts = \"types/api.d.tl\", records = [Call, Label])]\n\
+         impl Api {\n    pub fn get(&self) -> Call { todo!() }\n}\n\nfn main() {}\n",
+    );
+    let out = htl(&root, &["dts"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("types/api.d.tl")).unwrap(),
+        "local record api\n   record Call\n      callId: string\n      retryCount: integer\n      \
+         tags: {string}\n      note: string\n      trace: string\n      spanCount: integer\n      \
+         label: Label\n   end\n   type Label = string\n   get: function(self: api): Call\nend\n\n\
+         return api\n"
+    );
+
+    write(
+        &root.join("src/main.tl"),
+        "local type api = require(\"api\")\n\nlocal a: api = nil\nlocal c = a:get()\n\
+         local s: string = c.trace .. c.label .. c.callId\nlocal n: integer = c.spanCount + c.retryCount\n\
+         print(s, n, #c.tags)\n",
+    );
+    let out = htl(&root, &["check", "src/main.tl", "--no-cache"]);
+    let err =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("0 error(s)"), "{err}");
+
+    // The skipped field and the flattening one are not keys of the record.
+    for field in ["secret", "meta"] {
+        write(
+            &root.join("src/bad.tl"),
+            &format!(
+                "local type api = require(\"api\")\n\nlocal a: api = nil\nprint(a:get().{field})\n"
+            ),
+        );
+        let out = htl(&root, &["check", "src/bad.tl", "--no-cache"]);
+        let err = String::from_utf8_lossy(&out.stderr).to_string()
+            + &String::from_utf8_lossy(&out.stdout);
+        assert!(!out.status.success(), "{field}: {err}");
+        assert!(err.contains(field), "{field}: {err}");
+    }
+}

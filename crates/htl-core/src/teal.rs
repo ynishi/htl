@@ -16,6 +16,27 @@ pub trait TealRecord {
     const DECL: &'static str;
 }
 
+/// A struct record's fields, written into and read out of a table the caller holds — what
+/// `#[serde(flatten)]` is built on. `#[derive(TealRecord)]` implements it for every struct
+/// with named fields (not for an enum or an alias), and its own `IntoLua` / `FromLua` are
+/// this around a table of their own; a struct that flattens another calls the inner type's
+/// pair on *its* table, so the inner fields sit beside its own, as `serde_json` puts them.
+///
+/// `TealRecord` itself stays two constants: these are only meaningful for a record, and a
+/// struct's `DECL` cannot carry another type's fields at compile time (the declaration
+/// side reads the flattened struct from source instead, `htl::dts`). Not meant to be
+/// implemented by hand: the derive's declaration and this conversion are one reading.
+pub trait TealFields: Sized {
+    /// Set each field's key in `t`, as the record's `into_lua` does (a skipped field, or
+    /// one whose `skip_serializing_if` holds, is left out).
+    fn write_fields(self, t: &mlua::Table, lua: &mlua::Lua) -> mlua::Result<()>;
+    /// Read each field from `t`, reporting a failure as `path.field` — `path` is the
+    /// record the table is declared as: the type's own name from its `from_lua`, the outer
+    /// record's when it is flattened (the Teal side has no level for the inner struct, so a
+    /// `FieldError` names the key where it sits: `Outer.innerField`).
+    fn read_fields(t: &mlua::Table, lua: &mlua::Lua, path: &str) -> mlua::Result<Self>;
+}
+
 /// Why a value coming back from Lua did not fit a `#[derive(TealRecord)]` struct.
 ///
 /// `FromLua` is the only place the two sides of a record are compared — the `.d.tl` is

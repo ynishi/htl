@@ -48,11 +48,12 @@ use htl_core::dts;
 use proc_macro::TokenStream;
 use proc_macro2::Literal;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, quote_spanned};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use syn::punctuated::Punctuated;
+use syn::spanned::Spanned;
 use syn::{
     Item, ItemEnum, ItemImpl, ItemStruct, LitStr, Meta, Token, parse::Parser, parse_macro_input,
 };
@@ -735,14 +736,27 @@ fn write_dts(rel: &str, text: &str) -> Result<(), String> {
 ///   name (`Call.callId: expected string, got nil`). A word on the field or variant beats
 ///   the type's rule, and `teal` beats `serde` at each level. A renamed field may carry
 ///   `#[teal(as)]`.
-/// - refused at compile time: a name that differs by direction (`rename(serialize = "a",
-///   deserialize = "b")`, or one side alone; `rename_all` the same), and the words that
-///   change the shape and are not read yet — `skip`, `skip_serializing`,
-///   `skip_deserializing`, `skip_serializing_if`, `default`, `flatten`, `tag`, `content`,
-///   `untagged`, `transparent`, `with`, `serialize_with`, `deserialize_with`, `from`,
-///   `into`, `try_from`, `remote`, `other`, `borrow`, `getter`, `variant_identifier`,
-///   `field_identifier`; nothing is silently ignored. A data enum crosses in the `kind`
-///   form whatever serde's own form is.
+/// - read, on a field of a struct: `skip` (not declared, not written; filled on the way in
+///   from the field's `default`, else the struct's, else `Default::default()` — a type
+///   without `Default` is rustc's error at the field), `default` / `default = "path"` (still
+///   declared `T`; a nil key reads as the default), `skip_serializing_if = "path"` beside a
+///   `default` or on an `Option` field (the key is left out when `path(&self.field)`
+///   holds), and `flatten` of a struct deriving `TealRecord` declared in the same file (its
+///   fields join the record, and cross in the one table through its
+///   `htl::teal::TealFields`; a wrong one is reported under this record, `Call.trace`).
+///   On the struct: `default` (a nil field takes the same field of `Self::default()`) and
+///   `transparent` (`type N = T`, crossing as its one field that is not skipped).
+/// - refused at compile time, naming the rule and the way out: a name that differs by
+///   direction (`rename(serialize = "a", deserialize = "b")`, or one side alone;
+///   `rename_all` the same); `skip_serializing` / `skip_deserializing` alone and
+///   `skip_serializing_if` with nowhere for the omitted value to come from; `flatten` of a
+///   map, an `Option`, an enum, or a struct the derive cannot read in this file;
+///   `transparent` over other than one field; and the words that change the shape and are
+///   not read yet — `tag`, `content`, `untagged`, `with`, `serialize_with`,
+///   `deserialize_with`, `from`, `into`, `try_from`, `remote`, `other`, `borrow`, `getter`,
+///   `variant_identifier`, `field_identifier`; nothing is silently ignored. A data enum
+///   crosses in the `kind` form whatever serde's own form is, and its variants' fields do
+///   not take the presence words yet.
 /// - passed through to serde: `crate`, `bound`, `deny_unknown_fields`, `expecting`, and
 ///   `rename` on the type itself.
 ///
@@ -756,6 +770,25 @@ fn write_dts(rel: &str, text: &str) -> Result<(), String> {
 /// // local record Call
 /// //    callId: string
 /// //    message: string
+/// // end
+/// ```
+///
+/// ```rust,ignore
+/// #[derive(Serialize, Deserialize, TealRecord)]
+/// struct Meta { trace: String }
+///
+/// #[derive(Serialize, Deserialize, TealRecord)]
+/// #[serde(rename_all = "camelCase")]
+/// struct Job {
+///     job_id: String,
+///     #[serde(skip)] cache: Vec<u8>,
+///     #[serde(default, skip_serializing_if = "Vec::is_empty")] tags: Vec<String>,
+///     #[serde(flatten)] meta: Meta,
+/// }
+/// // local record Job
+/// //    jobId: string
+/// //    tags: {string}
+/// //    trace: string
 /// // end
 /// ```
 ///
@@ -784,20 +817,55 @@ pub fn derive_teal_record(input: TokenStream) -> TokenStream {
 /// `htl_core::dts`, the same code `htl dts` runs, so the `.d.tl` a build writes and the
 /// one the CLI writes cannot disagree.
 fn expand_record(item: &Item) -> Result<TokenStream, String> {
-    let rd = dts::record_decl(item)?;
+    // A `#[serde(flatten)]` field's struct is declared from its source, which a derive is
+    // not handed: read this file for it, only when there is one (`dts::needs_source`).
+    let file = if dts::needs_source(item) {
+        current_file()
+    } else {
+        None
+    };
+    let rd = dts::record_decl_in(item, file.as_ref().map(|(items, _)| items.as_slice()))?;
     if let Some(d) = &rd.attrs.dts {
         write_dts(d, &rd.decl)?;
     }
     let name = rd.name.as_str();
+    let mut fields_impl = quote! {};
     let (ident, into, from) = match (item, &rd.kind) {
-        (Item::Struct(st), dts::RecordKind::Record { fields, .. }) => (
-            &st.ident,
-            record_into(st, fields),
-            record_from(st, name, fields),
-        ),
-        (Item::Struct(st), dts::RecordKind::Alias { inner }) => {
-            (&st.ident, alias_into(), alias_from(st, name, inner))
+        (Item::Struct(st), dts::RecordKind::Record { .. }) => {
+            let ident = &st.ident;
+            let write = record_write(st, &rd.conversion)?;
+            let read = record_read(st, &rd.conversion)?;
+            fields_impl = quote! {
+                impl ::htl::teal::TealFields for #ident {
+                    #[allow(unused_variables)]
+                    fn write_fields(
+                        self,
+                        t: &::htl::mlua::Table,
+                        lua: &::htl::mlua::Lua,
+                    ) -> ::htl::mlua::Result<()> {
+                        #write
+                        Ok(())
+                    }
+                    #[allow(unused_variables)]
+                    fn read_fields(
+                        t: &::htl::mlua::Table,
+                        lua: &::htl::mlua::Lua,
+                        path: &str,
+                    ) -> ::htl::mlua::Result<Self> {
+                        #read
+                    }
+                }
+            };
+            (ident, record_into(), record_from(name))
         }
+        (Item::Struct(st), dts::RecordKind::Alias { inner }) => match &st.fields {
+            syn::Fields::Named(_) => (
+                &st.ident,
+                transparent_into(st, &rd.conversion)?,
+                transparent_from(st, name, inner, &rd.conversion)?,
+            ),
+            _ => (&st.ident, alias_into(), alias_from(st, name, inner)),
+        },
         (Item::Enum(en), dts::RecordKind::Enum { variants }) => (
             &en.ident,
             enum_into(en, variants),
@@ -843,6 +911,7 @@ fn expand_record(item: &Item) -> Result<TokenStream, String> {
                 #from
             }
         }
+        #fields_impl
         #preload
     }
     .into())
@@ -865,22 +934,37 @@ fn field_reads(
         .map(|(f, (fname, fteal))| {
             let id = f.ident.as_ref().unwrap();
             let aliases = dts::serde_aliases(&f.attrs);
-            let read = field_read(path, fname, &aliases, &f.ty, fteal);
+            let read = field_read(&quote!(#path), fname, &aliases, &f.ty, fteal, None);
             quote! { #id: #read }
         })
         .collect()
 }
 
 /// A block reading key `fname` out of table `t` as `ty` — or, while that is nil, each of
-/// `aliases` in turn — reporting a failure as `path.fname` with the Teal type `fteal` the
-/// declaration promised.
+/// `aliases` in turn — reporting a failure as `path.fname` (`path` an expression giving a
+/// `&str`: a literal, or `read_fields`'s own `path`) with the Teal type `fteal` the
+/// declaration promised. `nil`, when given, is what a key still nil after the aliases
+/// reads as (a `#[serde(default)]`) instead of reaching the type's `FromLua`.
 fn field_read(
-    path: &str,
+    path: &TokenStream2,
     fname: &str,
     aliases: &[String],
     ty: &syn::Type,
     fteal: &str,
+    nil: Option<TokenStream2>,
 ) -> TokenStream2 {
+    let convert = quote! {
+        {
+            let got = v.type_name();
+            <#ty as ::htl::mlua::FromLua>::from_lua(v, lua).map_err(|e| {
+                ::htl::teal::field_error(#path, #fname, #fteal, got, e)
+            })?
+        }
+    };
+    let value = match nil {
+        None => convert,
+        Some(d) => quote! { if v.is_nil() { #d } else #convert },
+    };
     quote! {
         {
             // Take the field as a Value first: what arrived is half the message, and
@@ -888,12 +972,52 @@ fn field_read(
             #[allow(unused_mut)]
             let mut v: ::htl::mlua::Value = t.get(#fname)?;
             #( if v.is_nil() { v = t.get(#aliases)?; } )*
-            let got = v.type_name();
-            <#ty as ::htl::mlua::FromLua>::from_lua(v, lua).map_err(|e| {
-                ::htl::teal::field_error(#path, #fname, #fteal, got, e)
-            })?
+            #value
         }
     }
+}
+
+/// A path serde was given as a string (`default = "path"`, `skip_serializing_if =
+/// "path"`), as tokens to call; `dts` checked it parses.
+fn serde_path(p: &str) -> Result<syn::ExprPath, String> {
+    syn::parse_str(p).map_err(|e| format!("TealRecord: cannot read the path {p:?}: {e}"))
+}
+
+/// What a field that is nil (or skipped) is filled with, `None` for
+/// [`dts::WhenNil::Convert`]. `Default::default()` is spanned at the field's type, so a type
+/// without `Default` is reported there, by rustc, as serde's derive reports it.
+fn nil_value(
+    nil: &dts::WhenNil,
+    id: &syn::Ident,
+    ty: &syn::Type,
+) -> Result<Option<TokenStream2>, String> {
+    Ok(match nil {
+        dts::WhenNil::Convert => None,
+        dts::WhenNil::Own(dts::DefaultFrom::Trait) => Some(quote_spanned! {ty.span()=>
+            <#ty as ::core::default::Default>::default()
+        }),
+        dts::WhenNil::Own(dts::DefaultFrom::Path(p)) => {
+            let p = serde_path(p)?;
+            Some(quote! { #p() })
+        }
+        dts::WhenNil::Struct => Some(quote! { __htl_default.#id }),
+    })
+}
+
+/// `let __htl_default: Self = ..;` for a struct with `#[serde(default)]`: the value its
+/// fields are filled from ([`dts::WhenNil::Struct`]), built once up front as serde does.
+/// Spanned at the struct, so a missing `Default` is reported there.
+fn struct_default(st: &ItemStruct, conv: &dts::RecordConversion) -> Result<TokenStream2, String> {
+    Ok(match &conv.default {
+        None => quote! {},
+        Some(dts::DefaultFrom::Trait) => quote_spanned! {st.ident.span()=>
+            let __htl_default: Self = <Self as ::core::default::Default>::default();
+        },
+        Some(dts::DefaultFrom::Path(p)) => {
+            let p = serde_path(p)?;
+            quote! { let __htl_default: Self = #p(); }
+        }
+    })
 }
 
 fn named_fields(st: &ItemStruct) -> &syn::FieldsNamed {
@@ -903,29 +1027,149 @@ fn named_fields(st: &ItemStruct) -> &syn::FieldsNamed {
     }
 }
 
-/// Record -> table, one key per field, under the name `fields` (from `dts`, in
-/// declaration order) declares it.
-fn record_into(st: &ItemStruct, fields: &[(String, String)]) -> TokenStream2 {
-    let idents: Vec<_> = named_fields(st)
-        .named
-        .iter()
-        .map(|f| f.ident.as_ref().unwrap())
-        .collect();
-    let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+/// Record -> table: a table of its own, filled by the record's `TealFields`.
+fn record_into() -> TokenStream2 {
     quote! {
         let t = lua.create_table()?;
-        #( t.set(#names, self.#idents)?; )*
+        ::htl::teal::TealFields::write_fields(self, &t, lua)?;
         Ok(::htl::mlua::Value::Table(t))
     }
 }
 
-/// Table -> record, every field checked and named on failure.
-fn record_from(st: &ItemStruct, name: &str, fields: &[(String, String)]) -> TokenStream2 {
-    let reads = field_reads(name, named_fields(st), fields);
+/// Table -> record: read by the record's `TealFields`, a failure named under the record.
+fn record_from(name: &str) -> TokenStream2 {
     quote! {
         let t = <::htl::mlua::Table as ::htl::mlua::FromLua>::from_lua(value, lua)?;
-        Ok(Self { #( #reads, )* })
+        <Self as ::htl::teal::TealFields>::read_fields(&t, lua, #name)
     }
+}
+
+/// `write_fields`' body: each field under the key `dts` declared it as (from the one
+/// reading, [`dts::Crossing`], paired with the Rust fields by position). A skipped field
+/// is left out, one whose `skip_serializing_if` holds is too (called as serde calls it,
+/// `path(&self.field)`), and a flattened struct writes its own fields into this table.
+fn record_write(st: &ItemStruct, conv: &dts::RecordConversion) -> Result<TokenStream2, String> {
+    let mut out = Vec::new();
+    for (f, c) in named_fields(st).named.iter().zip(&conv.fields) {
+        let id = f.ident.as_ref().unwrap();
+        let ty = &f.ty;
+        out.push(match c {
+            dts::Crossing::Key {
+                name,
+                skip_if: None,
+                ..
+            } => quote! { t.set(#name, self.#id)?; },
+            dts::Crossing::Key {
+                name,
+                skip_if: Some(p),
+                ..
+            } => {
+                let p = serde_path(p)?;
+                quote! { if !#p(&self.#id) { t.set(#name, self.#id)?; } }
+            }
+            dts::Crossing::Skip { .. } => quote! {},
+            dts::Crossing::Flatten { .. } => quote! {
+                <#ty as ::htl::teal::TealFields>::write_fields(self.#id, t, lua)?;
+            },
+        });
+    }
+    Ok(quote! { #( #out )* })
+}
+
+/// `read_fields`' body: every field checked and named on failure under `path` (the record
+/// the table is declared as), a nil key read as its default where it has one, a skipped
+/// field filled, and a flattened struct read from this same table under the same `path`.
+fn record_read(st: &ItemStruct, conv: &dts::RecordConversion) -> Result<TokenStream2, String> {
+    let mut inits = Vec::new();
+    for (f, c) in named_fields(st).named.iter().zip(&conv.fields) {
+        let id = f.ident.as_ref().unwrap();
+        let ty = &f.ty;
+        let value = match c {
+            dts::Crossing::Key {
+                name,
+                teal,
+                aliases,
+                nil,
+                ..
+            } => field_read(
+                &quote!(path),
+                name,
+                aliases,
+                ty,
+                teal,
+                nil_value(nil, id, ty)?,
+            ),
+            dts::Crossing::Skip { nil } => nil_value(nil, id, ty)?
+                .ok_or("TealRecord: a skipped field has to be filled from a default")?,
+            dts::Crossing::Flatten { .. } => quote! {
+                <#ty as ::htl::teal::TealFields>::read_fields(t, lua, path)?
+            },
+        };
+        inits.push(quote! { #id: #value });
+    }
+    let default = struct_default(st, conv)?;
+    Ok(quote! {
+        #default
+        Ok(Self { #( #inits, )* })
+    })
+}
+
+/// A skipped field of a transparent struct, and what it is filled from.
+type Skipped<'a> = (&'a syn::Field, &'a dts::WhenNil);
+
+/// The one field a `#[serde(transparent)]` struct crosses as, and the others (skipped),
+/// each with what it is filled from.
+fn transparent_field<'a>(
+    st: &'a ItemStruct,
+    conv: &'a dts::RecordConversion,
+) -> Result<(&'a syn::Field, Vec<Skipped<'a>>), String> {
+    let mut kept = None;
+    let mut skipped = Vec::new();
+    for (f, c) in named_fields(st).named.iter().zip(&conv.fields) {
+        match c {
+            dts::Crossing::Skip { nil } => skipped.push((f, nil)),
+            _ => kept = Some(f),
+        }
+    }
+    // `dts::transparent_kind` refuses a struct without exactly one.
+    let kept =
+        kept.ok_or("TealRecord: a transparent struct needs one field that is not skipped")?;
+    Ok((kept, skipped))
+}
+
+/// Transparent struct -> whatever its one field converts to.
+fn transparent_into(st: &ItemStruct, conv: &dts::RecordConversion) -> Result<TokenStream2, String> {
+    let (f, _) = transparent_field(st, conv)?;
+    let id = f.ident.as_ref().unwrap();
+    Ok(quote! { ::htl::mlua::IntoLua::into_lua(self.#id, lua) })
+}
+
+/// Value -> transparent struct: the one field through its own conversion, a refusal named
+/// as an alias's is (`N: expected T, got ..`), the skipped fields filled.
+fn transparent_from(
+    st: &ItemStruct,
+    name: &str,
+    inner: &str,
+    conv: &dts::RecordConversion,
+) -> Result<TokenStream2, String> {
+    let (f, skipped) = transparent_field(st, conv)?;
+    let id = f.ident.as_ref().unwrap();
+    let ty = &f.ty;
+    let mut fills = Vec::new();
+    for (sf, nil) in skipped {
+        let sid = sf.ident.as_ref().unwrap();
+        let v = nil_value(nil, sid, &sf.ty)?
+            .ok_or("TealRecord: a skipped field has to be filled from a default")?;
+        fills.push(quote! { #sid: #v });
+    }
+    let default = struct_default(st, conv)?;
+    Ok(quote! {
+        let got = value.type_name();
+        let __htl_inner = <#ty as ::htl::mlua::FromLua>::from_lua(value, lua)
+            .map_err(|e| ::htl::teal::value_error(#name, #inner, got, e))?;
+        #default
+        Ok(Self { #id: __htl_inner, #( #fills, )* })
+    })
 }
 
 /// Newtype -> whatever the inner value converts to.
@@ -1047,7 +1291,8 @@ fn union_from(en: &ItemEnum, name: &str, variants: &[dts::UnionVariant]) -> Toke
             match (&v.fields, &uv.shape) {
                 (syn::Fields::Unit, _) => quote! { #vname => Ok(Self::#id), },
                 (syn::Fields::Unnamed(u), dts::VariantShape::Newtype(teal)) => {
-                    let read = field_read(&path, "value", &[], &u.unnamed[0].ty, teal);
+                    let read =
+                        field_read(&quote!(#path), "value", &[], &u.unnamed[0].ty, teal, None);
                     quote! { #vname => Ok(Self::#id(#read)), }
                 }
                 (syn::Fields::Named(n), dts::VariantShape::Struct(fields)) => {
