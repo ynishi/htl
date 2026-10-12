@@ -2,7 +2,9 @@
 //!
 //! The macros map Rust types to Teal type names *syntactically* at expansion time
 //! (`f64 -> number`, `String -> string`, `Vec<T> -> {T}`, ...). This module holds the
-//! runtime-side traits the generated code implements.
+//! runtime-side traits the generated code implements, and the functions it calls:
+//! [`field_error`] and its kin name a value that does not fit, and [`serde_field`] is what
+//! a `#[teal(serde)]` field crosses through (htl's `serde` feature).
 
 /// A Rust type mirrored as a Teal declaration: a struct as a `record` (plain table with
 /// named fields), a newtype as a `type` alias, an enum as an `enum` of its variant names
@@ -318,4 +320,224 @@ pub trait HostModule {
     const MODULE: &'static str;
     /// Full `.d.tl` text for the module.
     const DECL: &'static str;
+}
+
+/// What `#[teal(serde)]` on a `#[derive(TealRecord)]` field crosses through: mlua's serde
+/// (`LuaSerdeExt::to_value_with` / `from_value_with`), with options htl fixes rather than
+/// mlua's defaults. The derive calls these; they are public only so that it can.
+///
+/// It exists under htl's `serde` feature (on with `std`, which is on by default). Without
+/// it the module holds the same two functions bounded by a trait nothing implements,
+/// `EnableHtlFeatureSerde`, so a field that says `#[teal(serde)]` fails to compile with an
+/// error that names the feature instead of one about a missing function.
+///
+/// The options, and why:
+///
+/// - writing: `set_array_metatable` on (a sequence carries mlua's array metatable, so an
+///   empty one reads back as a sequence); `serialize_none_to_null` off (a `None` is `nil`,
+///   so an absent field is an absent key, as a Teal record field is nilable) — on only for
+///   a field whose Rust type holds an `Option` inside a sequence (`Vec<Option<T>>`), where
+///   `nil` would leave a hole a Lua sequence cannot hold, and the derive asks for it
+///   (`none_to_null`); `serialize_unit_to_null` off; `detect_serde_json_arbitrary_precision`
+///   on (a `serde_json::Number` crosses as a number). A value that serializes to the null
+///   marker at the top (`None` under `none_to_null`) is written as `nil`: the field is
+///   absent, not a marker.
+/// - reading: `deny_unsupported_types` and `deny_recursive_tables` on (a function or a
+///   cycle is an error, not dropped); `encode_empty_tables_as_array` from the field's Rust
+///   type (`empty_as_array`, decided by the derive: a sequence type — `Vec`, `VecDeque`,
+///   `HashSet`, `BTreeSet`, a slice or an array, through `Option` / `Box` — reads an empty
+///   table as an empty sequence, anything else as an empty map). A serde type that holds
+///   both a sequence and a map inside cannot be told apart on an empty table — the option
+///   is one per conversion, and the derive sees only the field's type as written: that is
+///   the residue of mlua's option, and why the outermost type decides.
+///   `detect_mixed_tables` stays off: in mlua 0.12 it overrides `encode_empty_tables_as_array`
+///   (an empty table is always an array under it), and it only reaches values serde reads
+///   untyped (`serde_json::Value`) — a typed `Vec` reads a table's sequence part and ignores
+///   every other key. So htl refuses a mixed table itself, before serde reads: any table in
+///   the value with a sequence part (`#t > 0`) and a key that is not one of `1..#t` — a
+///   string key beside the sequence, or a hole.
+///
+/// A failure is a [`FieldError`] at the field (`Rec.opts: expected {string: any}, got table
+/// (a mixed table at `list`: ...)`), so a record nested in another extends the path as any
+/// field's does.
+pub mod serde_field {
+    #[cfg(not(feature = "serde"))]
+    use mlua::{Lua, Value};
+
+    /// Implemented by nothing: the bound the two functions carry when htl is built without
+    /// its `serde` feature, so `#[teal(serde)]` fails to compile naming the feature.
+    #[cfg(not(feature = "serde"))]
+    #[diagnostic::on_unimplemented(
+        message = "`#[teal(serde)]` crosses a field through serde, which needs htl's `serde` feature",
+        label = "this field says `#[teal(serde)]`",
+        note = "enable it: `htl = {{ version = \"..\", features = [\"serde\"] }}` (the default `std` feature turns it on too)"
+    )]
+    pub trait EnableHtlFeatureSerde {}
+
+    /// Without the `serde` feature: never callable, see [`EnableHtlFeatureSerde`].
+    #[cfg(not(feature = "serde"))]
+    pub fn to_lua<T: EnableHtlFeatureSerde + ?Sized>(
+        _lua: &Lua,
+        _value: &T,
+        _record: &str,
+        _field: &str,
+        _none_to_null: bool,
+    ) -> mlua::Result<Value> {
+        unreachable!("no type implements EnableHtlFeatureSerde")
+    }
+
+    /// Without the `serde` feature: never callable, see [`EnableHtlFeatureSerde`].
+    #[cfg(not(feature = "serde"))]
+    pub fn from_lua<T: EnableHtlFeatureSerde>(
+        _lua: &Lua,
+        _value: Value,
+        _record: &str,
+        _field: &str,
+        _expected: &str,
+        _empty_as_array: bool,
+    ) -> mlua::Result<T> {
+        unreachable!("no type implements EnableHtlFeatureSerde")
+    }
+
+    #[cfg(feature = "serde")]
+    pub use imp::{from_lua, to_lua};
+
+    #[cfg(feature = "serde")]
+    mod imp {
+        use super::super::FieldError;
+        use mlua::{ErrorContext, Lua, LuaSerdeExt, Table, Value};
+
+        /// Field `record.field` -> Lua, through its `Serialize`, with htl's options.
+        pub fn to_lua<T: serde::Serialize + ?Sized>(
+            lua: &Lua,
+            value: &T,
+            record: &str,
+            field: &str,
+            none_to_null: bool,
+        ) -> mlua::Result<Value> {
+            let opts = mlua::serde::ser::Options::new()
+                .set_array_metatable(true)
+                .serialize_none_to_null(none_to_null)
+                .serialize_unit_to_null(false)
+                .detect_serde_json_arbitrary_precision(true);
+            let v = lua
+                .to_value_with(value, opts)
+                .context(format!("{record}.{field}"))?;
+            Ok(match v {
+                Value::LightUserData(ud) if ud.0.is_null() => Value::Nil,
+                v => v,
+            })
+        }
+
+        /// Lua -> field `record.field` (declared `expected`), through its `Deserialize`,
+        /// with htl's options; a mixed table anywhere in the value is refused first.
+        pub fn from_lua<T: serde::de::DeserializeOwned>(
+            lua: &Lua,
+            value: Value,
+            record: &str,
+            field: &str,
+            expected: &str,
+            empty_as_array: bool,
+        ) -> mlua::Result<T> {
+            let fail = |got: String| {
+                mlua::Error::external(FieldError {
+                    path: format!("{record}.{field}"),
+                    expected: expected.to_string(),
+                    got,
+                })
+            };
+            let got = value.type_name();
+            if let Value::Table(t) = &value {
+                let mut seen = Vec::new();
+                if let Some(why) = mixed(t, "", &mut seen)? {
+                    return Err(fail(format!("{got} ({why})")));
+                }
+            }
+            let opts = mlua::serde::de::Options::new()
+                .deny_unsupported_types(true)
+                .deny_recursive_tables(true)
+                .detect_mixed_tables(false)
+                .encode_empty_tables_as_array(empty_as_array);
+            lua.from_value_with(value, opts).map_err(|e| {
+                let msg = match &e {
+                    mlua::Error::DeserializeError(m) => m.clone(),
+                    other => other.to_string(),
+                };
+                fail(format!("{got} ({msg})"))
+            })
+        }
+
+        /// The first table in `t` (itself, then its values, depth first) with a sequence
+        /// part and a key outside it, described with the keys that lead to it from the
+        /// field; `None` when there is none. `seen` keeps a cycle from recursing (serde's
+        /// own `deny_recursive_tables` reports it after).
+        fn mixed(t: &Table, at: &str, seen: &mut Vec<usize>) -> mlua::Result<Option<String>> {
+            let ptr = t.to_pointer() as usize;
+            if seen.contains(&ptr) {
+                return Ok(None);
+            }
+            seen.push(ptr);
+            let n = t.raw_len();
+            let mut inner = Vec::new();
+            let mut in_seq_count = 0;
+            for pair in t.clone().pairs::<Value, Value>() {
+                let (k, v) = pair?;
+                if n > 0 {
+                    let in_seq = match k {
+                        Value::Integer(i) => i >= 1 && (i as usize) <= n,
+                        _ => false,
+                    };
+                    in_seq_count += usize::from(in_seq);
+                    if !in_seq {
+                        let key = match &k {
+                            Value::String(s) => format!("{:?}", s.to_string_lossy()),
+                            Value::Integer(i) => i.to_string(),
+                            other => other.type_name().to_string(),
+                        };
+                        let place = if at.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" at `{at}`")
+                        };
+                        return Ok(Some(format!(
+                            "a mixed table{place}: a sequence of {n} and the key {key}; a Lua \
+                             table crosses as a sequence or as a map, not both, and not with holes"
+                        )));
+                    }
+                }
+                if let Value::Table(c) = v {
+                    let seg = match &k {
+                        Value::String(s) => s.to_string_lossy().to_string(),
+                        Value::Integer(i) => format!("[{i}]"),
+                        other => format!("[{}]", other.type_name()),
+                    };
+                    let path = if at.is_empty() {
+                        seg
+                    } else if seg.starts_with('[') {
+                        format!("{at}{seg}")
+                    } else {
+                        format!("{at}.{seg}")
+                    };
+                    inner.push((c, path));
+                }
+            }
+            if in_seq_count < n {
+                let place = if at.is_empty() {
+                    String::new()
+                } else {
+                    format!(" at `{at}`")
+                };
+                return Ok(Some(format!(
+                    "a sequence with holes{place}: {in_seq_count} values under the length {n}; a \
+                     Lua sequence cannot hold nil"
+                )));
+            }
+            for (c, path) in inner {
+                if let Some(why) = mixed(&c, &path, seen)? {
+                    return Ok(Some(why));
+                }
+            }
+            Ok(None)
+        }
+    }
 }
