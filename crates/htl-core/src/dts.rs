@@ -39,6 +39,9 @@
 //! | `struct Job { #[serde(skip)] cache: Cache, #[serde(default)] retries: u32, #[serde(default, skip_serializing_if = "Vec::is_empty")] tags: Vec<String> }` | `record Job` with `retries: integer` and `tags: {string}`; `cache` is not declared | `cache` is never written, and filled with its `Default` on the way in; a nil `retries` reads as `0`; `tags` is left out of the table when empty, as `serde_json` leaves it out of the object |
 //! | `#[serde(transparent)] struct Tag { text: String, #[serde(skip)] seen: u32 }` | `type Tag = string` | the `text` value itself; a refused read is `Tag: expected string, got table` |
 //! | `struct Call { call_id: String, #[serde(flatten)] meta: Meta }`, `Meta` a `TealRecord` struct in the same file | `record Call` with `call_id` and then `Meta`'s fields, under `Meta`'s own names | one table, `Meta`'s keys at its top beside `call_id`; a wrong one reads `Call.trace: expected string, got table` |
+//! | `#[serde(tag = "type")] enum Ev { Idle, Moved(Move), Resized { w: f64, h: f64 } }`, `Move` a `TealRecord` struct in the same file | `record Ev_Idle`, `record Ev_Moved`, `record Ev_Resized`, each `where self.type == "…"` with `type: string`; `Ev_Moved` lists `Move`'s fields beside it, `Ev_Resized` its own | a table as `serde_json` writes the object: `{ type = "Moved", fromX = 1, toX = 2 }`; an unknown tag reads `Ev: expected one of "Idle", "Moved", "Resized", got "Jumped"` |
+//! | `#[serde(tag = "t", content = "c")] enum Shape { Dot, Circle(f64), Rect { w: f64, h: f64 } }` | `record Shape_Circle` (`where self.t == "Circle"`, `t: string`, `c: number`); `Rect`'s fields in `record Shape_Rect_Content`, declared before `record Shape_Rect` with `c: Shape_Rect_Content`; `Dot` has `t` only | `{ t = "Circle", c = 1.5 }`, `{ t = "Rect", c = { w = 1, h = 2 } }`; a wrong payload reads `Shape.Rect.c.h: expected number, got nil` |
+//! | `#[serde(untagged)] enum Arg { Name(String), Size(f64), Rect { w: f64, h: f64 } }` | `record Arg_Rect` (no `where`) and `type Arg = string \| number \| Arg_Rect` | the payload alone, told apart by its Lua type as Teal's `is` tells it; anything else reads `Arg: expected one of string, number, Arg_Rect, got boolean` |
 //! | `struct Label(String)` | `type Label = string` | whatever the inner type crosses as |
 //! | `Option<T>` | `T` as a field and as a return, `name?: T` as a method parameter | nil where the Rust side has `None`; the mark on a parameter is what lets a caller write `api:find("x")` |
 //! | `Vec<T>` / `&[T]` / `[T; N]` / `VecDeque<T>` / `HashSet<T>` | `{T}` | a table used as a sequence |
@@ -101,6 +104,22 @@
 //!   declared as, `Call.trace`: the Teal side has no level for the inner struct.
 //! - read, on a struct: `transparent` — declared `type N = T`, `T` its one field that is
 //!   not skipped, and crossing as that field's value.
+//! - read, on an enum, how its variants are told apart ([`UnionRepr`]): `tag = "T"`
+//!   (each variant record `where self.T == ".."`, a struct variant's fields beside the tag;
+//!   a newtype variant's payload has to be a struct deriving `TealRecord` in the same file,
+//!   read as a flattened one is, and its fields sit beside the tag, as serde writes them),
+//!   `tag = "T", content = "C"` (the payload under `C`: a newtype's value, a struct
+//!   variant's fields as a record of their own, `N_V_Content`), and `untagged` (the payload
+//!   alone; newtypes over `string`, `number` / `integer`, `boolean`, and at most one variant
+//!   crossing as a table — a struct variant, a plain `record N_V`, or a newtype over any
+//!   other type). With any of them a unit-only enum is a union too, since serde writes a
+//!   table for it. The tag has to be a Teal identifier: Teal's `where` reads `self.T`, and
+//!   `self["T"]` runs into the record's next line in the vendored checker.
+//! - **a data enum with any `#[serde(..)]` but neither `tag` nor `untagged` is refused**:
+//!   serde writes it externally tagged (`{ "Circle": 1.0 }`), and htl's default stays the
+//!   `kind` form below, which a type with no `#[serde(..)]` keeps. The host's way to make
+//!   the two agree is one line, `#[serde(tag = "kind")]` (or another tag name). A unit-only
+//!   enum is a string on both sides and is not affected.
 //! - precedence: the word on the field or variant beats the rule on the type, and at each
 //!   level `teal` beats `serde` — `#[teal(name)]` over `#[serde(rename)]` on a variant,
 //!   `#[teal(rename_all)]` over `#[serde(rename_all)]` on the type.
@@ -112,9 +131,14 @@
 //!   the same file or named by a path, one not deriving `TealRecord`, or two flattened
 //!   fields bringing one name; `transparent` over other than one field that is neither
 //!   skipped nor defaulted (serde's rule, quoted); the presence words on a field of an enum
-//!   variant; and every word that changes the shape and is not read yet: `tag`, `content`,
-//!   `untagged`, `with`, `serialize_with`, `deserialize_with`, `from`, `into`, `try_from`,
-//!   `remote`, `other`, `borrow`, `getter`, `variant_identifier`, `field_identifier`. A
+//!   variant; `content` without `tag`, `tag` with `untagged`, `tag` and `content` naming
+//!   one key, a tag that is not a Teal identifier, a `tag` newtype variant over anything
+//!   but such a struct (or one bringing a field named as the tag), and `untagged` over a
+//!   unit variant, a newtype of an `Option`, two variants crossing as tables or two
+//!   crossing as the same Lua type (`from_lua` and Teal's `is` both tell them apart by
+//!   `type()`); and every word that changes the shape and is not read yet: `with`,
+//!   `serialize_with`, `deserialize_with`, `from`, `into`, `try_from`, `remote`, `other`,
+//!   `borrow`, `getter`, `variant_identifier`, `field_identifier`. A
 //!   declaration that ignored one would state a shape the value does not have. A read word
 //!   where it is not read (`alias` on a variant, `skip` on a type, `transparent` on a
 //!   field) and an attribute the reader cannot parse are refused too, the latter quoting
@@ -142,10 +166,14 @@
 //! - **`uses` imports with `local type name = require("module")`**. A module whose value
 //!   is only a type (an alias, an enum) is "abstract" to Teal when required as a value,
 //!   and the `type` form imports a record just the same, so one form serves every kind.
-//! - **The tag is `kind`, the newtype payload is `value`**, and neither is configurable:
-//!   a name that differs per host is a name the reader has to look up, and these are
-//!   what Teal's own `where` examples use. A struct variant may not carry a field named
-//!   `kind`.
+//! - **The tag is `kind`, the newtype payload is `value`**, and `#[teal(..)]` does not
+//!   configure them: a name that differs per host is a name the reader has to look up, and
+//!   these are what Teal's own `where` examples use. A struct variant may not carry a
+//!   field named `kind`. serde's `tag` / `content` / `untagged` are the exception, because
+//!   there the wire has already chosen and the declaration follows it; serde's default,
+//!   externally tagged, is not adopted as htl's (a `{ Circle = 1.5 }` table would be
+//!   narrowed by `self.Circle ~= nil`, which no variant word spells), so a serde data enum
+//!   says `tag` to cross.
 //! - **A variant's word is the Rust name unless the enum says otherwise.**
 //!   `#[teal(rename_all = "snake_case")]` on the enum and `#[teal(name = "..")]` on one
 //!   variant spell what crosses — the `enum` entries, the `kind` tag, the run-time match
@@ -1059,13 +1087,75 @@ pub enum RecordKind {
         /// lists and what a value crossing the boundary must be one of.
         variants: Vec<String>,
     },
-    /// An enum with a data variant: one `where`-discriminated record per variant and
-    /// `type N = N_A | N_B`, crossing as a table whose `kind` names the variant.
+    /// An enum with a data variant — or any enum serde tags (`#[serde(tag)]` /
+    /// `#[serde(untagged)]`), unit-only included, since serde then writes a table: one
+    /// record per variant and `type N = N_A | N_B`. How the variants are told apart is
+    /// `repr`: htl's own `kind` tag, serde's `tag` (and `content`), or the payload's Lua
+    /// type.
     Union {
         /// One per variant, in declaration order, which is the order the generated
         /// `type N = N_A | N_B` lists them in.
         variants: Vec<UnionVariant>,
+        /// Which key tells the variants apart and where a payload goes.
+        repr: UnionRepr,
     },
+}
+
+/// How a data enum's variants are told apart, on the wire and in the declaration — serde's
+/// enum representations, read off the enum's `#[serde(..)]`, beside htl's own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnionRepr {
+    /// No `#[serde(..)]` on the enum: htl's form. Each record is `where self.kind ==
+    /// "<word>"` and has `kind: string`; a newtype payload is `value: T`, a struct variant's
+    /// fields sit beside `kind`.
+    Kind,
+    /// `#[serde(tag = "T")]`, internally tagged: `where self.T == "<word>"` and `T: string`,
+    /// a struct variant's fields beside it. A newtype variant's payload is a struct
+    /// ([`VariantShape::Inline`]) whose fields sit beside the tag, as serde writes it.
+    Internal {
+        /// The tag's key — a Teal identifier, since `where` tests it as `self.T`.
+        tag: String,
+    },
+    /// `#[serde(tag = "T", content = "C")]`, adjacently tagged: `where self.T == "<word>"`,
+    /// `T: string`, and the payload under `C` — a newtype's value, or a struct variant's
+    /// fields as a record of their own, `N_V_Content`, declared just before the variant's.
+    /// A unit variant has no `C`.
+    Adjacent {
+        /// The tag's key, a Teal identifier.
+        tag: String,
+        /// The payload's key.
+        content: String,
+    },
+    /// `#[serde(untagged)]`: the payload alone. A newtype over `string`, `number` /
+    /// `integer` or `boolean` is that type in the union; at most one variant crosses as a
+    /// table — a struct variant (a plain `record N_V`, no `where`) or a newtype over any
+    /// other type (its Teal type in the union) — since Teal tells union members apart by
+    /// `type()`, and so does the derived `from_lua`. Unit variants are refused.
+    Untagged,
+}
+
+impl UnionRepr {
+    /// The key the variant's word is written under, `None` for [`UnionRepr::Untagged`].
+    pub fn tag(&self) -> Option<&str> {
+        match self {
+            UnionRepr::Kind => Some("kind"),
+            UnionRepr::Internal { tag } | UnionRepr::Adjacent { tag, .. } => Some(tag),
+            UnionRepr::Untagged => None,
+        }
+    }
+}
+
+/// The Lua type a value of Teal type `teal` is, when it is one a `type()` check tells
+/// apart from a table — `"string"`, `"number"` (for `number` and `integer`) or
+/// `"boolean"` — and `None` for anything else, which [`UnionRepr::Untagged`] counts as a
+/// table. What an untagged enum's `from_lua` dispatches on.
+pub fn untagged_lua_type(teal: &str) -> Option<&'static str> {
+    match teal {
+        "string" => Some("string"),
+        "number" | "integer" => Some("number"),
+        "boolean" => Some("boolean"),
+        _ => None,
+    }
 }
 
 /// One variant of a data-carrying enum.
@@ -1076,23 +1166,34 @@ pub struct UnionVariant {
     /// identifier cannot hold every `rename_all` spelling, and the record is what a
     /// caller narrows with by name.
     pub name: String,
-    /// The word the `kind` tag carries: `where self.kind == "in_review"`, and what the
-    /// value crossing the boundary must say. Equals `name` unless renamed.
+    /// The word the tag (`kind`, or serde's `tag`) carries: `where self.kind ==
+    /// "in_review"`, and what the value crossing the boundary must say. Equals `name`
+    /// unless renamed; unused by an untagged enum.
     pub word: String,
-    /// What it carries, and so which fields its record has beyond `kind` — the one thing
+    /// What it carries, and so which fields its record has beyond the tag — the one thing
     /// that differs between the variants of a union whose records are otherwise alike.
     pub shape: VariantShape,
 }
 
-/// What a variant carries, and so which fields its record has beyond `kind`.
+/// What a variant carries, and so which fields its record has beyond the tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VariantShape {
-    /// `A`: only `kind`.
+    /// `A`: only the tag.
     Unit,
-    /// `B(T)`: `value: T`.
+    /// `B(T)`: `T`'s Teal type — under `value` ([`UnionRepr::Kind`]), under the content key
+    /// ([`UnionRepr::Adjacent`]), or bare ([`UnionRepr::Untagged`]).
     Newtype(String),
     /// `C { x: U, .. }`: the fields as declared.
     Struct(Vec<(String, String)>),
+    /// `B(S)` under `#[serde(tag = "..")]` alone ([`UnionRepr::Internal`]): `S` is a struct
+    /// deriving `TealRecord` in the same file, and its fields sit beside the tag, as serde
+    /// writes them; the conversion goes through `S`'s [`crate::teal::TealFields`].
+    Inline {
+        /// `S`, the payload struct's Rust name.
+        record: String,
+        /// `S`'s fields as its own record declares them.
+        fields: Vec<(String, String)>,
+    },
 }
 
 /// One `#[derive(TealRecord)]` item, lowered: the shape it takes, the module text that
@@ -1250,7 +1351,8 @@ impl Scope<'_> {
 
 /// The serde words read, as a refusal lists them.
 const SERDE_READ: &str = "rename_all, rename, alias, rename_all_fields, skip, default, \
-                          skip_serializing_if (with default), transparent, flatten";
+                          skip_serializing_if (with default), transparent, flatten, tag, \
+                          content (with tag), untagged";
 
 /// serde words that do not change the shape of what crosses, accepted and left to serde.
 const SERDE_PASS: &[&str] = &["crate", "bound", "deny_unknown_fields", "expecting"];
@@ -1259,9 +1361,6 @@ const SERDE_PASS: &[&str] = &["crate", "bound", "deny_unknown_fields", "expectin
 /// carries one is refused: a declaration that ignored it would say a shape the value does
 /// not have.
 const SERDE_NOT_READ: &[&str] = &[
-    "tag",
-    "content",
-    "untagged",
     "with",
     "serialize_with",
     "deserialize_with",
@@ -1310,6 +1409,16 @@ struct SerdeWords {
     flatten: bool,
     /// `transparent` on a struct.
     transparent: bool,
+    /// `tag = ".."` on an enum: internally tagged, or adjacently with `content`.
+    tag: Option<String>,
+    /// `content = ".."` on an enum, read only beside `tag`.
+    content: Option<String>,
+    /// `untagged` on an enum.
+    untagged: bool,
+    /// Whether any `#[serde(..)]` was there at all, read or passed through: a data enum
+    /// carrying one is a serde type, which serde writes externally tagged unless it says
+    /// `tag` or `untagged` ([`SERDE_EXTERNAL`]).
+    any: bool,
 }
 
 impl SerdeWords {
@@ -1345,6 +1454,28 @@ const SERDE_ONE_WAY_DE: &str = "`skip_deserializing` alone: the field would be w
 const SERDE_SKIP_IF_ALONE: &str = "`skip_serializing_if` without `default`: a value omitted \
      on the way out would be missing on the way in; add `#[serde(default)]`, or use \
      `Option<T>`";
+
+/// A data enum that carries `#[serde(..)]` but neither `tag` nor `untagged`: serde writes it
+/// externally tagged, and htl declares its own `kind` form; the two would disagree.
+const SERDE_EXTERNAL: &str = "a data enum serde writes externally tagged (`{ \"Circle\": \
+     1.0 }`), which htl declares as a `kind`-tagged record; write `#[serde(tag = \"kind\")]` \
+     to make the two agree (or another tag name)";
+
+/// `content` with no `tag`.
+const SERDE_CONTENT_ALONE: &str = "`#[serde(content = ..)]` without `tag`: serde reads \
+     `content` only beside `tag` (adjacently tagged); add `tag = \"..\"`, or drop `content`";
+
+/// `untagged` with `tag`.
+const SERDE_TAG_UNTAGGED: &str = "`#[serde(tag = ..)]` and `#[serde(untagged)]` together: an \
+     enum is tagged or it is not (serde refuses the pair too); drop one";
+
+/// `#[serde(untagged)]` over two variants that both cross as tables.
+fn serde_untagged_tables(a: &str, b: &str) -> String {
+    format!(
+        "`untagged` over two table-shaped variants (`{a}` and `{b}`): Teal cannot tell them \
+         apart (nor can `from_lua` without a tag); use `#[serde(tag = \"..\")]`"
+    )
+}
 
 /// `#[serde(..)]` word `word` naming the type one way and another the other way.
 fn serde_two_names(word: &str, ser: Option<&str>, de: Option<&str>) -> String {
@@ -1390,6 +1521,8 @@ fn serde_misplaced(word: &str, place: SerdePlace) -> String {
         ("default", _) => ("a variant", "a field of a struct, or the struct itself"),
         ("transparent", SerdePlace::Field) => ("a field", "a struct"),
         ("transparent", _) => ("a variant", "a struct"),
+        ("tag" | "content" | "untagged", SerdePlace::Field) => ("a field", "an enum"),
+        ("tag" | "content" | "untagged", _) => ("a variant", "the enum"),
         _ => ("here", "elsewhere"),
     };
     format!("`#[serde({word})]` on {here} is not read by TealRecord; it reads it on {goes}")
@@ -1458,6 +1591,7 @@ fn serde_skip_value(meta: &syn::meta::ParseNestedMeta) -> syn::Result<()> {
 fn serde_words(attrs: &[Attribute], place: SerdePlace, at: &str) -> Result<SerdeWords, String> {
     let mut out = SerdeWords::default();
     for a in attrs.iter().filter(|a| a.path().is_ident("serde")) {
+        out.any = true;
         let Meta::List(list) = &a.meta else {
             return Err(format!(
                 "TealRecord: {at}: cannot read `{}`: serde's attribute takes a list, `#[serde(..)]`",
@@ -1541,6 +1675,27 @@ fn serde_words(attrs: &[Attribute], place: SerdePlace, at: &str) -> Result<Serde
                         Err(e) => refuse(e),
                     }
                 }
+                ("tag" | "content", SerdePlace::Container) => {
+                    let v = match meta.value().and_then(|v| v.parse::<syn::LitStr>()) {
+                        Ok(v) => v.value(),
+                        Err(_) => {
+                            return refuse(format!("`{word}` takes a string: `{word} = \"..\"`"));
+                        }
+                    };
+                    *if word == "tag" {
+                        &mut out.tag
+                    } else {
+                        &mut out.content
+                    } = Some(v);
+                    Ok(())
+                }
+                ("untagged", SerdePlace::Container) => {
+                    if !(meta.input.is_empty() || meta.input.peek(Token![,])) {
+                        return refuse("`untagged` takes no value: `#[serde(untagged)]`".into());
+                    }
+                    out.untagged = true;
+                    Ok(())
+                }
                 ("skip_serializing_if", SerdePlace::Field) => {
                     match serde_path_value(&meta, "skip_serializing_if") {
                         Ok(p) => {
@@ -1560,7 +1715,10 @@ fn serde_words(attrs: &[Attribute], place: SerdePlace, at: &str) -> Result<Serde
                     | "skip_serializing_if"
                     | "flatten"
                     | "default"
-                    | "transparent",
+                    | "transparent"
+                    | "tag"
+                    | "content"
+                    | "untagged",
                     _,
                 ) => refuse(serde_misplaced(&word, place)),
                 (w, _) if SERDE_PASS.contains(&w) => serde_skip_value(&meta),
@@ -1597,16 +1755,28 @@ pub fn serde_aliases(attrs: &[Attribute]) -> Vec<String> {
 
 /// `true` when reading `item` needs the source it sits in: a field of a struct says
 /// `#[serde(flatten)]`, and the flattened struct's fields are read from its definition
-/// ([`record_decl_in`]). The derive reads its file only then.
+/// ([`record_decl_in`]), or an enum under `#[serde(tag = "..")]` alone has a newtype variant,
+/// whose payload struct's fields are read the same way. The derive reads its file only then.
 pub fn needs_source(item: &Item) -> bool {
-    let Item::Struct(st) = item else {
-        return false;
-    };
-    st.fields.iter().any(|f| {
-        serde_words(&f.attrs, SerdePlace::Field, "")
-            .map(|w| w.flatten)
-            .unwrap_or(false)
-    })
+    match item {
+        Item::Struct(st) => st.fields.iter().any(|f| {
+            serde_words(&f.attrs, SerdePlace::Field, "")
+                .map(|w| w.flatten)
+                .unwrap_or(false)
+        }),
+        // An internally tagged newtype variant: its payload struct's fields sit beside the
+        // tag ([`tagged_newtype`]).
+        Item::Enum(en) => {
+            serde_words(&en.attrs, SerdePlace::Container, "")
+                .map(|w| w.tag.is_some() && w.content.is_none() && !w.untagged)
+                .unwrap_or(false)
+                && en
+                    .variants
+                    .iter()
+                    .any(|v| matches!(&v.fields, syn::Fields::Unnamed(u) if u.unnamed.len() == 1))
+        }
+        _ => false,
+    }
 }
 
 /// A Rust identifier's name as serde reads it: `r#type` is `type`.
@@ -1941,6 +2111,110 @@ fn flattened(
     Ok((id, fields))
 }
 
+/// The payload struct of newtype variant `vname` of `enum_name` under `#[serde(tag = "tag")]`
+/// alone, and its fields as its own record declares them: serde writes such a payload's
+/// fields beside the tag (and refuses at run time a payload that is not a struct or a map),
+/// so the variant record declares them there, and the conversion goes through the
+/// payload's [`crate::teal::TealFields`]. The payload is found as a flattened struct is
+/// ([`flattened`]): declared in the file being read (`scope`), named by its bare name,
+/// deriving `TealRecord`, with named fields, and not `transparent`. Anything else is
+/// refused, saying which of these it is not and the two ways out.
+fn tagged_newtype(
+    ty: &Type,
+    enum_name: &str,
+    vname: &str,
+    tag: &str,
+    uses: &[Use],
+    scope: Scope,
+) -> Result<(String, Vec<(String, String)>), String> {
+    let shown = quote_type(ty);
+    let refuse = |why: String| {
+        Err(format!(
+            "TealRecord: {enum_name}::{vname}: under `#[serde(tag = \"{tag}\")]` serde writes a \
+             newtype variant's payload beside the tag, so it has to be a struct; TealRecord \
+             reads one that derives TealRecord, has named fields and is declared in this same \
+             file, named by its bare name — `{shown}` {why}; make `{vname}` a struct variant, or \
+             write `#[serde(tag = \"{tag}\", content = \"..\")]`"
+        ))
+    };
+    // A type the table maps to a primitive, a sequence, a map or `any` is no struct,
+    // whatever file is at hand.
+    if let Ok(t) = teal_type_in(ty, enum_name, uses)
+        && (untagged_lua_type(&t).is_some() || t.starts_with('{') || t == "any")
+    {
+        return refuse("is not a struct".into());
+    }
+    let id = match ty {
+        Type::Path(p)
+            if p.qself.is_none()
+                && p.path.segments.len() == 1
+                && p.path.segments[0].arguments.is_none() =>
+        {
+            p.path.segments[0].ident.to_string()
+        }
+        _ => return refuse("is not a struct named by its bare name".into()),
+    };
+    let Some(items) = scope.items else {
+        return refuse("cannot be read: this expansion has no source file".into());
+    };
+    let st = match find_item(items, &id) {
+        Some(Item::Struct(st)) => st,
+        Some(_) => return refuse("is an enum".into()),
+        None => return refuse("is not declared in this file".into()),
+    };
+    if !derives_teal_record(&st.attrs) {
+        return refuse("does not derive TealRecord".into());
+    }
+    let syn::Fields::Named(named) = &st.fields else {
+        return refuse("has no named fields".into());
+    };
+    let teal = parse_teal_attrs(&st.attrs).map_err(|e| format!("TealRecord: {id}: {e}"))?;
+    let sw = serde_words(&st.attrs, SerdePlace::Container, &id)?;
+    if sw.transparent {
+        return refuse("is `#[serde(transparent)]`".into());
+    }
+    let within = [enum_name.to_string()];
+    let fields = record_fields(
+        named,
+        &id,
+        true,
+        teal.rename_all.or(sw.rename_all),
+        sw.default.is_some(),
+        uses,
+        Scope {
+            items: Some(items),
+            within: &within,
+        },
+    )?;
+    Ok((id, fields.fields))
+}
+
+/// A type as a message names it: a path as written, `<..>` standing for its arguments
+/// (`f64`, `geom::Point`, `Vec<..>`); any other type form as what it is.
+fn quote_type(ty: &Type) -> String {
+    match ty {
+        Type::Path(p) => {
+            let segs: Vec<String> = p
+                .path
+                .segments
+                .iter()
+                .map(|s| {
+                    if s.arguments.is_none() {
+                        s.ident.to_string()
+                    } else {
+                        format!("{}<..>", s.ident)
+                    }
+                })
+                .collect();
+            segs.join("::")
+        }
+        Type::Reference(_) => "a reference".into(),
+        Type::Tuple(_) => "a tuple".into(),
+        Type::Array(_) | Type::Slice(_) => "an array".into(),
+        _ => "the payload type".into(),
+    }
+}
+
 /// What a record field's `#[teal(..)]` says.
 #[derive(Default)]
 struct FieldAttrs {
@@ -2206,16 +2480,24 @@ fn reject_duplicate_words(en: &ItemEnum, words: &[String], enum_name: &str) -> R
     Ok(())
 }
 
-/// The kind an enum lowers to: all unit variants -> `enum`, otherwise a union of
-/// `where`-discriminated records. `rule` spells the variants ([`variant_word`]),
-/// `fields_rule` (`#[serde(rename_all_fields)]`) the fields of its struct variants. `uses`
-/// is what a variant's field types cross dotted against ([`teal_type_in`]).
+/// The kind an enum lowers to: all unit variants -> `enum`, otherwise (or when serde tags
+/// it) a union of records told apart as [`UnionRepr`] says — read from `sw`, the enum's own
+/// `#[serde(..)]` ([`enum_repr`]). `rule` spells the variants ([`variant_word`]),
+/// `sw.rename_all_fields` the fields of its struct variants. `uses` is what a variant's
+/// field types cross dotted against ([`teal_type_in`]); `scope` is where an internally
+/// tagged newtype's payload struct is looked up ([`tagged_newtype`]).
+///
+/// A data enum with any `#[serde(..)]` — on the enum, a variant or a variant's field — but
+/// neither `tag` nor `untagged` is refused ([`SERDE_EXTERNAL`]): serde writes it externally
+/// tagged, `{ "Circle": 1.0 }`, and htl's default is the `kind` form, which it keeps for a
+/// type serde has no say in. A unit-only enum is a string on both sides and unaffected.
 fn enum_kind(
     en: &ItemEnum,
     name: &str,
     rule: Option<RenameRule>,
-    fields_rule: Option<RenameRule>,
+    sw: &SerdeWords,
     uses: &[Use],
+    scope: Scope,
 ) -> Result<RecordKind, String> {
     if en.variants.is_empty() {
         return Err(format!(
@@ -2228,20 +2510,67 @@ fn enum_kind(
         .map(|v| variant_word(v, rule, name))
         .collect::<Result<_, _>>()?;
     reject_duplicate_words(en, &words, name)?;
-    if en
-        .variants
-        .iter()
-        .all(|v| matches!(v.fields, syn::Fields::Unit))
-    {
-        return Ok(RecordKind::Enum { variants: words });
-    }
+    let repr = match enum_repr(name, sw)? {
+        Some(r) => r,
+        None if en
+            .variants
+            .iter()
+            .all(|v| matches!(v.fields, syn::Fields::Unit)) =>
+        {
+            return Ok(RecordKind::Enum { variants: words });
+        }
+        None => {
+            let has_serde = |attrs: &[Attribute]| attrs.iter().any(|a| a.path().is_ident("serde"));
+            if sw.any
+                || en
+                    .variants
+                    .iter()
+                    .any(|v| has_serde(&v.attrs) || v.fields.iter().any(|f| has_serde(&f.attrs)))
+            {
+                return Err(format!("TealRecord: {name}: {SERDE_EXTERNAL}"));
+            }
+            UnionRepr::Kind
+        }
+    };
     let mut variants = Vec::new();
     for (v, word) in en.variants.iter().zip(words) {
         let vname = v.ident.to_string();
+        let refuse = |msg: String| Err(format!("TealRecord: {name}::{vname}: {msg}"));
         let shape = match &v.fields {
-            syn::Fields::Unit => VariantShape::Unit,
+            syn::Fields::Unit => {
+                if repr == UnionRepr::Untagged {
+                    return refuse(
+                        "`#[serde(untagged)]` writes a unit variant as `null`, which no Lua \
+                         value but nil carries and no union member declares; make it a newtype \
+                         or struct variant, or use `#[serde(tag = \"..\")]`"
+                            .into(),
+                    );
+                }
+                VariantShape::Unit
+            }
             syn::Fields::Unnamed(u) if u.unnamed.len() == 1 => {
-                VariantShape::Newtype(teal_type_in(&u.unnamed[0].ty, name, uses)?)
+                let ty = &u.unnamed[0].ty;
+                match &repr {
+                    UnionRepr::Internal { tag } => {
+                        let (record, fields) = tagged_newtype(ty, name, &vname, tag, uses, scope)?;
+                        if fields.iter().any(|(f, _)| f == tag) {
+                            return refuse(format!(
+                                "`{record}` brings a field named `{tag}`, which collides with \
+                                 the variant tag (`#[serde(tag = \"{tag}\")]`); rename one"
+                            ));
+                        }
+                        VariantShape::Inline { record, fields }
+                    }
+                    UnionRepr::Untagged if is_option(ty) => {
+                        return refuse(
+                            "`#[serde(untagged)]` over a newtype of an `Option`: `None` would \
+                             cross as nil, which no union member declares; drop the `Option`, \
+                             or use `#[serde(tag = \"..\")]`"
+                                .into(),
+                        );
+                    }
+                    _ => VariantShape::Newtype(teal_type_in(ty, name, uses)?),
+                }
             }
             syn::Fields::Unnamed(_) => {
                 return Err(
@@ -2250,15 +2579,33 @@ fn enum_kind(
                 );
             }
             syn::Fields::Named(fields) => {
-                let fs = record_fields(fields, name, false, fields_rule, false, uses, Scope::NONE)?
-                    .fields;
-                // The tag is `kind`, on every variant record; a payload field crossing
-                // under that name would be declared twice and could not survive a round
-                // trip.
-                if fs.iter().any(|(f, _)| f == "kind") {
-                    return Err(format!(
-                        "TealRecord: {name}::{vname}: a field named `kind` collides with the variant tag"
-                    ));
+                let fs = record_fields(
+                    fields,
+                    name,
+                    false,
+                    sw.rename_all_fields,
+                    false,
+                    uses,
+                    Scope::NONE,
+                )?
+                .fields;
+                // The tag sits beside the fields of every variant record (but under
+                // `content`, where the fields have a record of their own); a payload field
+                // crossing under that name would be declared twice and could not survive a
+                // round trip.
+                match &repr {
+                    UnionRepr::Kind if fs.iter().any(|(f, _)| f == "kind") => {
+                        return Err(format!(
+                            "TealRecord: {name}::{vname}: a field named `kind` collides with the variant tag"
+                        ));
+                    }
+                    UnionRepr::Internal { tag } if fs.iter().any(|(f, _)| f == tag) => {
+                        return refuse(format!(
+                            "a field named `{tag}` collides with the variant tag \
+                             (`#[serde(tag = \"{tag}\")]`); rename one"
+                        ));
+                    }
+                    _ => {}
                 }
                 VariantShape::Struct(fs)
             }
@@ -2269,7 +2616,94 @@ fn enum_kind(
             shape,
         });
     }
-    Ok(RecordKind::Union { variants })
+    match &repr {
+        UnionRepr::Untagged => untagged_discriminable(name, &variants)?,
+        UnionRepr::Adjacent { .. } => {
+            // `N_V_Content` sits beside the variant records, so it may not be one of them.
+            for v in &variants {
+                let content = format!("{}_Content", v.name);
+                if matches!(v.shape, VariantShape::Struct(_))
+                    && let Some(o) = variants.iter().find(|o| o.name == content)
+                {
+                    return Err(format!(
+                        "TealRecord: {name}::{}: its payload record `{name}_{content}` is the \
+                         record of variant `{name}::{}` too; rename one",
+                        v.name, o.name
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(RecordKind::Union { variants, repr })
+}
+
+/// The representation the enum's `#[serde(..)]` asks for, `None` when it says neither `tag`
+/// nor `untagged` (an `enum`, or htl's `kind` union). A tag has to be a Teal identifier:
+/// each variant record tests it in its `where` clause, and the vendored checker reads
+/// `where self["t"] == ".."` into the next line, which a record body starting `["t"]:`
+/// then breaks (`cannot index this expression`).
+fn enum_repr(name: &str, sw: &SerdeWords) -> Result<Option<UnionRepr>, String> {
+    let refuse = |msg: String| Err(format!("TealRecord: {name}: {msg}"));
+    match (&sw.tag, &sw.content, sw.untagged) {
+        (Some(_), _, true) => refuse(SERDE_TAG_UNTAGGED.into()),
+        (None, Some(_), _) => refuse(SERDE_CONTENT_ALONE.into()),
+        (None, None, true) => Ok(Some(UnionRepr::Untagged)),
+        (None, None, false) => Ok(None),
+        (Some(tag), content, false) => {
+            if !is_teal_ident(tag) {
+                return refuse(format!(
+                    "the tag {tag:?} is not a Teal identifier: each variant record tests it in \
+                     a `where` clause, which Teal reads as `self.<tag>` only (`self[\"..\"]` \
+                     runs into the record's next line); name the tag with letters, digits and \
+                     `_`, not a Teal keyword"
+                ));
+            }
+            match content {
+                None => Ok(Some(UnionRepr::Internal { tag: tag.clone() })),
+                Some(c) if c == tag => refuse(format!(
+                    "`tag` and `content` name the same key ({tag:?}): the payload would \
+                     overwrite the tag; give them two names"
+                )),
+                Some(c) if !representable_key(c) => refuse(serde_unrepresentable(c)),
+                Some(c) => Ok(Some(UnionRepr::Adjacent {
+                    tag: tag.clone(),
+                    content: c.clone(),
+                })),
+            }
+        }
+    }
+}
+
+/// An untagged union Teal can narrow and `from_lua` can read back: at most one variant
+/// crossing as a table, and no two crossing as the same Lua type — `from_lua` picks the
+/// variant by the value's `type()`, as Teal's `is` does.
+fn untagged_discriminable(name: &str, variants: &[UnionVariant]) -> Result<(), String> {
+    let mut seen: Vec<(&str, &str)> = Vec::new();
+    for v in variants {
+        let lua = match &v.shape {
+            VariantShape::Newtype(t) => untagged_lua_type(t).unwrap_or("table"),
+            _ => "table",
+        };
+        if let Some((other, _)) = seen.iter().find(|(_, l)| *l == lua) {
+            let (a, b) = (format!("{name}::{other}"), format!("{name}::{}", v.name));
+            return Err(format!(
+                "TealRecord: {name}: {}",
+                if lua == "table" {
+                    serde_untagged_tables(&a, &b)
+                } else {
+                    format!(
+                        "`untagged` over two variants that are both a Lua {lua} (`{a}` and \
+                         `{b}`): `from_lua` tells them apart by Lua type, so the second would \
+                         never be read back (and Teal can narrow to it); use \
+                         `#[serde(tag = \"..\")]`"
+                    )
+                }
+            ));
+        }
+        seen.push((&v.name, lua));
+    }
+    Ok(())
 }
 
 /// Attributes and name of a `#[derive(TealRecord)]` item, its [`RecordKind`] not built yet
@@ -2311,6 +2745,18 @@ fn record_kind(
                      of its struct variants); on a struct, `rename_all` renames the fields"
                 ));
             }
+            for (w, on) in [
+                ("tag", sw.tag.is_some()),
+                ("content", sw.content.is_some()),
+                ("untagged", sw.untagged),
+            ] {
+                if on {
+                    return Err(format!(
+                        "TealRecord: {name}: `#[serde({w})]` on a struct is not read by \
+                         TealRecord; it reads it on an enum"
+                    ));
+                }
+            }
             struct_kind(st, name, rule, &sw, uses, scope)
         }
         Item::Enum(en) => {
@@ -2325,7 +2771,7 @@ fn record_kind(
                     ));
                 }
             }
-            let kind = enum_kind(en, name, rule, sw.rename_all_fields, uses)?;
+            let kind = enum_kind(en, name, rule, &sw, uses, scope)?;
             Ok((kind, RecordConversion::default()))
         }
         _ => unreachable!(),
@@ -2342,17 +2788,6 @@ fn record_parts(
     let name = attrs.name.clone().unwrap_or(ident);
     let (kind, conv) = record_kind(item, &name, attrs.rename_all, &attrs.uses, scope)?;
     Ok((name, attrs, kind, conv))
-}
-
-/// Field lines of a variant record: `kind` first, then what the variant carries.
-fn variant_fields(v: &UnionVariant) -> Vec<(String, String)> {
-    let mut fields = vec![("kind".to_string(), "string".to_string())];
-    match &v.shape {
-        VariantShape::Unit => {}
-        VariantShape::Newtype(t) => fields.push(("value".to_string(), t.clone())),
-        VariantShape::Struct(fs) => fields.extend(fs.iter().cloned()),
-    }
-    fields
 }
 
 /// The declaration at `indent` (`""` for a module of its own, `"   "` nested in a host
@@ -2384,19 +2819,60 @@ fn kind_decl(name: &str, kind: &RecordKind, indent: &str) -> String {
             }
             s.push_str(&format!("{indent}end\n"));
         }
-        RecordKind::Union { variants } => {
+        RecordKind::Union { variants, repr } => {
+            let record =
+                |s: &mut String, rec: &str, cond: Option<String>, fs: &[(String, String)]| {
+                    s.push_str(&format!("{indent}{local}record {rec}\n"));
+                    if let Some(c) = cond {
+                        s.push_str(&format!("{inner}where {c}\n"));
+                    }
+                    for (f, t) in fs {
+                        s.push_str(&format!("{inner}{}: {t}\n", teal_field_key(f)));
+                    }
+                    s.push_str(&format!("{indent}end\n"));
+                };
+            let mut members = Vec::new();
             for v in variants {
-                s.push_str(&format!("{indent}{local}record {name}_{}\n", v.name));
-                s.push_str(&format!("{inner}where self.kind == \"{}\"\n", v.word));
-                for (f, t) in variant_fields(v) {
-                    s.push_str(&format!("{inner}{}: {t}\n", teal_field_key(&f)));
+                let rec = format!("{name}_{}", v.name);
+                let Some(tag) = repr.tag() else {
+                    // Untagged: a newtype is its payload's type in the union, a struct
+                    // variant a plain record (a `where` on it would make it one of several
+                    // `__is` tables, which Teal refuses beside a plain one).
+                    match &v.shape {
+                        VariantShape::Struct(fs) => {
+                            record(&mut s, &rec, None, fs);
+                            members.push(rec);
+                        }
+                        VariantShape::Newtype(t) => members.push(t.clone()),
+                        VariantShape::Unit | VariantShape::Inline { .. } => {}
+                    }
+                    continue;
+                };
+                let mut fields = vec![(tag.to_string(), "string".to_string())];
+                match (&v.shape, repr) {
+                    (VariantShape::Unit, _) => {}
+                    (VariantShape::Newtype(t), UnionRepr::Adjacent { content, .. }) => {
+                        fields.push((content.clone(), t.clone()))
+                    }
+                    (VariantShape::Newtype(t), _) => fields.push(("value".to_string(), t.clone())),
+                    (VariantShape::Struct(fs), UnionRepr::Adjacent { content, .. }) => {
+                        let crec = format!("{rec}_Content");
+                        record(&mut s, &crec, None, fs);
+                        fields.push((content.clone(), crec));
+                    }
+                    (VariantShape::Struct(fs), _)
+                    | (VariantShape::Inline { fields: fs, .. }, _) => {
+                        fields.extend(fs.iter().cloned())
+                    }
                 }
-                s.push_str(&format!("{indent}end\n"));
+                record(
+                    &mut s,
+                    &rec,
+                    Some(format!("self.{tag} == \"{}\"", v.word)),
+                    &fields,
+                );
+                members.push(rec);
             }
-            let members: Vec<String> = variants
-                .iter()
-                .map(|v| format!("{name}_{}", v.name))
-                .collect();
             s.push_str(&format!(
                 "{indent}{local}type {name} = {}\n",
                 members.join(" | ")
@@ -3807,15 +4283,15 @@ mod tests {
             e,
             "TealRecord: P.x: `#[serde(with)]` is not read by TealRecord; the attributes it reads \
              are rename_all, rename, alias, rename_all_fields, skip, default, \
-             skip_serializing_if (with default), transparent, flatten (and it leaves crate, \
-             bound, deny_unknown_fields, expecting to serde)"
+             skip_serializing_if (with default), transparent, flatten, tag, content (with tag), \
+             untagged (and it leaves crate, bound, deny_unknown_fields, expecting to serde)"
         );
         let e = record_decl(&item(
-            "#[derive(TealRecord)] #[serde(tag = \"type\")] pub enum S { A { x: f64 } }",
+            "#[derive(TealRecord)] #[serde(tag = \"type\")] pub enum S { #[serde(with = \"m\")] A { x: f64 } }",
         ))
         .unwrap_err();
         assert!(
-            e.starts_with("TealRecord: S: `#[serde(tag)]` is not read"),
+            e.starts_with("TealRecord: S::A: `#[serde(with)]` is not read"),
             "{e}"
         );
         let rd = record_decl(&item(
@@ -3931,7 +4407,7 @@ mod tests {
         .unwrap();
         assert_eq!(rd.decl, "local record P\n   a: integer\nend\n\nreturn P\n");
         let e = record_decl(&item(
-            "#[derive(TealRecord)] pub enum S { A { #[serde(default)] x: u32 } }",
+            "#[derive(TealRecord)] #[serde(tag = \"kind\")] pub enum S { A { #[serde(default)] x: u32 } }",
         ))
         .unwrap_err();
         assert_eq!(
@@ -4276,12 +4752,21 @@ impl Api {
              a `#[serde(rename = \"..\")]` of its own"
         );
         let e = record_decl(&item(
-            "#[derive(TealRecord)] pub enum S { A { #[serde(rename = \"kind\")] k: f64 } }",
+            "#[derive(TealRecord)] pub enum S { A { kind: f64 } }",
         ))
         .unwrap_err();
         assert_eq!(
             e,
             "TealRecord: S::A: a field named `kind` collides with the variant tag"
+        );
+        let e = record_decl(&item(
+            "#[derive(TealRecord)] #[serde(tag = \"kind\")] pub enum S { A { #[serde(rename = \"kind\")] k: f64 } }",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "TealRecord: S::A: a field named `kind` collides with the variant tag \
+             (`#[serde(tag = \"kind\")]`); rename one"
         );
     }
 
@@ -6087,5 +6572,243 @@ impl Api {
         std::fs::write(dir.join("src/extra.rs"), "pub fn g() {}\n").unwrap();
         let second = scan_fingerprint(&dir);
         assert_ne!(first, second, "a file was added");
+    }
+
+    /// The enums of `crates/htl/tests/record_serde_enum.rs`, with a host module nesting
+    /// them: what `htl dts` scans.
+    const ENUM_SRC: &str = "\
+#[derive(TealRecord)] #[serde(rename_all = \"camelCase\")]
+pub struct Move { pub from_x: f64, pub to_x: f64 }
+
+#[derive(TealRecord)] #[serde(tag = \"type\")]
+pub enum Internal { Idle, Moved(Move), Resized { w: f64, h: f64 } }
+
+#[derive(TealRecord)] #[serde(tag = \"t\", content = \"c\")]
+pub enum Adjacent { Dot, Circle(f64), Rect { w: f64, h: f64 } }
+
+#[derive(TealRecord)] #[serde(untagged)]
+pub enum Untagged { Name(String), Size(f64), Rect { w: f64, h: f64 } }
+
+pub struct Api;
+
+#[host_module(name = \"api\", dts = \"types/api.d.tl\", records = [Internal, Adjacent, Untagged])]
+impl Api {
+    pub fn get(&self) -> Internal { todo!() }
+}
+";
+
+    /// Each of serde's tagged representations, as the derive declares it from its file:
+    /// internally tagged tests `self.type` and inlines the newtype's struct; adjacently
+    /// tagged puts the payload under `c`, a struct variant's in a record of its own;
+    /// untagged is a union of the payloads' types. `record_serde_enum.rs`'s
+    /// `the_declarations_test_the_tag_serde_writes` asserts the same three texts.
+    #[test]
+    fn serde_tagged_enums_declare_the_union_serde_writes() {
+        let items = file(ENUM_SRC);
+        let rd = decl_in(&items, "Internal").unwrap();
+        assert_eq!(
+            rd.decl,
+            "local record Internal_Idle\n   where self.type == \"Idle\"\n   type: string\nend\n\
+             local record Internal_Moved\n   where self.type == \"Moved\"\n   type: string\n   \
+             fromX: number\n   toX: number\nend\n\
+             local record Internal_Resized\n   where self.type == \"Resized\"\n   type: string\n   \
+             w: number\n   h: number\nend\n\
+             local type Internal = Internal_Idle | Internal_Moved | Internal_Resized\n\n\
+             return Internal\n"
+        );
+        assert!(matches!(
+            &rd.kind,
+            RecordKind::Union { repr: UnionRepr::Internal { tag }, .. } if tag == "type"
+        ));
+        assert_eq!(
+            decl_in(&items, "Adjacent").unwrap().decl,
+            "local record Adjacent_Dot\n   where self.t == \"Dot\"\n   t: string\nend\n\
+             local record Adjacent_Circle\n   where self.t == \"Circle\"\n   t: string\n   \
+             c: number\nend\n\
+             local record Adjacent_Rect_Content\n   w: number\n   h: number\nend\n\
+             local record Adjacent_Rect\n   where self.t == \"Rect\"\n   t: string\n   \
+             c: Adjacent_Rect_Content\nend\n\
+             local type Adjacent = Adjacent_Dot | Adjacent_Circle | Adjacent_Rect\n\n\
+             return Adjacent\n"
+        );
+        assert_eq!(
+            decl_in(&items, "Untagged").unwrap().decl,
+            "local record Untagged_Rect\n   w: number\n   h: number\nend\n\
+             local type Untagged = string | number | Untagged_Rect\n\n\
+             return Untagged\n"
+        );
+        // A unit-only enum under `tag` is a union too: serde writes `{"type": "A"}`.
+        let rd = record_decl(&item(
+            "#[derive(TealRecord)] #[serde(tag = \"type\")] pub enum M { A, B }",
+        ))
+        .unwrap();
+        assert_eq!(
+            rd.decl,
+            "local record M_A\n   where self.type == \"A\"\n   type: string\nend\n\
+             local record M_B\n   where self.type == \"B\"\n   type: string\nend\n\
+             local type M = M_A | M_B\n\nreturn M\n"
+        );
+        // A unit-only enum with other serde words is still a string on both sides.
+        let rd = record_decl(&item(
+            "#[derive(TealRecord)] #[serde(rename_all = \"snake_case\")] pub enum M { InReview }",
+        ))
+        .unwrap();
+        assert_eq!(rd.decl, "local enum M\n   \"in_review\"\nend\n\nreturn M\n");
+    }
+
+    /// `htl dts`'s entry on a host module nesting the three enums: the nested records are
+    /// the derive's lines, indented, with no `local`.
+    #[test]
+    fn htl_dts_nests_the_serde_tagged_enums_as_the_derive_declares_them() {
+        let dir = core_common::tempdir("htl-dts-serde-enum", "default");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let lib = dir.join("src/lib.rs");
+        std::fs::write(&lib, ENUM_SRC).unwrap();
+        let generated = scan_rust_file(&lib, &dir).unwrap();
+        assert_eq!(generated.len(), 1);
+        let text = &generated[0].text;
+        let items = file(ENUM_SRC);
+        for name in ["Internal", "Adjacent", "Untagged"] {
+            let decl = decl_in(&items, name).unwrap().decl;
+            let body: String = decl
+                .lines()
+                .take_while(|l| !l.is_empty())
+                .map(|l| format!("   {}\n", l.strip_prefix("local ").unwrap_or(l)))
+                .collect();
+            assert!(text.contains(&body), "{name}:\n{body}\nin\n{text}");
+        }
+        assert!(
+            text.contains(
+                "   record Internal_Moved\n      where self.type == \"Moved\"\n      \
+                 type: string\n      fromX: number\n      toX: number\n   end\n"
+            ),
+            "{text}"
+        );
+    }
+
+    /// What a tagged representation cannot carry is refused, naming the rule.
+    #[test]
+    fn serde_tagged_enums_refuse_what_they_cannot_declare() {
+        let refused = |src: &str| record_decl(&item(src)).unwrap_err();
+        assert_eq!(
+            refused(
+                "#[derive(TealRecord)] #[serde(rename_all = \"snake_case\")] pub enum S { A(f64), B }"
+            ),
+            "TealRecord: S: a data enum serde writes externally tagged (`{ \"Circle\": 1.0 }`), \
+             which htl declares as a `kind`-tagged record; write `#[serde(tag = \"kind\")]` to \
+             make the two agree (or another tag name)"
+        );
+        // A serde word on a variant's field makes it a serde type just the same.
+        assert!(
+            refused("#[derive(TealRecord)] pub enum S { A { #[serde(rename = \"x\")] y: f64 } }")
+                .starts_with("TealRecord: S: a data enum serde writes externally tagged")
+        );
+        assert_eq!(
+            refused("#[derive(TealRecord)] #[serde(content = \"c\")] pub enum S { A(f64) }"),
+            "TealRecord: S: `#[serde(content = ..)]` without `tag`: serde reads `content` only \
+             beside `tag` (adjacently tagged); add `tag = \"..\"`, or drop `content`"
+        );
+        assert_eq!(
+            refused("#[derive(TealRecord)] #[serde(tag = \"t\", untagged)] pub enum S { A(f64) }"),
+            "TealRecord: S: `#[serde(tag = ..)]` and `#[serde(untagged)]` together: an enum is \
+             tagged or it is not (serde refuses the pair too); drop one"
+        );
+        assert_eq!(
+            refused(
+                "#[derive(TealRecord)] #[serde(untagged)] pub enum S { A { x: f64 }, B(Point) }"
+            ),
+            "TealRecord: S: `untagged` over two table-shaped variants (`S::A` and `S::B`): Teal \
+             cannot tell them apart (nor can `from_lua` without a tag); use \
+             `#[serde(tag = \"..\")]`"
+        );
+        assert_eq!(
+            refused("#[derive(TealRecord)] #[serde(untagged)] pub enum S { A(f64), B(i64) }"),
+            "TealRecord: S: `untagged` over two variants that are both a Lua number (`S::A` and \
+             `S::B`): `from_lua` tells them apart by Lua type, so the second would never be \
+             read back (and Teal can narrow to it); use `#[serde(tag = \"..\")]`"
+        );
+        assert_eq!(
+            refused("#[derive(TealRecord)] #[serde(untagged)] pub enum S { A(f64), B }"),
+            "TealRecord: S::B: `#[serde(untagged)]` writes a unit variant as `null`, which no \
+             Lua value but nil carries and no union member declares; make it a newtype or \
+             struct variant, or use `#[serde(tag = \"..\")]`"
+        );
+        assert!(
+            refused(
+                "#[derive(TealRecord)] #[serde(untagged)] pub enum S { A(Option<String>), B(f64) }"
+            )
+            .starts_with("TealRecord: S::A: `#[serde(untagged)]` over a newtype of an `Option`")
+        );
+        assert_eq!(
+            refused("#[derive(TealRecord)] #[serde(tag = \"type\")] pub enum S { A(f64) }"),
+            "TealRecord: S::A: under `#[serde(tag = \"type\")]` serde writes a newtype variant's \
+             payload beside the tag, so it has to be a struct; TealRecord reads one that derives \
+             TealRecord, has named fields and is declared in this same file, named by its bare \
+             name — `f64` is not a struct; make `A` a struct variant, or write \
+             `#[serde(tag = \"type\", content = \"..\")]`"
+        );
+        // With no source (a derive whose file is not at hand), and over a type with arguments.
+        assert!(
+            refused("#[derive(TealRecord)] #[serde(tag = \"type\")] pub enum S { A(Move) }")
+                .contains("— `Move` cannot be read: this expansion has no source file;")
+        );
+        assert!(
+            refused("#[derive(TealRecord)] #[serde(tag = \"type\")] pub enum S { A(Vec<u8>) }")
+                .contains("— `Vec<..>` is not a struct;")
+        );
+        let items = file(
+            "#[derive(TealRecord)] pub enum Inner { X, Y }\n\
+             pub struct Plain { pub x: f64 }\n\
+             #[derive(TealRecord)] pub struct Tagged { pub r#type: String }\n\
+             #[derive(TealRecord)] #[serde(tag = \"type\")] pub enum S { A(Inner) }\n\
+             #[derive(TealRecord)] #[serde(tag = \"type\")] pub enum T { A(Plain) }\n\
+             #[derive(TealRecord)] #[serde(tag = \"type\")] pub enum U { A(Tagged) }\n",
+        );
+        assert!(
+            decl_in(&items, "S")
+                .unwrap_err()
+                .contains("— `Inner` is an enum;")
+        );
+        assert!(
+            decl_in(&items, "T")
+                .unwrap_err()
+                .contains("— `Plain` does not derive TealRecord;")
+        );
+        assert_eq!(
+            decl_in(&items, "U").unwrap_err(),
+            "TealRecord: U::A: `Tagged` brings a field named `type`, which collides with the \
+             variant tag (`#[serde(tag = \"type\")]`); rename one"
+        );
+        assert!(
+            refused("#[derive(TealRecord)] #[serde(tag = \"the-tag\")] pub enum S { A }")
+                .starts_with("TealRecord: S: the tag \"the-tag\" is not a Teal identifier")
+        );
+        assert_eq!(
+            refused(
+                "#[derive(TealRecord)] #[serde(tag = \"t\", content = \"t\")] pub enum S { A(f64) }"
+            ),
+            "TealRecord: S: `tag` and `content` name the same key (\"t\"): the payload would \
+             overwrite the tag; give them two names"
+        );
+        assert_eq!(
+            refused(
+                "#[derive(TealRecord)] #[serde(tag = \"t\", content = \"c\")] \
+                 pub enum S { A { x: f64 }, A_Content(f64) }"
+            ),
+            "TealRecord: S::A: its payload record `S_A_Content` is the record of variant \
+             `S::A_Content` too; rename one"
+        );
+        assert_eq!(
+            refused("#[derive(TealRecord)] #[serde(tag = \"t\")] pub struct P { pub x: f64 }"),
+            "TealRecord: P: `#[serde(tag)]` on a struct is not read by TealRecord; it reads it \
+             on an enum"
+        );
+        assert_eq!(
+            refused(
+                "#[derive(TealRecord)] #[serde(tag = \"t\")] pub enum S { #[serde(untagged)] A(f64) }"
+            ),
+            "TealRecord: S::A: `#[serde(untagged)]` on a variant is not read by TealRecord; it \
+             reads it on the enum"
+        );
     }
 }

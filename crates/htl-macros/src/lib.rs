@@ -746,17 +746,28 @@ fn write_dts(rel: &str, text: &str) -> Result<(), String> {
 ///   `htl::teal::TealFields`; a wrong one is reported under this record, `Call.trace`).
 ///   On the struct: `default` (a nil field takes the same field of `Self::default()`) and
 ///   `transparent` (`type N = T`, crossing as its one field that is not skipped).
+/// - read, on an enum: `tag = "T"` (internally tagged: each variant record `where self.T ==
+///   ".."`, a struct variant's fields beside the tag, and a newtype variant's payload a
+///   `TealRecord` struct in the same file whose fields sit beside the tag), `tag = "T",
+///   content = "C"` (adjacently tagged: the payload under `C`, a struct variant's fields in
+///   a record `N_V_Content`), `untagged` (the payload alone: newtypes over `string`,
+///   `number` / `integer`, `boolean`, and at most one variant crossing as a table, read back
+///   by Lua type). The tag is a Teal identifier.
+/// - **a data enum with any `#[serde(..)]` but neither `tag` nor `untagged` is refused**:
+///   serde writes it externally tagged, htl declares the `kind` form; write
+///   `#[serde(tag = "kind")]` to make the two agree. An enum with no `#[serde(..)]` keeps
+///   the `kind` form, and a unit-only enum is a string on both sides either way.
 /// - refused at compile time, naming the rule and the way out: a name that differs by
 ///   direction (`rename(serialize = "a", deserialize = "b")`, or one side alone;
 ///   `rename_all` the same); `skip_serializing` / `skip_deserializing` alone and
 ///   `skip_serializing_if` with nowhere for the omitted value to come from; `flatten` of a
 ///   map, an `Option`, an enum, or a struct the derive cannot read in this file;
-///   `transparent` over other than one field; and the words that change the shape and are
-///   not read yet — `tag`, `content`, `untagged`, `with`, `serialize_with`,
-///   `deserialize_with`, `from`, `into`, `try_from`, `remote`, `other`, `borrow`, `getter`,
-///   `variant_identifier`, `field_identifier`; nothing is silently ignored. A data enum
-///   crosses in the `kind` form whatever serde's own form is, and its variants' fields do
-///   not take the presence words yet.
+///   `transparent` over other than one field; `content` without `tag`; `untagged` over a
+///   unit variant or two variants crossing as tables (Teal cannot tell them apart; use
+///   `tag`); and the words that change the shape and are not read yet — `with`,
+///   `serialize_with`, `deserialize_with`, `from`, `into`, `try_from`, `remote`, `other`,
+///   `borrow`, `getter`, `variant_identifier`, `field_identifier`; nothing is silently
+///   ignored. A data enum's variants' fields do not take the presence words yet.
 /// - passed through to serde: `crate`, `bound`, `deny_unknown_fields`, `expecting`, and
 ///   `rename` on the type itself.
 ///
@@ -790,6 +801,22 @@ fn write_dts(rel: &str, text: &str) -> Result<(), String> {
 /// //    tags: {string}
 /// //    trace: string
 /// // end
+/// ```
+///
+/// ```rust,ignore
+/// #[derive(Serialize, Deserialize, TealRecord)]
+/// #[serde(tag = "t", content = "c")]
+/// enum Shape { Dot, Circle(f64) }
+/// // local record Shape_Dot
+/// //    where self.t == "Dot"
+/// //    t: string
+/// // end
+/// // local record Shape_Circle
+/// //    where self.t == "Circle"
+/// //    t: string
+/// //    c: number
+/// // end
+/// // local type Shape = Shape_Dot | Shape_Circle
 /// ```
 ///
 /// ```rust,ignore
@@ -871,10 +898,10 @@ fn expand_record(item: &Item) -> Result<TokenStream, String> {
             enum_into(en, variants),
             enum_from(en, name, variants),
         ),
-        (Item::Enum(en), dts::RecordKind::Union { variants }) => (
+        (Item::Enum(en), dts::RecordKind::Union { variants, repr }) => (
             &en.ident,
-            union_into(en, variants),
-            union_from(en, name, variants),
+            union_into(en, variants, repr),
+            union_from(en, name, variants, repr),
         ),
         _ => return Err("TealRecord: only structs and enums are supported".into()),
     };
@@ -1228,10 +1255,24 @@ fn enum_from(en: &ItemEnum, name: &str, variants: &[String]) -> TokenStream2 {
     }
 }
 
-/// Data enum -> table: `kind` carries the variant's word (the one its `where` clause
-/// tests), a newtype payload goes under `value`, struct-variant fields under the names
-/// `dts` declared them as.
-fn union_into(en: &ItemEnum, variants: &[dts::UnionVariant]) -> TokenStream2 {
+/// Data enum -> table: the tag (`kind`, or serde's `tag`) carries the variant's word (the
+/// one its `where` clause tests); a newtype payload goes under `value` (htl's form) or the
+/// content key (`tag` + `content`), or — under `tag` alone — writes its struct's fields
+/// beside the tag through its `TealFields`; struct-variant fields go under the names `dts`
+/// declared them as, beside the tag or in a table of their own under the content key. An
+/// untagged enum is [`untagged_into`].
+fn union_into(
+    en: &ItemEnum,
+    variants: &[dts::UnionVariant],
+    repr: &dts::UnionRepr,
+) -> TokenStream2 {
+    let Some(tag) = repr.tag() else {
+        return untagged_into(en, variants);
+    };
+    let content = match repr {
+        dts::UnionRepr::Adjacent { content, .. } => Some(content.as_str()),
+        _ => None,
+    };
     let arms: Vec<TokenStream2> = en
         .variants
         .iter()
@@ -1239,16 +1280,28 @@ fn union_into(en: &ItemEnum, variants: &[dts::UnionVariant]) -> TokenStream2 {
         .map(|(v, uv)| {
             let id = &v.ident;
             let vname = uv.word.as_str();
-            match &v.fields {
-                syn::Fields::Unit => quote! {
-                    Self::#id => { t.set("kind", #vname)?; }
+            match (&v.fields, &uv.shape) {
+                (syn::Fields::Unit, _) => quote! {
+                    Self::#id => { t.set(#tag, #vname)?; }
                 },
-                syn::Fields::Unnamed(_) => quote! {
-                    Self::#id(value) => { t.set("kind", #vname)?; t.set("value", value)?; }
-                },
-                syn::Fields::Named(n) => {
+                (syn::Fields::Unnamed(u), dts::VariantShape::Inline { .. }) => {
+                    let ty = &u.unnamed[0].ty;
+                    quote! {
+                        Self::#id(value) => {
+                            t.set(#tag, #vname)?;
+                            <#ty as ::htl::teal::TealFields>::write_fields(value, &t, lua)?;
+                        }
+                    }
+                }
+                (syn::Fields::Unnamed(_), _) => {
+                    let key = content.unwrap_or("value");
+                    quote! {
+                        Self::#id(value) => { t.set(#tag, #vname)?; t.set(#key, value)?; }
+                    }
+                }
+                (syn::Fields::Named(n), shape) => {
                     let ids: Vec<_> = n.named.iter().map(|f| f.ident.as_ref().unwrap()).collect();
-                    let dts::VariantShape::Struct(fields) = &uv.shape else {
+                    let dts::VariantShape::Struct(fields) = shape else {
                         unreachable!("dts::record_decl and this walk see the same variants")
                     };
                     let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
@@ -1256,11 +1309,21 @@ fn union_into(en: &ItemEnum, variants: &[dts::UnionVariant]) -> TokenStream2 {
                     // shadow the table or the state the arm writes through.
                     let binds: Vec<_> =
                         ids.iter().map(|i| format_ident!("__htl_f_{}", i)).collect();
-                    quote! {
-                        Self::#id { #( #ids: #binds ),* } => {
-                            t.set("kind", #vname)?;
-                            #( t.set(#names, #binds)?; )*
-                        }
+                    match content {
+                        None => quote! {
+                            Self::#id { #( #ids: #binds ),* } => {
+                                t.set(#tag, #vname)?;
+                                #( t.set(#names, #binds)?; )*
+                            }
+                        },
+                        Some(c) => quote! {
+                            Self::#id { #( #ids: #binds ),* } => {
+                                t.set(#tag, #vname)?;
+                                let __htl_c = lua.create_table()?;
+                                #( __htl_c.set(#names, #binds)?; )*
+                                t.set(#c, __htl_c)?;
+                            }
+                        },
                     }
                 }
             }
@@ -1273,10 +1336,23 @@ fn union_into(en: &ItemEnum, variants: &[dts::UnionVariant]) -> TokenStream2 {
     }
 }
 
-/// Table -> data enum: `kind` picks the variant, then its fields are read as a record's
-/// are, reported under `Enum.Variant`. No table, no `kind`, or an unknown one names the
-/// enum and lists the variants.
-fn union_from(en: &ItemEnum, name: &str, variants: &[dts::UnionVariant]) -> TokenStream2 {
+/// Table -> data enum: the tag picks the variant, then its payload is read as a record's
+/// fields are, reported under `Enum.Variant` (`Enum.Variant.c` inside an adjacently tagged
+/// struct payload). No table, no tag, or an unknown one names the enum and lists the
+/// variants. An untagged enum is [`untagged_from`].
+fn union_from(
+    en: &ItemEnum,
+    name: &str,
+    variants: &[dts::UnionVariant],
+    repr: &dts::UnionRepr,
+) -> TokenStream2 {
+    let Some(tag) = repr.tag() else {
+        return untagged_from(en, name, variants);
+    };
+    let content = match repr {
+        dts::UnionRepr::Adjacent { content, .. } => Some(content.as_str()),
+        _ => None,
+    };
     let vnames: Vec<&str> = variants.iter().map(|v| v.word.as_str()).collect();
     let arms: Vec<TokenStream2> = en
         .variants
@@ -1291,14 +1367,39 @@ fn union_from(en: &ItemEnum, name: &str, variants: &[dts::UnionVariant]) -> Toke
             match (&v.fields, &uv.shape) {
                 (syn::Fields::Unit, _) => quote! { #vname => Ok(Self::#id), },
                 (syn::Fields::Unnamed(u), dts::VariantShape::Newtype(teal)) => {
-                    let read =
-                        field_read(&quote!(#path), "value", &[], &u.unnamed[0].ty, teal, None);
+                    let key = content.unwrap_or("value");
+                    let read = field_read(&quote!(#path), key, &[], &u.unnamed[0].ty, teal, None);
                     quote! { #vname => Ok(Self::#id(#read)), }
                 }
-                (syn::Fields::Named(n), dts::VariantShape::Struct(fields)) => {
-                    let reads = field_reads(&path, n, fields);
-                    quote! { #vname => Ok(Self::#id { #( #reads, )* }), }
+                (syn::Fields::Unnamed(u), dts::VariantShape::Inline { .. }) => {
+                    let ty = &u.unnamed[0].ty;
+                    quote! {
+                        #vname => Ok(Self::#id(
+                            <#ty as ::htl::teal::TealFields>::read_fields(&t, lua, #path)?
+                        )),
+                    }
                 }
+                (syn::Fields::Named(n), dts::VariantShape::Struct(fields)) => match content {
+                    None => {
+                        let reads = field_reads(&path, n, fields);
+                        quote! { #vname => Ok(Self::#id { #( #reads, )* }), }
+                    }
+                    Some(c) => {
+                        let crec = format!("{name}_{}_Content", uv.name);
+                        let reads = field_reads(&format!("{path}.{c}"), n, fields);
+                        quote! {
+                            #vname => {
+                                let __htl_c: ::htl::mlua::Value = t.get(#c)?;
+                                let got = __htl_c.type_name();
+                                // The fields are read out of the content table, under
+                                // `Enum.Variant.<content>`.
+                                let t = <::htl::mlua::Table as ::htl::mlua::FromLua>::from_lua(__htl_c, lua)
+                                    .map_err(|e| ::htl::teal::field_error(#path, #c, #crec, got, e))?;
+                                Ok(Self::#id { #( #reads, )* })
+                            }
+                        }
+                    }
+                },
                 _ => unreachable!("dts::record_decl and this walk see the same variants"),
             }
         })
@@ -1309,7 +1410,7 @@ fn union_from(en: &ItemEnum, name: &str, variants: &[dts::UnionVariant]) -> Toke
             ::htl::mlua::Value::Table(t) => t,
             other => return Err(::htl::teal::enum_error(#name, VARIANTS, other.type_name())),
         };
-        let kind: ::htl::mlua::Value = t.get("kind")?;
+        let kind: ::htl::mlua::Value = t.get(#tag)?;
         let kind = match &kind {
             ::htl::mlua::Value::String(s) => match s.to_str() {
                 Ok(s) => s.to_string(),
@@ -1321,6 +1422,98 @@ fn union_from(en: &ItemEnum, name: &str, variants: &[dts::UnionVariant]) -> Toke
         match kind.as_str() {
             #( #arms )*
             other => Err(::htl::teal::enum_error(#name, VARIANTS, &format!("\"{other}\""))),
+        }
+    }
+}
+
+/// Untagged enum -> the payload alone: a newtype's value as its own type converts, a struct
+/// variant's fields in a table, as serde writes `#[serde(untagged)]`.
+fn untagged_into(en: &ItemEnum, variants: &[dts::UnionVariant]) -> TokenStream2 {
+    let arms: Vec<TokenStream2> = en
+        .variants
+        .iter()
+        .zip(variants)
+        .map(|(v, uv)| {
+            let id = &v.ident;
+            match (&v.fields, &uv.shape) {
+                (syn::Fields::Named(n), dts::VariantShape::Struct(fields)) => {
+                    let ids: Vec<_> = n.named.iter().map(|f| f.ident.as_ref().unwrap()).collect();
+                    let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+                    let binds: Vec<_> =
+                        ids.iter().map(|i| format_ident!("__htl_f_{}", i)).collect();
+                    quote! {
+                        Self::#id { #( #ids: #binds ),* } => {
+                            let t = lua.create_table()?;
+                            #( t.set(#names, #binds)?; )*
+                            Ok(::htl::mlua::Value::Table(t))
+                        }
+                    }
+                }
+                _ => quote! {
+                    Self::#id(value) => ::htl::mlua::IntoLua::into_lua(value, lua),
+                },
+            }
+        })
+        .collect();
+    quote! { match self { #( #arms )* } }
+}
+
+/// Value -> untagged enum, by the value's Lua type, as Teal's `is` narrows: a string, a
+/// number or a boolean goes to the newtype over that type, a table to the one variant that
+/// crosses as a table (`dts` refuses two of either). A newtype over another type takes
+/// whatever no primitive variant did, through its own `FromLua`. Anything left names the
+/// enum and lists the union's members.
+fn untagged_from(en: &ItemEnum, name: &str, variants: &[dts::UnionVariant]) -> TokenStream2 {
+    let mut members: Vec<String> = Vec::new();
+    let mut arms: Vec<TokenStream2> = Vec::new();
+    let mut rest: Option<TokenStream2> = None;
+    for (v, uv) in en.variants.iter().zip(variants) {
+        let id = &v.ident;
+        let path = format!("{name}.{}", uv.name);
+        match (&v.fields, &uv.shape) {
+            (syn::Fields::Named(n), dts::VariantShape::Struct(fields)) => {
+                members.push(format!("{name}_{}", uv.name));
+                let reads = field_reads(&path, n, fields);
+                arms.push(quote! {
+                    ::htl::mlua::Value::Table(t) => Ok(Self::#id { #( #reads, )* }),
+                });
+            }
+            (syn::Fields::Unnamed(u), dts::VariantShape::Newtype(teal)) => {
+                members.push(teal.clone());
+                let ty = &u.unnamed[0].ty;
+                let convert = quote! {
+                    {
+                        let got = v.type_name();
+                        let x = <#ty as ::htl::mlua::FromLua>::from_lua(v, lua)
+                            .map_err(|e| ::htl::teal::value_error(#path, #teal, got, e))?;
+                        Ok(Self::#id(x))
+                    }
+                };
+                let pat = match dts::untagged_lua_type(teal) {
+                    Some("string") => quote! { v @ ::htl::mlua::Value::String(_) },
+                    Some("number") => quote! {
+                        v @ (::htl::mlua::Value::Integer(_) | ::htl::mlua::Value::Number(_))
+                    },
+                    Some(_) => quote! { v @ ::htl::mlua::Value::Boolean(_) },
+                    None => {
+                        rest = Some(quote! { v => #convert });
+                        continue;
+                    }
+                };
+                arms.push(quote! { #pat => #convert, });
+            }
+            _ => unreachable!("dts::record_decl refuses any other untagged variant"),
+        }
+    }
+    let rest = rest.unwrap_or_else(|| {
+        quote! { other => Err(::htl::teal::union_error(#name, MEMBERS, other.type_name())) }
+    });
+    quote! {
+        #[allow(dead_code)]
+        const MEMBERS: &[&str] = &[#( #members ),*];
+        match value {
+            #( #arms )*
+            #rest
         }
     }
 }
