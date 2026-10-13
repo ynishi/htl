@@ -172,6 +172,17 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
+A type the host already sends as JSON is written once, with serde, and crosses as serde
+names it: `TealRecord` reads `rename_all`, `rename`, `alias`, `skip`, `default`, `flatten`,
+`transparent`, `tag` and the rest, so the `.d.tl` declares the keys `serde_json` writes and
+the table Teal receives carries them. A word it cannot honour stops the build naming the way
+out — `#[teal(as = "..")]`, `#[teal(serde)]` or `#[teal(skip)]` on the field — and a data
+enum, which serde would write externally tagged, says `#[serde(tag = "kind")]` to agree. A
+host with no serde of its own derives through `htl::serde` and writes
+`#[serde(crate = "htl::serde")]`; the `Call` of `examples/embed`'s `--ask` mode is one. What
+is read, passed through and refused:
+[`htl::dts`](https://docs.rs/htl/latest/htl/dts/index.html#a-type-serde-already-describes).
+
 The reference is [docs.rs/htl](https://docs.rs/htl): its front page walks this example,
 and the pages behind it are
 
@@ -179,7 +190,7 @@ and the pages behind it are
   `errors = "return"`, `Option`, `UserDataRef`, `uses`, `async fn` (feature `async`; who
   runs the program that calls one is under Async);
 - [`dts`](https://docs.rs/htl/latest/htl/dts/index.html) — what each Rust shape becomes
-  on the Teal side (`#[derive(TealRecord)]`, `rename_all`, data enums as unions);
+  on the Teal side (`#[derive(TealRecord)]`, serde's attributes, data enums as unions);
 - [`Strict<T>`](https://docs.rs/htl/latest/htl/teal/struct.Strict.html) and
   [`Htl::strict_strings`](https://docs.rs/htl/latest/htl/struct.Htl.html#method.strict_strings)
   — the string boundary at run time;

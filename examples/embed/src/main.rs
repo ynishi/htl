@@ -18,7 +18,9 @@
 //!   asks from a thread of its own through an `htl::task::Asker` with the kind's deadline,
 //!   Teal takes each one from `gate:calls()` and replies or rejects, and an ask that fails
 //!   — here the one Teal answers too late and the one it rejects — becomes the safe side
-//!   (deny) in one place.
+//!   (deny) in one place. The question, `Call`, is a serde type (`rename_all`, a renamed
+//!   field) and crosses under serde's names: the mode prints its JSON first, and
+//!   `scripts/gate.d.tl` declares the same keys.
 
 use anyhow::Result;
 use htl::task::{Ask, Asker, RecvChannel, Request};
@@ -173,10 +175,19 @@ impl Http {
     }
 }
 
-/// What the host asks Teal: may `path` be served?
-#[derive(TealRecord, Debug, Clone)]
+/// What the host asks Teal: may `path` be served? Written as a host writes the type it
+/// already sends as JSON: serde names the fields, and `TealRecord` reads those names, so
+/// `gate.Call` declares `requestPath` and `clientId` — the keys `serde_json` writes — and
+/// the table Teal receives carries the same keys. The example has no serde dependency of
+/// its own: it derives through `htl::serde`, and `crate = "htl::serde"` says so.
+#[derive(htl::serde::Serialize, htl::serde::Deserialize, TealRecord, Debug, Clone)]
+#[serde(crate = "htl::serde", rename_all = "camelCase")]
 pub struct Call {
+    #[serde(rename = "requestPath")]
     pub path: String,
+    /// Who asks, when the handler knows; left out of the object (and nil in Teal) when not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
 }
 
 /// Teal's answer. `reason` says why a path is denied, and is empty when it is allowed.
@@ -207,6 +218,7 @@ impl Gate {
 async fn ask_gate(asker: &Asker<Call, Decision>, path: &str) -> Decision {
     let call = Call {
         path: path.to_string(),
+        client_id: None,
     };
     asker.ask(call).await.unwrap_or_else(|e| Decision {
         allow: false,
@@ -269,6 +281,13 @@ fn main() -> Result<()> {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_time()
                 .build()?;
+            // The wire form of the first question, the JSON this host would send for it: the
+            // keys are the ones `scripts/gate.d.tl` declares.
+            let first = Call {
+                path: "/public/index".to_string(),
+                client_id: None,
+            };
+            println!("wire {}", htl::serde_json::to_string(&first)?);
             for path in ["/public/index", "/admin", "relative", "/slow"] {
                 let d = rt.block_on(ask_gate(&asker, path));
                 if d.allow {

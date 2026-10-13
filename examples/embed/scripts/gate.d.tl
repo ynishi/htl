@@ -2,7 +2,8 @@ local type task = require("htl.task")
 
 local record gate
    record Call
-      path: string
+      requestPath: string
+      clientId: string
    end
    record Decision
       allow: boolean

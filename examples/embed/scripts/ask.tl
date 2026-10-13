@@ -2,8 +2,11 @@ local task = require("htl.task")
 local gate = require("gate")
 
 -- The decision the host moved into Teal: a path under `/public/` may be served.
+-- `requestPath` is the name the wire has: `Call` is a serde type with
+-- `#[serde(rename = "requestPath")] path`, so `gate.Call` declares the key serde writes,
+-- and the Rust name, `call.path`, is a check error here.
 local function decide(call: gate.Call): gate.Decision
-   if call.path:sub(1, #"/public/") == "/public/" then
+   if call.requestPath:sub(1, #"/public/") == "/public/" then
       return { allow = true, reason = "" }
    end
    return { allow = false, reason = "not public" }
@@ -20,11 +23,11 @@ while open do
          if not ok then
             return false
          end
-         if req.value.path:sub(1, 1) ~= "/" then
+         if req.value.requestPath:sub(1, 1) ~= "/" then
             -- Not a question the gate answers: refused with a reason, which reaches the
             -- host as `AskError::Rejected` — told apart from a deny the gate decided.
             assert(req:reject("path must start with /"), "a reject in time was not delivered")
-         elseif req.value.path == "/slow" then
+         elseif req.value.requestPath == "/slow" then
             -- Longer than the deadline: the host has taken its default by now, and the
             -- late answer is discarded rather than delivered to the next question.
             await task.after(500):wait()

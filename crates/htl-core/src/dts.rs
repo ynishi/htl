@@ -69,17 +69,22 @@
 //! name `task` for `htl.task` itself is accepted in the default's place (no second line);
 //! one that names `task` for a different module, where the declaration also needs
 //! `htl.task`, is refused, naming both; see [`TealAttrs::uses`].
+//!
 //! `#[teal(rename_all = "..")]` takes serde's set — `lowercase`, `UPPERCASE`,
 //! `PascalCase`, `camelCase`, `snake_case`, `SCREAMING_SNAKE_CASE`, `kebab-case`,
 //! `SCREAMING-KEBAB-CASE` — applied serde's way ([`RenameRule`]): on an enum it spells the
 //! variants, on a struct the fields, and `#[teal(name = "..")]` on one variant overrides
-//! it. A table coming back that does not fit says which record, which field (as the Teal
-//! side names it), what was declared and what arrived ([`crate::teal::FieldError`]):
+//! it; a type's `#[serde(rename_all)]` is read the same way (next section). A table coming
+//! back that does not fit says which record, which field (as the Teal side names it), what
+//! was declared and what arrived ([`crate::teal::FieldError`]):
 //! `Outcome.cause: expected string, got nil`.
 //!
-//! **What a type's `#[serde(..)]` says is read**, so a type deriving `Serialize` /
+//! # A type serde already describes
+//!
+//! What a type's `#[serde(..)]` says is read, so a type deriving `Serialize` /
 //! `Deserialize` beside `TealRecord` is declared and crosses under the names serde gives
-//! it, and the keys of the Lua table are the keys `serde_json` writes:
+//! it, and the keys of the Lua table are the keys `serde_json` writes. The `#[serde(..)]`
+//! rows of the table above are the examples; the rule, word by word:
 //!
 //! - read, the names: `rename_all` (a struct's fields, an enum's variants),
 //!   `rename_all_fields` (on an enum, the fields of its struct variants), `rename` (a field,
@@ -114,18 +119,18 @@
 //!   crossing as a table — a struct variant, a plain `record N_V`, or a newtype over any
 //!   other type). With any of them a unit-only enum is a union too, since serde writes a
 //!   table for it. The tag has to be a Teal identifier: Teal's `where` reads `self.T`, and
-//!   `self["T"]` runs into the record's next line in the vendored checker.
-//! - **a data enum with any `#[serde(..)]` but neither `tag` nor `untagged` is refused**:
-//!   serde writes it externally tagged (`{ "Circle": 1.0 }`), and htl's default stays the
-//!   `kind` form below, which a type with no `#[serde(..)]` keeps. The host's way to make
-//!   the two agree is one line, `#[serde(tag = "kind")]` (or another tag name). A unit-only
-//!   enum is a string on both sides and is not affected.
+//!   `self["T"]` runs into the record's next line in the vendored checker. **A data enum
+//!   with any `#[serde(..)]` but neither `tag` nor `untagged` is refused**: serde writes it
+//!   externally tagged (`{ "Circle": 1.0 }`), and htl's default stays the `kind` form,
+//!   which a type with no `#[serde(..)]` keeps (why: the last section). The host's way to
+//!   make the two agree is one line, `#[serde(tag = "kind")]` (or another tag name). A
+//!   unit-only enum without `tag` is a string on both sides and is not affected.
 //! - precedence: the word on the field or variant beats the rule on the type, and at each
 //!   level `teal` beats `serde` — `#[teal(name)]` over `#[serde(rename)]` on a variant,
 //!   `#[teal(rename_all)]` over `#[serde(rename_all)]` on the type.
 //! - refused, naming the rule and the way out — the list is `REFUSED` in this module, one
 //!   place, and a test builds an item for every entry and checks its refusal names the
-//!   escape:
+//!   escape (the field escapes are the next part):
 //!
 //!   | word or rule | what it means | the escape the refusal names |
 //!   |---|---|---|
@@ -162,9 +167,60 @@
 //!   `deny_unknown_fields`, `expecting`, and `rename` on the type itself (the Teal name is
 //!   `#[teal(name)]`).
 //!
+//! ## The field escapes: `#[teal(as)]`, `#[teal(serde)]`, `#[teal(skip)]`
+//!
+//! What a refusal names when a field's Rust type, or its `#[serde(..)]`, does not say the
+//! shape the value crosses as.
+//!
+//! - **`#[teal(as = "..")]` declares; it does not convert.** The field is written as the
+//!   given Teal text, verbatim (`"string"`, `"{string}"`, `"geom.Point"`), and the Rust type
+//!   is not mapped; the value still crosses by the field type's own `IntoLua` / `FromLua`,
+//!   so that type must implement both, and the attribute is the host's statement of the
+//!   shape they produce — a type with a hand-written `IntoLua` that crosses as a string,
+//!   say. Nothing checks the statement against the impl: a field that says `string` and
+//!   converts to a table is a declaration that lies. The text is also what a refused read
+//!   reports as expected, when the type's `FromLua` refuses with mlua's
+//!   `FromLuaConversionError` (`Rec.stamp: expected string, got integer`); any other error
+//!   it returns keeps its own message under the field's path. It applies to a field
+//!   of a struct record or of a data enum's struct variant; on a type, a variant or a
+//!   `#[host_module]` it is refused.
+//! - **`#[teal(serde)]` converts through serde.** For a field whose type has `Serialize` /
+//!   `Deserialize` and no `IntoLua` / `FromLua` (a type from another crate, one only ever
+//!   written for JSON), the field crosses through mlua's serde under htl's `serde` feature
+//!   (`std`, on by default, turns it on), with options htl fixes, listed with the reasons in
+//!   [`crate::teal::serde_field`]: a sequence carries mlua's array metatable, a `None` is
+//!   `nil` (an absent key), an empty table reads as an empty sequence when the field's Rust
+//!   type is one (`Vec`, `VecDeque`, `HashSet`, `BTreeSet`, a slice or an array, through
+//!   `Option` / `Box`) and as an empty map otherwise — a serde type with both a sequence and a
+//!   map inside cannot be told apart on an empty table, the one residue of mlua's option —
+//!   and a mixed table (a sequence part beside other keys, or holes) is refused at the field
+//!   before serde reads it, as `Rec.opts: expected {string: any}, got table (a mixed table at
+//!   ..)`; what serde itself refuses keeps its words there. The declared type is
+//!   `as`'s text when given, else the type table's mapping of the field type (`Vec<String>` is
+//!   `{string}`); a type the table does not know (a bare record name, `Vec<Stamp>`) has to
+//!   say `as`, since serde writes it in the shape only its `Serialize` knows. An `Option`
+//!   inside a sequence crosses with `serialize_none_to_null` on — serde's null marker, a light
+//!   userdata, where `nil` would leave a hole — and has to say `as` (`{any}`). The field's
+//!   `#[serde(with)]` (or `serialize_with` + `deserialize_with`) is read under it, and only
+//!   there: serde applies those only when it writes the struct that holds the field, so the
+//!   derive calls them itself. Without the feature, rustc refuses the field with
+//!   `` `#[teal(serde)]` crosses a field through serde, which needs htl's `serde` feature ``.
+//!   It goes on a field of a struct record, not on a variant's field nor a transparent
+//!   struct's.
+//! - **`#[teal(skip)]` is htl's own skip.** The field is not declared, not written, and
+//!   read as `Default::default()` (the struct's field under its `#[serde(default)]`), while
+//!   serde carries it as it says. It exists for a field Lua need not see that carries
+//!   something htl cannot cross or refuses to read — a `#[serde(borrow)]`, a `with` whose
+//!   output nobody declares, a flattened map: what serde says about such a field is not read
+//!   at all. It takes no other word, and goes on a field of a struct record.
+//! - **`#[teal(..)]` on a tuple field is refused**, a newtype struct's or a newtype
+//!   variant's: the newtype crosses as that field's value, by its type's own conversion and
+//!   under its declaration, so none of the field words has a place to act. A named field
+//!   says them: `#[serde(transparent)] struct N { #[teal(as = "..")] inner: T }`.
+//!
 //! # Why `#[derive(TealRecord)]` lowers the way it does
 //!
-//! This is the reasoning behind the table above.
+//! This is the reasoning behind the type table at the top.
 //!
 //! - **A data-carrying enum is a union of `where`-discriminated records**, not one
 //!   record with every variant's fields optional. Teal refuses a plain union of two
@@ -197,58 +253,13 @@
 //!   the host. What the rule does *not* touch is the union's record names
 //!   (`Shape_InReview` stays): those are Teal identifiers, and `kebab-case` is not one.
 //!   A record field is declared under its Rust name unless serde names it otherwise
-//!   (`#[serde(rename)]`, the type's `rename_all`; see above). A field's `#[teal(..)]`
-//!   takes four words, none of which spells it: `as = "<teal type>"`, the type it is
-//!   declared as when its Rust type does not say (below), `serde` and `skip` (below), and
-//!   `noyield`, on a `Function` / `Option<Function>` field of a struct, which says how the
-//!   host calls it. Anything else in a field's `#[teal(..)]` is refused. Renaming a field is not `as`'s job: `as` says
-//!   the type, and the name is serde's when serde says one, the Rust one otherwise; the
-//!   two compose, a renamed field carrying `as` too.
-//! - **`#[teal(as = "..")]` declares; it does not convert.** The field is written as the
-//!   given Teal text, verbatim (`"string"`, `"{string}"`, `"geom.Point"`), and the Rust type
-//!   is not mapped; the value still crosses by the field type's own `IntoLua` / `FromLua`,
-//!   so that type must implement both, and the attribute is the host's statement of the
-//!   shape they produce — a type with a hand-written `IntoLua` that crosses as a string,
-//!   say. Nothing checks the statement against the impl: a field that says `string` and
-//!   converts to a table is a declaration that lies. The text is also what a refused read
-//!   reports as expected, when the type's `FromLua` refuses with mlua's
-//!   `FromLuaConversionError` (`Rec.stamp: expected string, got integer`); any other error
-//!   it returns keeps its own message under the field's path. It applies to a field
-//!   of a struct record or of a data enum's struct variant; on a type, a variant or a
-//!   `#[host_module]` it is refused.
-//! - **`#[teal(serde)]` converts through serde.** For a field whose type has `Serialize` /
-//!   `Deserialize` and no `IntoLua` / `FromLua` (a type from another crate, one only ever
-//!   written for JSON), the field crosses through mlua's serde under htl's `serde` feature
-//!   (`std`, on by default, turns it on), with options htl fixes, listed with the reasons in
-//!   [`crate::teal::serde_field`]: a sequence carries mlua's array metatable, a `None` is
-//!   `nil` (an absent key), an empty table reads as an empty sequence when the field's Rust
-//!   type is one (`Vec`, `VecDeque`, `HashSet`, `BTreeSet`, a slice or an array, through
-//!   `Option` / `Box`) and as an empty map otherwise — a serde type with both a sequence and a
-//!   map inside cannot be told apart on an empty table, the one residue of mlua's option —
-//!   and a mixed table (a sequence part beside other keys, or holes) is refused at the field
-//!   before serde reads it, as `Rec.opts: expected {string: any}, got table (a mixed table at
-//!   ..)`; what serde itself refuses keeps its words there. The declared type is
-//!   `as`'s text when given, else the table's mapping of the field type (`Vec<String>` is
-//!   `{string}`); a type the table does not know (a bare record name, `Vec<Stamp>`) has to
-//!   say `as`, since serde writes it in the shape only its `Serialize` knows. An `Option`
-//!   inside a sequence crosses with `serialize_none_to_null` on — serde's null marker, a light
-//!   userdata, where `nil` would leave a hole — and has to say `as` (`{any}`). The field's
-//!   `#[serde(with)]` (or `serialize_with` + `deserialize_with`) is read under it, and only
-//!   there: serde applies those only when it writes the struct that holds the field, so the
-//!   derive calls them itself. Without the feature, rustc refuses the field with
-//!   `` `#[teal(serde)]` crosses a field through serde, which needs htl's `serde` feature ``.
-//!   It goes on a field of a struct record, not on a variant's field nor a transparent
-//!   struct's.
-//! - **`#[teal(skip)]` is htl's own skip.** The field is not declared, not written, and
-//!   read as `Default::default()` (the struct's field under its `#[serde(default)]`), while
-//!   serde carries it as it says. It exists for a field Lua need not see that carries
-//!   something htl cannot cross or refuses to read — a `#[serde(borrow)]`, a `with` whose
-//!   output nobody declares, a flattened map: what serde says about such a field is not read
-//!   at all. It takes no other word, and goes on a field of a struct record.
-//! - **`#[teal(..)]` on a tuple field is refused**, a newtype struct's or a newtype
-//!   variant's: the newtype crosses as that field's value, by its type's own conversion and
-//!   under its declaration, so none of the field words has a place to act. A named field
-//!   says them: `#[serde(transparent)] struct N { #[teal(as = "..")] inner: T }`.
+//!   (`#[serde(rename)]`, the type's `rename_all`; see *A type serde already describes*).
+//!   A field's `#[teal(..)]` takes four words, none of which spells it: `as`, `serde` and
+//!   `skip` (*The field escapes*), and `noyield`, on a `Function` / `Option<Function>`
+//!   field of a struct, which says how the host calls it. Anything else in a field's
+//!   `#[teal(..)]` is refused. Renaming a field is not `as`'s job: `as` says the type, and
+//!   the name is serde's when serde says one, the Rust one otherwise; the two compose, a
+//!   renamed field carrying `as` too.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
