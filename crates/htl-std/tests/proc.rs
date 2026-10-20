@@ -106,6 +106,14 @@ fn run(dir: &Path, tl_src: &str) {
     run_timed(dir, tl_src);
 }
 
+/// The upper bound of every "returned promptly" assertion here whose alternative is a 5 s
+/// child waited out (a `sleep 5` held to the end, or a `timeout_ms = 5000` expiring): the
+/// middle of the gap between the two outcomes rather than just above the fast one, so the
+/// time `run_blocking` itself takes on a loaded machine — loading the chunk, requiring
+/// `std.proc`, forking and exec'ing the child — stays inside it while the 5 s outcome stays
+/// outside. One second, the bound these tests had, was the one a loaded gate run crossed.
+const PROMPT: Duration = Duration::from_secs(3);
+
 /// [`run`], returning how long [`htl::Htl::run_blocking`] itself took. `gen_lua` (the
 /// checker) runs first, outside the timed region: a wall-clock assertion about a
 /// `timeout_ms` or a cancellation is an assertion about `run_blocking`, not about how
@@ -218,8 +226,8 @@ fn timeout_kills_a_long_running_child() {
          assert(e.code == nil, tostring(e.code))\n",
     );
     assert!(
-        elapsed < Duration::from_secs(1),
-        "expected run_blocking to return well under 1s, took {elapsed:?}"
+        elapsed < PROMPT,
+        "expected run_blocking to return well short of the child's 5s sleep, took {elapsed:?}"
     );
 }
 
@@ -240,9 +248,9 @@ fn timeout_kills_a_grandchild_under_a_non_exec_shell() {
          assert(e.code == nil, tostring(e.code))\n",
     );
     assert!(
-        elapsed < Duration::from_secs(1),
-        "expected run_blocking to return well under 1s even through a non-exec'd shell, \
-         took {elapsed:?}"
+        elapsed < PROMPT,
+        "expected run_blocking to return well short of the grandchild's 5s sleep even \
+         through a non-exec'd shell, took {elapsed:?}"
     );
 }
 
@@ -265,9 +273,9 @@ fn timeout_kills_a_backgrounded_descendant_the_direct_child_already_left_behind(
          assert(e.code == nil, tostring(e.code))\n",
     );
     assert!(
-        elapsed < Duration::from_secs(1),
-        "expected run_blocking to return well under 1s even though the direct child \
-         had already exited on its own, took {elapsed:?}"
+        elapsed < PROMPT,
+        "expected run_blocking to return well short of the backgrounded 5s sleep even \
+         though the direct child had already exited on its own, took {elapsed:?}"
     );
 }
 
@@ -295,8 +303,9 @@ fn timeout_kills_a_background_descendant_holding_only_stdout() {
          assert(e.code == nil, tostring(e.code))\n",
     );
     assert!(
-        elapsed < Duration::from_secs(1),
-        "expected run_blocking to return well under 1s without panicking, took {elapsed:?}"
+        elapsed < PROMPT,
+        "expected run_blocking to return well short of the backgrounded 5s sleep without \
+         panicking, took {elapsed:?}"
     );
 }
 
@@ -316,8 +325,9 @@ fn timeout_kills_a_background_descendant_holding_only_stderr() {
          assert(e.code == nil, tostring(e.code))\n",
     );
     assert!(
-        elapsed < Duration::from_secs(1),
-        "expected run_blocking to return well under 1s without panicking, took {elapsed:?}"
+        elapsed < PROMPT,
+        "expected run_blocking to return well short of the backgrounded 5s sleep without \
+         panicking, took {elapsed:?}"
     );
 }
 
@@ -338,7 +348,7 @@ fn a_deadline_that_is_never_hit_still_returns_normally() {
          assert(e.stdout == \"hi\", e.stdout)\n",
     );
     assert!(
-        elapsed < Duration::from_secs(1),
+        elapsed < PROMPT,
         "expected this to return almost immediately rather than waiting out the 5s \
          deadline, took {elapsed:?}"
     );
@@ -366,9 +376,9 @@ fn no_deadline_returns_once_a_backgrounded_descendant_closes_both_pipes() {
          rather than return as soon as the direct child exited, took {elapsed:?}"
     );
     assert!(
-        elapsed < Duration::from_secs(1),
-        "expected this to return once the backgrounded sleep closed the pipes, well \
-         under 1s, took {elapsed:?}"
+        elapsed < PROMPT,
+        "expected this to return once the backgrounded 0.3s sleep closed the pipes, took \
+         {elapsed:?}"
     );
 }
 
