@@ -385,7 +385,7 @@ pub struct TargetProfile {
 ///
 /// ```text
 /// ├── Cargo.toml             htl (features = ["async"]) + htl-std (under the same pin)
-/// │                          + anyhow + tokio (rt, signal), and
+/// │                          + anyhow + tokio (rt, time, signal), and
 /// │                          [profile.dev.build-override] opt-level = 3
 /// ├── src/lib.rs             #[host_module] Host, its records, the embedded module,
 /// │                          and pub fn preload(&Htl) registering both (plus htl-std's
@@ -417,8 +417,12 @@ const BIN: TargetProfile = TargetProfile {
             req: Dep::Version("1"),
             // `src/main.rs`'s Ctrl-C watcher: a thread of its own awaiting
             // `tokio::signal::ctrl_c()`, the way `htl run`'s `run_root` does. `rt` for the
-            // runtime that thread builds to await it on; neither is on by default.
-            features: &["rt", "signal"],
+            // runtime that thread builds to await it on. `time` for the deadline of a
+            // question the host asks Teal (`htl::task::Ask`, a `tokio::time::timeout`), and
+            // for any timer the host drives on a runtime of its own: htl's `async` compiles
+            // it in already, but a feature the project uses is named in its own line, so
+            // trimming htl's features does not take it away unseen. None is on by default.
+            features: &["rt", "time", "signal"],
         },
     ],
     lib: ScaffoldFile {

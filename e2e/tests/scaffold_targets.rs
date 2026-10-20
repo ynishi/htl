@@ -509,11 +509,8 @@ fn the_bin_target_builds_tests_and_greets() {
 /// the one line that changes is that `match`, which becomes a `let` so the handler thread is
 /// joined after the run and before the exit code is decided.
 ///
-/// The handler's runtime is built with `enable_all()`, as the template's Ctrl-C thread's is,
-/// not `enable_time()`: the project's `Cargo.toml` names tokio with `rt` and `signal` only,
-/// and the timer the deadline needs is compiled in by htl's `async` feature (htl-core's
-/// tokio has `time`), which `enable_all()` turns on without the project naming a feature it
-/// does not declare.
+/// The handler's runtime is built with `enable_time()`, the timer the deadline needs, which
+/// the project's `Cargo.toml` names in its tokio line (`rt`, `time`, `signal`).
 ///
 /// Two questions, so both ends of the one place the handler maps an `Err` are seen: one
 /// answered through `task.answer`, and one refused with `req:reject` and a fixed reason, which
@@ -623,7 +620,7 @@ pub fn gate(h: &Htl) -> anyhow::Result<Asker<Call, Decision>> {
 /// result is matched as before once the handler is joined.
 const ASK_MAIN_RS: &str = r#"    let handler = std::thread::spawn(move || -> anyhow::Result<()> {
         let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
+            .enable_time()
             .build()?;
         for path in ["/public/index", "relative"] {
             let call = asksample::Call {

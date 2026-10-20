@@ -24,7 +24,7 @@ edition = "2024"
 htl = "{{htl}}"
 htl-std = "{{htl}}"
 anyhow = "1"
-tokio = { version = "1", features = ["rt", "signal"] }
+tokio = { version = "1", features = ["rt", "time", "signal"] }
 
 # The Teal checker runs inside htl's proc macros; the dev profile would build it
 # unoptimised and make every `cargo build` that touches a .tl about 3x slower.

@@ -287,7 +287,8 @@ fn the_bin_targets_htl_std_line_follows_the_pin_and_preload_installs_it() {
 /// does — the first cancels the token (so a `std.proc` child in its own process group is
 /// killed by the drop guard rather than left running past the host's own exit), the
 /// second ends the process outright — and `tokio` with `rt` / `signal` is what that watcher
-/// needs to exist at all, so the manifest carries it beside `htl`.
+/// needs to exist at all, so the manifest carries it beside `htl`, with `time` for the
+/// deadline of a question the host asks Teal.
 #[test]
 fn the_bin_targets_main_rs_watches_ctrl_c_and_the_manifest_carries_tokio() {
     let root = tempdir("bin-ctrlc");
@@ -296,7 +297,7 @@ fn the_bin_targets_main_rs_watches_ctrl_c_and_the_manifest_carries_tokio() {
     let manifest = root.join("s/Cargo.toml");
     assert_eq!(
         dep_line(&manifest, "tokio"),
-        "tokio = { version = \"1\", features = [\"rt\", \"signal\"] }"
+        "tokio = { version = \"1\", features = [\"rt\", \"time\", \"signal\"] }"
     );
     let main_rs = std::fs::read_to_string(root.join("s/src/main.rs")).unwrap();
     assert!(main_rs.contains("tokio::signal::ctrl_c()"), "{main_rs}");
