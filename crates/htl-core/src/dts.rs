@@ -79,6 +79,13 @@
 //! was declared and what arrived ([`crate::teal::FieldError`]):
 //! `Outcome.cause: expected string, got nil`.
 //!
+//! `#[teal(name = "..")]` on a type is the Teal name, and `#[teal(dts = "..")]` writes
+//! the type's declaration to that path, relative to the crate root (`CARGO_MANIFEST_DIR`).
+//! Anything else in a type's `#[teal(..)]` is refused at compile time rather than ignored,
+//! as is `as` anywhere but on a named field. The declaration, `into_lua`, `from_lua` and a
+//! refused read's path all use a field's or variant's renamed name
+//! (`Call.callId: expected string, got nil`).
+//!
 //! # A type serde already describes
 //!
 //! What a type's `#[serde(..)]` says is read, so a type deriving `Serialize` /
@@ -175,10 +182,10 @@
 //!
 //! - **`#[teal(as = "..")]` declares; it does not convert.** The field is written as the
 //!   given Teal text, verbatim (`"string"`, `"{string}"`, `"geom.Point"`), and the Rust type
-//!   is not mapped; the value still crosses by the field type's own `IntoLua` / `FromLua`,
-//!   so that type must implement both, and the attribute is the host's statement of the
-//!   shape they produce — a type with a hand-written `IntoLua` that crosses as a string,
-//!   say. Nothing checks the statement against the impl: a field that says `string` and
+//!   is not mapped (nor the field renamed: its key is still the one the name rules give);
+//!   the value still crosses by the field type's own `IntoLua` / `FromLua`, so that type
+//!   must implement both, and the attribute is the host's statement of the shape they
+//!   produce — a type with a hand-written `IntoLua` that crosses as a string, say. Nothing checks the statement against the impl: a field that says `string` and
 //!   converts to a table is a declaration that lies. The text is also what a refused read
 //!   reports as expected, when the type's `FromLua` refuses with mlua's
 //!   `FromLuaConversionError` (`Rec.stamp: expected string, got integer`); any other error
