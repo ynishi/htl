@@ -224,3 +224,93 @@ fn the_refusal_is_a_field_error() {
         ("Rec.big", "string")
     );
 }
+
+/// A host type whose `Serialize` refuses: a `#[teal(serde)]` field of it fails on the way
+/// out. `Deserialize` is there because the field's reading half is generated beside it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Unwritable(pub u32);
+
+impl Serialize for Unwritable {
+    fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+        Err(serde::ser::Error::custom("no writer"))
+    }
+}
+
+/// Flattened into `Call`, then `Call` into `Outer`: the field that fails to write sits two
+/// structs below the record the table is declared as.
+#[derive(TealRecord, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Meta {
+    #[teal(serde, as = "number")]
+    pub opts: Unwritable,
+}
+
+#[derive(TealRecord, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Call {
+    pub id: String,
+    #[serde(flatten)]
+    pub meta: Meta,
+}
+
+#[derive(TealRecord, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Outer {
+    #[serde(flatten)]
+    pub call: Call,
+}
+
+/// A `tag` enum whose newtype variant writes `Meta`'s fields beside the tag.
+#[derive(TealRecord, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum Ev {
+    Idle,
+    Moved(Meta),
+}
+
+fn meta() -> Meta {
+    Meta {
+        opts: Unwritable(1),
+    }
+}
+
+/// Writing names the key where it sits in the table, as reading does
+/// (`a_wrong_flattened_field_is_reported_under_the_outer_record` in `record_serde_shape.rs`):
+/// the Teal side has no level for the inner struct. The path is the context line, serde's
+/// own words follow.
+#[test]
+fn a_flattened_field_that_will_not_write_is_reported_under_the_outer_record() {
+    let h = Htl::new().unwrap();
+    let e = Call {
+        id: "a1".into(),
+        meta: meta(),
+    }
+    .into_lua(h.lua())
+    .unwrap_err();
+    assert_eq!(e.to_string(), "Call.opts\nserialize error: no writer");
+    // The inner struct on its own still reports under its own name.
+    let e = meta().into_lua(h.lua()).unwrap_err();
+    assert_eq!(e.to_string(), "Meta.opts\nserialize error: no writer");
+}
+
+#[test]
+fn the_outermost_record_names_the_field_through_two_levels_of_flatten() {
+    let h = Htl::new().unwrap();
+    let e = Outer {
+        call: Call {
+            id: "a1".into(),
+            meta: meta(),
+        },
+    }
+    .into_lua(h.lua())
+    .unwrap_err();
+    assert_eq!(e.to_string(), "Outer.opts\nserialize error: no writer");
+}
+
+/// The payload of a `tag` variant is named as `union_from` names it, `Enum.Variant`, so the
+/// path to the field is the same whichever way the value crosses.
+#[test]
+fn a_tag_variants_payload_that_will_not_write_is_reported_under_the_variant() {
+    let h = Htl::new().unwrap();
+    let e = Ev::Moved(meta()).into_lua(h.lua()).unwrap_err();
+    assert_eq!(e.to_string(), "Ev.Moved.opts\nserialize error: no writer");
+    // A variant that carries no such field still writes.
+    assert!(Ev::Idle.into_lua(h.lua()).is_ok());
+}

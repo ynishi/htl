@@ -30,8 +30,12 @@ pub trait TealRecord {
 /// implemented by hand: the derive's declaration and this conversion are one reading.
 pub trait TealFields: Sized {
     /// Set each field's key in `t`, as the record's `into_lua` does (a skipped field, or
-    /// one whose `skip_serializing_if` holds, is left out).
-    fn write_fields(self, t: &mlua::Table, lua: &mlua::Lua) -> mlua::Result<()>;
+    /// one whose `skip_serializing_if` holds, is left out). A failure (a `#[teal(serde)]`
+    /// field's) is reported as `path.field`, `path` named as `read_fields` names it: the
+    /// type's own name from its `into_lua`, the outer record's when it is flattened, so a
+    /// flattened field is named by the same key whichever way it crosses. (A record nested
+    /// under a key, not flattened, still reports a write failure under its own name.)
+    fn write_fields(self, t: &mlua::Table, lua: &mlua::Lua, path: &str) -> mlua::Result<()>;
     /// Read each field from `t`, reporting a failure as `path.field` — `path` is the
     /// record the table is declared as: the type's own name from its `from_lua`, the outer
     /// record's when it is flattened (the Teal side has no level for the inner struct, so a

@@ -899,7 +899,7 @@ fn expand_record(item: &Item) -> Result<TokenStream, String> {
     let (ident, into, from) = match (item, &rd.kind) {
         (Item::Struct(st), dts::RecordKind::Record { .. }) => {
             let ident = &st.ident;
-            let write = record_write(st, name, &rd.conversion)?;
+            let write = record_write(st, &rd.conversion)?;
             let read = record_read(st, &rd.conversion)?;
             fields_impl = quote! {
                 impl ::htl::teal::TealFields for #ident {
@@ -908,6 +908,7 @@ fn expand_record(item: &Item) -> Result<TokenStream, String> {
                         self,
                         t: &::htl::mlua::Table,
                         lua: &::htl::mlua::Lua,
+                        path: &str,
                     ) -> ::htl::mlua::Result<()> {
                         #write
                         Ok(())
@@ -922,7 +923,7 @@ fn expand_record(item: &Item) -> Result<TokenStream, String> {
                     }
                 }
             };
-            (ident, record_into(), record_from(name))
+            (ident, record_into(name), record_from(name))
         }
         (Item::Struct(st), dts::RecordKind::Alias { inner }) => match &st.fields {
             syn::Fields::Named(_) => (
@@ -939,7 +940,7 @@ fn expand_record(item: &Item) -> Result<TokenStream, String> {
         ),
         (Item::Enum(en), dts::RecordKind::Union { variants, repr }) => (
             &en.ident,
-            union_into(en, variants, repr),
+            union_into(en, name, variants, repr),
             union_from(en, name, variants, repr),
         ),
         _ => return Err("TealRecord: only structs and enums are supported".into()),
@@ -1128,11 +1129,12 @@ fn named_fields(st: &ItemStruct) -> &syn::FieldsNamed {
     }
 }
 
-/// Record -> table: a table of its own, filled by the record's `TealFields`.
-fn record_into() -> TokenStream2 {
+/// Record -> table: a table of its own, filled by the record's `TealFields`, a failure
+/// named under the record.
+fn record_into(name: &str) -> TokenStream2 {
     quote! {
         let t = lua.create_table()?;
-        ::htl::teal::TealFields::write_fields(self, &t, lua)?;
+        ::htl::teal::TealFields::write_fields(self, &t, lua, #name)?;
         Ok(::htl::mlua::Value::Table(t))
     }
 }
@@ -1148,14 +1150,11 @@ fn record_from(name: &str) -> TokenStream2 {
 /// `write_fields`' body: each field under the key `dts` declared it as (from the one
 /// reading, [`dts::Crossing`], paired with the Rust fields by position). A skipped field
 /// is left out, one whose `skip_serializing_if` holds is too (called as serde calls it,
-/// `path(&self.field)`), and a flattened struct writes its own fields into this table. A
-/// `#[teal(serde)]` field is written through `htl::teal::serde_field`, a failure named
-/// `record.field` (`record` the struct's Teal name).
-fn record_write(
-    st: &ItemStruct,
-    record: &str,
-    conv: &dts::RecordConversion,
-) -> Result<TokenStream2, String> {
+/// `path(&self.field)`), and a flattened struct writes its own fields into this table under
+/// the same `path`. A `#[teal(serde)]` field is written through `htl::teal::serde_field`, a
+/// failure named `path.field` (`path` the record the table is declared as, as in
+/// [`record_read`]).
+fn record_write(st: &ItemStruct, conv: &dts::RecordConversion) -> Result<TokenStream2, String> {
     let mut out = Vec::new();
     for (f, c) in named_fields(st).named.iter().zip(&conv.fields) {
         let id = f.ident.as_ref().unwrap();
@@ -1173,7 +1172,7 @@ fn record_write(
                         let none_to_null = sc.none_to_null;
                         match &sc.ser_with {
                             None => quote_spanned! {ty.span()=>
-                                ::htl::teal::serde_field::to_lua(lua, &self.#id, #record, #name, #none_to_null)?
+                                ::htl::teal::serde_field::to_lua(lua, &self.#id, path, #name, #none_to_null)?
                             },
                             // `#[serde(with)]`: a local type whose `Serialize` is the named
                             // function (see `field_read`).
@@ -1190,7 +1189,7 @@ fn record_write(
                                                 #p(self.0, s)
                                             }
                                         }
-                                        ::htl::teal::serde_field::to_lua(lua, &__HtlSer(&self.#id), #record, #name, #none_to_null)?
+                                        ::htl::teal::serde_field::to_lua(lua, &__HtlSer(&self.#id), path, #name, #none_to_null)?
                                     }
                                 }
                             }
@@ -1207,7 +1206,7 @@ fn record_write(
             }
             dts::Crossing::Skip { .. } => quote! {},
             dts::Crossing::Flatten { .. } => quote! {
-                <#ty as ::htl::teal::TealFields>::write_fields(self.#id, t, lua)?;
+                <#ty as ::htl::teal::TealFields>::write_fields(self.#id, t, lua, path)?;
             },
         });
     }
@@ -1372,10 +1371,12 @@ fn enum_from(en: &ItemEnum, name: &str, variants: &[String]) -> TokenStream2 {
 /// one its `where` clause tests); a newtype payload goes under `value` (htl's form) or the
 /// content key (`tag` + `content`), or — under `tag` alone — writes its struct's fields
 /// beside the tag through its `TealFields`; struct-variant fields go under the names `dts`
-/// declared them as, beside the tag or in a table of their own under the content key. An
-/// untagged enum is [`untagged_into`].
+/// declared them as, beside the tag or in a table of their own under the content key. A
+/// failure in a `tag` payload's fields is named `Enum.Variant.field`, as [`union_from`]
+/// names it. An untagged enum is [`untagged_into`].
 fn union_into(
     en: &ItemEnum,
+    name: &str,
     variants: &[dts::UnionVariant],
     repr: &dts::UnionRepr,
 ) -> TokenStream2 {
@@ -1399,10 +1400,12 @@ fn union_into(
                 },
                 (syn::Fields::Unnamed(u), dts::VariantShape::Inline { .. }) => {
                     let ty = &u.unnamed[0].ty;
+                    // The path `union_from` reads it under: `Enum.Variant`.
+                    let path = format!("{name}.{}", uv.name);
                     quote! {
                         Self::#id(value) => {
                             t.set(#tag, #vname)?;
-                            <#ty as ::htl::teal::TealFields>::write_fields(value, &t, lua)?;
+                            <#ty as ::htl::teal::TealFields>::write_fields(value, &t, lua, #path)?;
                         }
                     }
                 }

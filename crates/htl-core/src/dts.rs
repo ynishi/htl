@@ -106,7 +106,8 @@
 //!   which nothing in a derive can see, so they are read from source: the file the derive
 //!   expands in, the file `htl dts` scans, the module a `records = [..]` entry names. A
 //!   value that does not fit a flattened field is reported under the record the table is
-//!   declared as, `Call.trace`: the Teal side has no level for the inner struct.
+//!   declared as, `Call.trace`, reading and writing alike: the Teal side has no level for
+//!   the inner struct.
 //! - read, on a struct: `transparent` — declared `type N = T`, `T` its one field that is
 //!   not skipped, and crossing as that field's value.
 //! - read, on an enum, how its variants are told apart ([`UnionRepr`]): `tag = "T"`
