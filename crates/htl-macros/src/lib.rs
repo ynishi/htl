@@ -705,90 +705,26 @@ fn write_dts(rel: &str, text: &str) -> Result<(), String> {
 /// Declare a struct or enum on the Teal side and convert it both ways: `TealRecord::DECL`
 /// (the `.d.tl` text), `IntoLua` / `FromLua` that produce and accept exactly what it
 /// declares, and `htl_preload`. What each Rust shape lowers to is the type table in
-/// `htl::dts`, which is also what `htl dts` reads; the two cannot disagree.
+/// [`htl::dts`](https://docs.rs/htl/latest/htl/dts/index.html), which is also what
+/// `htl dts` reads; the two cannot disagree.
 ///
-/// The words `#[teal(..)]` takes, by where it is written:
+/// The words `#[teal(..)]` takes, by where it is written (what each does, and what is
+/// refused, is in that module doc):
 ///
-/// - on the type: `name = ".."` (the Teal name), `dts = ".."` (write the declaration to
-///   that path, relative to the crate root), `uses = [..]` (types from other `.d.tl`
-///   modules), and `rename_all = ".."` (how an enum's variants, or a struct's fields, are
-///   spelled; it wins over `#[serde(rename_all)]`);
-/// - on a variant: `name = ".."` (that variant's word);
-/// - on a field: `as = "<teal type>"` — the field is declared as that Teal text, verbatim,
-///   instead of what its Rust type maps to; the value still crosses by the field type's
-///   own `IntoLua` / `FromLua`, so this is for a host type whose impls the type table
-///   cannot see into (a `Stamp(u64)` that crosses as a string). It goes on a field of a
-///   struct or of a data enum's struct variant;
-/// - on a field: `noyield`, on a `Function` / `Option<Function>` field of a struct (see
-///   `host_module`, *A Lua function as a parameter*);
-/// - on a field of a struct: `serde` — the field crosses through mlua's serde instead of
-///   `IntoLua` / `FromLua`, for a type with `Serialize` / `Deserialize` and no Lua
-///   conversion of its own, with the options `htl::teal::serde_field` fixes (`None` is
-///   `nil`, a sequence carries the array metatable, an empty table reads as the field's
-///   Rust type says, a mixed table is refused at the field). It is declared as `as` says, or
-///   as the type table maps the Rust type when every name in it is one the table knows
-///   (`Vec<String>` is `{string}`); a type it does not know has to say `as`. The field's
-///   `#[serde(with)]` is read beside `serde` and `as`, and the derive calls it. It needs
-///   htl's `serde` feature (on with the default `std`); without it rustc refuses the field
-///   naming the feature;
-/// - on a field of a struct: `skip` — htl does not carry the field: not declared, not
-///   written, read as `Default` (the struct's `#[serde(default)]` when it has one), and its
-///   `#[serde(..)]` is not read, which makes it the way out for a field Lua need not see
-///   that carries a word htl refuses (`borrow`, `with`, `flatten` of a map).
-///
-/// Anything else is refused at compile time rather than ignored, as is `as` anywhere but
-/// on a named field — `#[teal(..)]` on a newtype's one field is refused too (a newtype
-/// crosses as that value; name the field under `#[serde(transparent)]` to say `as`). `as`
-/// does not rename a field.
+/// - on the type: `name` (the Teal name), `dts` (write the declaration to a path),
+///   `uses` (types from other `.d.tl` modules), `rename_all` (how variants or fields are
+///   spelled);
+/// - on a variant: `name` (that variant's word);
+/// - on a field: `as` (declare the field as given Teal text), `noyield` (a `Function`
+///   field the host calls without yielding), `serde` (cross the field through serde),
+///   `skip` (htl does not carry the field).
 ///
 /// The type's `#[serde(..)]` is read too, so a type deriving `Serialize` / `Deserialize`
-/// beside `TealRecord` crosses under serde's names, and the keys of the table `into_lua`
-/// makes are the keys of the object `serde_json::to_value` makes:
-///
-/// - read: `rename_all` (a struct's fields, an enum's variants), `rename_all_fields` (an
-///   enum's struct-variant fields), `rename` (a field or a variant), `alias` (a field: one
-///   more key `from_lua` reads when the field's own is nil; not declared, not written). The
-///   declaration, `into_lua`, `from_lua` and the `FieldError` path all use the renamed
-///   name (`Call.callId: expected string, got nil`). A word on the field or variant beats
-///   the type's rule, and `teal` beats `serde` at each level. A renamed field may carry
-///   `#[teal(as)]`.
-/// - read, on a field of a struct: `skip` (not declared, not written; filled on the way in
-///   from the field's `default`, else the struct's, else `Default::default()` — a type
-///   without `Default` is rustc's error at the field), `default` / `default = "path"` (still
-///   declared `T`; a nil key reads as the default), `skip_serializing_if = "path"` beside a
-///   `default` or on an `Option` field (the key is left out when `path(&self.field)`
-///   holds), and `flatten` of a struct deriving `TealRecord` declared in the same file (its
-///   fields join the record, and cross in the one table through its
-///   `htl::teal::TealFields`; a wrong one is reported under this record, `Call.trace`).
-///   On the struct: `default` (a nil field takes the same field of `Self::default()`) and
-///   `transparent` (`type N = T`, crossing as its one field that is not skipped).
-/// - read, on an enum: `tag = "T"` (internally tagged: each variant record `where self.T ==
-///   ".."`, a struct variant's fields beside the tag, and a newtype variant's payload a
-///   `TealRecord` struct in the same file whose fields sit beside the tag), `tag = "T",
-///   content = "C"` (adjacently tagged: the payload under `C`, a struct variant's fields in
-///   a record `N_V_Content`), `untagged` (the payload alone: newtypes over `string`,
-///   `number` / `integer`, `boolean`, and at most one variant crossing as a table, read back
-///   by Lua type). The tag is a Teal identifier.
-/// - **a data enum with any `#[serde(..)]` but neither `tag` nor `untagged` is refused**:
-///   serde writes it externally tagged, htl declares the `kind` form; write
-///   `#[serde(tag = "kind")]` to make the two agree. An enum with no `#[serde(..)]` keeps
-///   the `kind` form, and a unit-only enum is a string on both sides either way.
-/// - refused at compile time, each message naming the rule and its escape —
-///   `#[teal(serde, as = "..")]`, `#[teal(skip)]`, `#[serde(tag = ..)]` or "write two
-///   types" (the table, with every escape, is in `htl::dts`'s module doc): a name that
-///   differs by direction (`rename(serialize = "a", deserialize = "b")`, or one side alone;
-///   `rename_all` the same); `skip_serializing` / `skip_deserializing` alone and
-///   `skip_serializing_if` with nowhere for the omitted value to come from; `flatten` of a
-///   map, an `Option`, an enum, or a struct the derive cannot read in this file;
-///   `transparent` over other than one field; `content` without `tag`; `untagged` over a
-///   unit variant or two variants crossing as tables (Teal cannot tell them apart; use
-///   `tag`); an `Option` inside a sequence (`Vec<Option<T>>`: a Lua sequence cannot hold
-///   nil) without `#[teal(serde)]`; `with`, `serialize_with`, `deserialize_with` except
-///   beside `#[teal(serde, as = "..")]`; and `from`, `into`, `try_from`, `remote`, `other`,
-///   `borrow`, `getter`, `variant_identifier`, `field_identifier`; nothing is silently
-///   ignored. A data enum's variants' fields do not take the presence words yet.
-/// - passed through to serde: `crate`, `bound`, `deny_unknown_fields`, `expecting`, and
-///   `rename` on the type itself.
+/// beside `TealRecord` crosses under serde's names. Which `#[serde(..)]` words are read,
+/// which pass through and which are refused, with the escape each refusal names, is
+/// [*A type serde already describes*](https://docs.rs/htl/latest/htl/dts/index.html#a-type-serde-already-describes)
+/// and [*The field escapes*](https://docs.rs/htl/latest/htl/dts/index.html#the-field-escapes-tealas-tealserde-tealskip)
+/// in `htl::dts`.
 ///
 /// ```rust,ignore
 /// #[derive(Serialize, Deserialize, TealRecord)]
@@ -796,73 +732,11 @@ fn write_dts(rel: &str, text: &str) -> Result<(), String> {
 /// struct Call {
 ///     call_id: String,
 ///     #[serde(alias = "msg")] message: String,
+///     #[teal(skip)] scratch: Vec<u8>,
 /// }
 /// // local record Call
 /// //    callId: string
 /// //    message: string
-/// // end
-/// ```
-///
-/// ```rust,ignore
-/// #[derive(Serialize, Deserialize, TealRecord)]
-/// struct Meta { trace: String }
-///
-/// #[derive(Serialize, Deserialize, TealRecord)]
-/// #[serde(rename_all = "camelCase")]
-/// struct Job {
-///     job_id: String,
-///     #[serde(skip)] cache: Vec<u8>,
-///     #[serde(default, skip_serializing_if = "Vec::is_empty")] tags: Vec<String>,
-///     #[serde(flatten)] meta: Meta,
-/// }
-/// // local record Job
-/// //    jobId: string
-/// //    tags: {string}
-/// //    trace: string
-/// // end
-/// ```
-///
-/// ```rust,ignore
-/// #[derive(Serialize, Deserialize, TealRecord)]
-/// #[serde(tag = "t", content = "c")]
-/// enum Shape { Dot, Circle(f64) }
-/// // local record Shape_Dot
-/// //    where self.t == "Dot"
-/// //    t: string
-/// // end
-/// // local record Shape_Circle
-/// //    where self.t == "Circle"
-/// //    t: string
-/// //    c: number
-/// // end
-/// // local type Shape = Shape_Dot | Shape_Circle
-/// ```
-///
-/// ```rust,ignore
-/// #[derive(TealRecord)]
-/// struct Entry {
-///     #[teal(as = "string")] stamp: Stamp, // Stamp: IntoLua / FromLua as a string
-///     text: String,
-/// }
-/// // local record Entry
-/// //    stamp: string
-/// //    text: string
-/// // end
-/// ```
-///
-/// ```rust,ignore
-/// #[derive(Serialize, Deserialize)]
-/// struct Options { limit: Option<u32>, list: Vec<String> } // serde only, no IntoLua
-///
-/// #[derive(TealRecord)]
-/// struct Job {
-///     #[teal(serde, as = "{string: any}")] opts: Options,
-///     #[teal(serde)] tags: Vec<String>,   // mapped: {string}
-///     #[teal(skip)] scratch: Vec<u8>,     // not declared, read as Default
-/// }
-/// // local record Job
-/// //    opts: {string: any}
-/// //    tags: {string}
 /// // end
 /// ```
 #[proc_macro_derive(TealRecord, attributes(teal))]
