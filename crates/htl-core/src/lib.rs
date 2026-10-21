@@ -158,6 +158,9 @@ pub mod task;
 pub mod registry;
 pub mod teal;
 pub mod testing;
+// What the checker knows of each position of a file, kept for an editor's hover and
+// go-to-definition.
+pub mod typeindex;
 // How much of htl's marker vocabulary a project has written, and where. On the project
 // layer, whose check hands it the census, so it carries that layer's features — the same
 // two `unused` does, and for the same reason.
@@ -317,6 +320,10 @@ pub struct CheckInfo {
     /// Empty for a `.d.tl`, as [`CheckInfo::markers`] is: no literal or cast is built in
     /// a declaration file either.
     pub record_sites: Vec<RecordSite>,
+    /// The types and declarations of the file's names, by position: what an editor asks for
+    /// on hover and go-to-definition ([`typeindex`]). Empty unless the check was
+    /// [`Htl::check_indexed`], which is the only one that copies it out of the checker.
+    pub types: typeindex::TypeIndex,
 }
 
 /// One table literal or `as` cast a check found typed as a declared record (see
@@ -2049,6 +2056,22 @@ impl Htl {
         read_checkinfo(&t)
     }
 
+    /// [`check_written`](Self::check_written) that also keeps what the checker knows of the
+    /// file's names, in [`CheckInfo::types`]: the type of what is at a position, and where
+    /// it is declared ([`typeindex::TypeIndex::at`]).
+    ///
+    /// For a caller that answers questions about a position of a file it checked, which is
+    /// `htl lsp`: the index is made once, by this check, and a hover or a go-to-definition
+    /// is answered from it with no check of its own. A copy of part of the checker's type
+    /// report is made at the end of the check (one pass over its positions; `HTL_PROFILE=1`
+    /// shows it as `type_index`), so a caller that asks no such question has
+    /// `check_written`.
+    pub fn check_indexed(&self, file: &Path) -> Result<CheckInfo> {
+        let f: Function = self.h.get("check_indexed")?;
+        let t: Table = f.call(path_str(file))?;
+        read_checkinfo(&t)
+    }
+
     /// Type-check and generate Lua source. `None` code means errors (see `CheckInfo`).
     ///
     /// The code is a whole file: it ends with exactly one newline, whether or not the `.tl`
@@ -3329,6 +3352,13 @@ fn read_checkinfo(t: &Table) -> Result<CheckInfo> {
         markers,
         record_sites,
         closure_requires,
+        // The index is an editor's extra and never what decides a check: one that cannot be
+        // read is an empty one, not a check that failed.
+        types: t
+            .get::<Table>("type_index")
+            .ok()
+            .and_then(|index| typeindex::TypeIndex::read(&index).ok())
+            .unwrap_or_default(),
     })
 }
 
