@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0](https://github.com/ynishi/htl/compare/v0.15.0...v0.16.0) - 2026-10-21
+
+### Added
+
+- htl shapes writes a run-time shape and a typed Schema<T> declaration from each record, so a value from outside is narrowed once at the boundary instead of cast at every read
+- htl lsp traces call hierarchies, the callers and the callees of a function across the project, from the uses the references index resolves
+- htl lsp answers textDocument/references from the uses each file of the project resolves, kept current as the symbol index is, so an agent finds every caller rather than every word
+- htl lsp answers the workspace-symbol request from an index of the project's declarations, kept current by checks, watched files and a stat of each file, so an agent finds a declaration by name
+- htl lsp answers textDocument/documentSymbol with the declaration tree of an open file, so an agent lists a module's API without searching text
+- htl lsp re-checks the open files when htl.toml, the package manifests, a declaration under types/ or the Rust htl dts reads changes, and the README says how an editor starts it
+- htl lsp answers hover with the type tl checked and go-to-definition with the declaration, and a require's module with the file htl resolves it to
+- htl lsp formats a buffer as htl fmt does, and offers htl fix's fixes as quick fixes and a fix-all action, only for the text the check read
+- htl lsp, a language server on stdio whose diagnostics are htl check's, on open and on save, for the open files and the ones that require a saved one
+- the bin scaffold names tokio's time beside rt and signal, the timer the deadline of a question the host asks Teal waits on
+- TealRecord reads serde's skip, default, skip_serializing_if, transparent and flatten, in the declaration and the conversion from one reading, and htl dts writes the same declaration
+- a Teal loop refuses a question with req:reject(reason), and the host reads it as AskError::Rejected, on mlua-isle 0.10
+- the type index carries each declaration's type as a structure, so a tool that lowers a record reads tl's type object and not its printed form
+- a declaration in the type index says which code is its own function body, so a call is attributed to the function it is written in
+- TypeIndex::uses lists every name a checked file uses with the declaration it resolves to and whether it is a call, the reverse go-to-definition is built from
+- Htl::declarations_of collects the declarations of a file it does not check, from a parse alone, as the type index's tree without the types
+- the type index keeps the declarations a file makes as a tree, with their kind, range, name and type, and typeindex::Decl reads them back
+- Htl::check_indexed keeps, beside a check, the type and the declaration tl's report gives each position, and CheckInfo::type_at reads them back
+- htl::fix names what htl fix decides about one fix and applies one fix's edits as htl fix does, and Htl::format_text formats a text as htl fmt formats its file
+- project::check_file is the per-file check htl check's walk asks, with the checker's answer from its store or from disk
+- TealFields::write_fields takes the path read_fields takes, so a serde-crossed field inside a flattened struct or a tag payload fails to write under the name it fails to read under
+- every serde word TealRecord refuses sits in one table with its escape, #[teal(serde)] crosses a field through serde under a serde feature, #[teal(skip)] leaves one out, and a derive refusal is one error again
+- a data enum declares and crosses the way serde tags it — tag, tag + content, or untagged — and one serde would write externally tagged says so instead of disagreeing with the wire
+- TealRecord reads serde's names — rename_all, rename, alias, rename_all_fields — so a field's Teal name and Lua key are the ones the JSON carries, and a serde word it does not read stops the build instead of being ignored
+- htl re-exports serde and serde_json, and a TealRecord field may say the Teal type it crosses as with #[teal(as = "..")]
+- task.answer(req, f) answers a question with what f returns and rejects it with the error f raised, so a bug in the decision reaches the host as a reason rather than a timeout
+- htl::task::Ask asks the Teal loop a typed question with a deadline, and names the three ways it fails, so a host writes the wait and the safe default once rather than per kind
+
+### Other
+
+- every command assembles its checker through checker_for, which goes through the library's project::checker over project::Scope::new, so run, build, gen, shapes, resolve and fix resolve a require the way check does
+- the embed example's Call is a serde type crossing as serde names it, the README says a serde type is written once, and the dts doc's serde material reads as one section
+- examples/embed --ask shows a host asking Teal through Ask, with the kind's deadline and the deny default in one place, and the README says how a host asks
+- the type index splits its rows with as_chunks, which the stable toolchain's clippy asks for in place of chunks_exact with a constant size
+- the TealRecord derive doc lists the #[teal(..)] words and links to htl::dts for what each serde word does, instead of stating the rules a second time
+- an end-to-end case adds one question to a scaffolded bin host and runs it, so the host htl new writes is shown to carry Ask without a change to its template
+- std.proc's timed tests bound a prompt return at 3 s, the middle of the gap to the 5 s child they rule out, not the 1 s a loaded machine crosses
+
 ## [0.15.0](https://github.com/ynishi/htl/compare/v0.14.0...v0.15.0) - 2026-10-11
 
 ### Added
