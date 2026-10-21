@@ -225,6 +225,15 @@ impl Client {
         );
     }
 
+    /// A full-sync `didChange`: the client's buffer is now `text`, saved or not.
+    fn change(&mut self, file: &Path, text: &str) {
+        self.notify(
+            "textDocument/didChange",
+            json!({ "textDocument": { "uri": uri(file), "version": 2 },
+                    "contentChanges": [{ "text": text }] }),
+        );
+    }
+
     fn save(&mut self, file: &Path) {
         self.notify(
             "textDocument/didSave",
@@ -313,7 +322,7 @@ fn the_handshake_asks_for_open_close_and_save_and_nothing_else() {
     let (mut client, init) = Client::start(&root, &root);
     let sync = &init["result"]["capabilities"]["textDocumentSync"];
     assert_eq!(sync["openClose"], true, "{init}");
-    assert_eq!(sync["change"], 0, "no didChange: {init}");
+    assert_eq!(sync["change"], 1, "full text on every change: {init}");
     assert_eq!(sync["save"]["includeText"], false, "{init}");
     assert_eq!(init["result"]["serverInfo"]["name"], "htl", "{init}");
 
@@ -566,4 +575,499 @@ fn the_last_publish_of_a_burst_of_saves_is_about_the_file_as_it_is() {
     for m in &unread {
         assert_eq!(m["params"]["diagnostics"], json!([]), "{m}");
     }
+}
+
+// ---------------------------------------------------------------- formatting, code actions
+
+/// The text after applying `edits` (LSP `TextEdit`s, positions in UTF-16 units of the
+/// original) to `text`. The edits are applied back to front, so each is about the original;
+/// two at one position keep their order.
+fn apply(text: &str, edits: &[Value]) -> String {
+    let offset = |pos: &Value| {
+        let (line, unit) = (
+            pos["line"].as_u64().unwrap() as usize,
+            pos["character"].as_u64().unwrap() as usize,
+        );
+        let start: usize = text.split('\n').take(line).map(|l| l.len() + 1).sum();
+        let mut units = 0;
+        let mut at = start;
+        for c in text[start..].chars() {
+            if units >= unit || c == '\n' {
+                break;
+            }
+            units += c.len_utf16();
+            at += c.len_utf8();
+        }
+        at
+    };
+    let mut spans: Vec<(usize, usize, usize, &str)> = edits
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            (
+                offset(&e["range"]["start"]),
+                offset(&e["range"]["end"]),
+                i,
+                e["newText"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    spans.sort_by_key(|&(s, _, i, _)| (std::cmp::Reverse(s), std::cmp::Reverse(i)));
+    let mut out = text.to_string();
+    for (s, e, _, new) in spans {
+        out.replace_range(s..e, new);
+    }
+    out
+}
+
+/// What `htl <args>` leaves `src/<scratch>.tl` as, run from `cwd` on a copy of `text`
+/// written there: the command the server's answer is held to, on the same project.
+fn written_by(cwd: &Path, args: &[&str], scratch: &str, text: &str) -> String {
+    let copy = cwd.join("src").join(scratch);
+    write(&copy, text);
+    let out = Command::new(common::htl_bin())
+        .args(args)
+        .arg(format!("src/{scratch}"))
+        .current_dir(cwd)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "htl {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::read_to_string(copy).unwrap()
+}
+
+fn formatting(client: &mut Client, file: &Path) -> Value {
+    client.request(
+        "textDocument/formatting",
+        json!({ "textDocument": { "uri": uri(file) },
+                "options": { "tabSize": 3, "insertSpaces": true } }),
+    )
+}
+
+/// The code actions at `range` (a whole-file range when `None`), of the kinds in `only`.
+fn actions(
+    client: &mut Client,
+    file: &Path,
+    range: Option<&Value>,
+    only: Option<&[&str]>,
+    diagnostics: &[Value],
+) -> Vec<Value> {
+    let whole = json!({ "start": { "line": 0, "character": 0 },
+                        "end": { "line": 1000, "character": 0 } });
+    // Invoked (1), as from a menu: the trigger that asks for fix-all without naming it.
+    let mut context = json!({ "diagnostics": diagnostics, "triggerKind": 1 });
+    if let Some(only) = only {
+        context["only"] = json!(only);
+    }
+    let r = client.request(
+        "textDocument/codeAction",
+        json!({ "textDocument": { "uri": uri(file) },
+                "range": range.unwrap_or(&whole), "context": context }),
+    );
+    assert!(r.get("error").is_none(), "{r}");
+    r["result"].as_array().expect("an array").clone()
+}
+
+fn edits_of(action: &Value, file: &Path) -> Vec<Value> {
+    action["edit"]["changes"][uri(file).as_str()]
+        .as_array()
+        .unwrap_or_else(|| panic!("an edit for the file: {action}"))
+        .clone()
+}
+
+/// A file that needs two safe fixes (`explicit-number` twice).
+const FIXABLE: &str = "local a = 0\na = a + 1.5\nlocal b = 0\nb = b + 2.5\nprint(a, b)\n";
+/// A file that needs one unsafe fix (`no-global`).
+const GLOBAL: &str = "global counter: number = 1\nreturn counter\n";
+
+/// A `htl new` project with `explicit-number` on, and `extra` appended to its `htl.toml`.
+fn lint_project(name: &str, extra: &str) -> (common::TempDir, PathBuf) {
+    let (root, p) = project(name);
+    let mut config = std::fs::read_to_string(p.join("htl.toml")).unwrap();
+    config.push_str("\n[lint.rules]\nexplicit-number = \"warn\"\n");
+    config.push_str(extra);
+    write(&p.join("htl.toml"), &config);
+    (root, p)
+}
+
+/// Acceptance 4: the handshake advertises both, and the edits formatting returns make the
+/// file what `htl fmt` writes; a file already formatted gets none, and one the parser
+/// rejects gets `null`. The file is never opened: formatting asks about the disk.
+#[test]
+fn formatting_returns_the_edits_that_make_the_file_what_fmt_writes() {
+    let (root, p) = project("format");
+    let file = p.join("src/messy.tl");
+    let messy = "local function f(x: number): number\n        local y = x+1\n  return    y\n   end\nreturn f\n";
+    write(&file, messy);
+    let (mut client, init) = Client::start(&root, &root);
+    let caps = &init["result"]["capabilities"];
+    assert_eq!(caps["documentFormattingProvider"], true, "{init}");
+    let kinds = caps["codeActionProvider"]["codeActionKinds"].clone();
+    assert_eq!(kinds, json!(["quickfix", "source.fixAll.htl"]), "{init}");
+
+    let expected = written_by(&p, &["fmt"], "expected.tl", messy);
+    assert_ne!(expected, messy, "the case needs something to format");
+    let r = formatting(&mut client, &file);
+    let edits = r["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{r}"))
+        .clone();
+    assert_eq!(apply(messy, &edits), expected);
+
+    // Formatted: nothing to do. (The disk is the document; it is changed to be so.)
+    write(&file, &expected);
+    let r = formatting(&mut client, &file);
+    assert_eq!(r["result"], json!([]), "{r}");
+
+    // A file the parser rejects cannot be formatted: `null`, not an error.
+    write(&file, "local x = = 1\n");
+    let r = formatting(&mut client, &file);
+    assert!(r.get("error").is_none() && r["result"].is_null(), "{r}");
+    let (unread, code) = client.finish();
+    assert!(unread.is_empty(), "{unread:?}");
+    assert_eq!(code, Some(0));
+}
+
+/// The indent is the project's `[fmt] indent`, which `htl fmt` reads the same way.
+#[test]
+fn formatting_uses_the_projects_indent() {
+    let (root, p) = project("format-indent");
+    let mut config = std::fs::read_to_string(p.join("htl.toml")).unwrap();
+    config = config.replace("indent = 3", "indent = 2");
+    assert!(config.contains("indent = 2"));
+    write(&p.join("htl.toml"), &config);
+    let file = p.join("src/messy.tl");
+    let messy = "local function f(x: number): number\n        return x+1\nend\nreturn f\n";
+    write(&file, messy);
+    let expected = written_by(&p, &["fmt"], "expected.tl", messy);
+    assert!(expected.contains("\n  return"), "{expected}");
+    let (mut client, _) = Client::start(&root, &root);
+    let r = formatting(&mut client, &file);
+    let edits = r["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{r}"))
+        .clone();
+    assert_eq!(apply(messy, &edits), expected);
+    client.finish();
+}
+
+/// Acceptance 5: a safe fix is a preferred quick fix on its diagnostic, linked to it, and
+/// its edit is what `htl fix` writes.
+#[test]
+fn a_safe_fix_is_a_preferred_quick_fix_that_matches_fix() {
+    let (root, p) = lint_project("quickfix-safe", "");
+    let file = p.join("src/num.tl");
+    let text = "local total = 0\ntotal = total + 1.5\nprint(total)\n";
+    write(&file, text);
+    let (mut client, _) = Client::start(&root, &root);
+    client.open(&file);
+    let got = client.publishes(&[&file]);
+    let lint = got[&file]
+        .iter()
+        .find(|d| d["code"] == "explicit-number")
+        .unwrap_or_else(|| panic!("{:?}", got[&file]))
+        .clone();
+
+    let expected = written_by(
+        &p,
+        &["fix", "--allow-no-vcs", "--allow-dirty"],
+        "expected.tl",
+        text,
+    );
+    assert_ne!(expected, text);
+    let found = actions(
+        &mut client,
+        &file,
+        Some(&lint["range"]),
+        Some(&["quickfix"]),
+        std::slice::from_ref(&lint),
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+    let a = &found[0];
+    assert_eq!(a["kind"], "quickfix", "{a}");
+    assert_eq!(a["isPreferred"], true, "{a}");
+    assert_eq!(a["title"], "Fix explicit-number", "{a}");
+    assert_eq!(
+        a["diagnostics"],
+        json!([lint]),
+        "linked to its diagnostic: {a}"
+    );
+    assert_eq!(apply(text, &edits_of(a, &file)), expected);
+
+    // Elsewhere in the file (the error on the next line has no fix): no quick fix there.
+    let elsewhere = json!({ "start": { "line": 2, "character": 0 },
+                            "end": { "line": 2, "character": 5 } });
+    let found = actions(
+        &mut client,
+        &file,
+        Some(&elsewhere),
+        Some(&["quickfix"]),
+        &[],
+    );
+    assert!(found.is_empty(), "{found:?}");
+
+    // A cursor at the very start of the name is on the finding.
+    let cursor = json!({ "start": lint["range"]["start"], "end": lint["range"]["start"] });
+    let found = actions(&mut client, &file, Some(&cursor), Some(&["quickfix"]), &[]);
+    assert_eq!(found.len(), 1, "{found:?}");
+    let (unread, _) = client.finish();
+    assert!(unread.is_empty(), "{unread:?}");
+}
+
+/// An unsafe fix is offered, flagged in the title and not preferred; fix-all leaves it
+/// alone, as `htl fix` does without `--unsafe`. Promoted by `[fix] unsafe` it is preferred
+/// and part of fix-all, as it is for `htl fix`; disabled by `[fix] disable` it is offered
+/// but not preferred, and not part of fix-all.
+#[test]
+fn an_unsafe_fix_is_offered_but_not_preferred_and_not_fixed_all() {
+    let (root, p) = lint_project("quickfix-unsafe", "");
+    let file = p.join("src/g.tl");
+    write(&file, GLOBAL);
+    let (mut client, _) = Client::start(&root, &root);
+    client.open(&file);
+    client.publishes(&[&file]);
+    let found = actions(&mut client, &file, None, None, &[]);
+    assert_eq!(found.len(), 1, "no fix-all: {found:?}");
+    let a = &found[0];
+    assert_eq!(a["kind"], "quickfix", "{a}");
+    assert_eq!(a["isPreferred"], false, "{a}");
+    assert_eq!(a["title"], "Fix no-global (unsafe)", "{a}");
+    let expected = written_by(
+        &p,
+        &["fix", "--unsafe", "--allow-no-vcs", "--allow-dirty"],
+        "expected.tl",
+        GLOBAL,
+    );
+    assert_ne!(expected, GLOBAL);
+    assert_eq!(apply(GLOBAL, &edits_of(a, &file)), expected);
+    let all = actions(&mut client, &file, None, Some(&["source.fixAll"]), &[]);
+    assert!(all.is_empty(), "{all:?}");
+    client.finish();
+
+    // Promoted: `htl fix` applies it by default, so it is preferred and fixed all.
+    let (root, p) = lint_project("quickfix-promoted", "\n[fix]\nunsafe = [\"no-global\"]\n");
+    let file = p.join("src/g.tl");
+    write(&file, GLOBAL);
+    let (mut client, _) = Client::start(&root, &root);
+    client.open(&file);
+    client.publishes(&[&file]);
+    let expected = written_by(
+        &p,
+        &["fix", "--allow-no-vcs", "--allow-dirty"],
+        "expected.tl",
+        GLOBAL,
+    );
+    assert_ne!(expected, GLOBAL);
+    let found = actions(&mut client, &file, None, None, &[]);
+    let quick = found.iter().find(|a| a["kind"] == "quickfix").unwrap();
+    assert_eq!(quick["isPreferred"], true, "{found:?}");
+    assert_eq!(quick["title"], "Fix no-global", "{found:?}");
+    let all = found
+        .iter()
+        .find(|a| a["kind"] == "source.fixAll.htl")
+        .unwrap();
+    assert_eq!(apply(GLOBAL, &edits_of(all, &file)), expected);
+    client.finish();
+
+    // Disabled: still a quick fix to ask for, never one to take without asking.
+    let (root, _p) = lint_project(
+        "quickfix-disabled",
+        "\n[fix]\ndisable = [\"explicit-number\"]\n",
+    );
+    let file = _p.join("src/num.tl");
+    write(&file, FIXABLE);
+    let (mut client, _) = Client::start(&root, &root);
+    client.open(&file);
+    client.publishes(&[&file]);
+    let found = actions(&mut client, &file, None, None, &[]);
+    assert!(
+        !found.is_empty() && found.iter().all(|a| a["kind"] == "quickfix"),
+        "{found:?}"
+    );
+    assert!(found.iter().all(|a| a["isPreferred"] == false), "{found:?}");
+    client.finish();
+}
+
+/// Fix-all is `htl fix`'s result for the file, as one edit; it is offered only when it
+/// changes something, is answered from the file as saved, and is the only action `only`
+/// asks for.
+#[test]
+fn fix_all_is_what_fix_writes_and_only_when_it_changes_the_file() {
+    let (root, p) = lint_project("fix-all", "");
+    let file = p.join("src/num.tl");
+    write(&file, FIXABLE);
+    let (mut client, _) = Client::start(&root, &root);
+    client.open(&file);
+    let got = client.publishes(&[&file]);
+    let lints = got[&file]
+        .iter()
+        .filter(|d| d["code"] == "explicit-number")
+        .count();
+    assert_eq!(lints, 2, "{:?}", got[&file]);
+
+    let expected = written_by(
+        &p,
+        &["fix", "--allow-no-vcs", "--allow-dirty"],
+        "expected.tl",
+        FIXABLE,
+    );
+    assert_eq!(expected.matches(": number").count(), 2, "{expected}");
+    let all = actions(&mut client, &file, None, Some(&["source.fixAll"]), &[]);
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0]["kind"], "source.fixAll.htl", "{all:?}");
+    assert!(all[0]["isPreferred"].is_null(), "{all:?}");
+    assert_eq!(apply(FIXABLE, &edits_of(&all[0], &file)), expected);
+    // Asked again: the same answer, from the one computation.
+    let again = actions(&mut client, &file, None, Some(&["source.fixAll.htl"]), &[]);
+    assert_eq!(again, all);
+
+    // `only` narrows: quick fixes alone, one per finding; neither kind for another.
+    let quick = actions(&mut client, &file, None, Some(&["quickfix"]), &[]);
+    assert_eq!(quick.len(), 2, "{quick:?}");
+    assert!(quick.iter().all(|a| a["kind"] == "quickfix"));
+    let none = actions(&mut client, &file, None, Some(&["refactor"]), &[]);
+    assert!(none.is_empty(), "{none:?}");
+
+    // Saved fixed: nothing left to fix, so no action, even though a save is right behind
+    // the request (the request is answered about the file as that save left it).
+    write(&file, &expected);
+    client.change(&file, &expected);
+    client.save(&file);
+    let all = actions(&mut client, &file, None, None, &[]);
+    assert!(all.is_empty(), "{all:?}");
+    let got = client.publishes(&[&file]);
+    assert!(
+        got[&file].iter().all(|d| d["code"] != "explicit-number"),
+        "{:?}",
+        got[&file]
+    );
+    let (unread, code) = client.finish();
+    assert!(unread.is_empty(), "{unread:?}");
+    assert_eq!(code, Some(0));
+}
+
+/// A client that formats or fixes on save asks before it writes: the buffer is not the
+/// file. Formatting formats the buffer, and an edit for the file would have reverted the
+/// unsaved work; fixes belong to the text that was checked, so a buffer that has moved on
+/// gets none, and gets them again once the change is saved and checked.
+#[test]
+fn a_buffer_that_differs_from_the_disk_is_formatted_and_gets_no_fixes() {
+    let (root, p) = lint_project("buffer", "");
+    let file = p.join("src/num.tl");
+    write(&file, FIXABLE);
+    let (mut client, _) = Client::start(&root, &root);
+    client.open(&file);
+    client.publishes(&[&file]);
+    assert!(!actions(&mut client, &file, None, None, &[]).is_empty());
+
+    // Unsaved edits: messy, and a new line the disk does not have.
+    let buffer =
+        "-- unsaved\nlocal function f(x: number): number\n        return x+1\nend\nreturn f\n";
+    client.change(&file, buffer);
+    let expected = written_by(&p, &["fmt"], "expected.tl", buffer);
+    assert_ne!(expected, buffer);
+    let r = formatting(&mut client, &file);
+    let edits = r["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{r}"))
+        .clone();
+    assert_eq!(
+        apply(buffer, &edits),
+        expected,
+        "formats the buffer, not the disk"
+    );
+    // And nothing was checked for the change.
+    assert!(actions(&mut client, &file, None, None, &[]).is_empty());
+
+    // Back to the checked text: the fixes are valid again; saved other text, they are the
+    // new text's.
+    client.change(&file, FIXABLE);
+    assert!(!actions(&mut client, &file, None, None, &[]).is_empty());
+    let (unread, code) = client.finish();
+    assert!(unread.is_empty(), "no publish for a change: {unread:?}");
+    assert_eq!(code, Some(0));
+}
+
+/// Fix-all costs a dry run of `htl fix`, so a client that did not ask for it by kind or by
+/// invoking the menu (the lightbulb on a cursor move) is not given it.
+#[test]
+fn fix_all_is_not_computed_for_an_automatic_request() {
+    let (root, p) = lint_project("automatic", "");
+    let file = p.join("src/num.tl");
+    write(&file, FIXABLE);
+    let (mut client, _) = Client::start(&root, &root);
+    client.open(&file);
+    client.publishes(&[&file]);
+    let r = client.request(
+        "textDocument/codeAction",
+        json!({ "textDocument": { "uri": uri(&file) },
+                "range": { "start": { "line": 0, "character": 0 },
+                           "end": { "line": 1000, "character": 0 } },
+                "context": { "diagnostics": [], "triggerKind": 2 } }),
+    );
+    let found = r["result"].as_array().unwrap();
+    assert_eq!(found.len(), 2, "the quick fixes only: {found:?}");
+    assert!(found.iter().all(|a| a["kind"] == "quickfix"), "{found:?}");
+    client.finish();
+}
+
+/// A `[fix]` section `htl fix` refuses is a setup error on the file, and no fix is offered
+/// while it stands.
+#[test]
+fn a_bad_fix_section_is_a_setup_error_and_offers_no_fix() {
+    let (root, p) = lint_project("bad-fix", "\n[fix]\ndisable = [\"no-such-rule\"]\n");
+    let file = p.join("src/num.tl");
+    write(&file, FIXABLE);
+    let (mut client, _) = Client::start(&root, &root);
+    client.open(&file);
+    let got = client.publishes(&[&file]);
+    let setup: Vec<&Value> = got[&file]
+        .iter()
+        .filter(|d| d["message"].as_str().unwrap().contains("no-such-rule"))
+        .collect();
+    assert_eq!(setup.len(), 1, "{:?}", got[&file]);
+    assert_eq!(setup[0]["severity"], 1);
+    assert!(actions(&mut client, &file, None, None, &[]).is_empty());
+    client.finish();
+}
+
+/// Edits are positions in the buffer's UTF-16 columns, and a file with CRLF line ends is
+/// fixed without disturbing them.
+#[test]
+fn a_fix_in_a_file_with_crlf_and_multibyte_text_matches_fix() {
+    let (root, p) = lint_project("crlf", "");
+    let file = p.join("src/num.tl");
+    let text =
+        "-- caf\u{e9} \u{1F600}\r\nlocal total = 0\r\ntotal = total + 1.5\r\nprint(total)\r\n";
+    write(&file, text);
+    let (mut client, _) = Client::start(&root, &root);
+    client.open(&file);
+    let got = client.publishes(&[&file]);
+    let lint = got[&file]
+        .iter()
+        .find(|d| d["code"] == "explicit-number")
+        .unwrap_or_else(|| panic!("{:?}", got[&file]))
+        .clone();
+    let expected = written_by(
+        &p,
+        &["fix", "--allow-no-vcs", "--allow-dirty"],
+        "expected.tl",
+        text,
+    );
+    assert_ne!(expected, text);
+    let found = actions(
+        &mut client,
+        &file,
+        Some(&lint["range"]),
+        Some(&["quickfix"]),
+        &[],
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(apply(text, &edits_of(&found[0], &file)), expected);
+    let all = actions(&mut client, &file, None, Some(&["source.fixAll"]), &[]);
+    assert_eq!(apply(text, &edits_of(&all[0], &file)), expected);
+    client.finish();
 }
