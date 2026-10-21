@@ -25,8 +25,8 @@
 //! A file is checked when the client opens it and when it saves it, from disk, never from a
 //! buffer, so what it reports is always about a text that exists as a file. The server does
 //! take every change (`textDocumentSync.change` is `Full`) and keeps each open document's
-//! buffer, but only to answer formatting and code actions about the text the client holds;
-//! a `didChange` triggers no check. Diagnostics while typing need the checker to answer for
+//! buffer, but only to answer formatting, code actions, hover and definition about the text
+//! the client holds; a `didChange` triggers no check. Diagnostics while typing need the checker to answer for
 //! text that is not on disk and is often not a program, which is a later step.
 //!
 //! **Every check is a fresh one.** The check is [`Htl::check_written`], the call `htl fix`
@@ -96,7 +96,8 @@
 //! stored as it arrives and the last one is the buffer.
 //!
 //! Every request is answered about the files as the messages before it left them: a
-//! request is preceded by the checks those messages made stale, as a `shutdown` is.
+//! request is preceded by the checks those messages made stale, as a `shutdown` is. (That
+//! is true of the four requests below; any other is refused as unknown.)
 //!
 //! Every edit is one `TextEdit` over the span in which the buffer and the new text differ
 //! (the text they share at both ends is left out, so the cursor, folds and marks outside it
@@ -152,6 +153,44 @@
 //! with the file's diagnostics as the setup error it is, and no fix is offered while it
 //! stands.
 //!
+//! # Hover and definition
+//!
+//! Both are read off the check that was made of the file, as quick fixes are: the check is
+//! [`Htl::check_indexed`], a [`Htl::check_written`] that also copies out of the checker's type
+//! report what an editor asks about a position ([`htl::typeindex`]; its module doc says what
+//! a question is and what the report cannot answer). The copy is made once per check and no
+//! check is made for a request. It is one pass over the report's positions, small beside
+//! the check it belongs to (`HTL_PROFILE=1` prints it as `type_index`, beside `check`),
+//! which is why it is made on every check and not on the first request: a request would
+//! otherwise be a check of the file, which is what the server avoids by checking on open
+//! and on save.
+//!
+//! **Hover** is the type of the name under the cursor, as Teal writes it
+//! (`function(string): sample.Greeting`), as a `teal` code block, over the range of the
+//! name. The cursor may be anywhere in the name or just after it. `null`, not an error, for
+//! anything that is not a name — whitespace, a bracket, a keyword, a number, the inside of a
+//! comment or of a string — and for a name the checker has no type for.
+//!
+//! **Definition** is, for the string of a literal `require("m")` (the quotes, and just after
+//! the closing one), the file htl's resolution picked for it — the same
+//! [`RequireSite::path`](htl::RequireSite::path) `htl resolve m` explains — at its first
+//! character. For a name, it is the declaration the report names: a local, a parameter or a
+//! local function or type in scope at the cursor, or, for a function reached through a field
+//! (`m.hello`), the function in the file that declares it. What the report cannot name is
+//! answered `null`: a field of a primitive type (`g.text`, which Teal shares one `string` for),
+//! a name of the standard library (its declarations are in a file Teal carries inside itself,
+//! not one on disk), a name the report has nothing for. The location is a point: the line and
+//! column Teal records (the name for a variable or a parameter, the start of the statement for a
+//! function or a record), converted to LSP's UTF-16 column against the declaring file as it is
+//! on disk now.
+//!
+//! **Only for the text that was checked.** Both are positions in the text the check read, so
+//! they are answered only while the client's buffer is that text; a buffer that has been
+//! edited since the last save gets `null` from both, not an answer about a text it no
+//! longer holds. Both are answered again after the next save is checked, or if the edit is
+//! undone. (Diagnostics while typing, which would let them follow the buffer, are a later
+//! step.)
+//!
 //! # What it does not do yet
 //!
 //! A project's `htl.toml`, `mlua-pkg.toml`, `types/` and the Rust sources `htl dts` reads
@@ -169,15 +208,19 @@ use lsp_types::notification::{
     Cancel, DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
     Exit, Notification as _, PublishDiagnostics,
 };
-use lsp_types::request::{CodeActionRequest, Formatting, Request as _, Shutdown};
+use lsp_types::request::{
+    CodeActionRequest, Formatting, GotoDefinition, HoverRequest, Request as _, Shutdown,
+};
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
     CodeActionProviderCapability, CodeActionTriggerKind, DiagnosticRelatedInformation,
     DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentFormattingParams, Location,
-    NumberOrString, OneOf, Position, PublishDiagnosticsParams, Range, SaveOptions,
-    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
-    TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceEdit,
+    DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentFormattingParams,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
+    HoverProviderCapability, Location, MarkupContent, MarkupKind, NumberOrString, OneOf, Position,
+    PublishDiagnosticsParams, Range, SaveOptions, ServerCapabilities, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri,
+    WorkspaceEdit,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -236,6 +279,8 @@ fn run_on(connection: &Connection) -> Result<ExitCode> {
             },
         )),
         document_formatting_provider: Some(OneOf::Left(true)),
+        hover_provider: Some(HoverProviderCapability::Simple(true)),
+        definition_provider: Some(OneOf::Left(true)),
         code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
             code_action_kinds: Some(vec![CodeActionKind::QUICKFIX, fix_all_kind()]),
             work_done_progress_options: Default::default(),
@@ -363,17 +408,39 @@ impl Project {
     /// `open` is every file the client has open, which the sink treats as walked: a
     /// dependency error in one of them is that file's to report, as it is for the files
     /// of an `htl check` walk.
-    fn check(&self, file: &Path, open: &[PathBuf]) -> Result<(Vec<htl::Diagnostic>, Vec<PathBuf>)> {
+    fn check(&self, file: &Path, open: &[PathBuf]) -> Result<Done> {
         let mut sink = Sink::new(Collect::default());
         sink.walking(open);
         let walk = self
             .scope
             .walk(&self.cfg, self.model.as_ref(), &self.origins);
-        // The per-file question `htl check`'s walk asks, from disk.
-        let (c, _) =
-            project::check_file(&self.checker, &mut sink, file, &walk, project::Fresh::Disk)?;
-        Ok((sink.out().take(), c.deps))
+        // The per-file question `htl check`'s walk asks, from disk, keeping what the
+        // checker knows of the file's names for hover and definition.
+        let (c, _) = project::check_file(
+            &self.checker,
+            &mut sink,
+            file,
+            &walk,
+            project::Fresh::DiskIndexed,
+        )?;
+        Ok(Done {
+            found: sink.out().take(),
+            deps: c.deps,
+            requires: c.requires,
+            types: c.types,
+        })
     }
+}
+
+/// What [`Project::check`] made of a file.
+struct Done {
+    found: Vec<htl::Diagnostic>,
+    /// The files its check reached through `require`.
+    deps: Vec<PathBuf>,
+    /// Its literal `require`s and the files they resolved to.
+    requires: Vec<htl::RequireSite>,
+    /// What the checker knows of its names, by position.
+    types: htl::typeindex::TypeIndex,
 }
 
 /// A document the client has open.
@@ -411,6 +478,12 @@ struct Checked {
     /// rather than with edits for a text that is gone.
     text: String,
     findings: Vec<Finding>,
+    /// The file's literal `require`s and where htl's resolution put each: what go-to-definition
+    /// on a `require`'s string answers.
+    requires: Vec<htl::RequireSite>,
+    /// What the checker knows of the names in `text`, by position: what hover and
+    /// go-to-definition answer.
+    types: htl::typeindex::TypeIndex,
     /// What `htl fix` would make of the file: not asked for until a request wants it, and
     /// asked once (`Some(None)` is "asked, and it changes nothing").
     fix_all: Option<Option<String>>,
@@ -506,13 +579,19 @@ impl<'c> Server<'c> {
                         ErrorCode::InvalidRequest as i32,
                         "the server is shutting down".to_string(),
                     )
-                } else if req.method == Formatting::METHOD
-                    || req.method == CodeActionRequest::METHOD
+                } else if [
+                    Formatting::METHOD,
+                    CodeActionRequest::METHOD,
+                    HoverRequest::METHOD,
+                    GotoDefinition::METHOD,
+                ]
+                .contains(&req.method.as_str())
                 {
                     // Answered about the files as the messages before it left them: what
                     // they made stale is checked first, as before a `shutdown`. A code
-                    // action is read off the last check, so one asked right behind a save
-                    // would otherwise describe the file as it was before.
+                    // action, a hover and a definition are read off the last check, so
+                    // one asked right behind a save would otherwise describe the file as
+                    // it was before.
                     self.check_all(&std::mem::take(stale));
                     self.document_request(req)
                 } else {
@@ -690,18 +769,17 @@ impl<'c> Server<'c> {
         // fixes.
         let text = read_lossy(&path);
         let outcome = self.project(&key, &path).and_then(|p| {
-            let (found, deps) = p.check(&path, &open)?;
+            let done = p.check(&path, &open)?;
             Ok((
-                found,
-                deps,
+                done,
                 p.scope.lints.selection().clone(),
                 p.policy,
                 p.fix_error.clone(),
             ))
         });
-        let (findings, deps) = match outcome {
-            Ok((found, deps, levels, policy, fix_error)) => {
-                let mut findings = convert(&path, &text, &found, &levels, &policy);
+        let (findings, deps, requires, types) = match outcome {
+            Ok((done, levels, policy, fix_error)) => {
+                let mut findings = convert(&path, &text, &done.found, &levels, &policy);
                 // A `[fix]` that `htl fix` refuses is a setup error, said like one.
                 if let Some(e) = fix_error {
                     findings.push(Finding {
@@ -710,7 +788,7 @@ impl<'c> Server<'c> {
                         rule: String::new(),
                     });
                 }
-                (findings, deps)
+                (findings, done.deps, done.requires, done.types)
             }
             // Nothing could be said about the file: say that, on the file, so the editor
             // shows why it has no diagnostics instead of looking clean.
@@ -721,17 +799,22 @@ impl<'c> Server<'c> {
                     rule: String::new(),
                 }],
                 Vec::new(),
+                Vec::new(),
+                htl::typeindex::TypeIndex::default(),
             ),
         };
         // A write that landed while the check ran leaves the checker's positions in a text
         // that may not be `text`; the buffer can still be `text` (an external write), so the
-        // comparison in `code_actions` would not catch it. Its fixes are dropped; the save
-        // that follows the write checks again.
-        let mut findings = findings;
+        // comparison in `code_actions` would not catch it. Its fixes, the index of its
+        // names and its `require` sites are dropped; the save that follows the write checks
+        // again.
+        let (mut findings, mut requires, mut types) = (findings, requires, types);
         if read_lossy(&path) != text {
             for f in &mut findings {
                 f.fix = None;
             }
+            requires.clear();
+            types = htl::typeindex::TypeIndex::default();
         }
         let diagnostics = findings.iter().map(|f| f.lsp.clone()).collect();
         if let Some(doc) = self.open.get_mut(uri) {
@@ -739,13 +822,15 @@ impl<'c> Server<'c> {
             doc.checked = Some(Checked {
                 text,
                 findings,
+                requires,
+                types,
                 fix_all: None,
             });
         }
         self.publish(uri.clone(), diagnostics);
     }
 
-    /// Answer `textDocument/formatting` or `textDocument/codeAction`.
+    /// Answer `textDocument/formatting`, `codeAction`, `hover` or `definition`.
     fn document_request(&mut self, req: lsp_server::Request) -> Response {
         let id = req.id.clone();
         let bad = |e: serde_json::Error| {
@@ -755,17 +840,94 @@ impl<'c> Server<'c> {
                 format!("malformed {}: {e}", req.method),
             )
         };
-        if req.method == Formatting::METHOD {
-            match serde_json::from_value::<DocumentFormattingParams>(req.params.clone()) {
-                Ok(p) => Response::new_ok(id.clone(), self.formatting(&p.text_document.uri)),
-                Err(e) => bad(e),
+        let params = req.params.clone();
+        match req.method.as_str() {
+            Formatting::METHOD => {
+                match serde_json::from_value::<DocumentFormattingParams>(params) {
+                    Ok(p) => Response::new_ok(id.clone(), self.formatting(&p.text_document.uri)),
+                    Err(e) => bad(e),
+                }
             }
-        } else {
-            match serde_json::from_value::<CodeActionParams>(req.params.clone()) {
+            HoverRequest::METHOD => match serde_json::from_value::<HoverParams>(params) {
+                Ok(p) => {
+                    let at = p.text_document_position_params;
+                    Response::new_ok(id.clone(), self.hover(&at.text_document.uri, at.position))
+                }
+                Err(e) => bad(e),
+            },
+            GotoDefinition::METHOD => {
+                match serde_json::from_value::<GotoDefinitionParams>(params) {
+                    Ok(p) => {
+                        let at = p.text_document_position_params;
+                        Response::new_ok(
+                            id.clone(),
+                            self.definition(&at.text_document.uri, at.position),
+                        )
+                    }
+                    Err(e) => bad(e),
+                }
+            }
+            _ => match serde_json::from_value::<CodeActionParams>(params) {
                 Ok(p) => Response::new_ok(id.clone(), self.code_actions(&p)),
                 Err(e) => bad(e),
-            }
+            },
         }
+    }
+
+    /// What the last check of `uri` read, while the client's buffer is still that text:
+    /// positions in the check's answers are positions in it. `None` for a document that was
+    /// never checked, one whose buffer has moved on, and one whose buffer the server lost
+    /// track of.
+    fn checked_buffer(&self, uri: &Uri) -> Option<&Checked> {
+        let doc = self.open.get(uri).filter(|d| !d.unsynced)?;
+        let checked = doc.checked.as_ref()?;
+        let buffer = match &doc.buffer {
+            Some(buffer) => buffer.as_str(),
+            None => &read_lossy(&doc.path),
+        };
+        (buffer == checked.text).then_some(checked)
+    }
+
+    /// The type of the name at `at`, as Teal writes it; `null` when there is no name there
+    /// or the checker has no type for it.
+    fn hover(&self, uri: &Uri, at: Position) -> Option<Hover> {
+        let checked = self.checked_buffer(uri)?;
+        let lines = lines_of(&checked.text);
+        let (line, col) = byte_position(&lines, at)?;
+        let found = checked.types.at(&checked.text, line, col)?;
+        let ty = found.ty?;
+        Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: format!("```teal\n{ty}\n```"),
+            }),
+            range: Some(range_at(&lines, found.line, found.col)),
+        })
+    }
+
+    /// Where the thing at `at` is declared: for the string of a `require`, the file htl's
+    /// resolution picked; for a name, the declaration the checker's report points to. `null`
+    /// when neither is known, or the declaration is in a file that is not on disk.
+    fn definition(&self, uri: &Uri, at: Position) -> Option<GotoDefinitionResponse> {
+        let checked = self.checked_buffer(uri)?;
+        let lines = lines_of(&checked.text);
+        let (line, col) = byte_position(&lines, at)?;
+        let here = path_of(uri)?;
+        if let Some(site) = required_at(&lines, &checked.requires, line, col) {
+            // The module's first character: a `require` is of the file, not of a line in it.
+            let file = site.path.as_ref()?;
+            let target = location_of(&here, uri, file, &checked.text, None)?;
+            return Some(GotoDefinitionResponse::Scalar(target));
+        }
+        let place = checked.types.at(&checked.text, line, col)?.declared?;
+        let target = location_of(
+            &here,
+            uri,
+            &place.file,
+            &checked.text,
+            Some((place.line, place.col)),
+        )?;
+        Some(GotoDefinitionResponse::Scalar(target))
     }
 
     /// The edits that make the buffer what `htl fmt` writes for it: `[]` when it already is,
@@ -938,6 +1100,98 @@ impl<'c> Server<'c> {
         // A closed connection is noticed by the next read.
         let _ = self.connection.sender.send(message);
     }
+}
+
+/// The 1-based line and byte column of an LSP position in `lines`; `None` for a line the
+/// text does not have. A character past the end of its line is the end.
+fn byte_position(lines: &[&str], at: Position) -> Option<(usize, usize)> {
+    let text = lines.get(at.line as usize)?;
+    let mut units = 0u32;
+    let mut byte = text.len();
+    for (i, c) in text.char_indices() {
+        if units >= at.character {
+            byte = i;
+            break;
+        }
+        units += c.len_utf16() as u32;
+    }
+    Some((at.line as usize + 1, byte + 1))
+}
+
+/// The `require` site, among `sites`, whose module string the cursor (`line`, byte `col`)
+/// is in, the quotes included and the end of the closing one too, as a cursor after the
+/// last character is on it.
+///
+/// A site is where the checker saw the call; its string is the first quote after that
+/// point on the line. A call spelled across lines is not found.
+fn required_at<'a>(
+    lines: &[&str],
+    sites: &'a [htl::RequireSite],
+    line: usize,
+    col: usize,
+) -> Option<&'a htl::RequireSite> {
+    let text = lines.get(line - 1)?;
+    sites.iter().filter(|s| s.line == line).find(|s| {
+        let from = (s.col.saturating_sub(1)).min(text.len());
+        let Some(open) = text.get(from..).and_then(|t| t.find(['"', '\''])) else {
+            return false;
+        };
+        let open = from + open;
+        let quote = text.as_bytes()[open];
+        let close = text.as_bytes()[open + 1..]
+            .iter()
+            .position(|c| *c == quote)
+            .map_or(text.len(), |p| open + 1 + p + 1);
+        (open + 1..=close + 1).contains(&col)
+    })
+}
+
+/// A `Location` for `file`, as a report spells it (relative to the working directory, or
+/// absolute, `./` and all), at `place` (1-based line and byte column) or at the start. The
+/// file the request was made in answers with the URI the client used for it. `None` for a
+/// file that is not on disk: the standard library's declarations are named by a file Teal
+/// carries inside itself.
+fn location_of(
+    here: &Path,
+    uri: &Uri,
+    file: &Path,
+    text: &str,
+    place: Option<(usize, usize)>,
+) -> Option<Location> {
+    let mut path = PathBuf::new();
+    for part in std::env::current_dir()
+        .unwrap_or_default()
+        .join(file)
+        .components()
+    {
+        if part != std::path::Component::CurDir {
+            path.push(part);
+        }
+    }
+    let target = if path == here {
+        uri.clone()
+    } else if path.is_file() {
+        uri_of(&path)?
+    } else {
+        return None;
+    };
+    let start = match place {
+        None => Position::new(0, 0),
+        Some((line, col)) => {
+            let theirs;
+            let theirs_text = if path == here {
+                text
+            } else {
+                theirs = read_lossy(&path);
+                &theirs
+            };
+            range_at(&lines_of(theirs_text), line, col).start
+        }
+    };
+    Some(Location {
+        uri: target,
+        range: Range::new(start, start),
+    })
 }
 
 /// A notification's parameters, or a line on stderr saying they were not what the method

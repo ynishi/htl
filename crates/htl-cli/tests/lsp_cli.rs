@@ -327,7 +327,7 @@ fn the_handshake_asks_for_open_close_and_save_and_nothing_else() {
     assert_eq!(init["result"]["serverInfo"]["name"], "htl", "{init}");
 
     // A request the server does not answer is refused as such, and the server goes on.
-    let r = client.request("textDocument/hover", json!({}));
+    let r = client.request("textDocument/completion", json!({}));
     assert_eq!(r["error"]["code"], -32601, "{r}");
     // A cancellation is accepted: it is a notification, and gets no answer to be wrong.
     client.notify("$/cancelRequest", json!({ "id": 1 }));
@@ -1070,4 +1070,252 @@ fn a_fix_in_a_file_with_crlf_and_multibyte_text_matches_fix() {
     let all = actions(&mut client, &file, None, Some(&["source.fixAll"]), &[]);
     assert_eq!(apply(text, &edits_of(&all[0], &file)), expected);
     client.finish();
+}
+
+/// `textDocument/hover` at a 0-based line and UTF-16 column.
+fn hover(client: &mut Client, file: &Path, line: u32, character: u32) -> Value {
+    let r = client.request(
+        "textDocument/hover",
+        json!({ "textDocument": { "uri": uri(file) },
+                "position": { "line": line, "character": character } }),
+    );
+    assert!(r.get("error").is_none(), "{r}");
+    r["result"].clone()
+}
+
+/// `textDocument/definition` at a 0-based line and UTF-16 column.
+fn definition(client: &mut Client, file: &Path, line: u32, character: u32) -> Value {
+    let r = client.request(
+        "textDocument/definition",
+        json!({ "textDocument": { "uri": uri(file) },
+                "position": { "line": line, "character": character } }),
+    );
+    assert!(r.get("error").is_none(), "{r}");
+    r["result"].clone()
+}
+
+/// The text a hover shows: the body of its markdown code block.
+fn shown(h: &Value) -> String {
+    assert_eq!(h["contents"]["kind"], "markdown", "{h}");
+    let v = h["contents"]["value"].as_str().unwrap();
+    v.strip_prefix("```teal\n")
+        .and_then(|v| v.strip_suffix("\n```"))
+        .unwrap_or_else(|| panic!("a teal code block: {v:?}"))
+        .to_string()
+}
+
+fn range_of(h: &Value) -> (u64, u64, u64, u64) {
+    let r = &h["range"];
+    (
+        r["start"]["line"].as_u64().unwrap(),
+        r["start"]["character"].as_u64().unwrap(),
+        r["end"]["line"].as_u64().unwrap(),
+        r["end"]["character"].as_u64().unwrap(),
+    )
+}
+
+/// The `htl new` scaffold, opened and checked: `src/main.tl` is
+///
+/// ```text
+/// local sample = require("sample")
+///
+/// local g = sample.greet(arg and arg[1] or "teal")
+/// print(g.text)
+/// ```
+fn opened_scaffold(name: &str) -> (common::TempDir, PathBuf, PathBuf, Client) {
+    let (root, p) = project(name);
+    let main = p.join("src/main.tl");
+    assert_eq!(
+        std::fs::read_to_string(&main).unwrap().lines().nth(3),
+        Some("print(g.text)"),
+        "the scaffold this case reads positions of"
+    );
+    let (mut client, init) = Client::start(&root, &root);
+    let caps = &init["result"]["capabilities"];
+    assert_eq!(caps["hoverProvider"], true, "{init}");
+    assert_eq!(caps["definitionProvider"], true, "{init}");
+    client.open(&main);
+    client.publishes(&[&main]);
+    (root, p, main, client)
+}
+
+/// Acceptance 6: a hover on a local bound to a record shows the record's type, on a function
+/// its signature; a position in the middle of a name, or just after it, is on the name, and
+/// one that is on no name answers `null`.
+#[test]
+fn hover_shows_the_type_of_the_name_under_the_cursor() {
+    let (_root, _p, main, mut client) = opened_scaffold("hover");
+
+    // `g` in `print(g.text)`: the record the call returns.
+    let h = hover(&mut client, &main, 3, 6);
+    assert!(shown(&h).contains("Greeting"), "{h}");
+    assert_eq!(range_of(&h), (3, 6, 3, 7), "{h}");
+
+    // `text`, from its first character, its middle and just after it: the field's type.
+    for character in [8, 10, 12] {
+        let h = hover(&mut client, &main, 3, character);
+        assert_eq!(shown(&h), "string", "{character}: {h}");
+        assert_eq!(range_of(&h), (3, 8, 3, 12), "{character}: {h}");
+    }
+
+    // `greet` in `sample.greet(..)`, a field that is a function.
+    let h = hover(&mut client, &main, 2, 17);
+    assert!(shown(&h).contains("function"), "{h}");
+    assert_eq!(range_of(&h), (2, 17, 2, 22), "{h}");
+
+    // The local that holds the module: a name in a declaration is a name too.
+    let h = hover(&mut client, &main, 0, 8);
+    assert!(shown(&h).contains("sample"), "{h}");
+
+    // No name: a blank line, a space after `=`, a keyword, a number, a string's text.
+    for (line, character) in [(1, 0), (2, 9), (0, 0), (0, 3), (2, 36), (2, 43)] {
+        let h = hover(&mut client, &main, line, character);
+        assert_eq!(h, Value::Null, "{line}:{character}");
+    }
+    // Past the end of the file or of a line is the same answer, not an error.
+    assert_eq!(hover(&mut client, &main, 40, 0), Value::Null);
+    assert_eq!(hover(&mut client, &main, 3, 90), Value::Null);
+
+    let (unread, code) = client.finish();
+    assert!(unread.is_empty(), "{unread:?}");
+    assert_eq!(code, Some(0));
+}
+
+/// Acceptance 6: a definition on the argument of `require` is the file `htl resolve` prints
+/// for the module, and on a name the line it is declared on.
+#[test]
+fn definition_of_a_require_is_the_file_resolve_prints() {
+    let (_root, p, main, mut client) = opened_scaffold("definition");
+    let out = Command::new(common::htl_bin())
+        .args(["resolve", "sample"])
+        .current_dir(&p)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let resolved = stdout
+        .lines()
+        .next()
+        .and_then(|l| l.strip_prefix("htl resolve sample: "))
+        .unwrap_or_else(|| panic!("the first line names the file: {stdout}"));
+    let init = p.join(resolved);
+    assert!(init.is_file(), "{resolved}");
+
+    // The string: its opening quote, its text, its closing quote and just after that.
+    for character in [23, 24, 27, 30, 31] {
+        let d = definition(&mut client, &main, 0, character);
+        assert_eq!(d["uri"], uri(&init).as_str(), "{character}: {d}");
+        assert_eq!(
+            d["range"],
+            json!({ "start": { "line": 0, "character": 0 },
+                    "end": { "line": 0, "character": 0 } }),
+            "{character}: {d}"
+        );
+    }
+
+    // `g` in `g.text` is the `g` of `local g`: line 2 (0-based), the name.
+    let d = definition(&mut client, &main, 3, 6);
+    assert_eq!(d["uri"], uri(&main).as_str(), "{d}");
+    assert_eq!(
+        d["range"]["start"],
+        json!({ "line": 2, "character": 6 }),
+        "{d}"
+    );
+    // `sample` the module, used on line 2, is declared by the `local` on line 0.
+    let d = definition(&mut client, &main, 2, 10);
+    assert_eq!(d["uri"], uri(&main).as_str(), "{d}");
+    assert_eq!(d["range"]["start"]["line"], 0, "{d}");
+
+    // `greet` is `function sample.greet` in the module: the line the checker names, in the
+    // file the require resolved to.
+    let d = definition(&mut client, &main, 2, 17);
+    assert_eq!(d["uri"], uri(&init).as_str(), "{d}");
+    let declared = std::fs::read_to_string(&init).unwrap();
+    let at = declared
+        .lines()
+        .position(|l| l.starts_with("function sample.greet"))
+        .unwrap();
+    assert_eq!(d["range"]["start"]["line"], at, "{d}");
+
+    // `print` is declared in Teal's standard library, which is not a file: no answer.
+    assert_eq!(definition(&mut client, &main, 3, 2), Value::Null);
+    // Nor is there one where there is no name, or in a string that is not a `require`'s.
+    assert_eq!(definition(&mut client, &main, 1, 0), Value::Null);
+    assert_eq!(definition(&mut client, &main, 2, 36), Value::Null);
+
+    let (unread, code) = client.finish();
+    assert!(unread.is_empty(), "{unread:?}");
+    assert_eq!(code, Some(0));
+}
+
+/// A hover and a definition are positions in the text the check read. Once the buffer is
+/// something else, the positions are in a text that is gone: both answer `null` until a save
+/// is checked, whatever the position would have been on.
+#[test]
+fn hover_and_definition_answer_only_for_the_text_that_was_checked() {
+    let (_root, _p, main, mut client) = opened_scaffold("hover-edited");
+    let text = std::fs::read_to_string(&main).unwrap();
+    assert_ne!(hover(&mut client, &main, 3, 6), Value::Null);
+
+    // A line inserted above: what was at 3:6 is now at 4:6, and 3:6 is another line's.
+    client.change(&main, &format!("-- a new first line\n{text}"));
+    assert_eq!(hover(&mut client, &main, 4, 6), Value::Null);
+    assert_eq!(hover(&mut client, &main, 3, 6), Value::Null);
+    assert_eq!(definition(&mut client, &main, 4, 6), Value::Null);
+    assert_eq!(definition(&mut client, &main, 1, 24), Value::Null);
+
+    // The text put back is the text that was checked, and it answers again.
+    client.change(&main, &text);
+    assert!(shown(&hover(&mut client, &main, 3, 6)).contains("Greeting"));
+
+    // Saved: what is on disk is checked, and the new text is the one that answers.
+    write(&main, &format!("-- a new first line\n{text}"));
+    client.change(&main, &format!("-- a new first line\n{text}"));
+    client.save(&main);
+    client.publishes(&[&main]);
+    let h = hover(&mut client, &main, 4, 6);
+    assert!(shown(&h).contains("Greeting"), "{h}");
+    assert_eq!(range_of(&h), (4, 6, 4, 7), "{h}");
+    let d = definition(&mut client, &main, 4, 6);
+    assert_eq!(d["range"]["start"]["line"], 3, "{d}");
+
+    let (unread, code) = client.finish();
+    assert!(unread.is_empty(), "{unread:?}");
+    assert_eq!(code, Some(0));
+}
+
+/// Columns are UTF-16 units on the way in and out, and a name is found by its bytes: a line
+/// with characters before the name, two bytes and then four, still has the name under the
+/// cursor.
+#[test]
+fn hover_and_definition_count_columns_in_utf16_units() {
+    let (_root, p, main, mut client) = opened_scaffold("hover-utf16");
+    let line = "local note = \"\u{e9}\u{1F600}\"; local count: integer = 7; print(note, count)\n";
+    let file = p.join("src/wide.tl");
+    write(&file, line);
+    client.open(&file);
+    client.publishes(&[&file]);
+    // `count` the second time: after `é` (1 unit) and the emoji (2 units).
+    let units = |needle: &str, nth: usize| {
+        let (byte, _) = line.match_indices(needle).nth(nth).unwrap();
+        line[..byte].encode_utf16().count() as u32
+    };
+    let use_at = units("count", 1);
+    let h = hover(&mut client, &file, 0, use_at + 2);
+    assert_eq!(shown(&h), "integer", "{h}");
+    assert_eq!(
+        range_of(&h),
+        (0, use_at as u64, 0, use_at as u64 + 5),
+        "{h}"
+    );
+    let d = definition(&mut client, &file, 0, use_at + 2);
+    assert_eq!(d["uri"], uri(&file).as_str(), "{d}");
+    assert_eq!(
+        d["range"]["start"],
+        json!({ "line": 0, "character": units("count", 0) }),
+        "{d}"
+    );
+    drop(main);
+    let (_, code) = client.finish();
+    assert_eq!(code, Some(0));
 }
