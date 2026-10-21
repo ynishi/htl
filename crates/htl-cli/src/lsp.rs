@@ -382,6 +382,75 @@
 //! - the standard library, whose declarations have no file to answer with;
 //! - a file that does not parse, which has no index and so no uses.
 //!
+//! # Call hierarchy
+//!
+//! `textDocument/prepareCallHierarchy`, `callHierarchy/incomingCalls` and
+//! `callHierarchy/outgoingCalls` answer "who calls this" and "what does this call" from the
+//! reference index, which is built, kept current and limited as "References" says: there is
+//! no index of its own, and what a request finds is what a references request would. The
+//! uses it reads are the ones that are calls (`f(`, `o:f(`, `f "s"`, `f {`), and the
+//! declarations are the tree of the file's last check, so a variable that holds a function
+//! (`local g = m.greet`) is a function here as in the outline. The code is in `calls.rs`.
+//!
+//! **Preparing.** The position is resolved as references resolve it, from a use or from the
+//! name a declaration writes, to the declaration the type index names. The answer is one
+//! item when that declaration is a function the tree of the file it is in holds: `local
+//! function`, `global function`, `function R.f`, `function R:m`, a record's field typed as a
+//! function and a variable that holds one, at the top level of its file. A function declared
+//! in a record's body and defined below is one item whichever name the request starts from.
+//! The item's `name` and `kind` (`Function`, or `Method` for `R:m`) are the outline's, its
+//! `detail` is the type as Teal writes it, `range` is the declaration from its first token to
+//! its end and `selectionRange` is its name. The answer is `null` for a position on no name,
+//! on a name with no declaration the check names, on one that is not a function (a local
+//! that holds a number, a field that is not a function) and on one the tree does not hold: a
+//! parameter, a function written inside another function (the tree does not enter bodies),
+//! the standard library's. The buffer must be the text the check read, as for references.
+//!
+//! **The item.** Its `data` is what finds the declaration again: the two places the checker
+//! names it by and its name (`{"at": [[line, col], [line, col]], "name": ".."}`, lines and byte
+//! columns from 1); the file is the item's URI. The two requests that follow take the item as
+//! the client got it and look the declaration up in the file's uses: if the file changed so
+//! that no function of that name is declared at those places, or the file is gone, or is not
+//! one the walk visits, or the `data` is not one this server made, the answer is `null` (and
+//! the reason is on stderr). A file the client has open is answered about only while its
+//! buffer is the text the check read, as everywhere else, since the item's ranges are
+//! positions in that text. `[]` is the answer for a function nothing calls (or that calls
+//! nothing).
+//!
+//! **Incoming calls** are the uses of the item's declaration that are calls, in every file of
+//! the project, whether or not it is open, grouped by the function each call is inside of:
+//! the innermost function of the file's tree whose code holds the call
+//! ([`htl::typeindex::Decl::fn_body`]): a function's whole extent, and for a variable only
+//! the function literal written for that name (the k-th expression of `local f, g =
+//! function() .. end, function() .. end`). A variable that merely holds a function, `local
+//! log = logger.make("x")`, has no code of its own: the call to `make` is at the top level,
+//! and `log` has no outgoing calls. A function's `from`
+//! item is its own, and `fromRanges` are the call sites in that file. The tree does not
+//! enter a function's body, so a closure or a local function inside a function is part of
+//! it: a call inside either is the enclosing function's. A call at the top level of a file,
+//! in no function (the `local g = m.greet(..)` of `main.tl`, a call inside the function
+//! literal a test passes to `t.it`), is grouped under an item for the file's chunk: kind
+//! `File`, named by the file's path from the project's root, whose range is the whole file.
+//! The groups are in the order of the files (by path), the chunk of a file before its
+//! functions, so the same request is the same answer. A function that calls itself is among
+//! its own callers.
+//!
+//! **Outgoing calls** are the calls inside the item's function (its own file's uses, those
+//! whose innermost function it is), grouped by the function each calls, whose `to` item is
+//! that function's and `fromRanges` the call sites, in the item's file. Left out: a call
+//! whose name the check does not resolve (see "What cannot be resolved" in References), a
+//! call of the standard library, of a parameter or of a local the tree does not hold
+//! (including a local function inside the function), of a variable that is not typed as a
+//! function, and of a function declared in a file the walk does not visit (a dependency's).
+//! The item of a file's chunk, which an incoming answer may carry, has outgoing calls too
+//! (the calls at the top level of the file) and no incoming ones.
+//!
+//! **What cannot be resolved.** A call through a value whose type the check does not know
+//! is no call of anything, and a call through an alias is a call of the alias: `local g =
+//! m.greet` is a function `g`, and `g(..)` is among `g`'s incoming calls and not `greet`'s.
+//! `self:n()` in a method of the record `R` is a call of `R:n` where the check knows `self`
+//! as an `R`, which it does for a `function R:m` written in the file.
+//!
 //! # Files that change the answer
 //!
 //! A file's diagnostics depend on more than the file: the project's `htl.toml` (lint levels,
@@ -440,6 +509,7 @@
 //! is built, is published again only when it is: a save of the `.tl` that declares it does not
 //! rebuild the project.
 
+mod calls;
 mod refs;
 mod symbols;
 
@@ -453,13 +523,16 @@ use lsp_types::notification::{
     DidOpenTextDocument, DidSaveTextDocument, Exit, Notification as _, PublishDiagnostics,
 };
 use lsp_types::request::{
+    CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare,
     CodeActionRequest, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest, References,
     RegisterCapability, Request as _, Shutdown, WorkspaceSymbolRequest,
 };
 use lsp_types::{
-    CodeAction, CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
-    CodeActionProviderCapability, CodeActionTriggerKind, DiagnosticRelatedInformation,
-    DiagnosticSeverity, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    CallHierarchyIncomingCallsParams, CallHierarchyItem, CallHierarchyOutgoingCallsParams,
+    CallHierarchyPrepareParams, CallHierarchyServerCapability, CodeAction, CodeActionKind,
+    CodeActionOptions, CodeActionOrCommand, CodeActionParams, CodeActionProviderCapability,
+    CodeActionTriggerKind, DiagnosticRelatedInformation, DiagnosticSeverity,
+    DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
     DidChangeWatchedFilesRegistrationOptions, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentFormattingParams, DocumentSymbol,
     DocumentSymbolParams, DocumentSymbolResponse, FileSystemWatcher, GlobPattern,
@@ -541,6 +614,7 @@ fn run_on(connection: &Connection) -> Result<ExitCode> {
         document_symbol_provider: Some(OneOf::Left(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
+        call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
         code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
             code_action_kinds: Some(vec![CodeActionKind::QUICKFIX, fix_all_kind()]),
             work_done_progress_options: Default::default(),
@@ -1036,6 +1110,9 @@ impl<'c> Server<'c> {
                     DocumentSymbolRequest::METHOD,
                     WorkspaceSymbolRequest::METHOD,
                     References::METHOD,
+                    CallHierarchyPrepare::METHOD,
+                    CallHierarchyIncomingCalls::METHOD,
+                    CallHierarchyOutgoingCalls::METHOD,
                 ]
                 .contains(&req.method.as_str())
                 {
@@ -1472,7 +1549,8 @@ impl<'c> Server<'c> {
     }
 
     /// Answer `textDocument/formatting`, `codeAction`, `hover`, `definition`,
-    /// `documentSymbol`, `references` or the workspace-symbol request.
+    /// `documentSymbol`, `references`, the workspace-symbol request or one of the three of the
+    /// call hierarchy.
     fn document_request(&mut self, req: lsp_server::Request) -> Response {
         let id = req.id.clone();
         let bad = |e: serde_json::Error| {
@@ -1531,6 +1609,30 @@ impl<'c> Server<'c> {
                 }
                 Err(e) => bad(e),
             },
+            CallHierarchyPrepare::METHOD => {
+                match serde_json::from_value::<CallHierarchyPrepareParams>(params) {
+                    Ok(p) => {
+                        let at = p.text_document_position_params;
+                        Response::new_ok(
+                            id.clone(),
+                            self.prepare_calls(&at.text_document.uri, at.position),
+                        )
+                    }
+                    Err(e) => bad(e),
+                }
+            }
+            CallHierarchyIncomingCalls::METHOD => {
+                match serde_json::from_value::<CallHierarchyIncomingCallsParams>(params) {
+                    Ok(p) => Response::new_ok(id.clone(), self.incoming_calls(&p.item)),
+                    Err(e) => bad(e),
+                }
+            }
+            CallHierarchyOutgoingCalls::METHOD => {
+                match serde_json::from_value::<CallHierarchyOutgoingCallsParams>(params) {
+                    Ok(p) => Response::new_ok(id.clone(), self.outgoing_calls(&p.item)),
+                    Err(e) => bad(e),
+                }
+            }
             WorkspaceSymbolRequest::METHOD => {
                 match serde_json::from_value::<WorkspaceSymbolParams>(params) {
                     Ok(p) => Response::new_ok(id.clone(), self.workspace_symbols(&p.query)),
@@ -1772,19 +1874,15 @@ impl<'c> Server<'c> {
         result
     }
 
-    /// Every use of the declaration the name at `at` stands for, across the files of its
-    /// project: where each is written, and with `include_declaration` the declaration
-    /// itself. `null` when the position resolves to no declaration the answer can name (not
-    /// a name, a name the report has no declaration for, a declaration in the standard
-    /// library, a buffer that is not the text the check read, a file nothing was checked
-    /// for, a project whose files cannot be listed); `[]` when it resolves and nothing but
-    /// the declaration uses it.
-    fn references(
-        &mut self,
-        uri: &Uri,
-        at: Position,
-        include_declaration: bool,
-    ) -> Option<Vec<Location>> {
+    /// What every request that asks about the uses of the project has first: the project
+    /// of `uri` built (again, if its manifests moved) and its symbol index brought up to
+    /// date, the files that decide what the uses resolve against looked at when the client
+    /// does not watch, the file a known file's uses are not trusted for checked again, and
+    /// the walk asked to hold `uri`'s file ("References" in the module doc says why each).
+    /// `what` names the request in the line on stderr that says why there is no answer.
+    /// The project's key and the file's path, or `None` when nothing can be answered (the
+    /// project's files cannot be listed, or the file is not one the walk visits).
+    fn project_ready(&mut self, uri: &Uri, what: &str) -> Option<(PathBuf, PathBuf)> {
         let here = path_of(uri)?;
         let key = self
             .open
@@ -1798,7 +1896,7 @@ impl<'c> Server<'c> {
             self.check_one(&other);
         }
         if let Err(e) = self.refresh_symbols(&key, &here) {
-            eprintln!("htl lsp: no references for {}: {e:#}", key.display());
+            eprintln!("htl lsp: no {what} for {}: {e:#}", key.display());
             return None;
         }
         // A client that does not watch is not told that a `types/` declaration or a Rust
@@ -1853,6 +1951,23 @@ impl<'c> Server<'c> {
         {
             self.check_one(uri);
         }
+        Some((key, here))
+    }
+
+    /// Every use of the declaration the name at `at` stands for, across the files of its
+    /// project: where each is written, and with `include_declaration` the declaration
+    /// itself. `null` when the position resolves to no declaration the answer can name (not
+    /// a name, a name the report has no declaration for, a declaration in the standard
+    /// library, a buffer that is not the text the check read, a file nothing was checked
+    /// for, a project whose files cannot be listed); `[]` when it resolves and nothing but
+    /// the declaration uses it.
+    fn references(
+        &mut self,
+        uri: &Uri,
+        at: Position,
+        include_declaration: bool,
+    ) -> Option<Vec<Location>> {
+        let (key, here) = self.project_ready(uri, "references")?;
         let (text, spelled, target) = {
             let checked = self.checked_buffer(uri)?;
             let lines = lines_of(&checked.text);
@@ -1936,6 +2051,167 @@ impl<'c> Server<'c> {
                 }
                 if let Err(e) = self.refresh_symbols(&key, &here) {
                     eprintln!("htl lsp: no references for {}: {e:#}", key.display());
+                    return None;
+                }
+                continue;
+            }
+            return Some(out);
+        }
+    }
+
+    /// The item of the function the name at `at` is, or is a use of: one, or `null` when the
+    /// answer cannot be given as for references (the position resolves to no declaration,
+    /// the buffer is not the text the check read, the file is not one the walk visits), or
+    /// the declaration is not a function the tree of declarations holds (a local that does
+    /// not hold one, a parameter, a local inside a function, a declaration in the standard
+    /// library).
+    fn prepare_calls(&mut self, uri: &Uri, at: Position) -> Option<Vec<CallHierarchyItem>> {
+        let (key, here) = self.project_ready(uri, "call hierarchy")?;
+        let here_canonical = canonical(&here);
+        // The declaration's symbol: from the check that resolved the name when the
+        // declaration is in the same file, so that its ranges are the buffer's; else from
+        // the uses of the file it is in.
+        let (target, mine) = {
+            let checked = self.checked_buffer(uri)?;
+            let lines = lines_of(&checked.text);
+            let (line, col) = byte_position(&lines, at)?;
+            let spelled = checked.types.at(&checked.text, line, col)?.declared?;
+            let target = refs::Place::of(&spelled)?;
+            let mine = (*target.file == *here_canonical).then(|| {
+                checked
+                    .types
+                    .declarations()
+                    .map(|d| symbols::flatten(&checked.text, d))
+                    .unwrap_or_default()
+            });
+            (target, mine)
+        };
+        let place = (target.line, target.col);
+        if let Some(syms) = mine {
+            let sym = &syms[symbols::find(&syms, place)?];
+            return sym
+                .is_function()
+                .then(|| vec![calls::item(uri.clone(), sym)]);
+        }
+        self.refresh_refs(&key);
+        let e = self.indices.get(&key)?.entry(&target.file)?;
+        let syms = &e.refs.as_ref()?.syms;
+        let sym = &syms[symbols::find(syms, place)?];
+        if !sym.is_function() || !e.path.is_file() {
+            return None;
+        }
+        let uri = std::path::absolute(&e.path).ok().and_then(|p| uri_of(&p))?;
+        Some(vec![calls::item(uri, sym)])
+    }
+
+    /// The functions that call the one `item` stands for, each with its call sites, and the
+    /// top level of a file that calls it as a file ("Call hierarchy" in the module doc).
+    /// `null` when the item's declaration is not there any more (the file changed, was
+    /// deleted, or the data is not an item this server made), the item's file is open and
+    /// its buffer is not the text the check read, or the project cannot be asked; `[]` for
+    /// a function nothing calls.
+    fn incoming_calls(
+        &mut self,
+        item: &CallHierarchyItem,
+    ) -> Option<Vec<lsp_types::CallHierarchyIncomingCall>> {
+        let (key, canonical_here) = self.calls_ready(item)?;
+        // No `data` is no item of this server's, answered as one whose function is gone.
+        let data = item.data.clone().unwrap_or_default();
+        let root = canonical(&key);
+        self.calls_answer(&key, &item.uri, |index| {
+            let ctx = calls::Ctx {
+                root: &root,
+                here: &canonical_here,
+                uri: &item.uri,
+            };
+            let (_, fr, which) = calls::resolve(index, &canonical_here, &data)?;
+            // A file's top level is called by no one.
+            let Some(i) = which else {
+                return Some((Vec::new(), false));
+            };
+            Some(calls::incoming(
+                index,
+                &ctx,
+                &calls::places(&canonical_here, &fr.syms[i]),
+            ))
+        })
+    }
+
+    /// The functions the one `item` stands for calls, each with the call sites in it; for
+    /// the item of a file's top level, the functions its statements call. Answered `null`
+    /// and `[]` as [`incoming_calls`](Self::incoming_calls) is.
+    fn outgoing_calls(
+        &mut self,
+        item: &CallHierarchyItem,
+    ) -> Option<Vec<lsp_types::CallHierarchyOutgoingCall>> {
+        let (key, canonical_here) = self.calls_ready(item)?;
+        // No `data` is no item of this server's, answered as one whose function is gone.
+        let data = item.data.clone().unwrap_or_default();
+        let root = canonical(&key);
+        self.calls_answer(&key, &item.uri, |index| {
+            let ctx = calls::Ctx {
+                root: &root,
+                here: &canonical_here,
+                uri: &item.uri,
+            };
+            let (_, fr, which) = calls::resolve(index, &canonical_here, &data)?;
+            Some(calls::outgoing(index, &ctx, fr, which))
+        })
+    }
+
+    /// What a request made with an item has first ([`project_ready`](Self::project_ready), for
+    /// the file of the item), and the rule of every answer made from a checked buffer: an
+    /// item of an open file is answered only while the buffer is the text the check read,
+    /// since its ranges are positions in it. Whether the file is open is decided by where
+    /// the file really is, not by how the URI spells it: a symlinked path or a differently
+    /// written URI of an open file is that file, with its unsaved edits. The project's key
+    /// and the file, canonical.
+    fn calls_ready(&mut self, item: &CallHierarchyItem) -> Option<(PathBuf, PathBuf)> {
+        let canonical_here = canonical(&path_of(&item.uri)?);
+        let open = self
+            .open
+            .iter()
+            .find(|(_, d)| d.canonical == canonical_here)
+            .map(|(u, _)| u.clone());
+        let uri = open.clone().unwrap_or_else(|| item.uri.clone());
+        let (key, _) = self.project_ready(&uri, "call hierarchy")?;
+        if let Some(open) = open {
+            self.checked_buffer(&open)?;
+        }
+        Some((key, canonical_here))
+    }
+
+    /// `answer` made from the uses of the project under `key`, once they are all made. An
+    /// answer that found a use in a file that is gone says so, and the project is walked
+    /// again and the answer made once more, as a references request does ("References" in
+    /// the module doc: a watcher names files, not the directory a file was in).
+    fn calls_answer<T>(
+        &mut self,
+        key: &Path,
+        uri: &Uri,
+        answer: impl Fn(&SymbolIndex) -> Option<(T, bool)>,
+    ) -> Option<T> {
+        let here = path_of(uri)?;
+        let mut round = 0;
+        loop {
+            self.refresh_refs(key);
+            let (out, gone) = match answer(self.indices.get(key)?) {
+                Some(found) => found,
+                None => {
+                    eprintln!(
+                        "htl lsp: no call hierarchy for an item of {}: it declares no such function",
+                        here.display()
+                    );
+                    return None;
+                }
+            };
+            if gone && round == 0 {
+                round += 1;
+                if let Some(index) = self.indices.get_mut(key) {
+                    index.relist();
+                }
+                if let Err(e) = self.refresh_symbols(key, &here) {
+                    eprintln!("htl lsp: no call hierarchy for {}: {e:#}", key.display());
                     return None;
                 }
                 continue;
