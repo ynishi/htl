@@ -2164,6 +2164,16 @@ impl Htl {
         out.ok_or_else(|| anyhow!("{}", err.unwrap_or_else(|| "format failed".into())))
     }
 
+    /// [`format_file`](Self::format_file) for text that is not (yet) a file: `text` is
+    /// formatted as the file `file` would be if it held it, and `file` only names it in an
+    /// error. For a caller that holds a buffer the file on disk does not match (`htl lsp`).
+    pub fn format_text(&self, text: &str, file: &Path, indent: usize) -> Result<String> {
+        let f: Function = self.h.get("format_text")?;
+        let (out, err): (Option<String>, Option<String>) =
+            f.call((text, path_str(file), indent))?;
+        out.ok_or_else(|| anyhow!("{}", err.unwrap_or_else(|| "format failed".into())))
+    }
+
     /// Drop Lua's default search path (cwd-relative `./?.lua` etc.) so only directories
     /// passed to [`add_path`](Self::add_path) are consulted by the checker and `require`.
     pub fn reset_search_path(&self) -> Result<()> {

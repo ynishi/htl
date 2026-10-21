@@ -72,6 +72,68 @@ impl FixOptions {
     }
 }
 
+/// What a [`FixOptions`] makes of one fix: whether `htl fix` applies it, and if not, why.
+///
+/// The one place the rules are written (`--rule`, `[fix] disable`, `[fix] unsafe`,
+/// `--unsafe`, and `suggest` never applying); [`fix_file`] asks it of every candidate, and
+/// a caller that wants to know what `htl fix` *would* do with a fix (an editor choosing
+/// which quick fix is the default) asks the same question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Disposition {
+    /// Applied, under this class: `Safe`, or `Unsafe` when the run was asked for it.
+    Apply(Applicability),
+    /// `--rule` names other rules; the fix is not mentioned in the report at all.
+    OutOfScope,
+    /// `[fix] disable` names the rule.
+    Disabled,
+    /// A `suggest` fix: shown, never applied.
+    Suggestion,
+    /// An `unsafe` fix, and neither `--unsafe` nor `[fix] unsafe` asked for it.
+    NeedsUnsafe,
+}
+
+impl Disposition {
+    /// The sentence a skipped fix is reported with (`skipped: ... — <reason>`); `None` for
+    /// a fix that is applied or is not in scope.
+    pub fn reason(self) -> Option<&'static str> {
+        match self {
+            Disposition::Apply(_) | Disposition::OutOfScope => None,
+            Disposition::Disabled => Some("disabled by [fix] disable"),
+            Disposition::Suggestion => Some("suggestion only; not applied automatically"),
+            Disposition::NeedsUnsafe => {
+                Some("unsafe fix; apply with --unsafe or promote it under [fix] unsafe")
+            }
+        }
+    }
+}
+
+impl FixOptions {
+    /// The class `fix` is applied under for `rule`: its own, except that `[fix] unsafe`
+    /// promotes an `unsafe` fix of the rules it names to `safe`.
+    pub fn effective(&self, rule: &str, fix: &crate::Fix) -> Applicability {
+        if fix.applicability == Applicability::Unsafe && self.promoted.iter().any(|r| r == rule) {
+            Applicability::Safe
+        } else {
+            fix.applicability
+        }
+    }
+
+    /// What this run does with `fix`, a fix of `rule` (the name [`rule_of`] gives it).
+    pub fn disposition(&self, rule: &str, fix: &crate::Fix) -> Disposition {
+        if !self.only.is_empty() && !self.only.iter().any(|r| r == rule) {
+            return Disposition::OutOfScope;
+        }
+        if self.disabled.iter().any(|r| r == rule) {
+            return Disposition::Disabled;
+        }
+        match self.effective(rule, fix) {
+            Applicability::Suggest => Disposition::Suggestion,
+            Applicability::Unsafe if !self.unsafe_fixes => Disposition::NeedsUnsafe,
+            class => Disposition::Apply(class),
+        }
+    }
+}
+
 /// One fix that was (or would be) applied.
 ///
 /// Reported even on a dry run, and even when a later pass reverted the file: what was
@@ -320,46 +382,19 @@ fn candidates(
     for (d, fix, is_error) in fixable(check) {
         let rule = rule_of(&d);
         let line = d.line;
-        if !opts.only.is_empty() && !opts.only.iter().any(|r| r == &rule) {
-            continue;
-        }
-        if opts.disabled.iter().any(|r| r == &rule) {
-            skipped.push(Skipped {
-                file: path.into(),
-                line,
-                rule,
-                reason: "disabled by [fix] disable".into(),
-            });
-            continue;
-        }
-        let promoted = opts.promoted.iter().any(|r| r == &rule);
-        let applicability = if promoted && fix.applicability == Applicability::Unsafe {
-            Applicability::Safe
-        } else {
-            fix.applicability
+        let applicability = match opts.disposition(&rule, &fix) {
+            Disposition::OutOfScope => continue,
+            Disposition::Apply(class) => class,
+            skip => {
+                skipped.push(Skipped {
+                    file: path.into(),
+                    line,
+                    rule,
+                    reason: skip.reason().unwrap_or_default().into(),
+                });
+                continue;
+            }
         };
-        match applicability {
-            Applicability::Suggest => {
-                skipped.push(Skipped {
-                    file: path.into(),
-                    line,
-                    rule,
-                    reason: "suggestion only; not applied automatically".into(),
-                });
-                continue;
-            }
-            Applicability::Unsafe if !opts.unsafe_fixes => {
-                skipped.push(Skipped {
-                    file: path.into(),
-                    line,
-                    rule,
-                    reason: "unsafe fix; apply with --unsafe or promote it under [fix] unsafe"
-                        .into(),
-                });
-                continue;
-            }
-            _ => {}
-        }
         out.push(Candidate {
             rule,
             line,
@@ -378,14 +413,8 @@ fn candidates(
 fn suggestions(check: &CheckInfo, opts: &FixOptions) -> Vec<Candidate> {
     let mut out = Vec::new();
     for (d, fix, is_error) in fixable(check) {
-        if fix.applicability != Applicability::Suggest {
-            continue;
-        }
         let rule = rule_of(&d);
-        if !opts.only.is_empty() && !opts.only.iter().any(|r| r == &rule) {
-            continue;
-        }
-        if opts.disabled.iter().any(|r| r == &rule) {
+        if opts.disposition(&rule, &fix) != Disposition::Suggestion {
             continue;
         }
         out.push(Candidate {
@@ -409,8 +438,47 @@ fn suggestions(check: &CheckInfo, opts: &FixOptions) -> Vec<Candidate> {
 /// filter naming one is a filter naming something that exists. `tl:error` is spelt in the
 /// compiler's namespace like its warning kinds, and for the same reason: it is the
 /// compiler speaking, and bare `error` as a rule name would collide with everything.
-fn rule_of(d: &Diagnostic) -> String {
+pub fn rule_of(d: &Diagnostic) -> String {
     d.rule.clone().unwrap_or_else(|| "tl:error".into())
+}
+
+/// `fix` applied to `src` the way `htl fix` applies it: its edits as positions in `src`
+/// (1-based lines and byte columns, an end past the line or the file clamped as `htl fix`
+/// clamps it), all of them or none. `None` when the edits do not fit `src` (a line it does
+/// not have, an end before a start, an offset inside a character, two of the fix's edits
+/// overlapping).
+///
+/// For a caller that applies one fix on its own, with no pass loop and no re-check — the
+/// text the fix alone would leave behind, which an editor turns into its edit.
+pub fn apply_fix(src: &str, fix: &crate::Fix) -> Option<String> {
+    // An offset inside a character would make the edit panic; such a fix does not fit.
+    let index = LineIndex::new(src);
+    let off_char = fix.edits.iter().any(|e| {
+        [(e.line, e.col), (e.end_line, e.end_col)]
+            .into_iter()
+            .any(|(l, c)| index.offset(l, c).is_some_and(|o| !src.is_char_boundary(o)))
+    });
+    if off_char {
+        return None;
+    }
+    // One candidate per edit, so that two of the fix's own edits overlapping is found the
+    // way an overlap between two fixes is (`apply_non_overlapping` compares a candidate's
+    // edits with the accepted ones only). The order insertions at one point are applied in
+    // is the same: by candidate, which is by edit.
+    let cs: Vec<Candidate> = fix
+        .edits
+        .iter()
+        .map(|e| Candidate {
+            rule: String::new(),
+            line: 0,
+            key: String::new(),
+            is_error: false,
+            applicability: fix.applicability,
+            edits: vec![e.clone()],
+        })
+        .collect();
+    let (text, _, deferred) = apply_non_overlapping(src, &cs);
+    (deferred == 0).then_some(text)
 }
 
 /// Apply the candidates whose edits do not overlap an already accepted edit, in

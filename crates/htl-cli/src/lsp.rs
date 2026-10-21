@@ -23,10 +23,11 @@
 //! # What is checked, and when
 //!
 //! A file is checked when the client opens it and when it saves it, from disk, never from a
-//! buffer: the server asks for open / close / save notifications and no `didChange`
-//! (`textDocumentSync.change` is `None`), so what it reports is always about a text that
-//! exists as a file. Diagnostics while typing need the checker to answer for text that is
-//! not on disk and is often not a program, which is a later step.
+//! buffer, so what it reports is always about a text that exists as a file. The server does
+//! take every change (`textDocumentSync.change` is `Full`) and keeps each open document's
+//! buffer, but only to answer formatting and code actions about the text the client holds;
+//! a `didChange` triggers no check. Diagnostics while typing need the checker to answer for
+//! text that is not on disk and is often not a program, which is a later step.
 //!
 //! **Every check is a fresh one.** The check is [`Htl::check_written`], the call `htl fix`
 //! measures a file by after writing it: a cold environment, nothing seeded from the
@@ -58,9 +59,10 @@
 //! are read, which is what the batch is drained from. A `shutdown` in a batch is answered
 //! after the checks the messages before it asked for, so a client that waits for the
 //! answer has had every publish those messages lead to.
-//! `$/cancelRequest` is accepted and does nothing: this server answers no request that
-//! takes any time (a check is triggered by a notification, and a notification has no
-//! response to cancel), so there is never a running request to stop.
+//! `$/cancelRequest` is accepted and does nothing: a check is triggered by a notification,
+//! which has no response to cancel, and the requests it answers (formatting, code actions)
+//! are answered on this one thread, so by the time a cancellation is read the request it
+//! names has been answered or is the next message.
 //!
 //! # What a diagnostic becomes
 //!
@@ -83,6 +85,73 @@
 //! - A file that is not on disk (a buffer opened before its first save, a file deleted
 //!   while open) has nothing to report until it is saved, and is published empty.
 //!
+//! # Formatting and code actions
+//!
+//! A client formats on save, or runs its fixes on save, by asking *before* it writes: the
+//! buffer is then not the file, and an edit computed from the file would put the file's text
+//! back over everything not yet saved. So the server keeps each open document's buffer
+//! (the `didOpen` text, then the text of every full-sync `didChange`) and answers about
+//! that. A document the client never opened (a save is all the server heard of it) has its
+//! disk for a buffer. The version a request or a change carries is not read: a change is
+//! stored as it arrives and the last one is the buffer.
+//!
+//! Every request is answered about the files as the messages before it left them: a
+//! request is preceded by the checks those messages made stale, as a `shutdown` is.
+//!
+//! Every edit is one `TextEdit` over the span in which the buffer and the new text differ
+//! (the text they share at both ends is left out, so the cursor, folds and marks outside it
+//! survive); applied, it gives the new text exactly.
+//!
+//! **Formatting.** `textDocument/formatting` returns the edits that make the file what
+//! `htl fmt` writes for the buffer's text ([`Htl::format_text`]), with the indent `htl fmt`
+//! resolves for it (`[fmt] indent` of the file's project, else 3; the request's `options`
+//! are not read). The answer is `[]` when the buffer is already formatted. A file `htl fmt` cannot format (a parse
+//! error) is answered `null`, not an error response: most clients show an error response
+//! as a failed command, and a file that does not parse is already a diagnostic. The reason
+//! goes to stderr. The file does not have to be open (its disk is the buffer then). `textDocument/rangeFormatting` is
+//! not offered: `htl fmt` formats files.
+//!
+//! **Quick fixes.** A check keeps, with each diagnostic it publishes, the
+//! [`htl::Fix`] the checker attached to it, and a `textDocument/codeAction` request is
+//! answered from those: nothing is checked again. For every finding whose range touches
+//! the request's range and that has a fix, there is a `quickfix` action titled `Fix <rule>`
+//! (` (unsafe)` after it for an unsafe fix; `htl fix` prints no description of a fix, so
+//! the rule is all there is to name), whose `diagnostics` is that finding and whose edit
+//! is the text [`htl::fix::apply_fix`] makes of the buffer with that fix, the code `htl fix`
+//! applies its edits with, as a span of the buffer. The action is tied to its diagnostic by the server's own record of
+//! which finding it came from, so nothing is matched on range, code and message and
+//! `Diagnostic.data` is left empty. `isPreferred` is set for a fix `htl fix` applies without
+//! being asked ([`htl::fix::FixOptions::disposition`] is that question, asked of the
+//! project's `[fix]`: a `safe` fix, or one `[fix] unsafe` promotes, of a rule `[fix]
+//! disable` does not name). An unsafe fix and a disabled one are offered, not preferred (the person
+//! asked for it; nothing takes it unasked). A `suggest` fix is not offered: what it writes
+//! is a placeholder for the author to replace (`htl_fixme(..)`), which `htl fix` shows
+//! and never applies. Only the file's own findings carry a fix: the edit of a finding
+//! about a required module is a position in that module.
+//!
+//! **Fix all.** The action of kind `source.fixAll.htl` (so a client asking for
+//! `source.fixAll` gets it) is one edit to what `htl fix <file>` leaves the file as: safe
+//! fixes, with the project's `[fix] unsafe` and `[fix] disable`, to a fixpoint of up to
+//! [`htl::fix::MAX_PASSES`] passes, reverting what made the file worse. It is computed by
+//! [`htl::fix::fix_file`] as a dry run (`htl fix --dry-run`, minus the git guard, which
+//! protects a file that is about to be written), in a checker state of its own, because
+//! `fix_file` begins with a check that reads the state's store and the shared checker's
+//! store must not hold anything (see "Every check is a fresh one"). That costs a check or
+//! two of the file, so it is computed only for a request that asks for it (`only` names
+//! `source.fixAll`, or the menu was invoked rather than opened by a cursor move), only
+//! when a fix `htl fix` applies is on file, and once per check: the answer is kept until
+//! the next one. It is offered only when it changes the file.
+//!
+//! **Only for the text that was checked.** A fix is positions in the text a check read.
+//! Quick fixes and fix-all are offered only while the buffer is that text (and, for
+//! fix-all, which `fix_file` reads from disk, the disk too); a buffer that has been edited
+//! since the last save gets none, because the positions belong to another text. That
+//! includes the request a client makes on save before it writes: formatting works on the
+//! buffer and is the part that can be done then; fixes follow once the save has been
+//! checked. A `[fix]` section `htl fix` would refuse (a rule that is none) is published
+//! with the file's diagnostics as the setup error it is, and no fix is offered while it
+//! stands.
+//!
 //! # What it does not do yet
 //!
 //! A project's `htl.toml`, `mlua-pkg.toml`, `types/` and the Rust sources `htl dts` reads
@@ -97,15 +166,18 @@ use htl::Htl;
 use htl::project::{self, Collect, Sink};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Response};
 use lsp_types::notification::{
-    Cancel, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument, Exit,
-    Notification as _, PublishDiagnostics,
+    Cancel, DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
+    Exit, Notification as _, PublishDiagnostics,
 };
-use lsp_types::request::{Request as _, Shutdown};
+use lsp_types::request::{CodeActionRequest, Formatting, Request as _, Shutdown};
 use lsp_types::{
-    DiagnosticRelatedInformation, DiagnosticSeverity, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DidSaveTextDocumentParams, Location, NumberOrString, Position,
-    PublishDiagnosticsParams, Range, SaveOptions, ServerCapabilities, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri,
+    CodeAction, CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
+    CodeActionProviderCapability, CodeActionTriggerKind, DiagnosticRelatedInformation,
+    DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentFormattingParams, Location,
+    NumberOrString, OneOf, Position, PublishDiagnosticsParams, Range, SaveOptions,
+    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceEdit,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -150,11 +222,12 @@ fn run_on(connection: &Connection) -> Result<ExitCode> {
         .initialize_start()
         .context("waiting for the client's initialize request")?;
     let capabilities = ServerCapabilities {
-        // Open, close and save, and nothing about edits: a file is checked as saved.
+        // Open, close and save to know when to check; the text of every change to answer
+        // formatting about the buffer. A change is stored and not checked (module doc).
         text_document_sync: Some(TextDocumentSyncCapability::Options(
             TextDocumentSyncOptions {
                 open_close: Some(true),
-                change: Some(TextDocumentSyncKind::NONE),
+                change: Some(TextDocumentSyncKind::FULL),
                 save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
                     include_text: Some(false),
                 })),
@@ -162,6 +235,12 @@ fn run_on(connection: &Connection) -> Result<ExitCode> {
                 will_save_wait_until: None,
             },
         )),
+        document_formatting_provider: Some(OneOf::Left(true)),
+        code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
+            code_action_kinds: Some(vec![CodeActionKind::QUICKFIX, fix_all_kind()]),
+            work_done_progress_options: Default::default(),
+            resolve_provider: Some(false),
+        })),
         ..ServerCapabilities::default()
     };
     connection
@@ -191,6 +270,15 @@ struct Project {
     /// costs about as much as a small project's whole check) and never asked to
     /// remember anything: checks go through [`Htl::check_written`].
     checker: Htl,
+    /// What `htl fix` with no flags would do in this project: safe fixes only, the rules
+    /// `[fix] unsafe` promotes counted as safe, the ones `[fix] disable` names left alone.
+    /// A dry run, since the server never writes.
+    fix: htl::fix::FixOptions,
+    /// Why `fix` cannot be trusted ([`htl::fix::FixOptions::validate`]: `htl fix` refuses
+    /// such a configuration outright), said with every check of the project. While it is
+    /// set no fix is offered: which fixes `htl fix` would apply is not a question with an
+    /// answer.
+    fix_error: Option<String>,
 }
 
 impl Project {
@@ -213,6 +301,20 @@ impl Project {
             scope.lints.selection(),
             &project::lang_of(&cfg),
         )?;
+        let fix = htl::fix::FixOptions {
+            unsafe_fixes: false,
+            promoted: cfg
+                .as_ref()
+                .map(|(_, _, c)| c.fix.unsafe_.clone())
+                .unwrap_or_default(),
+            disabled: cfg
+                .as_ref()
+                .map(|(_, _, c)| c.fix.disable.clone())
+                .unwrap_or_default(),
+            only: Vec::new(),
+            dry_run: true,
+        };
+        let fix_error = fix.validate().err().map(|e| format!("{e:#}"));
         Ok(Self {
             cfg,
             model,
@@ -220,7 +322,39 @@ impl Project {
             origins,
             policy,
             checker,
+            fix,
+            fix_error,
         })
+    }
+
+    /// `text`, the contents of `file`, as `htl fmt` would write it: the project's
+    /// `[fmt] indent`, or 3.
+    fn format(&self, file: &Path, text: &str) -> Result<String> {
+        let indent = self
+            .cfg
+            .as_ref()
+            .and_then(|(_, _, c)| c.fmt.indent)
+            .unwrap_or(3);
+        self.checker.format_text(text, file, indent)
+    }
+
+    /// `file` as `htl fix <file>` would leave it, or `None` when it would not change it.
+    ///
+    /// A dry run of [`htl::fix::fix_file`] (which checks, applies, re-checks and reverts what
+    /// made the file worse, exactly as the command does) in a state of its own. The shared
+    /// [`checker`](Self::checker) cannot be used: `fix_file` begins with [`Htl::check`],
+    /// which serves a module from the state's store, and a store that outlives an edit
+    /// describes the file as it was. A new state has an empty store, so that first check is
+    /// of what is on disk now. It costs what a first check costs, which is why the answer is
+    /// kept until the next check of the file ([`Checked::fix_all`]).
+    fn fixed(&self, file: &Path) -> Result<Option<String>> {
+        let h = project::checker(
+            self.model.as_ref(),
+            self.scope.lints.selection(),
+            &project::lang_of(&self.cfg),
+        )?;
+        project::file_view(&h, self.model.as_ref(), file)?;
+        Ok(htl::fix::fix_file(&h, file, &self.fix)?.contents)
     }
 
     /// Check `file` as it is on disk, the way `htl check` reports it: everything the file
@@ -254,6 +388,43 @@ struct Doc {
     /// The files its last check reached through `require` (canonical): what a save of any
     /// of them makes it stale for.
     deps: HashSet<PathBuf>,
+    /// The text the client holds: what it opened the file with, then what its last
+    /// `didChange` said. `None` for a file known only from a save, whose buffer is then
+    /// the disk. It is what formatting formats and what an edit is computed against; a
+    /// check never reads it.
+    buffer: Option<String>,
+    /// Set when the client sent a change this server cannot apply (an incremental one): the
+    /// client holds a text the server does not know, so neither `buffer` nor the disk is
+    /// what an edit may be computed against, and formatting and code actions answer nothing
+    /// until a `didOpen` or a full change says what the text is again.
+    unsynced: bool,
+    /// What the last check of it found, as it was found; `None` before the first check and
+    /// for a file that was not on disk.
+    checked: Option<Checked>,
+}
+
+/// One check's result for a document, kept for the requests that follow it (a code action
+/// is answered from this, not from a check of its own).
+struct Checked {
+    /// The file's text when it was checked. A fix is a set of positions in it, so a request
+    /// offers one only while the buffer is still this text, and is answered with nothing
+    /// rather than with edits for a text that is gone.
+    text: String,
+    findings: Vec<Finding>,
+    /// What `htl fix` would make of the file: not asked for until a request wants it, and
+    /// asked once (`Some(None)` is "asked, and it changes nothing").
+    fix_all: Option<Option<String>>,
+}
+
+/// A diagnostic as published, with the fix the checker attached to it.
+struct Finding {
+    lsp: lsp_types::Diagnostic,
+    /// Present only for a finding in the file itself: the edits of a fix are positions in
+    /// the file it is attached to, and a finding about a required module is shown here
+    /// but is not this file's to rewrite.
+    fix: Option<htl::Fix>,
+    /// What `htl fix --rule` and `[fix]` name the fix by.
+    rule: String,
 }
 
 /// What a batch of messages left to check.
@@ -335,6 +506,15 @@ impl<'c> Server<'c> {
                         ErrorCode::InvalidRequest as i32,
                         "the server is shutting down".to_string(),
                     )
+                } else if req.method == Formatting::METHOD
+                    || req.method == CodeActionRequest::METHOD
+                {
+                    // Answered about the files as the messages before it left them: what
+                    // they made stale is checked first, as before a `shutdown`. A code
+                    // action is read off the last check, so one asked right behind a save
+                    // would otherwise describe the file as it was before.
+                    self.check_all(&std::mem::take(stale));
+                    self.document_request(req)
                 } else {
                     let what = format!("htl lsp does not answer {}", req.method);
                     Response::new_err(req.id, ErrorCode::MethodNotFound as i32, what)
@@ -361,13 +541,20 @@ impl<'c> Server<'c> {
             Cancel::METHOD => {}
             DidOpenTextDocument::METHOD => {
                 if let Some(p) = params::<DidOpenTextDocumentParams>(n) {
-                    self.opened(p.text_document.uri, stale, false);
+                    let d = p.text_document;
+                    self.opened(d.uri, stale, false, Some(d.text));
+                }
+            }
+            // Stored, not checked: the diagnostics are about what is saved (module doc).
+            DidChangeTextDocument::METHOD => {
+                if let Some(p) = params::<DidChangeTextDocumentParams>(n) {
+                    self.changed(&p.text_document.uri, p.content_changes);
                 }
             }
             DidSaveTextDocument::METHOD => {
                 if let Some(p) = params::<DidSaveTextDocumentParams>(n) {
                     // A save of a file never opened is a file to check like any other.
-                    self.opened(p.text_document.uri, stale, true);
+                    self.opened(p.text_document.uri, stale, true, None);
                 }
             }
             DidCloseTextDocument::METHOD => {
@@ -387,9 +574,32 @@ impl<'c> Server<'c> {
         None
     }
 
-    /// `uri` is to be checked, because it was opened or (`saved`) saved: make it an open
-    /// document if it is not one yet.
-    fn opened(&mut self, uri: Uri, stale: &mut Stale, saved: bool) {
+    /// A `didChange`: the buffer is now the text the (full-sync) change carries. A change
+    /// for a document that is not open is a client that has not said it opened it, and is
+    /// not this server's to keep.
+    fn changed(&mut self, uri: &Uri, changes: Vec<lsp_types::TextDocumentContentChangeEvent>) {
+        // Full sync: the last event is the whole text. One with a range is a client that
+        // did not take the capability, and is not applied to a text it does not describe.
+        let Some(last) = changes.into_iter().next_back() else {
+            return;
+        };
+        if let Some(doc) = self.open.get_mut(uri) {
+            if last.range.is_none() {
+                doc.buffer = Some(last.text);
+                doc.unsynced = false;
+            } else {
+                // Falling back to the disk here would hand out edits for the saved text over
+                // an unsaved buffer: nothing is answered until the text is known again.
+                eprintln!("htl lsp: an incremental change, which was not asked for; ignored");
+                doc.buffer = None;
+                doc.unsynced = true;
+            }
+        }
+    }
+
+    /// `uri` is to be checked, because it was opened (with `text`) or (`saved`) saved: make
+    /// it an open document if it is not one yet.
+    fn opened(&mut self, uri: Uri, stale: &mut Stale, saved: bool, text: Option<String>) {
         let Some(path) = path_of(&uri) else {
             eprintln!("htl lsp: not a file: {}", uri.as_str());
             return;
@@ -404,8 +614,17 @@ impl<'c> Server<'c> {
                     path,
                     project,
                     deps: HashSet::new(),
+                    buffer: None,
+                    unsynced: false,
+                    checked: None,
                 },
             );
+        }
+        if let Some(text) = text
+            && let Some(doc) = self.open.get_mut(&uri)
+        {
+            doc.buffer = Some(text);
+            doc.unsynced = false;
         }
         if let Some(doc) = self.open.get(&uri)
             && (saved || newly_open)
@@ -447,6 +666,7 @@ impl<'c> Server<'c> {
         if !path.is_file() {
             if let Some(doc) = self.open.get_mut(uri) {
                 doc.deps.clear();
+                doc.checked = None;
             }
             self.publish(uri.clone(), Vec::new());
             return;
@@ -464,20 +684,234 @@ impl<'c> Server<'c> {
                 Err(_) => htl::parent_dir(&path),
             },
         };
+        // Read before the check, and again after it (below): a write that lands while the
+        // check runs then leaves the disk unlike `text`, and the check's fixes are dropped,
+        // where a text read only after would match the disk and hand out the old text's
+        // fixes.
+        let text = read_lossy(&path);
         let outcome = self.project(&key, &path).and_then(|p| {
             let (found, deps) = p.check(&path, &open)?;
-            Ok((found, deps, p.scope.lints.selection().clone(), p.policy))
+            Ok((
+                found,
+                deps,
+                p.scope.lints.selection().clone(),
+                p.policy,
+                p.fix_error.clone(),
+            ))
         });
-        let (diagnostics, deps) = match outcome {
-            Ok((found, deps, levels, policy)) => (convert(&path, &found, &levels, &policy), deps),
+        let (findings, deps) = match outcome {
+            Ok((found, deps, levels, policy, fix_error)) => {
+                let mut findings = convert(&path, &text, &found, &levels, &policy);
+                // A `[fix]` that `htl fix` refuses is a setup error, said like one.
+                if let Some(e) = fix_error {
+                    findings.push(Finding {
+                        lsp: failure(&anyhow::anyhow!("{e}")),
+                        fix: None,
+                        rule: String::new(),
+                    });
+                }
+                (findings, deps)
+            }
             // Nothing could be said about the file: say that, on the file, so the editor
             // shows why it has no diagnostics instead of looking clean.
-            Err(e) => (vec![failure(&e)], Vec::new()),
+            Err(e) => (
+                vec![Finding {
+                    lsp: failure(&e),
+                    fix: None,
+                    rule: String::new(),
+                }],
+                Vec::new(),
+            ),
         };
+        // A write that landed while the check ran leaves the checker's positions in a text
+        // that may not be `text`; the buffer can still be `text` (an external write), so the
+        // comparison in `code_actions` would not catch it. Its fixes are dropped; the save
+        // that follows the write checks again.
+        let mut findings = findings;
+        if read_lossy(&path) != text {
+            for f in &mut findings {
+                f.fix = None;
+            }
+        }
+        let diagnostics = findings.iter().map(|f| f.lsp.clone()).collect();
         if let Some(doc) = self.open.get_mut(uri) {
             doc.deps = deps.iter().map(|d| canonical(d)).collect();
+            doc.checked = Some(Checked {
+                text,
+                findings,
+                fix_all: None,
+            });
         }
         self.publish(uri.clone(), diagnostics);
+    }
+
+    /// Answer `textDocument/formatting` or `textDocument/codeAction`.
+    fn document_request(&mut self, req: lsp_server::Request) -> Response {
+        let id = req.id.clone();
+        let bad = |e: serde_json::Error| {
+            Response::new_err(
+                id.clone(),
+                ErrorCode::InvalidParams as i32,
+                format!("malformed {}: {e}", req.method),
+            )
+        };
+        if req.method == Formatting::METHOD {
+            match serde_json::from_value::<DocumentFormattingParams>(req.params.clone()) {
+                Ok(p) => Response::new_ok(id.clone(), self.formatting(&p.text_document.uri)),
+                Err(e) => bad(e),
+            }
+        } else {
+            match serde_json::from_value::<CodeActionParams>(req.params.clone()) {
+                Ok(p) => Response::new_ok(id.clone(), self.code_actions(&p)),
+                Err(e) => bad(e),
+            }
+        }
+    }
+
+    /// The edits that make the buffer what `htl fmt` writes for it: `[]` when it already is,
+    /// one edit over the changed span when not, and `null` when `htl fmt` could not format
+    /// it.
+    fn formatting(&mut self, uri: &Uri) -> Option<Vec<TextEdit>> {
+        let path = path_of(uri)?;
+        let key = project_key(&path).unwrap_or_else(|_| htl::parent_dir(&path));
+        // The buffer if the client has one; a file it has not opened is its disk. A buffer
+        // the server lost track of is neither, and gets no edits.
+        if self.open.get(uri).is_some_and(|d| d.unsynced) {
+            eprintln!(
+                "htl lsp: not formatting {}: its buffer is not known",
+                path.display()
+            );
+            return None;
+        }
+        let buffer = self.open.get(uri).and_then(|d| d.buffer.clone());
+        let result = (|| {
+            let before = match buffer {
+                Some(text) => text,
+                None => std::fs::read_to_string(&path)
+                    .with_context(|| format!("reading {}", path.display()))?,
+            };
+            let after = self.project(&key, &path)?.format(&path, &before)?;
+            Ok::<_, anyhow::Error>((before, after))
+        })();
+        match result {
+            Ok((before, after)) => Some(minimal_edit(&before, &after).into_iter().collect()),
+            // Not a formatting problem the client can do anything about (a file the parser
+            // rejects is already a diagnostic): no edits, and the reason where the
+            // server's other complaints go.
+            Err(e) => {
+                eprintln!("htl lsp: not formatting {}: {e:#}", path.display());
+                None
+            }
+        }
+    }
+
+    /// The quick fixes for the findings at the request's range, and "fix all".
+    fn code_actions(&mut self, p: &CodeActionParams) -> Vec<CodeActionOrCommand> {
+        let uri = &p.text_document.uri;
+        let wanted = |kind: &CodeActionKind| match &p.context.only {
+            None => true,
+            Some(only) => only.iter().any(|o| kind_within(kind, o)),
+        };
+        let quick = wanted(&CodeActionKind::QUICKFIX);
+        // Fix-all costs a dry run of `htl fix`, so it is computed for a client that asked
+        // for it: by kind (a code action on save), or by invoking the menu. A lightbulb
+        // that asks on every cursor move asks for neither.
+        let all = match &p.context.only {
+            Some(only) => only.iter().any(|o| kind_within(&fix_all_kind(), o)),
+            None => p.context.trigger_kind == Some(CodeActionTriggerKind::INVOKED),
+        };
+        let Some(doc) = self.open.get(uri).filter(|d| !d.unsynced) else {
+            return Vec::new();
+        };
+        let (Some(checked), Some(key)) = (&doc.checked, doc.project.clone()) else {
+            return Vec::new();
+        };
+        // A fix is positions in the text that was checked: the buffer must still be it
+        // (module doc, "Formatting and code actions"). A buffer the server never saw
+        // change is the disk, which is what the check read.
+        let buffer = doc.buffer.clone().unwrap_or_else(|| read_lossy(&doc.path));
+        if buffer != checked.text {
+            return Vec::new();
+        }
+        let Some(project) = self.projects.get(&key) else {
+            return Vec::new();
+        };
+        if project.fix_error.is_some() {
+            return Vec::new();
+        }
+        let mut actions = Vec::new();
+        if quick {
+            for f in &checked.findings {
+                let Some(fix) = &f.fix else { continue };
+                if !overlaps(&f.lsp.range, &p.range) {
+                    continue;
+                }
+                let class = project.fix.effective(&f.rule, fix);
+                if class == htl::Applicability::Suggest {
+                    continue;
+                }
+                // The text this fix alone leaves, which is `htl fix`'s to say.
+                let Some(after) = htl::fix::apply_fix(&buffer, fix) else {
+                    continue;
+                };
+                let Some(edit) = minimal_edit(&buffer, &after) else {
+                    continue;
+                };
+                let applied = project.fix.disposition(&f.rule, fix)
+                    == htl::fix::Disposition::Apply(htl::Applicability::Safe);
+                let unsafe_ = class == htl::Applicability::Unsafe;
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: format!("Fix {}{}", f.rule, if unsafe_ { " (unsafe)" } else { "" }),
+                    kind: Some(CodeActionKind::QUICKFIX),
+                    diagnostics: Some(vec![f.lsp.clone()]),
+                    edit: Some(edit_of(uri, vec![edit])),
+                    is_preferred: Some(applied),
+                    ..Default::default()
+                }));
+            }
+        }
+        // `htl fix` has something to apply only if a fix it applies is on file; without
+        // one the dry run is not worth its cost.
+        let applicable = checked.findings.iter().any(|f| {
+            f.fix.as_ref().is_some_and(|fix| {
+                matches!(
+                    project.fix.disposition(&f.rule, fix),
+                    htl::fix::Disposition::Apply(_)
+                )
+            })
+        });
+        // `fix_file` reads the disk, so the disk must be the text too.
+        if all && applicable && read_lossy(&doc.path) == checked.text {
+            let path = doc.path.clone();
+            // A failure is said and not kept: the next request asks again.
+            let fixed = match checked.fix_all.clone() {
+                Some(known) => Some(known),
+                None => match project.fixed(&path) {
+                    Ok(known) => {
+                        if let Some(doc) = self.open.get_mut(uri)
+                            && let Some(checked) = &mut doc.checked
+                        {
+                            checked.fix_all = Some(known.clone());
+                        }
+                        Some(known)
+                    }
+                    Err(e) => {
+                        eprintln!("htl lsp: no fix-all for {}: {e:#}", path.display());
+                        None
+                    }
+                },
+            }
+            .flatten();
+            if let Some(edit) = fixed.and_then(|text| minimal_edit(&buffer, &text)) {
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: "Fix all htl problems that are safe to fix".to_string(),
+                    kind: Some(fix_all_kind()),
+                    edit: Some(edit_of(uri, vec![edit])),
+                    ..Default::default()
+                }));
+            }
+        }
+        actions
     }
 
     /// The project under `key`, loaded for `file` if the session has not met it yet. A
@@ -556,13 +990,13 @@ fn failure(e: &anyhow::Error) -> lsp_types::Diagnostic {
 /// `htl check`'s findings for `file`, as the client shows them.
 fn convert(
     file: &Path,
+    text: &str,
     found: &[htl::Diagnostic],
     levels: &htl::lint::Selection,
     policy: &htl::verdict::Policy,
-) -> Vec<lsp_types::Diagnostic> {
+) -> Vec<Finding> {
     // What the positions are read against: the file as the check saw it.
-    let text = read_lossy(file);
-    let lines = lines_of(&text);
+    let lines = lines_of(text);
     let cwd = std::env::current_dir().unwrap_or_default();
     let file_canonical = canonical(file);
     found
@@ -596,7 +1030,7 @@ fn convert(
             } else {
                 format!("{}:{}:{}: {}", d.file, d.line, d.col, d.message)
             };
-            lsp_types::Diagnostic {
+            let lsp = lsp_types::Diagnostic {
                 range,
                 severity: Some(severity(d, levels, policy)),
                 code: d.rule.clone().map(NumberOrString::String),
@@ -604,6 +1038,18 @@ fn convert(
                 message,
                 related_information: related,
                 ..Default::default()
+            };
+            // The fixes `htl fix` looks at are the file's own errors' and lints' (a Teal
+            // warning is none of them), named by the rule or, for an error the checker
+            // gave none, by `tl:error` (`htl_core::fix`'s `rule_of`).
+            let fix = d
+                .fix
+                .clone()
+                .filter(|_| own && d.severity != htl::Severity::Warning);
+            Finding {
+                lsp,
+                fix,
+                rule: htl::fix::rule_of(d),
             }
         })
         .collect()
@@ -621,6 +1067,95 @@ fn lines_of(text: &str) -> Vec<&str> {
     text.split('\n')
         .map(|l| l.strip_suffix('\r').unwrap_or(l))
         .collect()
+}
+
+/// The kind of the action that applies every fix `htl fix` would.
+fn fix_all_kind() -> CodeActionKind {
+    CodeActionKind::new("source.fixAll.htl")
+}
+
+/// Whether `kind` is `only` or one of its sub-kinds (`source.fixAll.htl` is within
+/// `source.fixAll` and `source`, not within `source.fix`): the filter's rule.
+fn kind_within(kind: &CodeActionKind, only: &CodeActionKind) -> bool {
+    let (kind, only) = (kind.as_str(), only.as_str());
+    kind == only || kind.strip_prefix(only).is_some_and(|r| r.starts_with('.'))
+}
+
+/// Whether two ranges share a point, the ends included: a cursor at either end of a
+/// finding is on it, and an empty range (a cursor) is a point.
+fn overlaps(a: &Range, b: &Range) -> bool {
+    a.start <= b.end && b.start <= a.end
+}
+
+/// A `WorkspaceEdit` of `edits` in the one file `uri`.
+fn edit_of(uri: &Uri, edits: Vec<TextEdit>) -> WorkspaceEdit {
+    WorkspaceEdit {
+        changes: Some(HashMap::from([(uri.clone(), edits)])),
+        ..Default::default()
+    }
+}
+
+/// One edit that turns `before` into `after`, over the span in which they differ: the
+/// text they share at the start and at the end is left out, so an editor keeps its cursors,
+/// folds and marks everywhere else. `None` when they are the same text.
+///
+/// Positions are 0-based lines and UTF-16 columns of `before`, its lines ended by `\n`,
+/// `\r\n` or a lone `\r` as LSP counts them. The span is kept off the middle of a `\r\n`,
+/// which a position is not allowed to be in.
+fn minimal_edit(before: &str, after: &str) -> Option<TextEdit> {
+    if before == after {
+        return None;
+    }
+    let mut start = before
+        .bytes()
+        .zip(after.bytes())
+        .take_while(|(a, b)| a == b)
+        .count();
+    while !before.is_char_boundary(start) || !after.is_char_boundary(start) {
+        start -= 1;
+    }
+    if start > 0
+        && before.as_bytes()[start - 1] == b'\r'
+        && before.as_bytes().get(start) == Some(&b'\n')
+    {
+        start -= 1;
+    }
+    let (rb, ra) = (&before.as_bytes()[start..], &after.as_bytes()[start..]);
+    let mut shared = rb
+        .iter()
+        .rev()
+        .zip(ra.iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    // The tail starts on a character of both, and at a `\n` only if its `\r` is in it too.
+    while shared > 0
+        && (!before.is_char_boundary(before.len() - shared)
+            || !after.is_char_boundary(after.len() - shared)
+            || (before.as_bytes()[before.len() - shared] == b'\n'
+                && before.len() - shared > start
+                && before.as_bytes()[before.len() - shared - 1] == b'\r'))
+    {
+        shared -= 1;
+    }
+    let (end_before, end_after) = (before.len() - shared, after.len() - shared);
+    // A line ends at `\n`, `\r\n` or a lone `\r`: LSP counts all three, so a client
+    // reads a position past a lone `\r` as on the next line.
+    let at = |upto: usize| {
+        let b = before.as_bytes();
+        let (mut line, mut line_start) = (0u32, 0usize);
+        for i in 0..upto {
+            if b[i] == b'\n' || (b[i] == b'\r' && b.get(i + 1) != Some(&b'\n')) {
+                line += 1;
+                line_start = i + 1;
+            }
+        }
+        let col = before[line_start..upto].encode_utf16().count();
+        Position::new(line, col as u32)
+    };
+    Some(TextEdit::new(
+        Range::new(at(start), at(end_before)),
+        after[start..end_after].to_string(),
+    ))
 }
 
 /// An error is an error. A Teal warning and an htl lint are warnings, unless they are what
@@ -738,6 +1273,88 @@ mod tests {
         assert_eq!(
             path_of(&Uri::from_str("untitled:Untitled-1").unwrap()),
             None
+        );
+    }
+
+    /// `edit` applied to `before`, by the positions it carries.
+    fn applied(before: &str, edit: &TextEdit) -> String {
+        let at = |p: Position| {
+            let line_start: usize = before
+                .split('\n')
+                .take(p.line as usize)
+                .map(|l| l.len() + 1)
+                .sum();
+            let mut units = 0;
+            let mut off = line_start;
+            for c in before[line_start..].chars() {
+                if units >= p.character || c == '\n' {
+                    break;
+                }
+                units += c.len_utf16() as u32;
+                off += c.len_utf8();
+            }
+            off
+        };
+        let mut out = before.to_string();
+        out.replace_range(at(edit.range.start)..at(edit.range.end), &edit.new_text);
+        out
+    }
+
+    #[test]
+    fn an_edit_covers_only_the_span_that_differs() {
+        assert!(minimal_edit("a\nb\n", "a\nb\n").is_none());
+        let e = minimal_edit("a\nbcd\ne\n", "a\nbXd\ne\n").unwrap();
+        assert_eq!(e.new_text, "X");
+        assert_eq!(
+            (e.range.start, e.range.end),
+            (Position::new(1, 1), Position::new(1, 2))
+        );
+        // An insertion is an empty range; a deletion an empty text.
+        let e = minimal_edit("ab", "aXb").unwrap();
+        assert_eq!(
+            (e.range.start, e.range.end),
+            (Position::new(0, 1), Position::new(0, 1))
+        );
+        let e = minimal_edit("aXb", "ab").unwrap();
+        assert_eq!(
+            (e.new_text.as_str(), e.range.end),
+            ("", Position::new(0, 2))
+        );
+        // Repeated text: the shared prefix and suffix may not overlap.
+        let e = minimal_edit("aaa", "aa").unwrap();
+        assert_eq!(applied("aaa", &e), "aa");
+    }
+
+    #[test]
+    fn an_edit_is_in_utf16_and_not_in_the_middle_of_a_character_or_a_crlf() {
+        // `é` and the emoji share their first bytes with other characters.
+        for (a, b) in [
+            ("x \u{e9}y", "x \u{e8}y"),
+            ("\u{1F600}a", "\u{1F601}a"),
+            ("a\u{1F600}", "a\u{1F601}"),
+            ("l1\r\nl2\r\n", "l1\r\nl2\r\nl3\r\n"),
+            ("l1\r\nl2\r\n", "l1\nl2\n"),
+            ("a\r\nb", "a\r\n\r\nb"),
+            ("a\r\n", "a\r\n\r\n"),
+            ("", "x"),
+            ("x", ""),
+        ] {
+            let e = minimal_edit(a, b).unwrap();
+            assert_eq!(applied(a, &e), b, "{a:?} -> {b:?}: {e:?}");
+        }
+        let e = minimal_edit("\u{1F600}a", "\u{1F601}a").unwrap();
+        assert_eq!(
+            (e.range.start, e.range.end),
+            (Position::new(0, 0), Position::new(0, 2))
+        );
+        // No position between the `\r` and the `\n` of a line end.
+        let e = minimal_edit("l1\r\nl2\r\n", "l1\r\nl2\r\nl3\r\n").unwrap();
+        assert_eq!(e.range.start, Position::new(2, 0));
+        // A lone `\r` ends a line for the client: past it is the next line's start.
+        let e = minimal_edit("a\rb", "a\r\nb").unwrap();
+        assert_eq!(
+            (e.range.start, e.new_text.as_str()),
+            (Position::new(1, 0), "\n")
         );
     }
 
