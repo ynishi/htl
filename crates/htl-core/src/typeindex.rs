@@ -142,6 +142,35 @@
 //! function it did not write (`local f = m.hello`) — is [`DeclKind::Local`] there and
 //! [`DeclKind::Function`] after a check.
 //!
+//! # What the walk keeps besides the string
+//!
+//! [`Decl::detail`] is a type as Teal prints it, which is for a person to read and not for a
+//! program to take apart. [`Decl::info`] is the same knowledge as a value ([`TypeInfo`]), read
+//! off the checker's own type objects while the walk has them in hand:
+//!
+//! - a field, and a function the record's body declares: its type as a [`TypeExpr`];
+//! - a type alias: the type it names, as a [`TypeExpr`];
+//! - a record: whether it is the record the file returns, the place of its own
+//!   declaration (`at`), and whether its header says `is` or `where`;
+//! - an enum: its members, sorted, and `at`;
+//! - an interface: `at`.
+//!
+//! A [`TypeExpr::Nominal`] carries `declared`, the place of the declaration the name
+//! resolved to. It is not computed here: it is the `found` Teal's resolution sets on a
+//! nominal type when it resolves the name, and is `None` when Teal did not resolve it. `at`
+//! of a record, an enum or an interface is the same coordinates a nominal's `declared`
+//! carries for it (the declaration's own, not the `local` token [`Decl::line`] and
+//! [`Decl::col`] point at for a top-level one), so a caller can match a use of a type to the
+//! declaration without a lookup by name. Both are spelled as the checker spelled the file
+//! (see [`Place`]); nothing here canonicalises them.
+//!
+//! The rest of the tree has no `info`: a variable, and a function or method written outside
+//! the record's body (one the body also declares is the body's, and keeps the body's). Nor
+//! does the parse-only tree above, which has no type objects.
+//!
+//! The index is built from the check's result and kept in memory; it is not written to disk,
+//! so `info` has no stored form beyond the table `prelude.lua` builds and this module reads.
+//!
 //! # What it costs
 //!
 //! [`TypeIndex::uses`] is not part of it: it is made from the stored index and the text when
@@ -159,6 +188,7 @@
 use crate::CheckInfo;
 use anyhow::Result;
 use mlua::Table;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -169,7 +199,7 @@ use std::path::PathBuf;
 /// position in the checked file, a path from the search for one in another (relative to the
 /// working directory, or absolute — and `./m.tl` for the file `m.tl` of the directory the
 /// checker ran in). A file of Teal's standard library (`stdlib.d.tl`) is not on disk at all.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Place {
     /// The file, spelled as above.
     pub file: PathBuf,
@@ -274,6 +304,114 @@ pub struct Decl {
     /// Fields, nested types and functions, in position order; empty but for a record or
     /// interface.
     pub children: Vec<Decl>,
+    /// What the checker's type objects say of the declaration, as a value and not a string
+    /// (the module doc's "What the walk keeps besides the string"). `None` for a variable, a
+    /// method or function written outside a record's body, and every declaration of the tree
+    /// [`Htl::declarations_of`](crate::Htl::declarations_of) makes.
+    pub info: Option<TypeInfo>,
+}
+
+/// What a checked [`Decl`] carries beyond its text ([`Decl::info`]), by kind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TypeInfo {
+    /// A field, or a function the record's body declares (`f: function(..)`, whether or not
+    /// the file also defines it below): `ty` is its type.
+    Field {
+        /// The field's type.
+        ty: TypeExpr,
+    },
+    /// A `type X = ...` that names another type: `ty` is that type.
+    Alias {
+        /// The type the alias names.
+        ty: TypeExpr,
+    },
+    /// A record.
+    Record {
+        /// Whether this is the record the file returns (`result.type` of the check),
+        /// compared by identity of the type object once the declaration and the result are
+        /// unwrapped: it is "the record the file returns", whatever else it holds, and not
+        /// "a record of functions only".
+        returned: bool,
+        /// The place of the record's own declaration: what a [`TypeExpr::Nominal`]'s
+        /// `declared` is for a name that resolves to it.
+        at: Place,
+        /// Whether the header says `is`: `record R is I` (or `is {T}, I`), so that the
+        /// fields of `R` are partly written in an interface, with their own markers, and the
+        /// index does not list them under `R`. Read from the checker's type object (a
+        /// non-empty `interface_list` of the record), not from the text. `htl shapes` does not
+        /// lower such a record in this release.
+        interfaces: bool,
+        /// Whether the header carries a `where` clause: `record R where self.x > 0`. Teal
+        /// stores it as the record's `__is` meta field, a function whose `macroexp` is the
+        /// clause, and a record with one is a tagged member of a union, which a shape cannot
+        /// say. `htl shapes` does not lower such a record in this release.
+        where_clause: bool,
+    },
+    /// An enum.
+    Enum {
+        /// Its members, sorted bytewise: Teal keeps them as a set, with no order of its own.
+        members: Vec<String>,
+        /// The place of the enum's own declaration, as for [`TypeInfo::Record`].
+        at: Place,
+    },
+    /// An interface. It carries only where it is declared, so that a nominal that resolves
+    /// to it can be told from one that resolves to nothing in the project.
+    Interface {
+        /// The place of the interface's own declaration, as for [`TypeInfo::Record`].
+        at: Place,
+    },
+}
+
+/// A type as the checker's type object has it, reduced to what a program tells apart
+/// ([`TypeInfo`]). What is not one of these is [`Other`](TypeExpr::Other), the printed form
+/// Teal gives it, so that a reader can say what it met.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TypeExpr {
+    /// A primitive.
+    Prim(Prim),
+    /// `{T}`.
+    Array(Box<TypeExpr>),
+    /// `{K : V}`: the key type, then the value type.
+    Map(Box<TypeExpr>, Box<TypeExpr>),
+    /// `{A, B}`, a table typed by position.
+    Tuple(Vec<TypeExpr>),
+    /// `A | B`.
+    Union(Vec<TypeExpr>),
+    /// A function; its parameters and results are not kept.
+    Fn,
+    /// A name that stands for a type declared elsewhere (`Inner`, `other.Thing`).
+    Nominal {
+        /// The name as written, one part per `.`.
+        names: Vec<String>,
+        /// The place of the declaration the name resolved to: the `found` Teal's resolution
+        /// sets. `None` when Teal did not resolve the name, and for a name with type
+        /// arguments (`Box<integer>`), which is [`Other`](TypeExpr::Other).
+        declared: Option<Place>,
+    },
+    /// Anything else (a generic, a polymorphic function, a type variable, an empty table, `self`,
+    /// ...): the type as Teal prints it.
+    Other(String),
+}
+
+/// The primitive types of [`TypeExpr::Prim`], named as Teal names them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Prim {
+    /// `string`.
+    String,
+    /// `number`.
+    Number,
+    /// `integer`.
+    Integer,
+    /// `boolean`.
+    Boolean,
+    /// `any`.
+    Any,
+    /// `nil`.
+    Nil,
+    /// `thread`.
+    Thread,
+    /// `userdata`.
+    Userdata,
 }
 
 /// The positions of a checked file that an editor asks about. Empty ([`Default`]) for a
@@ -662,6 +800,7 @@ pub(crate) fn read_decls(list: &Table) -> Result<Vec<Decl>> {
             Some(children) => read_decls(&children)?,
             None => Vec::new(),
         };
+        let info = read_info(&row, kind)?;
         out.push(Decl {
             name: row.get("name")?,
             kind,
@@ -679,9 +818,107 @@ pub(crate) fn read_decls(list: &Table) -> Result<Vec<Decl>> {
                 .zip(row.get::<Option<i64>>("bx")?)
                 .map(|(y, x)| (y.max(1) as usize, x.max(1) as usize)),
             children,
+            info,
         });
     }
     Ok(out)
+}
+
+/// A `{ f, y, x }` table of `prelude.lua`: a type object's own place. `None` when it holds no
+/// position (a line below 1).
+fn read_place(t: &Table) -> Result<Option<Place>> {
+    let line = t.get::<Option<i64>>("y")?.unwrap_or(0);
+    let file = t.get::<Option<String>>("f")?;
+    Ok(file.filter(|_| line > 0).map(|file| Place {
+        file: PathBuf::from(file),
+        line: line as usize,
+        col: t.get::<Option<i64>>("x").ok().flatten().unwrap_or(1).max(1) as usize,
+    }))
+}
+
+/// The `ty` / `returned` / `at` / `members` a row of `decl_index` carries, as the [`TypeInfo`]
+/// of its kind. `None` for a kind that carries nothing, and for a row the walk gave nothing:
+/// the declarations of a file that was parsed and not checked.
+fn read_info(row: &Table, kind: DeclKind) -> Result<Option<TypeInfo>> {
+    Ok(match kind {
+        DeclKind::Field | DeclKind::Function | DeclKind::Method => row
+            .get::<Option<Table>>("ty")?
+            .map(|ty| read_type(&ty).map(|ty| TypeInfo::Field { ty }))
+            .transpose()?,
+        DeclKind::Alias => row
+            .get::<Option<Table>>("ty")?
+            .map(|ty| read_type(&ty).map(|ty| TypeInfo::Alias { ty }))
+            .transpose()?,
+        DeclKind::Record => match row.get::<Option<Table>>("at")? {
+            Some(at) => read_place(&at)?.map(|at| TypeInfo::Record {
+                returned: row.get::<Option<bool>>("returned").ok().flatten() == Some(true),
+                at,
+                interfaces: row.get::<Option<bool>>("interfaces").ok().flatten() == Some(true),
+                where_clause: row.get::<Option<bool>>("where").ok().flatten() == Some(true),
+            }),
+            None => None,
+        },
+        DeclKind::Interface => match row.get::<Option<Table>>("at")? {
+            Some(at) => read_place(&at)?.map(|at| TypeInfo::Interface { at }),
+            None => None,
+        },
+        DeclKind::Enum => match row.get::<Option<Table>>("at")? {
+            Some(at) => match read_place(&at)? {
+                Some(at) => {
+                    let mut members: Vec<String> = match row.get::<Option<Table>>("members")? {
+                        Some(list) => list
+                            .sequence_values::<String>()
+                            .collect::<mlua::Result<_>>()?,
+                        None => Vec::new(),
+                    };
+                    // `pairs` over the set has no order, and Lua's own string order follows the
+                    // C library's locale: bytewise is what is promised.
+                    members.sort_unstable();
+                    Some(TypeInfo::Enum { members, at })
+                }
+                None => None,
+            },
+            None => None,
+        },
+        DeclKind::Local => None,
+    })
+}
+
+/// A `{ k = .., .. }` table of `prelude.lua`'s `type_expr` as a [`TypeExpr`].
+fn read_type(t: &Table) -> Result<TypeExpr> {
+    let sub = |key: &str| -> Result<TypeExpr> { read_type(&t.get::<Table>(key)?) };
+    let list = |key: &str| -> Result<Vec<TypeExpr>> {
+        t.get::<Table>(key)?
+            .sequence_values::<Table>()
+            .map(|e| read_type(&e?))
+            .collect()
+    };
+    Ok(match t.get::<String>("k")?.as_str() {
+        "prim" => TypeExpr::Prim(match t.get::<String>("name")?.as_str() {
+            "string" => Prim::String,
+            "number" => Prim::Number,
+            "integer" => Prim::Integer,
+            "boolean" => Prim::Boolean,
+            "any" => Prim::Any,
+            "nil" => Prim::Nil,
+            "thread" => Prim::Thread,
+            "userdata" => Prim::Userdata,
+            other => return Ok(TypeExpr::Other(other.to_string())),
+        }),
+        "array" => TypeExpr::Array(Box::new(sub("elem")?)),
+        "map" => TypeExpr::Map(Box::new(sub("key")?), Box::new(sub("value")?)),
+        "tuple" => TypeExpr::Tuple(list("elems")?),
+        "union" => TypeExpr::Union(list("members")?),
+        "fn" => TypeExpr::Fn,
+        "nominal" => TypeExpr::Nominal {
+            names: t
+                .get::<Table>("names")?
+                .sequence_values::<String>()
+                .collect::<mlua::Result<_>>()?,
+            declared: read_place(t)?,
+        },
+        _ => TypeExpr::Other(t.get::<Option<String>>("text")?.unwrap_or_default()),
+    })
 }
 
 impl Ty {

@@ -654,3 +654,469 @@ fn the_name_a_header_declares_is_the_function_it_defines() {
     let t = at(&c, local, "f()", 0).unwrap();
     assert_eq!(t.declared.map(|d| (d.line, d.col)), Some((1, 1)));
 }
+
+/// The declarations of a checked file, by walking the tree for the first declaration named
+/// `name` (any depth).
+fn find<'a>(
+    decls: &'a [htl_core::typeindex::Decl],
+    name: &str,
+) -> Option<&'a htl_core::typeindex::Decl> {
+    decls.iter().find_map(|d| {
+        if d.name == name {
+            Some(d)
+        } else {
+            find(&d.children, name)
+        }
+    })
+}
+
+/// The first test of `TypeInfo`, and the question the rest stands on: tl sets a nominal's
+/// `found` when it resolves the name, and a field typed `other.Thing` that no expression of the
+/// file ever uses may never be resolved. If `declared` is `None` here, a shape lowering cannot
+/// tell which record the field names from the index alone.
+#[test]
+fn a_nominal_the_file_never_uses_in_an_expression_is_still_resolved() {
+    use htl_core::typeindex::{TypeExpr, TypeInfo};
+    let root = common::tempdir("htl-core-typeindex", "found");
+    write(
+        &root.join("other.tl"),
+        "local record other
+   record Thing
+      a: integer
+   end
+end
+return other
+",
+    );
+    let text = "local other = require(\"other\")
+
+local record Holder
+   thing: other.Thing
+end
+
+return Holder
+";
+    write(&root.join("main.tl"), text);
+    let h = Htl::new().unwrap();
+    h.add_path(&root).unwrap();
+    let c = h.check_indexed(&root.join("main.tl")).unwrap();
+    assert!(c.errors.is_empty(), "{:?}", c.errors);
+    let decls = c.types.declarations().unwrap();
+    let thing = find(decls, "thing").unwrap();
+    let Some(TypeInfo::Field {
+        ty: TypeExpr::Nominal { names, declared },
+    }) = &thing.info
+    else {
+        panic!("not a nominal field: {:?}", thing.info);
+    };
+    assert_eq!(names, &["other", "Thing"]);
+    let declared = declared.as_ref().expect("found is set for the field");
+    assert!(declared.file.ends_with("other.tl"), "{declared:?}");
+    assert_eq!(declared.line, 2);
+}
+
+/// A record with a field of every kind of type `TypeExpr` tells apart, a nested record and
+/// enum for the nominal fields to name, and one type that is none of them.
+const KINDS: &str = "local other = require(\"other\")
+
+local record Box<T>
+   v: T
+end
+
+local record Top
+   a: integer
+end
+
+local record Cfg
+   record Inner
+      b: number
+   end
+   enum Kind
+      \"z\"
+      \"a\"
+      \"m\"
+   end
+   s: string
+   n: number
+   i: integer
+   flag: boolean
+   any: any
+   gone: nil
+   th: thread
+   u: userdata
+   arr: {string}
+   map: {string : any}
+   tup: {string, integer}
+   un: string | integer
+   cb: function(string): string
+   nested: Inner
+   top: Top
+   kind: Kind
+   far: other.Thing
+   boxed: Box<integer>
+   poly: function<T>(T): T
+end
+
+local type Names = {string}
+local type Alias = Top
+local type Union = string | integer
+
+function Cfg.make(): Cfg
+   return {}
+end
+
+return Cfg
+";
+
+const OTHER: &str = "local record other
+   record Thing
+      a: integer
+   end
+end
+return other
+";
+
+fn check_kinds(name: &str) -> (common::TempDir, htl_core::CheckInfo) {
+    let root = common::tempdir("htl-core-typeindex", name);
+    write(&root.join("other.tl"), OTHER);
+    write(&root.join("kinds.tl"), KINDS);
+    let h = Htl::new().unwrap();
+    h.add_path(&root).unwrap();
+    let c = h.check_indexed(&root.join("kinds.tl")).unwrap();
+    assert!(c.errors.is_empty(), "{:?}", c.errors);
+    (root, c)
+}
+
+/// The `ty` of the field or alias `name` (first by that name, at any depth).
+fn ty_of(c: &htl_core::CheckInfo, name: &str) -> htl_core::typeindex::TypeExpr {
+    use htl_core::typeindex::TypeInfo;
+    match find(c.types.declarations().unwrap(), name)
+        .unwrap_or_else(|| panic!("{name} declared"))
+        .info
+        .clone()
+    {
+        Some(TypeInfo::Field { ty } | TypeInfo::Alias { ty }) => ty,
+        other => panic!("{name}: no type in {other:?}"),
+    }
+}
+
+/// One assertion per kind of type §2.2 of the design tells apart.
+#[test]
+fn a_field_has_its_type_as_a_value() {
+    use htl_core::typeindex::{Prim, TypeExpr};
+    let (_root, c) = check_kinds("kinds");
+    let prim = |p| TypeExpr::Prim(p);
+    assert_eq!(ty_of(&c, "s"), prim(Prim::String));
+    assert_eq!(ty_of(&c, "n"), prim(Prim::Number));
+    assert_eq!(ty_of(&c, "i"), prim(Prim::Integer));
+    assert_eq!(ty_of(&c, "flag"), prim(Prim::Boolean));
+    assert_eq!(ty_of(&c, "any"), prim(Prim::Any));
+    assert_eq!(ty_of(&c, "gone"), prim(Prim::Nil));
+    assert_eq!(ty_of(&c, "th"), prim(Prim::Thread));
+    assert_eq!(ty_of(&c, "u"), prim(Prim::Userdata));
+    assert_eq!(
+        ty_of(&c, "arr"),
+        TypeExpr::Array(Box::new(prim(Prim::String)))
+    );
+    assert_eq!(
+        ty_of(&c, "map"),
+        TypeExpr::Map(Box::new(prim(Prim::String)), Box::new(prim(Prim::Any)))
+    );
+    assert_eq!(
+        ty_of(&c, "tup"),
+        TypeExpr::Tuple(vec![prim(Prim::String), prim(Prim::Integer)])
+    );
+    assert_eq!(
+        ty_of(&c, "un"),
+        TypeExpr::Union(vec![prim(Prim::String), prim(Prim::Integer)])
+    );
+    assert_eq!(ty_of(&c, "cb"), TypeExpr::Fn);
+    // A generic function is the function under the generic.
+    assert_eq!(ty_of(&c, "poly"), TypeExpr::Fn);
+    // A name with type arguments is not a plain name: it is the printed form.
+    assert_eq!(ty_of(&c, "boxed"), TypeExpr::Other("Box<integer>".into()));
+    // The type variable inside a generic record.
+    assert_eq!(ty_of(&c, "v"), TypeExpr::Other("T".into()));
+}
+
+/// A nominal carries the name as written and the place of the declaration it resolved to,
+/// for a record of this file (nested or not), an enum, and a record of another file.
+#[test]
+fn a_nominal_names_the_declaration_it_resolved_to() {
+    use htl_core::typeindex::{TypeExpr, TypeInfo};
+    let (root, c) = check_kinds("nominal");
+    let decls = c.types.declarations().unwrap();
+    let nominal = |name: &str| match ty_of(&c, name) {
+        TypeExpr::Nominal { names, declared } => (names, declared),
+        other => panic!("{name}: {other:?}"),
+    };
+    let at_of = |name: &str| match &find(decls, name).unwrap().info {
+        Some(TypeInfo::Record { at, .. } | TypeInfo::Enum { at, .. }) => at.clone(),
+        other => panic!("{name}: {other:?}"),
+    };
+    let (names, declared) = nominal("nested");
+    assert_eq!(names, ["Inner"]);
+    assert_eq!(declared.as_ref(), Some(&at_of("Inner")));
+    let (names, declared) = nominal("top");
+    assert_eq!(names, ["Top"]);
+    assert_eq!(declared.as_ref(), Some(&at_of("Top")));
+    let (names, declared) = nominal("kind");
+    assert_eq!(names, ["Kind"]);
+    assert_eq!(declared.as_ref(), Some(&at_of("Kind")));
+    let (names, declared) = nominal("far");
+    assert_eq!(names, ["other", "Thing"]);
+    assert!(declared.unwrap().file.ends_with("other.tl"));
+    // An alias of a name is that name, resolved the same way.
+    match ty_of(&c, "Alias") {
+        TypeExpr::Nominal { names, declared } => {
+            assert_eq!(names, ["Top"]);
+            assert_eq!(declared.as_ref(), Some(&at_of("Top")));
+        }
+        other => panic!("{other:?}"),
+    }
+    // `at` is spelled as the checker spelled the file, which is the name it was given.
+    assert_eq!(at_of("Top").file, root.join("kinds.tl"));
+}
+
+/// `at` is the typedecl's own place, which is not `Decl::line` / `Decl::col` for a top-level
+/// declaration (they are its `local` token), and is for a nested one the same coordinates.
+#[test]
+fn a_record_and_an_enum_have_the_place_of_their_own_declaration() {
+    use htl_core::typeindex::TypeInfo;
+    let (_root, c) = check_kinds("at");
+    let decls = c.types.declarations().unwrap();
+    let top = find(decls, "Top").unwrap();
+    let Some(TypeInfo::Record { at, .. }) = &top.info else {
+        panic!("{:?}", top.info)
+    };
+    // The declaration's statement (`local record Top`), not the name after it.
+    assert_eq!((at.line, at.col), (7, 1));
+    assert_eq!((top.name_line, top.name_col), (7, 14));
+    // A nested one is keyed at its `record` keyword, and an enum at its `enum`.
+    let inner = find(decls, "Inner").unwrap();
+    let Some(TypeInfo::Record { at, .. }) = &inner.info else {
+        panic!("{:?}", inner.info)
+    };
+    assert_eq!((at.line, at.col), (inner.line, inner.col));
+    assert_eq!(at.line, 12);
+    let kind = find(decls, "Kind").unwrap();
+    let Some(TypeInfo::Enum { at, .. }) = &kind.info else {
+        panic!("{:?}", kind.info)
+    };
+    assert_eq!((at.line, at.col), (kind.line, kind.col));
+    assert_eq!(at.line, 15);
+}
+
+/// The record the file returns is flagged, whatever else it holds; no other is.
+#[test]
+fn the_record_the_file_returns_is_flagged() {
+    use htl_core::typeindex::TypeInfo;
+    let returned =
+        |c: &htl_core::CheckInfo, name: &str| match &find(c.types.declarations().unwrap(), name)
+            .unwrap()
+            .info
+        {
+            Some(TypeInfo::Record { returned, .. }) => *returned,
+            other => panic!("{name}: {other:?}"),
+        };
+    let (_root, c) = check_kinds("returned");
+    assert!(returned(&c, "Cfg"));
+    assert!(!returned(&c, "Top"));
+    assert!(!returned(&c, "Inner"));
+
+    // Functions only, and with a data field: either way it is the record the file returns.
+    let root = common::tempdir("htl-core-typeindex", "returned-module");
+    let h = Htl::new().unwrap();
+    h.add_path(&root).unwrap();
+    for (name, text) in [
+        (
+            "fns.tl",
+            "local record fns
+   hello: function(string): string
+end
+function fns.hello(who: string): string
+   return who
+end
+return fns
+",
+        ),
+        (
+            "data.tl",
+            "local record Req
+   id: string
+end
+local record data
+   VERSION: string
+   hello: function(string): string
+end
+function data.hello(who: string): string
+   return who
+end
+data.VERSION = \"1\"
+return data
+",
+        ),
+    ] {
+        write(&root.join(name), text);
+        let c = h.check_indexed(&root.join(name)).unwrap();
+        assert!(c.errors.is_empty(), "{name}: {:?}", c.errors);
+        let module = name.trim_end_matches(".tl");
+        assert!(returned(&c, module), "{name}");
+        if name == "data.tl" {
+            assert!(!returned(&c, "Req"));
+        }
+    }
+}
+
+/// An enum's members are the set's keys, in a fixed order; a nested enum is the same.
+#[test]
+fn an_enum_lists_its_members_sorted() {
+    use htl_core::typeindex::TypeInfo;
+    let (_root, c) = check_kinds("members");
+    let decls = c.types.declarations().unwrap();
+    let Some(TypeInfo::Enum { members, at }) = &find(decls, "Kind").unwrap().info else {
+        panic!()
+    };
+    assert_eq!(members, &["a", "m", "z"]);
+    assert_eq!(at.file.file_name().unwrap(), "kinds.tl");
+
+    let root = common::tempdir("htl-core-typeindex", "members-top");
+    write(
+        &root.join("e.tl"),
+        "local enum Color
+   \"red\"
+   \"Blue\"
+   \"green\"
+end
+return Color
+",
+    );
+    let h = Htl::new().unwrap();
+    h.add_path(&root).unwrap();
+    let c = h.check_indexed(&root.join("e.tl")).unwrap();
+    let Some(TypeInfo::Enum { members, .. }) =
+        &find(c.types.declarations().unwrap(), "Color").unwrap().info
+    else {
+        panic!()
+    };
+    // Bytewise: an upper-case letter comes before a lower-case one.
+    assert_eq!(members, &["Blue", "green", "red"]);
+}
+
+/// A function the body declares keeps its type when the file defines it below; one written
+/// outside a body, a method and a variable carry nothing; an interface carries only where it
+/// is declared.
+#[test]
+fn only_what_has_a_type_object_to_read_carries_info() {
+    use htl_core::typeindex::{TypeExpr, TypeInfo};
+    let (_root, c) = check_kinds("info-none");
+    let decls = c.types.declarations().unwrap();
+    // `Cfg.make` is written outside the body.
+    let make = find(decls, "make").unwrap();
+    assert_eq!(make.kind, htl_core::typeindex::DeclKind::Function);
+    assert_eq!(make.info, None);
+    let root = common::tempdir("htl-core-typeindex", "info-merged");
+    let text = "local interface Shape
+   area: function(Shape): number
+end
+local record M
+   f: function(integer): string
+   n: integer
+end
+function M.f(n: integer): string
+   return tostring(n)
+end
+local v = 1
+return M
+";
+    write(&root.join("m.tl"), text);
+    let h = Htl::new().unwrap();
+    h.add_path(&root).unwrap();
+    let c = h.check_indexed(&root.join("m.tl")).unwrap();
+    let decls = c.types.declarations().unwrap();
+    let shape = find(decls, "Shape").unwrap();
+    let Some(TypeInfo::Interface { at }) = &shape.info else {
+        panic!("{:?}", shape.info)
+    };
+    // The declaration's statement (`local interface Shape`), as for a top-level record.
+    assert_eq!((at.line, at.col), (1, 1));
+    assert_eq!(find(decls, "v").unwrap().info, None);
+    // Declared in the body and defined below: one child, the definition, with the body's type.
+    let f = find(decls, "f").unwrap();
+    assert!(f.body.is_some());
+    assert_eq!(f.info, Some(TypeInfo::Field { ty: TypeExpr::Fn }));
+}
+
+/// A parse alone has no type objects: nothing carries `info`.
+#[test]
+fn the_declarations_of_a_parse_carry_no_info() {
+    let (root, _c) = check_kinds("parse-none");
+    let h = Htl::new().unwrap();
+    h.add_path(&root).unwrap();
+    let parsed = h.declarations_of(&root.join("kinds.tl")).unwrap().unwrap();
+    fn none(ds: &[htl_core::typeindex::Decl]) -> bool {
+        ds.iter().all(|d| d.info.is_none() && none(&d.children))
+    }
+    assert!(!parsed.is_empty());
+    assert!(none(&parsed));
+    // The same file checked has some, so the test is not vacuous.
+    let c = h.check_indexed(&root.join("kinds.tl")).unwrap();
+    assert!(
+        c.types
+            .declarations()
+            .unwrap()
+            .iter()
+            .any(|d| d.info.is_some())
+    );
+}
+
+/// The header of a record, as the checker has it and not as the text spells it: `is I` and a
+/// `where` clause are flags on the record's index, for a top-level and a nested record alike.
+#[test]
+fn a_record_says_whether_its_header_has_is_or_where() {
+    use htl_core::typeindex::TypeInfo;
+    let root = common::tempdir("htl-core-typeindex", "header-flags");
+    let text = "local interface I
+   x: integer
+end
+local record Plain
+   x: integer
+end
+local record WithIs is I
+end
+local record WithWhere where self.x > 0
+   x: integer
+end
+local record M
+   record NestedIs is I
+   end
+   record NestedWhere
+      where self.x > 0
+      x: integer
+   end
+   record NestedPlain
+      x: integer
+   end
+end
+return M
+";
+    write(&root.join("m.tl"), text);
+    let h = Htl::new().unwrap();
+    h.add_path(&root).unwrap();
+    let c = h.check_indexed(&root.join("m.tl")).unwrap();
+    let decls = c.types.declarations().unwrap();
+    let flags = |name: &str| match &find(decls, name).unwrap().info {
+        Some(TypeInfo::Record {
+            interfaces,
+            where_clause,
+            ..
+        }) => (*interfaces, *where_clause),
+        other => panic!("{name}: {other:?}"),
+    };
+    assert_eq!(flags("Plain"), (false, false));
+    assert_eq!(flags("WithIs"), (true, false));
+    assert_eq!(flags("WithWhere"), (false, true));
+    assert_eq!(flags("NestedIs"), (true, false));
+    assert_eq!(flags("NestedWhere"), (false, true));
+    assert_eq!(flags("NestedPlain"), (false, false));
+}
