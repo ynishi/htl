@@ -25,8 +25,8 @@
 //! A file is checked when the client opens it and when it saves it, from disk, never from a
 //! buffer, so what it reports is always about a text that exists as a file. The server does
 //! take every change (`textDocumentSync.change` is `Full`) and keeps each open document's
-//! buffer, but only to answer formatting, code actions, hover and definition about the text
-//! the client holds; a `didChange` triggers no check. Diagnostics while typing need the checker to answer for
+//! buffer, but only to answer formatting, code actions, hover, definition and the outline about
+//! the text the client holds; a `didChange` triggers no check. Diagnostics while typing need the checker to answer for
 //! text that is not on disk and is often not a program, which is a later step.
 //!
 //! **Every check is a fresh one.** The check is [`Htl::check_written`], the call `htl fix`
@@ -191,6 +191,29 @@
 //! undone. (Diagnostics while typing, which would let them follow the buffer, are a later
 //! step.)
 //!
+//! # Outline
+//!
+//! `textDocument/documentSymbol` lists what a file declares, as a tree of `DocumentSymbol`s,
+//! from the same index ([`htl::typeindex::TypeIndex::declarations`]): the declarations of the
+//! file's top level, and for a record its fields, the types nested in it and the functions
+//! declared on it anywhere in the file. A module record's `function M.f` is written after the
+//! record's `end` and is its child all the same, so a child's range may lie outside its
+//! parent's. The kinds: a record is a `Struct`, an interface an `Interface`, an enum an `Enum`,
+//! a type alias a `TypeParameter`, a variable a `Variable` (a `Function` if it holds one), a
+//! field a `Field`; `function R.f` and a field typed as a function are `Function`s and
+//! `function R:m` a `Method`. `detail` is the type as Teal writes it. `range` runs from the
+//! first token of the declaration to its `end` where the checker records one and otherwise
+//! to the end of the line the declaration starts on (the index's module doc lists which is
+//! which), and `selectionRange` is the name. Columns are UTF-16 units.
+//!
+//! It is answered about the text that was checked, like hover and definition: `null` for a
+//! buffer that has been edited since, and also `null`, never `[]`, for a file the server
+//! cannot say anything about. That is a file the client has not opened (nothing has been
+//! checked for it; the server does not check one for a request), one not on disk, and one
+//! that does not parse (the checker keeps no tree for it). `[]` is what a file that parses
+//! and declares nothing gets. An open file whose check found type errors still has its
+//! outline, as it still has hover.
+//!
 //! # Files that change the answer
 //!
 //! A file's diagnostics depend on more than the file: the project's `htl.toml` (lint levels,
@@ -257,21 +280,21 @@ use lsp_types::notification::{
     DidOpenTextDocument, DidSaveTextDocument, Exit, Notification as _, PublishDiagnostics,
 };
 use lsp_types::request::{
-    CodeActionRequest, Formatting, GotoDefinition, HoverRequest, RegisterCapability, Request as _,
-    Shutdown,
+    CodeActionRequest, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest,
+    RegisterCapability, Request as _, Shutdown,
 };
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
     CodeActionProviderCapability, CodeActionTriggerKind, DiagnosticRelatedInformation,
     DiagnosticSeverity, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
     DidChangeWatchedFilesRegistrationOptions, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentFormattingParams,
-    FileSystemWatcher, GlobPattern, GotoDefinitionParams, GotoDefinitionResponse, Hover,
-    HoverContents, HoverParams, HoverProviderCapability, Location, MarkupContent, MarkupKind,
-    NumberOrString, OneOf, Position, PublishDiagnosticsParams, Range, Registration,
-    RegistrationParams, SaveOptions, ServerCapabilities, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri,
-    WorkspaceEdit,
+    DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentFormattingParams, DocumentSymbol,
+    DocumentSymbolParams, DocumentSymbolResponse, FileSystemWatcher, GlobPattern,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
+    HoverProviderCapability, Location, MarkupContent, MarkupKind, NumberOrString, OneOf, Position,
+    PublishDiagnosticsParams, Range, Registration, RegistrationParams, SaveOptions,
+    ServerCapabilities, SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceEdit,
 };
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -340,6 +363,7 @@ fn run_on(connection: &Connection) -> Result<ExitCode> {
         document_formatting_provider: Some(OneOf::Left(true)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
+        document_symbol_provider: Some(OneOf::Left(true)),
         code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
             code_action_kinds: Some(vec![CodeActionKind::QUICKFIX, fix_all_kind()]),
             work_done_progress_options: Default::default(),
@@ -750,14 +774,15 @@ impl<'c> Server<'c> {
                     CodeActionRequest::METHOD,
                     HoverRequest::METHOD,
                     GotoDefinition::METHOD,
+                    DocumentSymbolRequest::METHOD,
                 ]
                 .contains(&req.method.as_str())
                 {
                     // Answered about the files as the messages before it left them: what
                     // they made stale is checked first, as before a `shutdown`. A code
-                    // action, a hover and a definition are read off the last check, so
-                    // one asked right behind a save would otherwise describe the file as
-                    // it was before.
+                    // action, a hover, a definition and an outline are read off the last
+                    // check, so one asked right behind a save would otherwise describe the
+                    // file as it was before.
                     self.check_all(&std::mem::take(stale));
                     self.document_request(req)
                 } else {
@@ -1135,7 +1160,8 @@ impl<'c> Server<'c> {
         self.publish(uri.clone(), diagnostics);
     }
 
-    /// Answer `textDocument/formatting`, `codeAction`, `hover` or `definition`.
+    /// Answer `textDocument/formatting`, `codeAction`, `hover`, `definition` or
+    /// `documentSymbol`.
     fn document_request(&mut self, req: lsp_server::Request) -> Response {
         let id = req.id.clone();
         let bad = |e: serde_json::Error| {
@@ -1168,6 +1194,14 @@ impl<'c> Server<'c> {
                             id.clone(),
                             self.definition(&at.text_document.uri, at.position),
                         )
+                    }
+                    Err(e) => bad(e),
+                }
+            }
+            DocumentSymbolRequest::METHOD => {
+                match serde_json::from_value::<DocumentSymbolParams>(params) {
+                    Ok(p) => {
+                        Response::new_ok(id.clone(), self.document_symbols(&p.text_document.uri))
                     }
                     Err(e) => bad(e),
                 }
@@ -1233,6 +1267,19 @@ impl<'c> Server<'c> {
             Some((place.line, place.col)),
         )?;
         Some(GotoDefinitionResponse::Scalar(target))
+    }
+
+    /// The declarations of the file as a tree, from the index of the last check of it. `null`
+    /// when that is not known: the file is not open, it was never checked or is not on disk,
+    /// the buffer is not the text the check read, or it did not parse. `[]` only for a file
+    /// that parses and declares nothing.
+    fn document_symbols(&self, uri: &Uri) -> Option<DocumentSymbolResponse> {
+        let checked = self.checked_buffer(uri)?;
+        let decls = checked.types.declarations()?;
+        let lines = lines_of(&checked.text);
+        Some(DocumentSymbolResponse::Nested(
+            decls.iter().map(|d| symbol_of(&lines, d)).collect(),
+        ))
     }
 
     /// The edits that make the buffer what `htl fmt` writes for it: `[]` when it already is,
@@ -1797,6 +1844,69 @@ fn severity(
     }
 }
 
+/// The LSP position of a point the checker reports: `line` counted from 1 and `col` from 1
+/// in bytes, as a 0-based line and a UTF-16 column. A column past the end of the line is its
+/// end, and a line past the end of the text is its last line's.
+fn position_at(lines: &[&str], line: usize, col: usize) -> Position {
+    let (n, text, at) = clamped(lines, line, col);
+    Position::new(n as u32, text[..at].encode_utf16().count() as u32)
+}
+
+/// The point at `line` (from 1) and byte `col` (from 1) as the 0-based line, its text and a
+/// byte offset in it on a character boundary: a column past the end is the end, one inside a
+/// character the start of that character, and a line past the end of the text the last line.
+fn clamped<'a>(lines: &[&'a str], line: usize, col: usize) -> (usize, &'a str, usize) {
+    let n = line.saturating_sub(1).min(lines.len().saturating_sub(1));
+    let text = lines.get(n).copied().unwrap_or("");
+    let mut at = col.saturating_sub(1).min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    (n, text, at)
+}
+
+/// One declaration of the index as an LSP `DocumentSymbol`, its children with it.
+///
+/// The kinds: a record is a `Struct`, an interface an `Interface`, an enum an `Enum`; a
+/// type alias a `TypeParameter` (rust-analyzer's choice for one); a variable a `Variable`; a
+/// record's field that is not a function a `Field`; any function, `function R.f` and a
+/// function-typed field included, a `Function`, and `function R:m` (or a field typed as a
+/// method) a `Method`. `detail` is Teal's type string. `range` is the declaration's extent as
+/// far as the index knows it ([`htl::typeindex`], "Declarations"; an unknown end is the end of
+/// the line) and `selectionRange` is the name, which `range` is made to contain.
+fn symbol_of(lines: &[&str], d: &htl::typeindex::Decl) -> DocumentSymbol {
+    use htl::typeindex::DeclKind;
+    let start = position_at(lines, d.line, d.col);
+    let end = position_at(lines, d.end_line, d.end_col.unwrap_or(usize::MAX));
+    let name_start = position_at(lines, d.name_line, d.name_col);
+    let name_end = position_at(
+        lines,
+        d.name_line,
+        d.name_col.saturating_add(d.short_name().len()),
+    );
+    let children: Vec<DocumentSymbol> = d.children.iter().map(|c| symbol_of(lines, c)).collect();
+    #[allow(deprecated)]
+    DocumentSymbol {
+        name: d.name.clone(),
+        detail: d.detail.clone(),
+        kind: match d.kind {
+            DeclKind::Local => SymbolKind::VARIABLE,
+            DeclKind::Function => SymbolKind::FUNCTION,
+            DeclKind::Method => SymbolKind::METHOD,
+            DeclKind::Field => SymbolKind::FIELD,
+            DeclKind::Record => SymbolKind::STRUCT,
+            DeclKind::Interface => SymbolKind::INTERFACE,
+            DeclKind::Enum => SymbolKind::ENUM,
+            DeclKind::Alias => SymbolKind::TYPE_PARAMETER,
+        },
+        tags: None,
+        deprecated: None,
+        range: Range::new(start.min(name_start), end.max(name_end)),
+        selection_range: Range::new(name_start, name_end),
+        children: (!children.is_empty()).then_some(children),
+    }
+}
+
 /// The range for the point a check reports: `line` counted from 1 and `col` from 1 in
 /// bytes (the checker counts bytes), as LSP's 0-based line and UTF-16 column. The range
 /// runs to the end of the identifier that starts at the point, or over one character if
@@ -1806,12 +1916,7 @@ fn range_at(lines: &[&str], line: usize, col: usize) -> Range {
     if line == 0 {
         return Range::default();
     }
-    let n = (line - 1).min(lines.len().saturating_sub(1));
-    let text = lines.get(n).copied().unwrap_or("");
-    let mut start = col.saturating_sub(1).min(text.len());
-    while !text.is_char_boundary(start) {
-        start -= 1;
-    }
+    let (n, text, start) = clamped(lines, line, col);
     let word = |c: char| c.is_alphanumeric() || c == '_';
     let mut end = start;
     let mut rest = text[start..].chars();

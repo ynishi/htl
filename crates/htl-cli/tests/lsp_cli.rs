@@ -1187,6 +1187,7 @@ fn opened_scaffold(name: &str) -> (common::TempDir, PathBuf, PathBuf, Client) {
     let caps = &init["result"]["capabilities"];
     assert_eq!(caps["hoverProvider"], true, "{init}");
     assert_eq!(caps["definitionProvider"], true, "{init}");
+    assert_eq!(caps["documentSymbolProvider"], true, "{init}");
     client.open(&main);
     client.publishes(&[&main]);
     (root, p, main, client)
@@ -1370,6 +1371,211 @@ fn hover_and_definition_count_columns_in_utf16_units() {
     );
     drop(main);
     let (_, code) = client.finish();
+    assert_eq!(code, Some(0));
+}
+
+/// `textDocument/documentSymbol`: the result, `null` included.
+fn symbols(client: &mut Client, file: &Path) -> Value {
+    let r = client.request(
+        "textDocument/documentSymbol",
+        json!({ "textDocument": { "uri": uri(file) } }),
+    );
+    assert!(r.get("error").is_none(), "{r}");
+    r["result"].clone()
+}
+
+/// `kind name line:col-line:col` of a symbol's range (0-based, as sent), and its name's
+/// range after an `@`; children indented below it.
+fn outline(list: &Value, depth: usize, out: &mut Vec<String>) {
+    let pos = |p: &Value| format!("{}:{}", p["line"], p["character"]);
+    for s in list.as_array().unwrap() {
+        out.push(format!(
+            "{}{} {} {}-{} @{}-{} {}",
+            "  ".repeat(depth),
+            s["kind"],
+            s["name"].as_str().unwrap(),
+            pos(&s["range"]["start"]),
+            pos(&s["range"]["end"]),
+            pos(&s["selectionRange"]["start"]),
+            pos(&s["selectionRange"]["end"]),
+            s["detail"].as_str().unwrap_or("")
+        ));
+        if let Some(children) = s.get("children") {
+            outline(children, depth + 1, out);
+        }
+    }
+}
+
+fn outlined(list: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    outline(list, 0, &mut out);
+    out
+}
+
+/// Acceptance 1: on the scaffold's module file the module record, with the record nested in
+/// it and the function written after it as children — the function with the line it is
+/// declared on; and on `src/main.tl` its top-level locals.
+#[test]
+fn document_symbol_lists_the_declarations_of_the_scaffold() {
+    let (_root, p, main, mut client) = opened_scaffold("symbols");
+    let module = p.join("src/sample/init.tl");
+    assert_eq!(
+        std::fs::read_to_string(&module)
+            .unwrap()
+            .lines()
+            .nth(7)
+            .unwrap(),
+        "function sample.greet(who: string): sample.Greeting",
+        "the scaffold this case reads positions of"
+    );
+    // Opening a file the open one requires checks that one again.
+    client.open(&module);
+    client.publishes(&[&module, &main]);
+
+    // SymbolKind: Struct 23, Field 8, Function 12, Variable 13.
+    let got = outlined(&symbols(&mut client, &module));
+    assert_eq!(
+        got,
+        [
+            "23 sample 0:0-5:3 @0:13-0:19 ",
+            "  23 Greeting 1:3-4:6 @1:10-1:18 ",
+            "    8 who 2:6-2:17 @2:6-2:9 string",
+            "    8 text 3:6-3:18 @3:6-3:10 string",
+            "  12 greet 7:0-9:3 @7:16-7:21 function(string): sample.Greeting",
+        ]
+        .to_vec(),
+        "{got:#?}"
+    );
+    let main_syms = outlined(&symbols(&mut client, &main));
+    assert_eq!(
+        main_syms,
+        [
+            "13 sample 0:0-0:32 @0:6-0:12 sample",
+            "13 g 2:0-2:48 @2:6-2:7 sample.Greeting",
+        ],
+        "{main_syms:#?}"
+    );
+    let (unread, code) = client.finish();
+    assert!(unread.is_empty(), "{unread:?}");
+    assert_eq!(code, Some(0));
+}
+
+/// Acceptance 2: the outline is positions in the text the check read, so a buffer that has
+/// moved on gets `null` and the text put back answers again; a file that was never opened,
+/// and one that does not parse, are `null` too, and a file that parses and declares nothing
+/// is `[]`.
+#[test]
+fn document_symbol_is_null_when_the_server_cannot_say() {
+    let (_root, p, main, mut client) = opened_scaffold("symbols-null");
+    let text = std::fs::read_to_string(&main).unwrap();
+    assert_ne!(symbols(&mut client, &main), Value::Null);
+
+    client.change(&main, &format!("-- a new first line\n{text}"));
+    assert_eq!(symbols(&mut client, &main), Value::Null);
+    client.change(&main, &text);
+    assert_eq!(symbols(&mut client, &main).as_array().unwrap().len(), 2);
+
+    // Never opened: nothing was checked for it, and the answer is not `[]`.
+    let never = p.join("src/sample/init.tl");
+    assert_eq!(symbols(&mut client, &never), Value::Null);
+
+    // Opened, but not a program.
+    let bad = p.join("src/bad.tl");
+    write(&bad, "local x = (\n");
+    client.open(&bad);
+    client.publishes(&[&bad]);
+    assert_eq!(symbols(&mut client, &bad), Value::Null);
+
+    // A type error is a diagnostic, not a reason to lose the outline.
+    let typed = p.join("src/typed.tl");
+    write(&typed, "local x: integer = \"s\"\n");
+    client.open(&typed);
+    let got = client.publishes(&[&typed]);
+    assert!(!got[&typed].is_empty(), "{got:?}");
+    assert_eq!(
+        outlined(&symbols(&mut client, &typed)),
+        ["13 x 0:0-0:22 @0:6-0:7 integer"]
+    );
+
+    // A program with no declarations: known to have none.
+    let none = p.join("src/none.tl");
+    write(&none, "print(1)\n");
+    client.open(&none);
+    client.publishes(&[&none]);
+    assert_eq!(symbols(&mut client, &none), json!([]));
+
+    let (unread, code) = client.finish();
+    assert!(unread.is_empty(), "{unread:?}");
+    assert_eq!(code, Some(0));
+}
+
+/// The kinds, and the columns: a function, an enum, a type alias, a method, a record nested
+/// in a record, a variable that holds a function, and a name after characters that are more
+/// than one UTF-16 unit.
+#[test]
+fn document_symbol_kinds_ranges_and_utf16_columns() {
+    let (_root, p, _main, mut client) = opened_scaffold("symbols-kinds");
+    let text = "\
+local record R
+   n: integer
+   record Inner
+      a: number
+   end
+end
+
+local enum Color
+   \"red\"
+end
+
+local type Alias = R
+
+local function helper(x: integer): integer
+   return x + 1
+end
+
+function R.make(): R
+   return { n = 1 }
+end
+
+function R:show(): integer
+   return self.n
+end
+
+local f = function(): integer return 1 end
+local wide = \"\u{e9}\u{1F600}\"; local after: integer = 7
+return R
+";
+    let file = p.join("src/kinds.tl");
+    write(&file, text);
+    client.open(&file);
+    client.publishes(&[&file]);
+    let got = outlined(&symbols(&mut client, &file));
+    // SymbolKind: Struct 23, Field 8, Enum 10, TypeParameter 26, Function 12, Method 6,
+    // Variable 13. A range the index gives no end runs to the end of its line: `n: integer`
+    // is ten characters after three of indent.
+    assert_eq!(
+        got,
+        [
+            "23 R 0:0-5:3 @0:13-0:14 ",
+            "  8 n 1:3-1:13 @1:3-1:4 integer",
+            "  23 Inner 2:3-4:6 @2:10-2:15 ",
+            "    8 a 3:6-3:15 @3:6-3:7 number",
+            "  12 make 17:0-19:3 @17:11-17:15 function(): R",
+            "  6 show 21:0-23:3 @21:11-21:15 function(R): integer",
+            "10 Color 7:0-9:3 @7:11-7:16 ",
+            "26 Alias 11:0-11:20 @11:11-11:16 R",
+            "12 helper 13:0-15:3 @13:15-13:21 function(integer): integer",
+            "12 f 25:0-25:42 @25:6-25:7 function(): integer",
+            // A literal has no end the tree records, so `wide` runs to the end of its line,
+            // `after` included. `after` is after `é` (one unit, two bytes) and the emoji
+            // (two units, four): unit 26, byte 29.
+            "13 wide 26:0-26:44 @26:6-26:10 string",
+            "13 after 26:26-26:44 @26:26-26:31 integer",
+        ],
+        "{got:#?}"
+    );
+    let (unread, code) = client.finish();
+    assert!(unread.is_empty(), "{unread:?}");
     assert_eq!(code, Some(0));
 }
 
