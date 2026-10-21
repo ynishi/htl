@@ -10,7 +10,7 @@
 //! is in front of the answer.
 
 use lsp_types::notification::{DidChangeWatchedFiles, Notification as _};
-use lsp_types::request::{Request as _, WorkspaceSymbolRequest};
+use lsp_types::request::{References, Request as _, WorkspaceSymbolRequest};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -2183,4 +2183,548 @@ fn workspace_symbol_without_an_open_file_asks_the_workspace_and_is_null_without_
     let (mut client, _) = Client::start(&root, &root);
     assert_eq!(workspace_symbols(&mut client, "greet"), Value::Null);
     client.finish();
+}
+
+/// `textDocument/references` at a 0-based line and UTF-16 column.
+fn references(
+    client: &mut Client,
+    file: &Path,
+    line: u32,
+    character: u32,
+    include_declaration: bool,
+) -> Value {
+    let r = client.request(
+        References::METHOD,
+        json!({ "textDocument": { "uri": uri(file) },
+                "position": { "line": line, "character": character },
+                "context": { "includeDeclaration": include_declaration } }),
+    );
+    assert!(r.get("error").is_none(), "{r}");
+    r["result"].clone()
+}
+
+/// `path:line:start-end` for each location of an answer (0-based, as sent), the path
+/// relative to `root`, in the order sent.
+fn places(list: &Value, root: &Path) -> Vec<String> {
+    let prefix = format!("{}/", uri(root));
+    list.as_array()
+        .unwrap_or_else(|| panic!("a list, not {list}"))
+        .iter()
+        .map(|l| {
+            let (s, e) = (&l["range"]["start"], &l["range"]["end"]);
+            assert_eq!(s["line"], e["line"], "{l}");
+            format!(
+                "{}:{}:{}-{}",
+                l["uri"].as_str().unwrap().strip_prefix(&prefix).unwrap(),
+                s["line"],
+                s["character"],
+                e["character"]
+            )
+        })
+        .collect()
+}
+
+/// The scaffold plus `src/other.tl`, whose two local functions each call the module's `greet`
+/// and each have a local named `who`. Only `src/sample/init.tl`, the module, is opened.
+fn project_with_other(name: &str, watching: bool) -> (common::TempDir, PathBuf, PathBuf, Client) {
+    let (root, p) = project(name);
+    write(
+        &p.join("src/other.tl"),
+        "local sample = require(\"sample\")
+
+local function a(): string
+   local who = \"a\"
+   return sample.greet(who).text
+end
+
+local function b(): string
+   local who = \"b\"
+   return who .. sample.greet(who).text
+end
+
+return { a = a, b = b }
+",
+    );
+    let init = p.join("src/sample/init.tl");
+    // Started above the project, as a client whose workspace is a parent directory is.
+    let (mut client, started) = if watching {
+        Client::start_watching(&root, &root)
+    } else {
+        Client::start(&root, &root)
+    };
+    assert_eq!(
+        started["result"]["capabilities"]["referencesProvider"], true,
+        "{started}"
+    );
+    if watching {
+        client.registration();
+    }
+    client.open(&init);
+    client.publishes(&[&init]);
+    (root, p, init, client)
+}
+
+/// The scaffold's `greet` is declared on line 7 of the module, and called in `src/main.tl`,
+/// twice in `src/other.tl`, and in the scaffold's own test.
+const GREET_CALLS: [&str; 4] = [
+    "src/main.tl:2:17-22",
+    "src/other.tl:4:17-22",
+    "src/other.tl:9:24-29",
+    "tests/sample_test.tl:5:22-27",
+];
+
+/// Acceptance 1: the references of the module's function, asked at its declaration, are the
+/// calls in the files that are not open, and `includeDeclaration` adds the declaration;
+/// asked at a call site they are the same set.
+#[test]
+fn references_of_a_function_are_its_calls_in_files_that_are_not_open() {
+    let (_root, p, init, mut client) = project_with_other("refs-calls", false);
+    // `greet` of `function sample.greet`: from its first character, its middle and just after.
+    for character in [16, 18, 21] {
+        let got = places(&references(&mut client, &init, 7, character, false), &p);
+        assert_eq!(got, GREET_CALLS, "{character}");
+    }
+    let with = places(&references(&mut client, &init, 7, 18, true), &p);
+    let mut want: Vec<&str> = GREET_CALLS.to_vec();
+    want.insert(3, "src/sample/init.tl:7:16-21");
+    assert_eq!(with, want);
+    // The first request checked the open module again, since its last check may be older than
+    // what the index has seen: the publish of that check.
+    client.publishes(&[&init]);
+
+    // From a call site: the same set. The calling file is open now, and answers with the
+    // URI the client used for it.
+    let main = p.join("src/main.tl");
+    client.open(&main);
+    client.publishes(&[&main]);
+    let got = places(&references(&mut client, &main, 2, 19, true), &p);
+    assert_eq!(got, want);
+    let got = places(&references(&mut client, &main, 2, 19, false), &p);
+    assert_eq!(got, GREET_CALLS);
+    let (unread, code) = client.finish();
+    assert!(unread.is_empty(), "{unread:?}");
+    assert_eq!(code, Some(0));
+}
+
+/// Acceptance 2: a local's references are its uses in its scope; the local of the same name
+/// in another function is not among them, nor is a field or a function of that name.
+#[test]
+fn references_of_a_local_are_its_uses_in_its_scope() {
+    let (_root, p, _init, mut client) = project_with_other("refs-locals", false);
+    let other = p.join("src/other.tl");
+    client.open(&other);
+    client.publishes(&[&other]);
+    // `who` of `a`: its declaration and the one use, from either.
+    let in_a = ["src/other.tl:3:9-12", "src/other.tl:4:23-26"];
+    for (line, character) in [(3, 10), (4, 24)] {
+        let got = places(&references(&mut client, &other, line, character, true), &p);
+        assert_eq!(got, in_a, "{line}:{character}");
+    }
+    let got = places(&references(&mut client, &other, 3, 10, false), &p);
+    assert_eq!(got, ["src/other.tl:4:23-26"]);
+    // `who` of `b`: its own two uses.
+    let in_b = [
+        "src/other.tl:8:9-12",
+        "src/other.tl:9:10-13",
+        "src/other.tl:9:30-33",
+    ];
+    let got = places(&references(&mut client, &other, 9, 11, true), &p);
+    assert_eq!(got, in_b);
+    // The module local `sample`: the `require` that declares it and its two uses here.
+    let got = places(&references(&mut client, &other, 0, 8, true), &p);
+    assert_eq!(
+        got,
+        [
+            "src/other.tl:0:6-12",
+            "src/other.tl:4:10-16",
+            "src/other.tl:9:17-23"
+        ]
+    );
+    client.finish();
+}
+
+/// What is not a name, a name with no declaration the answer can give, and a buffer that is
+/// not the checked text answer `null`; a declaration that only a table's field uses has that
+/// one use.
+#[test]
+fn references_are_null_where_nothing_resolves() {
+    let (_root, p, _init, mut client) = project_with_other("refs-null", false);
+    let other = p.join("src/other.tl");
+    client.open(&other);
+    client.publishes(&[&other]);
+    // A blank line, a keyword, a string's text, a field of a primitive type, `require` of the
+    // standard library, and a file that is not open.
+    for (line, character) in [(1, 0), (2, 2), (4, 31), (0, 20)] {
+        assert_eq!(
+            references(&mut client, &other, line, character, true),
+            Value::Null,
+            "{line}:{character}"
+        );
+    }
+    assert_eq!(
+        references(&mut client, &p.join("src/main.tl"), 2, 19, true),
+        Value::Null
+    );
+    // `a` is exported by `return { a = a, b = b }` and used nowhere else: its declaration
+    // and the value of that field. (The `a` of the table's key names a field, not the local.)
+    let got = places(&references(&mut client, &other, 2, 16, true), &p);
+    assert_eq!(got, ["src/other.tl:2:15-16", "src/other.tl:12:13-14"]);
+    let got = references(&mut client, &other, 2, 16, false);
+    assert_eq!(places(&got, &p), ["src/other.tl:12:13-14"]);
+
+    // The buffer edited and not saved: its positions are not the checked text's.
+    let text = std::fs::read_to_string(&other).unwrap();
+    client.change(&other, &format!("-- a new first line\n{text}"));
+    assert_eq!(references(&mut client, &other, 3, 10, true), Value::Null);
+    client.change(&other, &text);
+    assert_ne!(references(&mut client, &other, 3, 10, true), Value::Null);
+    client.finish();
+}
+
+/// The key of a table constructor names a field, whatever is in scope under that name: the
+/// scaffold's `{ who = who, .. }` has one use of the parameter `who` in it, not two.
+#[test]
+fn references_of_a_parameter_leave_out_the_field_of_the_same_name() {
+    let (_root, p, init, mut client) = project_with_other("refs-key", false);
+    // `who` of `function sample.greet(who: string)`, line 7 col 22.
+    let got = places(&references(&mut client, &init, 7, 23, true), &p);
+    assert_eq!(
+        got,
+        [
+            "src/sample/init.tl:7:22-25",
+            "src/sample/init.tl:8:18-21",
+            "src/sample/init.tl:8:43-46"
+        ]
+    );
+    client.finish();
+}
+
+/// Acceptance 3, for a client that watches: a call removed from a file on disk (not open)
+/// and reported is no longer among the references; one added is.
+#[test]
+fn references_follow_a_call_removed_on_disk_the_watcher_reports() {
+    let (_root, p, init, mut client) = project_with_other("refs-watch", true);
+    let other = p.join("src/other.tl");
+    assert_eq!(
+        places(&references(&mut client, &init, 7, 18, false), &p),
+        GREET_CALLS
+    );
+    client.publishes(&[&init]);
+
+    // The call in `b` goes, written by something that is not the client.
+    let text = std::fs::read_to_string(&other).unwrap();
+    write(
+        &other,
+        &text.replace("who .. sample.greet(who).text", "who .. \"b\""),
+    );
+    client.watched(&[(&other, 2)]);
+    assert_eq!(
+        places(&references(&mut client, &init, 7, 18, false), &p),
+        [
+            "src/main.tl:2:17-22",
+            "src/other.tl:4:17-22",
+            "tests/sample_test.tl:5:22-27"
+        ]
+    );
+
+    // The file with the last call in it deleted; a new file with a call made.
+    let main = p.join("src/main.tl");
+    std::fs::remove_file(&main).unwrap();
+    client.watched(&[(&main, 3)]);
+    let added = p.join("src/added.tl");
+    write(
+        &added,
+        "local s = require(\"sample\")\nlocal x = s.greet(\"x\")\nreturn x\n",
+    );
+    client.watched(&[(&added, 1)]);
+    assert_eq!(
+        places(&references(&mut client, &init, 7, 18, false), &p),
+        [
+            "src/added.tl:1:12-17",
+            "src/other.tl:4:17-22",
+            "tests/sample_test.tl:5:22-27"
+        ]
+    );
+    // A file appearing or going can change what a `require` finds anywhere, so the open file
+    // was checked again before it was asked: the publish of that check is the one unread.
+    client.publishes(&[&init]);
+    let (unread, code) = client.finish();
+    assert!(unread.is_empty(), "{unread:?}");
+    assert_eq!(code, Some(0));
+}
+
+/// Acceptance 3, for a client that does not say when files change: the same edits are seen by
+/// the stat of each file at the request.
+#[test]
+fn references_see_a_call_removed_on_disk_without_being_told() {
+    let (_root, p, init, mut client) = project_with_other("refs-stat", false);
+    let other = p.join("src/other.tl");
+    assert_eq!(
+        places(&references(&mut client, &init, 7, 18, false), &p),
+        GREET_CALLS
+    );
+    let text = std::fs::read_to_string(&other).unwrap();
+    write(
+        &other,
+        &text.replace("who .. sample.greet(who).text", "who .. \"b\""),
+    );
+    assert_eq!(
+        places(&references(&mut client, &init, 7, 18, false), &p),
+        [
+            "src/main.tl:2:17-22",
+            "src/other.tl:4:17-22",
+            "tests/sample_test.tl:5:22-27"
+        ]
+    );
+    // The same length, written straight after being read: the stamp tells nothing.
+    let text = std::fs::read_to_string(&other).unwrap();
+    write(
+        &other,
+        &text.replace("sample.greet(who)", "sample.greet(wha)"),
+    );
+    assert_eq!(
+        places(&references(&mut client, &init, 7, 18, false), &p),
+        [
+            "src/main.tl:2:17-22",
+            "src/other.tl:4:17-22",
+            "tests/sample_test.tl:5:22-27"
+        ],
+        "a call whose argument is undefined is still a call of greet"
+    );
+    let main = p.join("src/main.tl");
+    std::fs::remove_file(&main).unwrap();
+    assert_eq!(
+        places(&references(&mut client, &init, 7, 18, false), &p),
+        ["src/other.tl:4:17-22", "tests/sample_test.tl:5:22-27"]
+    );
+    client.finish();
+}
+
+/// A file's uses name where the declaration is, in another file: the declaring file moving
+/// (a line added above, saved and checked) is a change to every use of it, in files that did
+/// not change and are not open.
+#[test]
+fn references_follow_the_declaration_when_its_file_changes() {
+    let (_root, p, init, mut client) = project_with_other("refs-moved", true);
+    assert_eq!(
+        places(&references(&mut client, &init, 7, 18, true), &p).len(),
+        5
+    );
+    let text = std::fs::read_to_string(&init).unwrap();
+    let moved = format!("-- one line more\n{text}");
+    write(&init, &moved);
+    client.change(&init, &moved);
+    client.save(&init);
+    client.publishes(&[&init]);
+    // `greet` is on line 8 now, and so is what the calls in the other files declare it by.
+    let got = places(&references(&mut client, &init, 8, 18, true), &p);
+    let mut want: Vec<&str> = GREET_CALLS.to_vec();
+    want.insert(3, "src/sample/init.tl:8:16-21");
+    assert_eq!(got, want);
+    client.finish();
+}
+
+/// A function the record's body declares and the module defines below, which is how a module
+/// states its API first, is one function: the references asked at the definition are the
+/// calls, and at a call the definition.
+#[test]
+fn references_of_a_function_declared_in_the_body_and_defined_below_are_one_function() {
+    let (root, p) = project("refs-body");
+    write(
+        &p.join("src/api.tl"),
+        "local record api
+   hello: function(string): string
+   shout: function(api, string): string
+end
+
+function api.hello(who: string): string
+   return \"hello \" .. who
+end
+
+function api:shout(s: string): string
+   return s .. \"!\"
+end
+
+return api
+",
+    );
+    write(
+        &p.join("src/user.tl"),
+        "local api = require(\"api\")
+local function go(o: api): string
+   return api.hello(\"w\") .. o:shout(\"s\") .. api.shout(o, \"t\")
+end
+return go
+",
+    );
+    let (mut client, _) = Client::start(&root, &root);
+    let api = p.join("src/api.tl");
+    client.open(&api);
+    client.publishes(&[&api]);
+    // `hello` of `function api.hello`: the declaration is its name in the body and its name in
+    // the definition, and the call.
+    let want = [
+        "src/api.tl:1:3-8",
+        "src/api.tl:5:13-18",
+        "src/user.tl:2:14-19",
+    ];
+    let got = places(&references(&mut client, &api, 5, 14, true), &p);
+    assert_eq!(got, want);
+    // The first request checked the open file again (nothing is known of what it read
+    // since); the publish of that check is read here.
+    client.publishes(&[&api]);
+    let got = places(&references(&mut client, &api, 5, 14, false), &p);
+    assert_eq!(got, ["src/user.tl:2:14-19"]);
+    // From the name in the body: the same declaration.
+    for (include, want) in [(true, &want[..]), (false, &want[2..])] {
+        let got = places(&references(&mut client, &api, 1, 4, include), &p);
+        assert_eq!(got, want, "{include}");
+    }
+    // From the call.
+    let user = p.join("src/user.tl");
+    client.open(&user);
+    client.publishes(&[&user]);
+    let got = places(&references(&mut client, &user, 2, 16, true), &p);
+    assert_eq!(got, want);
+    // The method: written `function api:shout`, called `o:shout(..)` and `api.shout(..)`.
+    let got = places(&references(&mut client, &api, 9, 14, true), &p);
+    assert_eq!(
+        got,
+        [
+            "src/api.tl:2:3-8",
+            "src/api.tl:9:13-18",
+            "src/user.tl:2:30-35",
+            "src/user.tl:2:48-53"
+        ]
+    );
+    client.finish();
+}
+
+/// A file the open file reads changes on disk and is not saved from the editor (a branch
+/// switch): the open file's last check names the declaration where it was. A references
+/// request in it checks it again first, so the answer is about the files as they are.
+#[test]
+fn references_asked_in_an_open_file_whose_dependency_moved_under_it() {
+    let (_root, p, init, mut client) = project_with_other("refs-under", true);
+    let other = p.join("src/other.tl");
+    client.open(&other);
+    client.publishes(&[&other]);
+    let want_before = places(&references(&mut client, &other, 4, 18, true), &p);
+    assert_eq!(want_before.len(), 5, "{want_before:?}");
+
+    let text = std::fs::read_to_string(&init).unwrap();
+    write(&init, &format!("-- one line more\n{text}"));
+    client.watched(&[(&init, 2)]);
+    let got = places(&references(&mut client, &other, 4, 18, true), &p);
+    let mut want: Vec<&str> = GREET_CALLS.to_vec();
+    want.insert(3, "src/sample/init.tl:8:16-21");
+    assert_eq!(got, want);
+    client.finish();
+}
+
+/// The first request does not trust a check made before the index existed: a file the open
+/// file reads changed on disk (nothing told the server, which had no index to tell), and the
+/// answer is about the files as they are.
+#[test]
+fn references_the_first_time_do_not_trust_a_check_older_than_the_index() {
+    let (_root, p, init, mut client) = project_with_other("refs-first", false);
+    let other = p.join("src/other.tl");
+    client.open(&other);
+    client.publishes(&[&other]);
+    let text = std::fs::read_to_string(&init).unwrap();
+    write(&init, &format!("-- one line more\n{text}"));
+    let got = places(&references(&mut client, &other, 4, 18, true), &p);
+    let mut want: Vec<&str> = GREET_CALLS.to_vec();
+    want.insert(3, "src/sample/init.tl:8:16-21");
+    assert_eq!(got, want);
+    // The file the request was made in was checked again: its publish.
+    client.publishes(&[&other]);
+    client.finish();
+}
+
+/// A file the walk does not visit (in a directory no module of the project owns) has no uses
+/// indexed, and so no answer: `null`, not an empty list or the declaration alone.
+#[test]
+fn references_in_a_file_the_walk_does_not_visit_are_null() {
+    let (_root, p, _init, mut client) = project_with_other("refs-stray", false);
+    let lone = p.join("stray/lone.tl");
+    write(
+        &lone,
+        "local function lone(): integer\n   return 1\nend\nreturn lone()\n",
+    );
+    client.open(&lone);
+    client.publishes(&[&lone]);
+    assert_eq!(references(&mut client, &lone, 0, 16, true), Value::Null);
+    assert_eq!(references(&mut client, &lone, 3, 8, true), Value::Null);
+    // The project's own files are still answered.
+    assert_eq!(
+        places(
+            &references(&mut client, &p.join("src/sample/init.tl"), 7, 18, false),
+            &p
+        ),
+        GREET_CALLS
+    );
+    client.finish();
+}
+
+/// A declaration of `types/xdecl.d.tl` with `f` on its line `line` (0-based), `src/other.tl`
+/// calling it.
+fn declare_xdecl(p: &Path, blank_lines: usize) {
+    write(
+        &p.join("types/xdecl.d.tl"),
+        &format!(
+            "{}local record xdecl\n   f: function(): integer\nend\nreturn xdecl\n",
+            "\n".repeat(blank_lines)
+        ),
+    );
+}
+
+/// A declaration under `types/` changes on disk. A client that does not watch is not told, and
+/// the project, its open files and the uses made against the old declaration are brought up
+/// to date by what the request finds when it looks at `types/`; a client that watches is told
+/// and does not look.
+#[test]
+fn references_follow_a_types_declaration_that_changed_on_disk() {
+    for watching in [false, true] {
+        let (root, p) = project(&format!("refs-types-{watching}"));
+        declare_xdecl(&p, 0);
+        let other = p.join("src/other.tl");
+        write(
+            &other,
+            "local x = require(\"xdecl\")\nlocal function a(): integer\n   return x.f()\nend\nreturn a\n",
+        );
+        let (mut client, _) = if watching {
+            Client::start_watching(&root, &root)
+        } else {
+            Client::start(&root, &root)
+        };
+        if watching {
+            client.registration();
+        }
+        client.open(&other);
+        client.publishes(&[&other]);
+
+        // `f` of `x.f()`: the declaration, in the `.d.tl` at its type (a file the walk does not
+        // visit, so a point), and the call.
+        let first = places(&references(&mut client, &other, 2, 12, true), &p);
+        assert_eq!(
+            first,
+            ["types/xdecl.d.tl:1:6-6", "src/other.tl:2:12-13"],
+            "{watching}"
+        );
+        client.publishes(&[&other]);
+
+        declare_xdecl(&p, 1);
+        if watching {
+            client.watched(&[(&p.join("types/xdecl.d.tl"), 2)]);
+        }
+        let got = places(&references(&mut client, &other, 2, 12, true), &p);
+        assert_eq!(
+            got,
+            ["types/xdecl.d.tl:2:6-6", "src/other.tl:2:12-13"],
+            "{watching}"
+        );
+        client.publishes(&[&other]);
+        client.finish();
+    }
 }
