@@ -5,9 +5,11 @@
 //! - `htl run <file.tl|.hb>`  type-check then execute (strict: type errors abort)
 //! - `htl build <dir>`        compile a tree of `.tl` into one stripped-bytecode bundle
 //! - `htl bundle info <.hb>`  print what a bundle records, without running it
+//! - `htl lsp`                a language server on stdio; its diagnostics are `htl check`'s
 
 use htl::cache;
 mod junit;
+mod lsp;
 mod pin;
 pub mod report;
 mod scaffold;
@@ -695,6 +697,16 @@ binary carries, `provided by the environment`.
         #[command(subcommand)]
         cmd: BundleCmd,
     },
+    /// A language server on stdio whose diagnostics are `htl check`'s
+    ///
+    /// Speaks the Language Server Protocol on stdin and stdout; an editor starts it as a
+    /// child process. A file is checked when it is opened and when it is saved, from disk,
+    /// under the project it belongs to: the same resolution rules, lint levels,
+    /// `-- htl: allow(..)` comments and `.d.tl` declarations `htl check` applies, and the
+    /// same messages and lines. Saving a file also re-checks the other open files that
+    /// require it. Diagnostics are not computed while typing, and `htl.toml` is read once
+    /// per session. Anything the server has to say about itself goes to stderr.
+    Lsp,
 }
 
 /// The command line as clap holds it, before any argument is parsed.
@@ -996,6 +1008,7 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
         Cmd::Bundle { cmd } => match cmd {
             BundleCmd::Info { file, format } => cmd_bundle_info(&file, format == Format::Json),
         },
+        Cmd::Lsp => lsp::serve(),
     }
 }
 

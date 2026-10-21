@@ -45,6 +45,20 @@ toml = "0.8"
 # for (`Project::patch`'s `set_dep_key`), at the same version.
 toml_edit = "0.22"
 semver = { workspace = true }
+# `htl lsp`: the connection and message loop (`lsp-server`, rust-analyzer's, which ruff and
+# gleam use as well) and the protocol's types (`lsp-types`; `lsp-server` carries none of its
+# own and speaks `serde_json::Value`). The loop is synchronous on purpose: the checker's Lua
+# state is `!Send`, so the one thread that reads messages is the one that owns it.
+lsp-server = "0.10"
+lsp-types = "0.97"
+# The channel type `lsp-server`'s `Connection` is made of, for the unbounded queue `htl lsp`
+# puts between the stdio reader and the loop (`lsp.rs`, "Superseded work"). Already in the
+# graph under `lsp-server`, at the version it uses.
+crossbeam-channel = "0.5"
+# A `file:` URI and a path, in both directions, percent-encoding included. `lsp-types`'s
+# `Uri` is a bare string type with no path conversion; this is the crate that does it, and
+# it is already in the graph under `git2` (through `mlua-pkg`).
+url = "2"
 
 [dev-dependencies]
 criterion = "0.8"
