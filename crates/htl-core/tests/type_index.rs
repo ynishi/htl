@@ -1120,3 +1120,83 @@ return M
     assert_eq!(flags("NestedWhere"), (false, true));
     assert_eq!(flags("NestedPlain"), (false, false));
 }
+
+/// What of a declaration is its own code (`Decl::fn_body`): a function's extent, and for a
+/// variable only the function literal written for it. A variable whose type is a function
+/// but whose initialiser is a call has none, and in `local f, g = function() .. end,
+/// function() .. end` each name has the literal that is its own, the k-th expression.
+#[test]
+fn a_variable_has_code_of_its_own_only_when_a_function_literal_is_written_for_it() {
+    use htl_core::typeindex::Span;
+    let root = common::tempdir("htl-core-typeindex", "fn-body");
+    let text = "local function make(): function(): string
+   return function(): string return \"x\" end
+end
+local log = make()
+local f, g = function() make() end, function() make() end
+local h: function() = function()
+   make()
+end
+local n = 1
+return log, f, g, h, n
+";
+    write(&root.join("a.tl"), text);
+    let h = Htl::new().unwrap();
+    h.add_path(&root).unwrap();
+    let c = h.check_indexed(&root.join("a.tl")).unwrap();
+    let decls = c.types.declarations().unwrap();
+    let body = |name: &str| {
+        let d = decls.iter().find(|d| d.name == name).unwrap();
+        (d.kind, d.fn_body)
+    };
+    use htl_core::typeindex::DeclKind::{Function, Local};
+    // A function: the whole of it, `local` to `end`.
+    assert_eq!(
+        body("make"),
+        (
+            Function,
+            Some(Span {
+                line: 1,
+                col: 1,
+                end_line: 3,
+                end_col: Some(4)
+            })
+        )
+    );
+    // A function by its type, from a call: a function, with no code of its own.
+    assert_eq!(body("log"), (Function, None));
+    // Each name has its own literal.
+    let span = |col, end_col| {
+        Some(Span {
+            line: 5,
+            col,
+            end_line: 5,
+            end_col: Some(end_col),
+        })
+    };
+    assert_eq!(body("f"), (Function, span(14, 35)));
+    assert_eq!(body("g"), (Function, span(37, 58)));
+    assert_eq!(
+        body("h"),
+        (
+            Function,
+            Some(Span {
+                line: 6,
+                col: 23,
+                end_line: 8,
+                end_col: Some(4)
+            })
+        )
+    );
+    assert_eq!(body("n"), (Local, None));
+    // The same from a parse alone, where the kinds a type decides are not known.
+    let parsed = h.declarations_of(&root.join("a.tl")).unwrap().unwrap();
+    let f = parsed.iter().find(|d| d.name == "f").unwrap();
+    let g = parsed.iter().find(|d| d.name == "g").unwrap();
+    assert_eq!(f.fn_body, span(14, 35));
+    assert_eq!(g.fn_body, span(37, 58));
+    assert_eq!(
+        parsed.iter().find(|d| d.name == "log").unwrap().fn_body,
+        None
+    );
+}

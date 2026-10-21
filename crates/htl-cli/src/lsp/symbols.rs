@@ -52,6 +52,43 @@ pub struct Sym {
     /// definition's and the body's. The uses of the function are of either, by where they
     /// are written, and are of one function.
     pub same: Option<[(usize, usize); 2]>,
+    /// The declaration's extent as far as the index knows it (an unknown end is the end of
+    /// its line), made to contain the name: where a call is *inside* a function.
+    pub full: Range,
+    /// Where the function's own code is ([`Decl::fn_body`]): what a call is inside of. `None`
+    /// for a declaration with no code of its own, a variable that holds a function without
+    /// a literal for it included (`local log = logger.make("x")`).
+    pub body: Option<Range>,
+    /// The declaration's type as Teal writes it, when the tree the symbols were read from
+    /// had one (a parse alone knows none).
+    pub detail: Option<String>,
+    /// The places the checker names the declaration by, as (line, byte column) from 1: the
+    /// declaration's first token (the `function` of a function, the `record`'s statement),
+    /// and its name. For a function a record's body declares and the file does not define
+    /// (`f: function(..)` alone), whose first token is its name, the first is where its type
+    /// is written instead, which is where a use of it is declared. A use is declared at one of the two, or at the other place of a
+    /// function a record's body also declares ([`same`](Self::same)): which one depends on
+    /// what is declared (`htl::typeindex`, "Where it is declared"), so a lookup by place
+    /// tries them all ([`find`]).
+    pub at: [(usize, usize); 2],
+}
+
+impl Sym {
+    /// Whether this is a function a call can be of: a function or a method.
+    pub fn is_function(&self) -> bool {
+        matches!(self.kind, SymbolKind::FUNCTION | SymbolKind::METHOD)
+    }
+}
+
+/// The symbol that is declared at `place` (line, byte column), among those of one file:
+/// the one whose name is there, else the one whose first token is, else the function whose
+/// record's body wrote its type there. `None` for a declaration the tree does not hold (a
+/// parameter, a local inside a function, which the tree does not enter).
+pub fn find(syms: &[Sym], place: (usize, usize)) -> Option<usize> {
+    let by = |f: &dyn Fn(&Sym) -> bool| syms.iter().position(f);
+    by(&|s| s.at[1] == place)
+        .or_else(|| by(&|s| s.at[0] == place))
+        .or_else(|| by(&|s| s.same.is_some_and(|pair| pair.contains(&place))))
 }
 
 /// The LSP kind of a declaration. The same table as the outline's.
@@ -79,6 +116,20 @@ pub fn flatten(text: &str, decls: &[Decl]) -> Vec<Sym> {
                 d.name_line,
                 d.name_col.saturating_add(d.short_name().len()),
             );
+            let start_decl = position_at(lines, d.line, d.col);
+            let end_decl = position_at(lines, d.end_line, d.end_col.unwrap_or(usize::MAX));
+            // A function the body declares and nothing defines starts at its name, and a use
+            // of it is declared where its type is written after the `:`.
+            let first = (d.line, d.col);
+            let first = if matches!(d.kind, DeclKind::Function | DeclKind::Method)
+                && container.is_some()
+                && d.body.is_none()
+                && first == (d.name_line, d.name_col)
+            {
+                type_after_name(lines, d).unwrap_or(first)
+            } else {
+                first
+            };
             out.push(Sym {
                 name: d.name.clone(),
                 lower: d.short_name().to_lowercase(),
@@ -87,9 +138,27 @@ pub fn flatten(text: &str, decls: &[Decl]) -> Vec<Sym> {
                 kind: kind_of(d.kind),
                 range: Range::new(start, end),
                 same: d.body.map(|b| [(d.line, d.col), b]),
+                full: Range::new(start_decl.min(start), end_decl.max(end)),
+                body: d.fn_body.map(|b| {
+                    Range::new(
+                        position_at(lines, b.line, b.col),
+                        position_at(lines, b.end_line, b.end_col.unwrap_or(usize::MAX)),
+                    )
+                }),
+                detail: d.detail.clone(),
+                at: [first, (d.name_line, d.name_col)],
             });
             walk(lines, &d.children, Some(&d.name), out);
         }
+    }
+    /// Where the type of the field `d` is written: after its name and a `:` on the name's
+    /// line (`htl::typeindex` finds a body-declared function's type the same way). `None`
+    /// when the line has no `:` and a type after it there.
+    fn type_after_name(lines: &[&str], d: &Decl) -> Option<(usize, usize)> {
+        let row = lines.get(d.name_line.checked_sub(1)?)?;
+        let rest = row.get(d.name_col.checked_sub(1)? + d.name.len()..)?;
+        let rest = rest.trim_start().strip_prefix(':')?.trim_start();
+        (!rest.is_empty()).then(|| (d.name_line, row.len() - rest.len() + 1))
     }
     let lines = lines_of(text);
     let mut out = Vec::new();
@@ -416,6 +485,11 @@ impl SymbolIndex {
             e.refs = Some(refs);
             e.distrust = false;
         }
+    }
+
+    /// The entry of the file with this canonical path.
+    pub fn entry(&self, canonical: &Path) -> Option<&Entry> {
+        self.files.get(canonical)
     }
 
     /// Every file, with its canonical path.

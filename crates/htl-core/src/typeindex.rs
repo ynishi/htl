@@ -265,6 +265,21 @@ pub enum DeclKind {
     Alias,
 }
 
+/// A stretch of a file: from `line`, `col` to `end_line`, `end_col`, counted as in
+/// [`Decl`] (lines and byte columns from 1; `end_col` is the column just past the last
+/// character, or `None` for the end of `end_line`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    /// Line it starts on.
+    pub line: usize,
+    /// Byte column of its first character.
+    pub col: usize,
+    /// Line it ends on.
+    pub end_line: usize,
+    /// The byte column just past its last character, or `None` for "the end of `end_line`".
+    pub end_col: Option<usize>,
+}
+
 /// One declaration of a file ([`TypeIndex::declarations`]). Lines are counted from 1 and
 /// columns are byte columns from 1, as in [`Place`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -301,6 +316,17 @@ pub struct Decl {
     /// [`col`](Decl::col)); the two places are one function. `None` for every other
     /// declaration.
     pub body: Option<(usize, usize)>,
+    /// Where the function's own code is, when the declaration has some in this file: a
+    /// `local` / `global function` and a `function R.f` / `function R:m` (their whole
+    /// extent, as the range above), and a variable whose initialiser is a function literal
+    /// written for it (`function(..) .. end`: the literal's extent, so that in `local f, g =
+    /// function() a() end, function() b() end` the `a()` is `f`'s and the `b()` is `g`'s).
+    /// `None` for what has no code of its own: a variable that merely holds a function
+    /// (`local log = logger.make("x")`, `local up = m.hello`: its type is a function's, and a
+    /// call in its initialiser is made when the variable is declared, not when it is
+    /// called), a record's field typed as a function, and everything that is not a function.
+    /// What a call hierarchy asks to tell which function a call is inside of.
+    pub fn_body: Option<Span>,
     /// Fields, nested types and functions, in position order; empty but for a record or
     /// interface.
     pub children: Vec<Decl>,
@@ -817,6 +843,21 @@ pub(crate) fn read_decls(list: &Table) -> Result<Vec<Decl>> {
                 .get::<Option<i64>>("by")?
                 .zip(row.get::<Option<i64>>("bx")?)
                 .map(|(y, x)| (y.max(1) as usize, x.max(1) as usize)),
+            fn_body: row
+                .get::<Option<i64>>("fy")?
+                .zip(row.get::<Option<i64>>("fx")?)
+                .map(|(y, x)| -> Result<Span> {
+                    let line = y.max(1) as usize;
+                    Ok(Span {
+                        line,
+                        col: x.max(1) as usize,
+                        end_line: row
+                            .get::<Option<i64>>("fey")?
+                            .map_or(line, |n| n.max(1) as usize),
+                        end_col: row.get::<Option<i64>>("fex")?.map(|n| n.max(1) as usize),
+                    })
+                })
+                .transpose()?,
             children,
             info,
         });

@@ -10,7 +10,10 @@
 //! is in front of the answer.
 
 use lsp_types::notification::{DidChangeWatchedFiles, Notification as _};
-use lsp_types::request::{References, Request as _, WorkspaceSymbolRequest};
+use lsp_types::request::{
+    CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare, References,
+    Request as _, WorkspaceSymbolRequest,
+};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -2727,4 +2730,572 @@ fn references_follow_a_types_declaration_that_changed_on_disk() {
         client.publishes(&[&other]);
         client.finish();
     }
+}
+
+/// `textDocument/prepareCallHierarchy` at a 0-based line and UTF-16 column: the list of items,
+/// or `null`.
+fn prepare_calls(client: &mut Client, file: &Path, line: u32, character: u32) -> Value {
+    let r = client.request(
+        CallHierarchyPrepare::METHOD,
+        json!({ "textDocument": { "uri": uri(file) },
+                "position": { "line": line, "character": character } }),
+    );
+    assert!(r.get("error").is_none(), "{r}");
+    r["result"].clone()
+}
+
+/// `callHierarchy/incomingCalls` (`"from"`) or `callHierarchy/outgoingCalls` (`"to"`) of an
+/// item exactly as `prepareCallHierarchy` or an earlier answer sent it.
+fn calls_of(client: &mut Client, item: &Value, side: &str) -> Value {
+    let method = if side == "from" {
+        CallHierarchyIncomingCalls::METHOD
+    } else {
+        CallHierarchyOutgoingCalls::METHOD
+    };
+    let r = client.request(method, json!({ "item": item }));
+    assert!(r.get("error").is_none(), "{r}");
+    r["result"].clone()
+}
+
+/// An item as `name kind path:line:start-end` (the selection, 0-based as sent).
+fn item_line(item: &Value, root: &Path) -> String {
+    let prefix = format!("{}/", uri(root));
+    let s = &item["selectionRange"];
+    format!(
+        "{} {} {}:{}:{}-{}",
+        item["name"].as_str().unwrap(),
+        item["kind"],
+        item["uri"].as_str().unwrap().strip_prefix(&prefix).unwrap(),
+        s["start"]["line"],
+        s["start"]["character"],
+        s["end"]["character"]
+    )
+}
+
+/// What an incoming (`"from"`) or outgoing (`"to"`) answer says, one line per group, in the
+/// order sent: the item, then `<-` and the call sites (`line:start-end`).
+fn call_lines(list: &Value, side: &str, root: &Path) -> Vec<String> {
+    list.as_array()
+        .unwrap_or_else(|| panic!("a list, not {list}"))
+        .iter()
+        .map(|c| {
+            let sites: Vec<String> = c["fromRanges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| {
+                    assert_eq!(r["start"]["line"], r["end"]["line"], "{r}");
+                    format!(
+                        "{}:{}-{}",
+                        r["start"]["line"], r["start"]["character"], r["end"]["character"]
+                    )
+                })
+                .collect();
+            format!("{} <- {}", item_line(&c[side], root), sites.join(" "))
+        })
+        .collect()
+}
+
+/// The scaffold plus `src/other.tl`, whose `run` calls the module's `greet` and whose
+/// `other_local` calls nothing, and `src/meth.tl`, a record whose method `m` calls its
+/// method `n` through `self`. Only the module, `src/sample/init.tl`, is opened.
+fn project_with_calls(name: &str, watching: bool) -> (common::TempDir, PathBuf, PathBuf, Client) {
+    let (root, p) = project(name);
+    write(
+        &p.join("src/other.tl"),
+        "local sample = require(\"sample\")
+
+local function run(): string
+   return sample.greet(\"run\").text
+end
+
+local function other_local(): integer
+   return 1
+end
+
+return { run = run, other_local = other_local }
+",
+    );
+    write(
+        &p.join("src/meth.tl"),
+        "local record M
+end
+
+function M:n(): integer
+   return 1
+end
+
+function M:m(): integer
+   return self:n() + 1
+end
+
+return M
+",
+    );
+    let init = p.join("src/sample/init.tl");
+    let (mut client, started) = if watching {
+        Client::start_watching(&root, &root)
+    } else {
+        Client::start(&root, &root)
+    };
+    assert_eq!(
+        started["result"]["capabilities"]["callHierarchyProvider"], true,
+        "{started}"
+    );
+    if watching {
+        client.registration();
+    }
+    client.open(&init);
+    client.publishes(&[&init]);
+    (root, p, init, client)
+}
+
+/// Acceptance 4: the incoming calls of the module's `greet` are each calling function with
+/// its call sites, and a file for a call at its top level, in files that are not open; the
+/// outgoing calls of a function are the functions it calls, none for one that calls nothing.
+#[test]
+fn call_hierarchy_of_a_function_lists_its_callers_and_what_it_calls() {
+    let (_root, p, init, mut client) = project_with_calls("calls-basic", false);
+    // `greet` of `function sample.greet`, and the item for it.
+    let items = prepare_calls(&mut client, &init, 7, 18);
+    client.publishes(&[&init]);
+    let items = items
+        .as_array()
+        .unwrap_or_else(|| panic!("a list, not {items}"));
+    assert_eq!(items.len(), 1, "{items:?}");
+    let greet = &items[0];
+    assert_eq!(item_line(greet, &p), "greet 12 src/sample/init.tl:7:16-21");
+    assert_eq!(greet["detail"], "function(string): sample.Greeting");
+    // The declaration, from `function` to `end`, which contains the name.
+    assert_eq!(
+        greet["range"]["start"],
+        json!({ "line": 7, "character": 0 })
+    );
+    assert_eq!(greet["range"]["end"], json!({ "line": 9, "character": 3 }));
+    // From a call site, the same function.
+    let main = p.join("src/main.tl");
+    client.open(&main);
+    client.publishes(&[&main]);
+    let at_call = prepare_calls(&mut client, &main, 2, 19);
+    assert_eq!(at_call[0]["name"], "greet");
+    assert_eq!(at_call[0]["uri"], greet["uri"]);
+    assert_eq!(at_call[0]["data"], greet["data"]);
+
+    // The callers: the top level of `main.tl`, `run` of `other.tl`, and the test file's top
+    // level (its call is inside a function literal, which is no declaration).
+    let incoming = calls_of(&mut client, greet, "from");
+    assert_eq!(
+        call_lines(&incoming, "from", &p),
+        [
+            "src/main.tl 1 src/main.tl:0:0-0 <- 2:17-22",
+            "run 12 src/other.tl:2:15-18 <- 3:17-22",
+            "tests/sample_test.tl 1 tests/sample_test.tl:0:0-0 <- 5:22-27",
+        ]
+    );
+    let run = incoming[1]["from"].clone();
+    assert_eq!(run["detail"], "function(): string");
+    // `run`'s calls: `greet`, once. The same item, named as a callee.
+    let out = calls_of(&mut client, &run, "to");
+    assert_eq!(
+        call_lines(&out, "to", &p),
+        ["greet 12 src/sample/init.tl:7:16-21 <- 3:17-22"]
+    );
+    assert_eq!(out[0]["to"]["data"], greet["data"]);
+    // What calls `run`: nothing; what `other_local` calls: nothing. Both are `[]`, not `null`.
+    assert_eq!(calls_of(&mut client, &run, "from"), json!([]));
+    let other = p.join("src/other.tl");
+    client.open(&other);
+    client.publishes(&[&other]);
+    let local = prepare_calls(&mut client, &other, 6, 18);
+    assert_eq!(
+        item_line(&local[0], &p),
+        "other_local 12 src/other.tl:6:15-26"
+    );
+    assert_eq!(calls_of(&mut client, &local[0], "to"), json!([]));
+    // The top level of a file is an item too: what it calls, and nothing calls it.
+    let chunk = incoming[0]["from"].clone();
+    assert_eq!(
+        call_lines(&calls_of(&mut client, &chunk, "to"), "to", &p),
+        ["greet 12 src/sample/init.tl:7:16-21 <- 2:17-22"]
+    );
+    assert_eq!(calls_of(&mut client, &chunk, "from"), json!([]));
+    let (unread, code) = client.finish();
+    assert!(unread.is_empty(), "{unread:?}");
+    assert_eq!(code, Some(0));
+}
+
+/// A method that calls another through `self`: the call is a use of the other, so it is among
+/// the other's incoming calls and the method's outgoing ones.
+#[test]
+fn call_hierarchy_follows_a_call_through_self() {
+    let (_root, p, _init, mut client) = project_with_calls("calls-self", false);
+    let meth = p.join("src/meth.tl");
+    client.open(&meth);
+    client.publishes(&[&meth]);
+    // `n` of `function M:n()`.
+    let n = prepare_calls(&mut client, &meth, 3, 12);
+    assert_eq!(item_line(&n[0], &p), "n 6 src/meth.tl:3:11-12");
+    assert_eq!(
+        call_lines(&calls_of(&mut client, &n[0], "from"), "from", &p),
+        ["m 6 src/meth.tl:7:11-12 <- 8:15-16"]
+    );
+    let m = prepare_calls(&mut client, &meth, 7, 12);
+    assert_eq!(
+        call_lines(&calls_of(&mut client, &m[0], "to"), "to", &p),
+        ["n 6 src/meth.tl:3:11-12 <- 8:15-16"]
+    );
+    client.finish();
+}
+
+/// What is not a function has no call hierarchy: `null`, whether the position is on nothing,
+/// on a local that holds no function, or on a field that is not a function.
+#[test]
+fn call_hierarchy_is_null_where_the_name_is_not_a_function() {
+    let (_root, p, init, mut client) = project_with_calls("calls-null", false);
+    // Whitespace, a keyword, and the record `sample`, which is no function.
+    for (line, character) in [(0, 30), (7, 3), (0, 14)] {
+        assert_eq!(
+            prepare_calls(&mut client, &init, line, character),
+            Value::Null,
+            "{line}:{character}"
+        );
+    }
+    client.publishes(&[&init]);
+    // A field of a record that is not a function, a local that holds a number, a function
+    // whose declaration is in the standard library.
+    let other = p.join("src/other.tl");
+    write(
+        &other,
+        "local count = 1
+local record R
+   who: string
+end
+local function show(): string
+   return tostring(count)
+end
+return { show = show }
+",
+    );
+    client.watched(&[(&other, 1)]);
+    client.open(&other);
+    client.publishes(&[&other]);
+    for (line, character, what) in [
+        (0, 8, "a local that holds a number"),
+        (2, 5, "a field that is not a function"),
+        (5, 12, "the standard library's function"),
+        (5, 25, "a use of the number"),
+    ] {
+        assert_eq!(
+            prepare_calls(&mut client, &other, line, character),
+            Value::Null,
+            "{what}"
+        );
+    }
+    // The function in the same file is one.
+    let show = prepare_calls(&mut client, &other, 4, 18);
+    assert_eq!(item_line(&show[0], &p), "show 12 src/other.tl:4:15-19");
+    client.finish();
+}
+
+/// An item whose declaration is not in its file any more, and one whose file is open with a
+/// buffer that is not the text the check read, are answered `null`.
+#[test]
+fn call_hierarchy_of_an_item_that_no_longer_is_null() {
+    let (_root, p, init, mut client) = project_with_calls("calls-gone", true);
+    let items = prepare_calls(&mut client, &init, 7, 18);
+    client.publishes(&[&init]);
+    let greet = items[0].clone();
+    assert_eq!(
+        calls_of(&mut client, &greet, "from")
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+
+    // A buffer with unsaved text is not the text the check read: ranges would be wrong.
+    client.change(
+        &init,
+        &format!("-- unsaved\n{}", std::fs::read_to_string(&init).unwrap()),
+    );
+    assert_eq!(calls_of(&mut client, &greet, "from"), Value::Null);
+    assert_eq!(calls_of(&mut client, &greet, "to"), Value::Null);
+    // Back to the text on disk; the item is good again.
+    client.change(&init, &std::fs::read_to_string(&init).unwrap());
+    assert_eq!(
+        calls_of(&mut client, &greet, "from")
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+
+    // The function renamed on disk (and everything that called it still names the old
+    // one): the item names a declaration that is not there.
+    let text = std::fs::read_to_string(&init).unwrap();
+    write(
+        &init,
+        &text.replace("function sample.greet", "function sample.hello"),
+    );
+    client.change(&init, &std::fs::read_to_string(&init).unwrap());
+    client.save(&init);
+    client.publishes(&[&init]);
+    assert_eq!(calls_of(&mut client, &greet, "from"), Value::Null);
+    assert_eq!(calls_of(&mut client, &greet, "to"), Value::Null);
+    // And data that is not an item of this server's.
+    let mut foreign = greet.clone();
+    foreign["data"] = json!("not ours");
+    assert_eq!(calls_of(&mut client, &foreign, "from"), Value::Null);
+    let _ = p;
+    client.finish();
+}
+
+/// Acceptance 3 for the call hierarchy: a call removed from a file on disk and reported (and,
+/// for a client that does not watch, found by the stat of the files) is no longer among the
+/// incoming calls, and a function that stops calling is no longer among the outgoing ones.
+#[test]
+fn call_hierarchy_follows_a_call_removed_on_disk() {
+    for watching in [true, false] {
+        let (_root, p, init, mut client) =
+            project_with_calls(&format!("calls-watch-{watching}"), watching);
+        let items = prepare_calls(&mut client, &init, 7, 18);
+        client.publishes(&[&init]);
+        let greet = items[0].clone();
+        let callers = |client: &mut Client| -> Vec<String> {
+            call_lines(&calls_of(client, &greet, "from"), "from", &p)
+                .into_iter()
+                .map(|l| l.split(' ').next().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(
+            callers(&mut client),
+            ["src/main.tl", "run", "tests/sample_test.tl"]
+        );
+        let run = calls_of(&mut client, &greet, "from")[1]["from"].clone();
+        assert_eq!(
+            calls_of(&mut client, &run, "to").as_array().unwrap().len(),
+            1
+        );
+
+        let other = p.join("src/other.tl");
+        let text = std::fs::read_to_string(&other).unwrap();
+        write(
+            &other,
+            &text.replace("sample.greet(\"run\").text", "\"run\""),
+        );
+        if watching {
+            client.watched(&[(&other, 2)]);
+        }
+        assert_eq!(
+            callers(&mut client),
+            ["src/main.tl", "tests/sample_test.tl"],
+            "{watching}"
+        );
+        // `run` is still there, and calls nothing now.
+        assert_eq!(calls_of(&mut client, &run, "to"), json!([]), "{watching}");
+
+        // The file that held the last of the top-level calls but one is deleted.
+        let main = p.join("src/main.tl");
+        std::fs::remove_file(&main).unwrap();
+        if watching {
+            client.watched(&[(&main, 3)]);
+        }
+        assert_eq!(callers(&mut client), ["tests/sample_test.tl"], "{watching}");
+        client.publishes(&[&init]);
+        client.finish();
+    }
+}
+
+/// A function the record's body declares and the module defines below is one item, whichever
+/// of its two names the request starts from, whose callers are found by either, and a method
+/// is called through `o:m(..)` and `api.m(o, ..)` alike.
+#[test]
+fn call_hierarchy_of_a_function_declared_in_the_body_and_defined_below() {
+    let (root, p) = project("calls-body");
+    write(
+        &p.join("src/api.tl"),
+        "local record api
+   hello: function(string): string
+   shout: function(api, string): string
+end
+
+function api.hello(who: string): string
+   return \"hello \" .. who
+end
+
+function api:shout(s: string): string
+   return s .. \"!\"
+end
+
+return api
+",
+    );
+    write(
+        &p.join("src/user.tl"),
+        "local api = require(\"api\")
+local function go(o: api): string
+   return api.hello(\"w\") .. o:shout(\"s\") .. api.shout(o, \"t\")
+end
+return go
+",
+    );
+    let (mut client, _) = Client::start(&root, &root);
+    let user = p.join("src/user.tl");
+    client.open(&user);
+    client.publishes(&[&user]);
+    // `hello` at the call: the definition's item, and the body's name finds the same.
+    let hello = prepare_calls(&mut client, &user, 2, 16);
+    // The first request checked the open file again: its publish.
+    client.publishes(&[&user]);
+    assert_eq!(item_line(&hello[0], &p), "hello 12 src/api.tl:5:13-18");
+    let api = p.join("src/api.tl");
+    client.open(&api);
+    client.publishes(&[&api]);
+    let from_body = prepare_calls(&mut client, &api, 1, 4);
+    assert_eq!(from_body[0]["data"], hello[0]["data"]);
+    assert_eq!(
+        call_lines(&calls_of(&mut client, &hello[0], "from"), "from", &p),
+        ["go 12 src/user.tl:1:15-17 <- 2:14-19"]
+    );
+    // `go` calls `hello` once and `shout` twice, written two ways.
+    let go = calls_of(&mut client, &hello[0], "from")[0]["from"].clone();
+    assert_eq!(
+        call_lines(&calls_of(&mut client, &go, "to"), "to", &p),
+        [
+            "hello 12 src/api.tl:5:13-18 <- 2:14-19",
+            "shout 6 src/api.tl:9:13-18 <- 2:30-35 2:48-53",
+        ]
+    );
+    client.finish();
+}
+
+/// A function a record's body declares and the file does not define (a callback a value of the
+/// record carries) is an item from a call of it, and its calls are found: a use of it is
+/// declared where the body wrote its type, not at its name.
+#[test]
+fn call_hierarchy_of_a_function_only_the_body_declares() {
+    let (root, p) = project("calls-field");
+    write(
+        &p.join("src/ev.tl"),
+        "local record Bus
+   on: function(string)
+end
+local bus: Bus = { on = function(_s: string) end }
+local function fire()
+   bus.on(\"x\")
+end
+return { fire = fire }
+",
+    );
+    let (mut client, _) = Client::start(&root, &root);
+    let ev = p.join("src/ev.tl");
+    client.open(&ev);
+    client.publishes(&[&ev]);
+    let on = prepare_calls(&mut client, &ev, 5, 8);
+    client.publishes(&[&ev]);
+    assert_eq!(item_line(&on[0], &p), "on 12 src/ev.tl:1:3-5", "{on}");
+    assert_eq!(
+        call_lines(&calls_of(&mut client, &on[0], "from"), "from", &p),
+        ["fire 12 src/ev.tl:4:15-19 <- 5:7-9"]
+    );
+    let fire = prepare_calls(&mut client, &ev, 4, 16);
+    assert_eq!(
+        call_lines(&calls_of(&mut client, &fire[0], "to"), "to", &p),
+        ["on 12 src/ev.tl:1:3-5 <- 5:7-9"]
+    );
+    client.finish();
+}
+
+/// A variable is the function a call is inside of only for the function literal written for
+/// it: the call in `local log = make()` is at the top level though `log` holds a function,
+/// and in `local f, g = function() .. end, function() .. end` each literal is its own name's.
+#[test]
+fn call_hierarchy_attributes_a_call_to_the_literal_it_is_in() {
+    let (_root, p, _init, mut client) = project_with_calls("calls-literals", false);
+    let fns = p.join("src/fns.tl");
+    write(
+        &fns,
+        "local sample = require(\"sample\")
+
+local function make(): function(): string
+   return function(): string
+      return \"x\"
+   end
+end
+
+local log = make()
+local f, g = function() sample.greet(\"f\") end, function() make() end
+return { log = log, f = f, g = g }
+",
+    );
+    client.open(&fns);
+    client.publishes(&[&fns]);
+    let make = prepare_calls(&mut client, &fns, 2, 17);
+    client.publishes(&[&fns]);
+    assert_eq!(item_line(&make[0], &p), "make 12 src/fns.tl:2:15-19");
+    // The top level calls `make` to make `log`; `g`'s literal calls it; `f`'s does not.
+    assert_eq!(
+        call_lines(&calls_of(&mut client, &make[0], "from"), "from", &p),
+        [
+            "src/fns.tl 1 src/fns.tl:0:0-0 <- 8:12-16",
+            "g 12 src/fns.tl:9:9-10 <- 9:58-62",
+        ]
+    );
+    // `greet` is called by `f`, and not by `g` or the chunk.
+    let greet = prepare_calls(&mut client, &p.join("src/sample/init.tl"), 7, 18);
+    let from = calls_of(&mut client, &greet[0], "from");
+    let callers = call_lines(&from, "from", &p);
+    assert!(
+        callers.contains(&"f 12 src/fns.tl:9:6-7 <- 9:31-36".to_string()),
+        "{callers:?}"
+    );
+    assert!(
+        !callers.iter().any(|l| l.contains("src/fns.tl 1")),
+        "{callers:?}"
+    );
+    // What each calls: `f` the greeting, `g` `make`, and `log`, which holds the result of a
+    // call, nothing: the call that made it is the top level's.
+    let f = prepare_calls(&mut client, &fns, 9, 6);
+    assert_eq!(
+        call_lines(&calls_of(&mut client, &f[0], "to"), "to", &p),
+        ["greet 12 src/sample/init.tl:7:16-21 <- 9:31-36"]
+    );
+    let g = prepare_calls(&mut client, &fns, 9, 9);
+    assert_eq!(
+        call_lines(&calls_of(&mut client, &g[0], "to"), "to", &p),
+        ["make 12 src/fns.tl:2:15-19 <- 9:58-62"]
+    );
+    let log = prepare_calls(&mut client, &fns, 8, 6);
+    assert_eq!(item_line(&log[0], &p), "log 12 src/fns.tl:8:6-9");
+    assert_eq!(calls_of(&mut client, &log[0], "to"), json!([]));
+    client.finish();
+}
+
+/// Whether an item's file is open is a question about the file, not the spelling of its URI:
+/// an item named through a symlinked directory is the open file, and while the buffer holds
+/// edits that were not saved it is answered `null`, as it is by the URI the client opened it
+/// with.
+#[cfg(unix)]
+#[test]
+fn call_hierarchy_of_an_item_named_through_a_symlink_is_the_open_file() {
+    let (_root, p, _init, mut client) = project_with_calls("calls-symlink", false);
+    std::os::unix::fs::symlink(p.join("src"), p.join("alias")).unwrap();
+    let other = p.join("src/other.tl");
+    client.open(&other);
+    client.publishes(&[&other]);
+    let run = prepare_calls(&mut client, &other, 2, 17);
+    client.publishes(&[&other]);
+    assert_eq!(item_line(&run[0], &p), "run 12 src/other.tl:2:15-18");
+    let mut through = run[0].clone();
+    through["uri"] = json!(uri(&p.join("alias/other.tl")));
+    // The same file: answered, with what the item says.
+    let out = calls_of(&mut client, &through, "to");
+    assert_eq!(out.as_array().map(Vec::len), Some(1), "{out}");
+    // An edit that is not saved: the ranges of the item are not the buffer's.
+    let text = std::fs::read_to_string(&other).unwrap();
+    client.change(&other, &format!("-- unsaved\n{text}"));
+    assert_eq!(calls_of(&mut client, &run[0], "to"), Value::Null);
+    assert_eq!(calls_of(&mut client, &through, "to"), Value::Null);
+    assert_eq!(calls_of(&mut client, &through, "from"), Value::Null);
+    client.finish();
 }

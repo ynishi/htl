@@ -3170,6 +3170,7 @@ local function decl_index(result, filename, src, report, reporter, sym_type)
             local d = { name = n.name.tk, kind = "function", y = n.y, x = decl_start(n.y, n.x),
                ny = n.name.y, nx = n.name.x, ey = n.yend or n.y, ex = n.xend and n.xend + 1,
                children = {} }
+            d.fy, d.fx, d.fey, d.fex = d.y, d.x, d.ey, d.ex
             d.detail = var_type(n.name.tk, n.name.y, n.name.x) or var_type(n.name.tk, n.y, n.x)
             -- A global is in no scope list: the report's table of globals has its type.
             if not d.detail and k == "global_function" then
@@ -3186,10 +3187,21 @@ local function decl_index(result, filename, src, report, reporter, sym_type)
                if not detail and n.decltuple and n.decltuple.tuple then
                   detail, ti = str_of(n.decltuple.tuple[i])
                end
-               push({ name = v.tk, kind = ((ti and ti.args ~= nil) or (n.exps and n.exps[i] and n.exps[i].kind == "function"))
+               local d = { name = v.tk, kind = ((ti and ti.args ~= nil) or (n.exps and n.exps[i] and n.exps[i].kind == "function"))
                   and "function" or "local",
                   y = n.y, x = decl_start(n.y, n.x), ny = v.y, nx = v.x, ey = best.y, ex = best.x,
-                  detail = detail, children = {} })
+                  detail = detail, children = {} }
+               -- Only a function literal written for this name has code of its own: the i-th
+               -- expression of `local f, g = function() .. end, function() .. end`, and not a
+               -- call that returns a function (`local log = logger.make("x")`), whose type
+               -- is a function's all the same.
+               local init = n.exps and n.exps[i]
+               if init and init.kind == "function" and init.y then
+                  local lit = { y = init.y }
+                  extent(init, lit, {})
+                  d.fy, d.fx, d.fey, d.fex = init.y, init.x, lit.y, lit.x
+               end
+               push(d)
             end
          end
       end
@@ -3211,6 +3223,7 @@ local function decl_index(result, filename, src, report, reporter, sym_type)
          local fname = n.name.tk
          local d = { name = fname, kind = n.is_method and "method" or "function", y = n.y, x = n.x,
             ny = n.name.y, nx = n.name.x, ey = n.yend or n.y, ex = n.xend and n.xend + 1, children = {} }
+         d.fy, d.fx, d.fey, d.fex = d.y, d.x, d.ey, d.ex
          if owner and owner._def and owner._def.fields then
             d.detail = str_of(owner._def.fields[fname])
             -- A function declared in the record's body (`f: function(..)`) and defined here
