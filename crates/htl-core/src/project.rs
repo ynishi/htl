@@ -798,18 +798,7 @@ pub fn check_one<O: Output>(
     f: &Path,
     w: &Walk<'_>,
 ) -> Result<cache::Module> {
-    // What this file may read beyond the sources' view, and the contract lints, both
-    // prepend to the search path, and without putting it back the Nth file would be
-    // checked against the directories of the first N-1 as well — so a `require` would
-    // resolve against whatever happened to be walked earlier, and a file's diagnostics
-    // would depend on its position in the walk (#21). `TestSession::run_file` does the
-    // same for `htl test`. An error below ends the process, so the restore is not on that
-    // path.
-    let saved = h.search_path()?;
-    file_view(h, w.model, f)?;
-    let c = h.check(f)?;
-    let lints_said = file_findings(h, sink, f, &c, w)?;
-    h.set_search_path(&saved)?;
+    let (c, lints_said) = check_file(h, sink, f, w, Fresh::Stored)?;
     Ok(cache::Module {
         // Everything this file put into the sink, and nothing from the files before it:
         // the previous iteration took its own.
@@ -828,6 +817,52 @@ pub fn check_one<O: Output>(
         code: None,
         check: None,
     })
+}
+
+/// Which answer [`check_file`] asks the checker for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fresh {
+    /// [`Htl::check`]: a module the checker already loaded, or has in its store, is served
+    /// from there — what makes a walk of a project fast, and right for a run that reads
+    /// each file once.
+    Stored,
+    /// [`Htl::check_written`]: what is on disk now, in a cold environment, nothing stored.
+    /// For a caller that outlives an edit — `htl lsp`, which checks the same files again
+    /// after every save.
+    Disk,
+}
+
+/// Check one file and say to `sink` everything it reports ([`file_findings`]), under the
+/// view `f` itself may read; returns the check and how many lints this layer added. The
+/// one per-file question [`check_one`] (`htl check`'s walk) and `htl lsp` both ask, so
+/// what an editor is told about a file is what the terminal is told.
+///
+/// What this file may read beyond the sources' view, and the contract lints, both prepend
+/// to the search path, and without putting it back the Nth file would be checked against
+/// the directories of the first N-1 as well — so a `require` would resolve against
+/// whatever happened to be walked earlier, and a file's diagnostics would depend on its
+/// position in the walk (#21). `TestSession::run_file` does the same for `htl test`. The
+/// path is put back on the error path too: a long-lived caller checks the next file after
+/// one that failed.
+pub fn check_file<O: Output>(
+    h: &Htl,
+    sink: &mut Sink<O>,
+    f: &Path,
+    w: &Walk<'_>,
+    fresh: Fresh,
+) -> Result<(CheckInfo, usize)> {
+    let saved = h.search_path()?;
+    let found = (|| {
+        file_view(h, w.model, f)?;
+        let c = match fresh {
+            Fresh::Stored => h.check(f)?,
+            Fresh::Disk => h.check_written(f)?,
+        };
+        let lints_said = file_findings(h, sink, f, &c, w)?;
+        Ok((c, lints_said))
+    })();
+    h.set_search_path(&saved)?;
+    found
 }
 
 /// Say, to `sink`, everything a file reports once the checker has checked it as `c`: its
