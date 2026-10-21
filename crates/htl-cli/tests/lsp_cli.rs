@@ -10,6 +10,7 @@
 //! is in front of the answer.
 
 use lsp_types::notification::{DidChangeWatchedFiles, Notification as _};
+use lsp_types::request::{Request as _, WorkspaceSymbolRequest};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -1846,4 +1847,340 @@ fn a_changed_rust_source_rechecks_the_open_files_of_its_crate_and_target_does_no
     let (unread, code) = client.finish();
     assert!(unread.is_empty(), "{unread:?}");
     assert_eq!(code, Some(0));
+}
+
+fn workspace_symbols(client: &mut Client, query: &str) -> Value {
+    let r = client.request(WorkspaceSymbolRequest::METHOD, json!({ "query": query }));
+    assert!(r.get("error").is_none(), "{r}");
+    r["result"].clone()
+}
+
+/// `kind Container.name path:line` for each symbol of an answer (0-based line, as sent),
+/// the path relative to `root`, in the order sent.
+fn found(list: &Value, root: &Path) -> Vec<String> {
+    let prefix = format!("{}/", uri(root));
+    list.as_array()
+        .unwrap_or_else(|| panic!("a list, not {list}"))
+        .iter()
+        .map(|s| {
+            let name = match s["containerName"].as_str() {
+                Some(c) => format!("{c}.{}", s["name"].as_str().unwrap()),
+                None => s["name"].as_str().unwrap().to_string(),
+            };
+            format!(
+                "{} {} {}:{}",
+                s["kind"],
+                name,
+                s["location"]["uri"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix(&prefix)
+                    .unwrap(),
+                s["location"]["range"]["start"]["line"]
+            )
+        })
+        .collect()
+}
+
+/// The scaffold plus `src/extra.tl`, which declares a local function and a function of its
+/// module record; only `src/main.tl` is opened and checked.
+fn project_with_extra(name: &str, watching: bool) -> (common::TempDir, PathBuf, PathBuf, Client) {
+    let (root, p) = project(name);
+    write(
+        &p.join("src/extra.tl"),
+        "local function compute(n: integer): integer
+   return n * 2
+end
+
+local record extra
+end
+
+function extra.double_it(x: integer): integer
+   return compute(x)
+end
+
+return extra
+",
+    );
+    let main = p.join("src/main.tl");
+    let (mut client, init) = if watching {
+        Client::start_watching(&p, &root)
+    } else {
+        Client::start(&p, &root)
+    };
+    assert_eq!(
+        init["result"]["capabilities"]["workspaceSymbolProvider"], true,
+        "{init}"
+    );
+    if watching {
+        client.registration();
+    }
+    client.open(&main);
+    client.publishes(&[&main]);
+    (root, p, main, client)
+}
+
+/// Acceptance 3: a query matching a function of a module that is not open answers with that
+/// file's URI and the line the declaration is on; the query is case-insensitive and matches
+/// anywhere in the name; an empty query lists every declaration, at most the bound; and a
+/// query nothing matches is `[]`, not `null`.
+#[test]
+fn workspace_symbol_finds_a_declaration_of_a_file_that_is_not_open() {
+    let (_root, p, _main, mut client) = project_with_extra("wsym-find", false);
+    // Exact name first, then the names that start with it (`Greeting`, the record). Both are
+    // children of the module record `sample`, which is their container.
+    let got = found(&workspace_symbols(&mut client, "greet"), &p);
+    assert_eq!(
+        got,
+        [
+            "12 sample.greet src/sample/init.tl:7",
+            "23 sample.Greeting src/sample/init.tl:1"
+        ],
+        "{got:#?}"
+    );
+    // The module record's function is a child of the record: its container is named.
+    let got = found(&workspace_symbols(&mut client, "compute"), &p);
+    assert_eq!(got, ["12 compute src/extra.tl:0"], "{got:#?}");
+    let got = found(&workspace_symbols(&mut client, "DOUBLE"), &p);
+    assert_eq!(got, ["12 extra.double_it src/extra.tl:7"], "{got:#?}");
+    // A field of a record is found as well as a function.
+    let got = found(&workspace_symbols(&mut client, "who"), &p);
+    assert_eq!(got, ["8 Greeting.who src/sample/init.tl:2"], "{got:#?}");
+
+    let all = found(&workspace_symbols(&mut client, ""), &p);
+    for wanted in [
+        "12 compute src/extra.tl:0",
+        "23 extra src/extra.tl:4",
+        "12 extra.double_it src/extra.tl:7",
+        "23 sample src/sample/init.tl:0",
+        "12 sample.greet src/sample/init.tl:7",
+        "13 g src/main.tl:2",
+    ] {
+        assert!(all.iter().any(|a| a == wanted), "{wanted} in {all:#?}");
+    }
+    assert!(all.len() <= 1000);
+
+    let none = workspace_symbols(&mut client, "no_such_name_anywhere");
+    assert_eq!(none, json!([]));
+    let (unread, code) = client.finish();
+    assert!(unread.is_empty(), "{unread:?}");
+    assert_eq!(code, Some(0));
+}
+
+/// What the workspace-symbol request orders by: the name itself (whatever its case), then names that
+/// start with the query, then the rest; inside each, by path.
+#[test]
+fn workspace_symbol_puts_the_exact_name_first_then_prefixes_then_the_rest() {
+    let (_root, p, _main, mut client) = project_with_extra("wsym-order", false);
+    write(
+        &p.join("src/a.tl"),
+        "local function ungreeted() end\nreturn {}\n",
+    );
+    write(
+        &p.join("src/b.tl"),
+        "local function greeting_b() end\nreturn {}\n",
+    );
+    write(
+        &p.join("src/c.tl"),
+        "local function greeting_a() end\nreturn {}\n",
+    );
+    write(
+        &p.join("src/d.tl"),
+        "local function GREET() end\nreturn {}\n",
+    );
+    let got = found(&workspace_symbols(&mut client, "greet"), &p);
+    assert_eq!(
+        got,
+        [
+            "12 GREET src/d.tl:0",
+            "12 sample.greet src/sample/init.tl:7",
+            "12 greeting_b src/b.tl:0",
+            "12 greeting_a src/c.tl:0",
+            "23 sample.Greeting src/sample/init.tl:1",
+            "12 ungreeted src/a.tl:0",
+        ],
+        "{got:#?}"
+    );
+    client.finish();
+}
+
+/// Acceptance 4, for a client that watches files: a function renamed in a file on disk and
+/// the change reported is found under the new name and no longer under the old one; a file
+/// created and a file deleted are reported the same way.
+#[test]
+fn workspace_symbol_follows_a_rename_on_disk_the_watcher_reports() {
+    let (_root, p, _main, mut client) = project_with_extra("wsym-watch", true);
+    let extra = p.join("src/extra.tl");
+    let got = found(&workspace_symbols(&mut client, "compute"), &p);
+    assert_eq!(got, ["12 compute src/extra.tl:0"]);
+
+    let text = std::fs::read_to_string(&extra).unwrap();
+    write(&extra, &text.replace("compute", "evaluate_all"));
+    client.watched(&[(&extra, 2)]);
+    assert_eq!(workspace_symbols(&mut client, "compute"), json!([]));
+    let got = found(&workspace_symbols(&mut client, "evaluate"), &p);
+    assert_eq!(got, ["12 evaluate_all src/extra.tl:0"], "{got:#?}");
+
+    // A file made, then deleted.
+    let made = p.join("src/made.tl");
+    write(&made, "local function brand_new() end\nreturn {}\n");
+    client.watched(&[(&made, 1)]);
+    let got = found(&workspace_symbols(&mut client, "brand_new"), &p);
+    assert_eq!(got, ["12 brand_new src/made.tl:0"], "{got:#?}");
+    std::fs::remove_file(&made).unwrap();
+    client.watched(&[(&made, 3)]);
+    assert_eq!(workspace_symbols(&mut client, "brand_new"), json!([]));
+    let (unread, code) = client.finish();
+    assert!(unread.is_empty(), "{unread:?}");
+    assert_eq!(code, Some(0));
+}
+
+/// A watcher names files: a directory renamed or deleted is one event for the directory,
+/// which `**/*.tl` does not match. The files that were in it are not answered from where
+/// they were, and the ones it moved to are found where they are.
+#[test]
+fn workspace_symbol_follows_a_directory_renamed_or_deleted_under_a_watcher() {
+    let (_root, p, _main, mut client) = project_with_extra("wsym-dir", true);
+    let sub = p.join("src/sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    let deep = sub.join("deep.tl");
+    write(&deep, "local function deep_only() end\nreturn {}\n");
+    client.watched(&[(&deep, 1)]);
+    let got = found(&workspace_symbols(&mut client, "deep_only"), &p);
+    assert_eq!(got, ["12 deep_only src/sub/deep.tl:0"], "{got:#?}");
+
+    let moved = p.join("src/moved");
+    std::fs::rename(&sub, &moved).unwrap();
+    client.watched(&[(&sub, 3), (&moved, 1)]);
+    let got = found(&workspace_symbols(&mut client, "deep_only"), &p);
+    assert_eq!(got, ["12 deep_only src/moved/deep.tl:0"], "{got:#?}");
+
+    std::fs::remove_dir_all(&moved).unwrap();
+    client.watched(&[(&moved, 3)]);
+    assert_eq!(workspace_symbols(&mut client, "deep_only"), json!([]));
+    let (unread, code) = client.finish();
+    assert!(unread.is_empty(), "{unread:?}");
+    assert_eq!(code, Some(0));
+}
+
+/// Acceptance 4, for a client that does not say when files change: each request stats the
+/// project's files, so a rename on disk, a file made and a file deleted are seen with
+/// nothing reported; a rename that leaves the length and lands in the same instant as the
+/// text before it (a write the file system's clock cannot tell apart) is seen too.
+#[test]
+fn workspace_symbol_sees_what_changed_on_disk_without_being_told() {
+    let (_root, p, _main, mut client) = project_with_extra("wsym-stat", false);
+    let extra = p.join("src/extra.tl");
+    let got = found(&workspace_symbols(&mut client, "compute"), &p);
+    assert_eq!(got, ["12 compute src/extra.tl:0"]);
+
+    let text = std::fs::read_to_string(&extra).unwrap();
+    write(&extra, &text.replace("compute", "evaluate_all"));
+    assert_eq!(workspace_symbols(&mut client, "compute"), json!([]));
+    let got = found(&workspace_symbols(&mut client, "evaluate"), &p);
+    assert_eq!(got, ["12 evaluate_all src/extra.tl:0"], "{got:#?}");
+
+    // Same length, written straight after being read: the stamp is no evidence of anything.
+    let text = std::fs::read_to_string(&extra).unwrap();
+    write(&extra, &text.replace("evaluate_all", "evaluate_xyz"));
+    assert_eq!(workspace_symbols(&mut client, "evaluate_all"), json!([]));
+    let got = found(&workspace_symbols(&mut client, "evaluate_xyz"), &p);
+    assert_eq!(got, ["12 evaluate_xyz src/extra.tl:0"], "{got:#?}");
+
+    let made = p.join("src/made.tl");
+    write(&made, "local function brand_new() end\nreturn {}\n");
+    let got = found(&workspace_symbols(&mut client, "brand_new"), &p);
+    assert_eq!(got, ["12 brand_new src/made.tl:0"], "{got:#?}");
+    std::fs::remove_file(&made).unwrap();
+    assert_eq!(workspace_symbols(&mut client, "brand_new"), json!([]));
+    let (unread, code) = client.finish();
+    assert!(unread.is_empty(), "{unread:?}");
+    assert_eq!(code, Some(0));
+}
+
+/// A save of an open file checks it, and the check's declarations are the index's: found
+/// under the new name with nothing reported by a watcher (the client does watch, so the
+/// requests do not stat the files either).
+#[test]
+fn workspace_symbol_takes_the_declarations_of_a_file_that_was_just_checked() {
+    let (_root, p, _main, mut client) = project_with_extra("wsym-save", true);
+    let extra = p.join("src/extra.tl");
+    client.open(&extra);
+    client.publishes(&[&extra]);
+    let got = found(&workspace_symbols(&mut client, "compute"), &p);
+    assert_eq!(got, ["12 compute src/extra.tl:0"]);
+
+    let text = std::fs::read_to_string(&extra).unwrap();
+    write(&extra, &text.replace("compute", "evaluate_all"));
+    client.save(&extra);
+    client.publishes(&[&extra]);
+    assert_eq!(workspace_symbols(&mut client, "compute"), json!([]));
+    let got = found(&workspace_symbols(&mut client, "evaluate"), &p);
+    assert_eq!(got, ["12 evaluate_all src/extra.tl:0"], "{got:#?}");
+    let (_unread, code) = client.finish();
+    assert_eq!(code, Some(0));
+}
+
+/// A file that does not parse has nothing to list, and does not stop the others being
+/// listed; one with a type error is listed.
+#[test]
+fn workspace_symbol_skips_a_file_that_does_not_parse_and_lists_one_with_a_type_error() {
+    let (_root, p, _main, mut client) = project_with_extra("wsym-broken", false);
+    write(
+        &p.join("src/bad.tl"),
+        "local function lost_one() end\nlocal x = (\n",
+    );
+    write(
+        &p.join("src/wrong.tl"),
+        "local function typed_wrong(): string\n   return 1\nend\nreturn {}\n",
+    );
+    assert_eq!(workspace_symbols(&mut client, "lost_one"), json!([]));
+    let got = found(&workspace_symbols(&mut client, "typed_wrong"), &p);
+    assert_eq!(got, ["12 typed_wrong src/wrong.tl:0"], "{got:#?}");
+    let got = found(&workspace_symbols(&mut client, "compute"), &p);
+    assert_eq!(got, ["12 compute src/extra.tl:0"]);
+    client.finish();
+}
+
+/// No more than the bound is answered, and what is cut is the tail: the exact name is still
+/// first.
+#[test]
+fn workspace_symbol_answers_at_most_a_thousand() {
+    let (_root, p, _main, mut client) = project_with_extra("wsym-bound", false);
+    let mut text = String::new();
+    for i in 0..1200 {
+        text.push_str(&format!("local function many_{i:04}() end\n"));
+    }
+    text.push_str("return {}\n");
+    write(&p.join("src/many.tl"), &text);
+    let all = workspace_symbols(&mut client, "");
+    assert_eq!(all.as_array().unwrap().len(), 1000);
+    let got = workspace_symbols(&mut client, "many_");
+    assert_eq!(got.as_array().unwrap().len(), 1000);
+    let got = found(&workspace_symbols(&mut client, "many_1199"), &p);
+    assert_eq!(got, ["12 many_1199 src/many.tl:1199"], "{got:#?}");
+    client.finish();
+}
+
+/// A symbol search made before any file is open asks the project at the workspace folder;
+/// one made where there is no project has nothing to answer with, which is `null`.
+#[test]
+fn workspace_symbol_without_an_open_file_asks_the_workspace_and_is_null_without_a_project() {
+    let (root, p) = project("wsym-root");
+    let (mut client, _) = Client::start(&p, &root);
+    let got = found(&workspace_symbols(&mut client, "greet"), &p);
+    assert_eq!(
+        got,
+        [
+            "12 sample.greet src/sample/init.tl:7",
+            "23 sample.Greeting src/sample/init.tl:1"
+        ],
+        "{got:#?}"
+    );
+    client.finish();
+
+    // `root` holds the project's directory and no `htl.toml` of its own.
+    let (mut client, _) = Client::start(&root, &root);
+    assert_eq!(workspace_symbols(&mut client, "greet"), Value::Null);
+    client.finish();
 }
