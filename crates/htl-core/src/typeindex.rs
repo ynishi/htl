@@ -16,8 +16,8 @@
 //!
 //! - **The type**, as Teal writes it (`Greeting`, `function(string): Greeting`): the
 //!   `str` of the report's type, the same text an error message uses.
-//! - **Where it is declared**, when the report says. Two sources, tried in this order for a
-//!   name that is not a field (`a.b`, `a:b`) — a field is not in scope, so a local of the
+//! - **Where it is declared**, when the report says. Three sources, tried in this order; the
+//!   first is not asked for a field (`a.b`, `a:b`), which is not in scope, so a local of the
 //!   same name must not answer for it:
 //!   1. the symbols in scope. The innermost declaration of the name that encloses the
 //!      position is the one a reader means: a `local`, a parameter, a `for` variable, a
@@ -28,6 +28,8 @@
 //!      name of its type (`Cfg` in `local c: m.Cfg`) goes to the declaration the type
 //!      resolves to. A value of a record type is not answered this way: its type's position
 //!      is where the type is declared, and that is not where the value is.
+//!   3. the header, for a field. The name `function R.f(..)` declares is not in the report,
+//!      so it is declared by the `function` that writes it (see "Uses").
 //!
 //!   Everything else — a field of a primitive type, a global of the standard library (its
 //!   declaration is in a file that is not on disk), a name the report has no entry for —
@@ -54,6 +56,33 @@
 //!   required module is reached through the type of the field (above).
 //! - **A field of a primitive type** has no position of its own in the report: Teal shares
 //!   one type for every `string`, so a `name: string` field has nowhere to point.
+//!
+//! # Uses
+//!
+//! [`TypeIndex::uses`] asks that question of every name of a file at once: each identifier
+//! the scan meets outside comments and strings (not a keyword, not a number), with the place
+//! [`TypeIndex::at`] says it is declared at, and whether it is called there ([`Use`]). It is
+//! the reverse of go-to-definition: a caller that groups the uses of many files by their
+//! declarations has, for each declaration, where it is used. A name with no declaration in
+//! the report (a field of a primitive type, a name only a type is known for) is not listed.
+//!
+//! The same place is the answer for the same declaration wherever it is asked from, with one
+//! exception the index cannot see across: a function a record's body declares (`f:
+//! function(..)`) and the module defines below (`function R.f`) has two places in the report —
+//! a use of it, from another file or this one's `R.f(..)`, is declared where the body wrote
+//! the type, and the definition's own name is declared at its `function` — and
+//! [`Decl::body`] says they are one.
+//!
+//! Two decisions make a use what a reader means. The name a header declares (`f` of
+//! `function R.f(`) is not keyed in the report, so it is declared by the `function` that
+//! writes it, which is where the report puts the function when a use of it is not through a
+//! body declaration; and the key of a table constructor (`who` of `{ who = who }`) is a field's
+//! name and not a use of the local of the same name, which is how scope finds it, so it is left
+//! out (a comment between the separator and the key does not hide it). `at` answers the key
+//! with the local, as a position it has no way to tell apart. A header's name it answers like
+//! a use, and so is the name a record's body declares a function by (`f` of `f: function(..)`
+//! where `function R.f` defines it below): it is declared by the type written after it, the
+//! place [`Decl::body`] holds.
 //!
 //! # Declarations
 //!
@@ -82,7 +111,8 @@
 //!   definition with no body declaration. A second definition of the name (an overload)
 //!   is one more entry.
 //!   A nested `record` is one more level of the same. The fields a `record R is I` takes
-//!   from `I` are not listed under `R`: they are written in `I`.
+//!   from `I` are not listed under `R`: they are written in `I`. The merged function keeps
+//!   where the body wrote its type ([`Decl::body`]), the place a use of it is declared at.
 //!
 //! What is approximate:
 //!
@@ -113,6 +143,10 @@
 //! [`DeclKind::Function`] after a check.
 //!
 //! # What it costs
+//!
+//! [`TypeIndex::uses`] is not part of it: it is made from the stored index and the text when
+//! a caller asks, a scan of the text and a lookup per name, a small part of what checking the
+//! file costs, so no check pays for it.
 //!
 //! One pass over the report's positions at check time, with each distinct type copied once,
 //! and the declaration walk above, which visits the top-level statements and the initialisers
@@ -158,6 +192,24 @@ pub struct TypeAt {
     pub ty: Option<String>,
     /// Where it is declared, when the report says (see the module doc).
     pub declared: Option<Place>,
+}
+
+/// One name of a checked file and the declaration it stands for ([`TypeIndex::uses`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Use {
+    /// Line of the name, from 1.
+    pub line: usize,
+    /// Byte column the name starts at, from 1.
+    pub col: usize,
+    /// Byte column just past the name's last character, from 1.
+    pub end: usize,
+    /// Where it is declared: what [`TypeAt::declared`] says of the same position.
+    pub declared: Place,
+    /// Whether the name is called here: `f(`, `f "s"`, `f {`, `f [[s]]`, `o.f(` and `o:f(`,
+    /// with nothing but blanks between the name and the argument. The name in the header of
+    /// the function it declares (`function M.f(`, `local function f(`) is not a call, and
+    /// neither is a name that is only read (`local g = f`, `f.x`).
+    pub call: bool,
 }
 
 /// What a [`Decl`] is. Which Teal construct each is, and which positions they have, is in
@@ -211,6 +263,14 @@ pub struct Decl {
     /// Byte column the name starts at; the name is `name.len()` bytes long (for a
     /// `R.f` that stands at the top level, the `f` is the part this points at).
     pub name_col: usize,
+    /// For a function a `function R.f` defines that the record's body also declares
+    /// (`f: function(..)`, the two being one entry, see the module doc): the line and byte
+    /// column of the type written in the body. That is the place the checker gives as where
+    /// the function is declared for a *use* of it (`m.f` in another file, [`TypeAt::declared`]),
+    /// while the definition's own name is declared at its `function` ([`line`](Decl::line),
+    /// [`col`](Decl::col)); the two places are one function. `None` for every other
+    /// declaration.
+    pub body: Option<(usize, usize)>,
     /// Fields, nested types and functions, in position order; empty but for a record or
     /// interface.
     pub children: Vec<Decl>,
@@ -355,6 +415,13 @@ impl TypeIndex {
         if inert(text, before + word.start) {
             return None;
         }
+        self.resolve(line, row, &word)
+    }
+
+    /// What the report says of `word`, a name on the line `line` whose text is `row`: the
+    /// part of [`at`](Self::at) that comes after finding the name, shared with
+    /// [`uses`](Self::uses), which finds every name of a file in one pass.
+    fn resolve(&self, line: usize, row: &str, word: &Word) -> Option<TypeAt> {
         let field = word.field_dot(row);
         // The entry under the position the report keys the name by.
         let entry = |c: usize| {
@@ -397,7 +464,36 @@ impl TypeIndex {
                 line: s.line as usize,
                 col: s.col as usize,
             })
-            .or_else(|| keyed.and_then(|t| t.declaration(word.text)));
+            .or_else(|| keyed.and_then(|t| t.declaration(word.text)))
+            // The name `function M.f` declares is not keyed in the report, and the function it
+            // defines is where the checker says it is declared for a use: at `function`.
+            .or_else(|| {
+                let (kw, at) = word.header(row).filter(|_| field.is_some())?;
+                (kw == "function").then(|| Place {
+                    file: self.file.clone(),
+                    line,
+                    col: at + 1,
+                })
+            })
+            // The name a record's body declares a function by (`f` of `f: function(..)`) is
+            // not keyed either; it is declared by the type written after it, where a use of
+            // the function is declared.
+            .or_else(|| {
+                if field.is_some() {
+                    return None;
+                }
+                let rest = row.get(word.start + word.text.len()..)?;
+                let rest = rest.trim_start().strip_prefix(':')?.trim_start();
+                let col = row.len() - rest.len() + 1;
+                self.decls
+                    .as_deref()
+                    .is_some_and(|d| has_body(d, (line, col)))
+                    .then(|| Place {
+                        file: self.file.clone(),
+                        line,
+                        col,
+                    })
+            });
         if ty.is_none() && declared.is_none() {
             return None;
         }
@@ -408,6 +504,98 @@ impl TypeIndex {
             ty,
             declared,
         })
+    }
+
+    /// Every name of `text` — the text the check read — that [`at`](Self::at) resolves to a
+    /// declaration, in the order written, each with the place it stands for.
+    ///
+    /// The same resolution as a question about one position, asked of every name in one pass
+    /// over the text: not in a comment or a string, not a keyword or a number, a field after
+    /// `.` or `:` included and the name a declaration writes included (it is a use of the
+    /// declaration it is the name of, which is how a caller finds the declaration among the
+    /// uses of it). A name the report has no declaration for — a field of a primitive type, a
+    /// name `at` answers only a type for — is not listed, so a name's absence is not a
+    /// statement that nothing is there.
+    ///
+    /// Made from the stored index and `text` when asked, and not at check time: it is a scan
+    /// of the file and a lookup per name, and only a caller that wants every use of a
+    /// declaration (a references request) has a use for it. `text` must be the text the
+    /// check read; positions in any other are not the report's. Empty for an index that is
+    /// [empty](Self::is_empty).
+    pub fn uses(&self, text: &str) -> Vec<Use> {
+        if self.is_empty() {
+            return Vec::new();
+        }
+        let b = text.as_bytes();
+        let mut starts = vec![0usize];
+        starts.extend(
+            b.iter()
+                .enumerate()
+                .filter_map(|(i, c)| (*c == b'\n').then_some(i + 1)),
+        );
+        let inert = inert_spans(text, usize::MAX);
+        let mut spans = inert.iter().peekable();
+        let is_word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+        let (mut out, mut line, mut i) = (Vec::new(), 0usize, 0usize);
+        // The brackets open at the scan: whether a name is directly in a table constructor.
+        let mut open: Vec<u8> = Vec::new();
+        while i < b.len() {
+            while spans.next_if(|r| r.end <= i).is_some() {}
+            if let Some(r) = spans.peek()
+                && r.start <= i
+            {
+                i = r.end;
+                continue;
+            }
+            if !is_word(b[i]) {
+                match b[i] {
+                    b'{' | b'(' | b'[' => open.push(b[i]),
+                    b'}' | b')' | b']' => {
+                        open.pop();
+                    }
+                    _ => {}
+                }
+                i += 1;
+                continue;
+            }
+            let mut j = i + 1;
+            while j < b.len() && is_word(b[j]) {
+                j += 1;
+            }
+            while line + 1 < starts.len() && starts[line + 1] <= i {
+                line += 1;
+            }
+            let row_end = starts.get(line + 1).map_or(b.len(), |s| s - 1);
+            let row = &text[starts[line]..row_end];
+            let word = Word {
+                text: &text[i..j],
+                start: i - starts[line],
+            };
+            i = j;
+            if word.is_keyword() || word.is_number() {
+                continue;
+            }
+            // `who` of `{ who = who }` names a field, though a local of that name is in scope.
+            if open.last() == Some(&b'{') && is_key(b, &inert, word.start + starts[line], j) {
+                continue;
+            }
+            if let Some(TypeAt {
+                col,
+                end,
+                declared: Some(declared),
+                ..
+            }) = self.resolve(line + 1, row, &word)
+            {
+                out.push(Use {
+                    line: line + 1,
+                    col,
+                    end,
+                    declared,
+                    call: word.is_called(row),
+                });
+            }
+        }
+        out
     }
 
     /// The innermost declaration of `name` in scope at (`line`, `col`): Teal's
@@ -433,6 +621,14 @@ impl TypeIndex {
         }
         None
     }
+}
+
+/// Whether some declaration of the tree is a function whose body declaration's type is at
+/// `place`.
+fn has_body(decls: &[Decl], place: (usize, usize)) -> bool {
+    decls
+        .iter()
+        .any(|d| d.body == Some(place) || has_body(&d.children, place))
 }
 
 impl Decl {
@@ -478,6 +674,10 @@ pub(crate) fn read_decls(list: &Table) -> Result<Vec<Decl>> {
             end_col: row.get::<Option<i64>>("ex")?.map(|n| n.max(1) as usize),
             name_line,
             name_col,
+            body: row
+                .get::<Option<i64>>("by")?
+                .zip(row.get::<Option<i64>>("bx")?)
+                .map(|(y, x)| (y.max(1) as usize, x.max(1) as usize)),
             children,
         });
     }
@@ -573,6 +773,52 @@ impl<'a> Word<'a> {
         matches!(b.get(end), Some(b'.' | b':')) && !matches!(b.get(end + 1), Some(b'.' | b':'))
     }
 
+    /// Whether the word is called on this line (see [`Use::call`]): an argument list, a
+    /// string or a table follows it, and it is not the name of the function a header
+    /// declares.
+    fn is_called(&self, row: &str) -> bool {
+        let b = row.as_bytes();
+        let mut at = self.start + self.text.len();
+        while matches!(b.get(at), Some(b' ' | b'\t')) {
+            at += 1;
+        }
+        let opens = match b.get(at) {
+            Some(b'(' | b'"' | b'\'' | b'{') => true,
+            Some(b'[') => matches!(b.get(at + 1), Some(b'[' | b'=')),
+            _ => false,
+        };
+        // The name of the function a header declares (`f` of `local function f(`).
+        opens && self.header(row).is_none()
+    }
+
+    /// The header keyword the dotted name the word ends is written after, and its byte
+    /// offset in the line: `function` of `function M.f(`, `local function f(`, `macroexp` of
+    /// `local macroexp f(`.
+    /// `None` for a word that does not end the name (`sub` of `function M.sub.f(`): it names
+    /// a table the function is put in, not the function.
+    fn header(&self, row: &str) -> Option<(&'static str, usize)> {
+        let b = row.as_bytes();
+        let part = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'.' || c == b':';
+        if b.get(self.start + self.text.len())
+            .is_some_and(|c| matches!(c, b'.' | b':'))
+        {
+            return None;
+        }
+        let mut at = self.start;
+        while at > 0 && part(b[at - 1]) {
+            at -= 1;
+        }
+        let before = row[..at].trim_end();
+        ["function", "macroexp"].into_iter().find_map(|kw| {
+            let rest = before.strip_suffix(kw)?;
+            let glued = rest
+                .as_bytes()
+                .last()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_');
+            (!glued).then_some((kw, rest.len()))
+        })
+    }
+
     fn is_keyword(&self) -> bool {
         matches!(
             self.text,
@@ -620,10 +866,44 @@ impl<'a> Word<'a> {
     }
 }
 
-/// Whether the byte at `target` of `text` is inside a comment or a string literal, by
-/// Lua's lexical rules: `--` to the end of the line, `--[==[ .. ]==]`, `"` and `'` strings
-/// (with escapes, ending at the line end if unterminated) and `[==[ .. ]==]`.
+/// Whether the name at `from..to` of the text `b`, which is directly in a table constructor,
+/// is the key of a field: `name = value` after `{`, `,` or `;`. `inert` is the text's
+/// [`inert_spans`]: a comment between the separator and the name (`{ a = 1, -- note` and the
+/// name on the next line) is not what comes before the name.
+fn is_key(b: &[u8], inert: &[std::ops::Range<usize>], from: usize, to: usize) -> bool {
+    let blank = |c: &u8| c.is_ascii_whitespace();
+    let after = b[to..].iter().position(|c| !blank(c)).map(|p| to + p);
+    let eq = after.is_some_and(|a| b[a] == b'=' && b.get(a + 1) != Some(&b'='));
+    if !eq {
+        return false;
+    }
+    let mut end = from;
+    loop {
+        let Some(p) = b[..end].iter().rposition(|c| !blank(c)) else {
+            return false;
+        };
+        let i = inert.partition_point(|r| r.end <= p);
+        match inert.get(i) {
+            Some(r) if r.start <= p => end = r.start,
+            _ => return matches!(b[p], b'{' | b',' | b';'),
+        }
+    }
+}
+
+/// Whether the byte at `target` of `text` is inside a comment or a string literal: one of
+/// [`inert_spans`].
 fn inert(text: &str, target: usize) -> bool {
+    inert_spans(text, target)
+        .iter()
+        .any(|r| r.contains(&target))
+}
+
+/// The comments and string literals of `text` that start at or before `upto`, as byte
+/// ranges in order, by Lua's lexical rules: `--` to the end of the line, `--[==[ .. ]==]`,
+/// `"` and `'` strings (with escapes, ending at the line end if unterminated) and
+/// `[==[ .. ]==]`.
+fn inert_spans(text: &str, upto: usize) -> Vec<std::ops::Range<usize>> {
+    let mut spans = Vec::new();
     let b = text.as_bytes();
     // `[`, any number of `=`, `[` at `i`: the number of `=`.
     let long_open = |i: usize| -> Option<usize> {
@@ -644,7 +924,7 @@ fn inert(text: &str, target: usize) -> bool {
             .map_or(b.len(), |p| from + p + close.len())
     };
     let mut i = 0;
-    while i < b.len() && i <= target {
+    while i < b.len() && i <= upto {
         let start = i;
         if b[i] == b'-' && b.get(i + 1) == Some(&b'-') {
             i = match long_open(i + 2) {
@@ -667,11 +947,9 @@ fn inert(text: &str, target: usize) -> bool {
             i += 1;
             continue;
         }
-        if (start..i).contains(&target) {
-            return true;
-        }
+        spans.push(start..i);
     }
-    false
+    spans
 }
 
 impl CheckInfo {
@@ -704,6 +982,67 @@ mod tests {
         assert!(!inert("\"abc\nnext", 6));
         assert!(inert("\"a\\\"b\" c", 3));
         assert!(!inert("\"a\\\"b\" c", 7));
+    }
+
+    #[test]
+    fn a_name_is_called_when_an_argument_follows_it_and_no_header_declares_it() {
+        // The word `@` marks is the one asked about.
+        let called = |marked: &str| {
+            let at = marked.find('@').unwrap();
+            let row = marked.replace('@', "");
+            Word::find(&row, at).unwrap().is_called(&row)
+        };
+        assert!(called("@f(x)"));
+        assert!(called("local y = o:@f (x)"));
+        assert!(called("a.b.@c \"s\""));
+        assert!(called("@f 's'"));
+        assert!(called("@f {}"));
+        assert!(called("@f [[s]]"));
+        assert!(called("@f [=[s]=]"));
+        assert!(!called("@f[1]"));
+        assert!(!called("@f.x"));
+        assert!(!called("local g = @f"));
+        assert!(!called("@f = 1"));
+        assert!(!called("function M.@f(x: integer)"));
+        assert!(!called("function M:@f(x: integer)"));
+        assert!(!called("local function @f(x: integer)"));
+        assert!(!called("local macroexp @f(x: integer)"));
+        // Not a header: the `function` is the end of another word.
+        assert!(called("my_function @f(x)"));
+        // Only the last part of a header's name is the function it declares.
+        let header = |marked: &str| {
+            let at = marked.find('@').unwrap();
+            let row = marked.replace('@', "");
+            Word::find(&row, at).unwrap().header(&row)
+        };
+        assert_eq!(header("function M.sub.@f(x)"), Some(("function", 0)));
+        assert_eq!(header("function M.@sub.f(x)"), None);
+        assert_eq!(header("function @M:f(x)"), None);
+    }
+
+    #[test]
+    fn a_key_is_a_name_after_an_opener_or_a_separator_and_before_an_equals() {
+        let key = |marked: &str| {
+            let from = marked.find('@').unwrap();
+            let text = marked.replace('@', "");
+            let word = Word::find(&text, from).unwrap();
+            let inert = inert_spans(&text, usize::MAX);
+            is_key(text.as_bytes(), &inert, from, from + word.text.len())
+        };
+        assert!(key("{ @a = 1 }"));
+        assert!(key("{ a = 1,\n   @b = 2 }"));
+        assert!(key("f { x = 1; @y=2 }"));
+        assert!(!key("{ a == @b }"));
+        assert!(!key("{ x, @a == 1 }"));
+        assert!(!key("{ x = @a }"));
+        assert!(!key("{ @a }"));
+        // A comment between the separator and the name is skipped, and one that hides a
+        // separator is not one.
+        assert!(key("{ a = 1, -- note\n   @who = who }"));
+        assert!(key("{ a = 1, --[[ n ]] @who = who }"));
+        assert!(key("{ a = 1, --[==[ a\n b ]==]\n @who = who }"));
+        assert!(!key("{ x -- , \n   @who = who }"));
+        assert!(!key("-- {\n@who = 1"));
     }
 
     #[test]

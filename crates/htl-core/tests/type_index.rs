@@ -477,3 +477,180 @@ local n: integer = \"not a number\"
     );
     assert!(h.declarations_of(&root.join("gone.tl")).unwrap().is_none());
 }
+
+/// `line:col-end name call? -> file:line:col` for each use of `text`, but the standard
+/// library's.
+fn listed(c: &htl_core::CheckInfo, text: &str) -> Vec<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    c.types
+        .uses(text)
+        .into_iter()
+        .filter(|u| !u.declared.file.ends_with("stdlib.d.tl"))
+        .map(|u| {
+            format!(
+                "{}:{}-{} {}{} -> {}:{}:{}",
+                u.line,
+                u.col,
+                u.end,
+                &lines[u.line - 1][u.col - 1..u.end - 1],
+                if u.call { " call" } else { "" },
+                u.declared.file.file_name().unwrap().to_str().unwrap(),
+                u.declared.line,
+                u.declared.col
+            )
+        })
+        .collect()
+}
+
+const API: &str = "local record m
+   name: string
+   hello: function(string): string
+end
+
+function m.hello(who: string): string
+   return \"hello \" .. who
+end
+
+function m:shout(s: string): string
+   return s .. self.name
+end
+
+return m
+";
+
+const CALLER: &str = "local m = require(\"m\")
+local function run(n: string): string
+   local g = m.hello
+   local t = { n = n }
+   return m.hello(n) .. g(n) .. m.name .. t.n
+end
+local obj: m = { name = \"n\" }
+print(run(\"a\"), obj:shout(\"s\"), m.shout(obj, \"t\")) -- run(\"c\")
+local s = \"run(1)\"
+";
+
+/// Every name of a file that resolves, in the order written, with what it is declared by:
+/// locals by their names, a function by the `function` that writes it (its definition's own
+/// name included), a function the record's body also declares by the type written there, in
+/// the other file and in this one's calls alike; a call is told from a read, and a name that
+/// is only a table's key, a comment's or a string's is not a use.
+#[test]
+fn uses_are_every_name_that_resolves_with_where_it_is_declared_and_whether_it_is_called() {
+    let root = common::tempdir("htl-core-typeindex", "uses");
+    write(&root.join("m.tl"), API);
+    write(&root.join("user.tl"), CALLER);
+    let h = Htl::new().unwrap();
+    h.add_path(&root).unwrap();
+
+    let c = h.check_indexed(&root.join("m.tl")).unwrap();
+    assert_eq!(
+        listed(&c, API),
+        [
+            "1:14-15 m -> m.tl:1:14",
+            // The name the body declares the function by is declared by the type written
+            // after it, where the uses of the function from other files are.
+            "3:4-9 hello -> m.tl:3:11",
+            "6:10-11 m -> m.tl:1:14",
+            // The name a header declares is a use of the function it defines, at `function`,
+            // and not a call; `shout` is a method of a record that does not declare it.
+            "6:12-17 hello -> m.tl:6:1",
+            "6:18-21 who -> m.tl:6:18",
+            "7:23-26 who -> m.tl:6:18",
+            "10:10-11 m -> m.tl:1:14",
+            "10:12-17 shout -> m.tl:10:1",
+            "10:18-19 s -> m.tl:10:18",
+            "11:11-12 s -> m.tl:10:18",
+            "11:16-20 self -> m.tl:10:10",
+            "14:8-9 m -> m.tl:1:14",
+        ]
+    );
+    // `hello` is declared in the body (line 3, its type at column 11) and defined below
+    // (line 6, column 1): the two places the uses may name are on the declaration.
+    let tree = c.types.declarations().unwrap();
+    let hello = tree[0].children.iter().find(|d| d.name == "hello").unwrap();
+    assert_eq!((hello.line, hello.col, hello.body), (6, 1, Some((3, 11))));
+    let shout = tree[0].children.iter().find(|d| d.name == "shout").unwrap();
+    assert_eq!(shout.body, None);
+
+    let c = h.check_indexed(&root.join("user.tl")).unwrap();
+    assert!(c.errors.is_empty(), "{:?}", c.errors);
+    assert_eq!(
+        listed(&c, CALLER),
+        [
+            "1:7-8 m -> user.tl:1:7",
+            "2:16-19 run -> user.tl:2:1",
+            "2:20-21 n -> user.tl:2:20",
+            "3:10-11 g -> user.tl:3:10",
+            "3:14-15 m -> user.tl:1:7",
+            // Read, not called; through the body's declaration.
+            "3:16-21 hello -> m.tl:3:11",
+            // `n = n`: the key names a field, the value is the parameter.
+            "4:10-11 t -> user.tl:4:10",
+            "4:20-21 n -> user.tl:2:20",
+            "5:11-12 m -> user.tl:1:7",
+            "5:13-18 hello call -> m.tl:3:11",
+            "5:19-20 n -> user.tl:2:20",
+            // A call through a local that holds the function is a call of the local.
+            "5:25-26 g call -> user.tl:3:10",
+            "5:27-28 n -> user.tl:2:20",
+            // `name` and `t.n` are fields of primitive types: nothing to point at.
+            "5:33-34 m -> user.tl:1:7",
+            "5:43-44 t -> user.tl:4:10",
+            "7:7-10 obj -> user.tl:7:7",
+            "7:12-13 m -> user.tl:1:7",
+            // Not the `run("c")` of the comment, nor the `run(1)` of the string.
+            "8:7-10 run call -> user.tl:2:1",
+            "8:17-20 obj -> user.tl:7:7",
+            // A method call `obj:shout(..)` and the same function through the field.
+            "8:21-26 shout call -> m.tl:10:1",
+            "8:33-34 m -> user.tl:1:7",
+            "8:35-40 shout call -> m.tl:10:1",
+            "8:41-44 obj -> user.tl:7:7",
+            "9:7-8 s -> user.tl:9:7",
+        ]
+    );
+    // Every use is what a question about its position says, and the standard library's
+    // `print` and `require` are among the uses with the places of a file that is not one.
+    for u in c.types.uses(CALLER) {
+        let at = c.type_at(CALLER, u.line, u.col).unwrap();
+        assert_eq!(at.declared.as_ref(), Some(&u.declared));
+        assert_eq!((at.col, at.end), (u.col, u.end));
+    }
+    let std: Vec<_> = c
+        .types
+        .uses(CALLER)
+        .into_iter()
+        .filter(|u| u.declared.file.ends_with("stdlib.d.tl"))
+        .map(|u| (u.line, u.call))
+        .collect();
+    assert_eq!(std, [(1, true), (8, true)]);
+
+    // The index of a check that was not asked to keep one has none.
+    let plain = h.check_written(&root.join("user.tl")).unwrap();
+    assert!(plain.types.uses(CALLER).is_empty());
+}
+
+/// Asking a position of the name a header declares is answered with the function it
+/// defines: the declaration is its own.
+#[test]
+fn the_name_a_header_declares_is_the_function_it_defines() {
+    let root = common::tempdir("htl-core-typeindex", "header-name");
+    write(&root.join("m.tl"), API);
+    let h = Htl::new().unwrap();
+    h.add_path(&root).unwrap();
+    let c = h.check_indexed(&root.join("m.tl")).unwrap();
+    let t = at(&c, API, "hello(who", 0).unwrap();
+    assert_eq!((t.line, t.col, t.end), (6, 12, 17));
+    assert_eq!(t.declared.map(|d| (d.line, d.col)), Some((6, 1)));
+    // The name the body declares it by is the body's type, and a field with no definition is
+    // not given one.
+    let t = at(&c, API, "hello:", 0).unwrap();
+    assert_eq!(t.declared.map(|d| (d.line, d.col)), Some((3, 11)));
+    assert_eq!(at(&c, API, "name:", 0), None);
+    // A local function is declared by its own `local`, as before.
+    let local = "local function f(): integer\n   return 1\nend\nreturn f()\n";
+    write(&root.join("l.tl"), local);
+    let c = h.check_indexed(&root.join("l.tl")).unwrap();
+    let t = at(&c, local, "f()", 0).unwrap();
+    assert_eq!(t.declared.map(|d| (d.line, d.col)), Some((1, 1)));
+}
