@@ -9,7 +9,14 @@
 //! is handed the list of files and a function that makes a file's symbols from its text, so
 //! the server decides where they come from (an open file's last check, else
 //! [`Htl::declarations_of`](htl::Htl::declarations_of)).
+//!
+//! The reference index ("References" in the module doc) is kept in the same entries, so that
+//! there is one list of files and one rule for when an entry is out of date: each [`Entry`]
+//! may also hold the uses of its file ([`FileRefs`]), made by a references request and thrown
+//! away when the entry is replaced, or when a file whose check it read changed
+//! ([`SymbolIndex::moved`]), which a symbol alone never depends on.
 
+use super::refs::{FileRefs, Place};
 use super::{lines_of, position_at, read_lossy};
 use htl::typeindex::{Decl, DeclKind};
 use lsp_types::{Range, SymbolKind};
@@ -40,6 +47,11 @@ pub struct Sym {
     pub kind: SymbolKind,
     /// The name, as LSP positions in the text the symbols were read from.
     pub range: Range,
+    /// For a function whose definition and whose declaration in the record's body are one
+    /// entry ([`Decl::body`]): the places (line, byte column) the checker names it by, the
+    /// definition's and the body's. The uses of the function are of either, by where they
+    /// are written, and are of one function.
+    pub same: Option<[(usize, usize); 2]>,
 }
 
 /// The LSP kind of a declaration. The same table as the outline's.
@@ -74,6 +86,7 @@ pub fn flatten(text: &str, decls: &[Decl]) -> Vec<Sym> {
                 container: container.map(str::to_string),
                 kind: kind_of(d.kind),
                 range: Range::new(start, end),
+                same: d.body.map(|b| [(d.line, d.col), b]),
             });
             walk(lines, &d.children, Some(&d.name), out);
         }
@@ -205,6 +218,17 @@ pub struct Entry {
     settled: bool,
     /// Empty for a file that does not parse, and for one that declares nothing.
     pub syms: Vec<Sym>,
+    /// The uses in the text `syms` were read from, once something made them (a reference
+    /// request); `None` before, and after anything they depend on changed.
+    pub refs: Option<FileRefs>,
+    /// Set when `refs` was thrown away because a file the file's check read changed, and
+    /// cleared by a check or a new entry: the last check of the file, if it is open, then
+    /// describes a file that is no longer there, and is not to be used for the uses.
+    distrust: bool,
+    /// The files the check that made `refs` read, when one did: what [`SymbolIndex::moved`]
+    /// compares a change with. `None` for an entry nothing has checked, and for one whose
+    /// check failed: any change is then one it may depend on.
+    deps: Option<HashSet<PathBuf>>,
 }
 
 impl Entry {
@@ -218,6 +242,9 @@ impl Entry {
             hash: hash_of(text),
             settled: stamp.settled(),
             syms,
+            refs: None,
+            distrust: false,
+            deps: None,
         }
     }
 }
@@ -232,6 +259,14 @@ pub struct SymbolIndex {
     /// Set when the list of files may have changed: the first time, and when a watcher names
     /// a `.tl` the index does not hold (a file made, or one the walk does not visit).
     relist: bool,
+    /// Whether the uses have been asked for before: the first time, an open file's last
+    /// check may predate a change to a file the index never saw, so none is trusted
+    /// ([`first_refs`](Self::first_refs)).
+    refs_built: bool,
+    /// A fingerprint of the files outside the walk that the checker resolves names against
+    /// (`types/` declarations, the Rust `htl dts` reads), taken by a client that does not
+    /// watch; a change to it takes the uses ([`inputs_changed`](Self::inputs_changed)).
+    inputs: Option<u64>,
 }
 
 impl Default for SymbolIndex {
@@ -241,6 +276,8 @@ impl Default for SymbolIndex {
             files: BTreeMap::new(),
             dirty: HashSet::new(),
             relist: true,
+            refs_built: false,
+            inputs: None,
         }
     }
 }
@@ -269,14 +306,145 @@ impl SymbolIndex {
 
     /// Put `entry` in for `canonical`, if the index holds that file: a file just checked,
     /// whose symbols are fresher than anything read from the disk (they carry the kinds
-    /// types decide) and need not be read again.
-    pub fn put(&mut self, canonical: &Path, mut entry: Entry) {
-        if let Some(slot) = self.files.get_mut(canonical) {
-            // Spelled as the walk spelled it, whatever the client called the file.
-            entry.path = slot.path.clone();
-            *slot = entry;
-            self.dirty.remove(canonical);
+    /// types decide) and need not be read again. `deps` is what that check read through
+    /// `require`.
+    ///
+    /// The uses of the file survive a check that read the same text; a check that read
+    /// another is a change like any other ([`moved`](Self::moved)), and takes the uses of
+    /// the files that depend on this one with it.
+    pub fn put(&mut self, canonical: &Path, mut entry: Entry, deps: HashSet<PathBuf>) {
+        let Some(slot) = self.files.get_mut(canonical) else {
+            return;
+        };
+        // Spelled as the walk spelled it, whatever the client called the file.
+        entry.path = slot.path.clone();
+        let changed = slot.hash != entry.hash;
+        if !changed {
+            entry.refs = slot.refs.take();
         }
+        entry.deps = Some(deps);
+        *slot = entry;
+        self.dirty.remove(canonical);
+        if changed {
+            self.moved(&[canonical.to_path_buf()], false);
+        }
+    }
+
+    /// The files whose text changed, or (`structural`) the list of files did: whatever was
+    /// worked out from them is no longer so. The uses of a file say where a name declared in
+    /// another file is, so a change to a file takes the uses of every file whose check read
+    /// it (and those of a file nothing is known about); one of the files of the project
+    /// appearing or going can change what a `require` finds anywhere, and takes all of them.
+    ///
+    /// What is thrown away is marked: the last check of an open file, which the uses were
+    /// to be made from, describes the files as they were.
+    fn moved(&mut self, changed: &[PathBuf], structural: bool) {
+        if changed.is_empty() && !structural {
+            return;
+        }
+        for (path, e) in &mut self.files {
+            let hit = structural
+                || (!changed.contains(path)
+                    && e.deps
+                        .as_ref()
+                        .is_none_or(|d| changed.iter().any(|c| d.contains(c))));
+            if hit {
+                e.refs = None;
+                e.distrust = true;
+            }
+        }
+    }
+
+    /// Whether this is the first time the uses are asked for, and if so, mark every file's
+    /// last check as not to be trusted (as after [`forget_refs`](Self::forget_refs)): a
+    /// check made before the index existed may have read a file that changed since, and the
+    /// index was not there to see it.
+    pub fn first_refs(&mut self) -> bool {
+        if self.refs_built {
+            return false;
+        }
+        self.refs_built = true;
+        self.moved(&[], true);
+        true
+    }
+
+    /// Whether the index holds `canonical`: the walk visits it.
+    pub fn holds(&self, canonical: &Path) -> bool {
+        self.files.contains_key(canonical)
+    }
+
+    /// Take `fingerprint` as the state of the files outside the walk the checker reads, and
+    /// say whether it differs from the one before (the first is not a change).
+    pub fn inputs_changed(&mut self, fingerprint: u64) -> bool {
+        self.inputs
+            .replace(fingerprint)
+            .is_some_and(|was| was != fingerprint)
+    }
+
+    /// Throw away every file's uses: the declarations a check resolves against changed
+    /// without a file of the project changing (a `types/` declaration, a Rust source).
+    pub fn forget_refs(&mut self) {
+        self.moved(&[], true);
+    }
+
+    /// Whether the index holds `canonical` and has thrown its uses away because a file its
+    /// check read changed ([`Entry`]): the last check of it, if there is one, is out of date.
+    pub fn distrusts(&self, canonical: &Path) -> bool {
+        self.files.get(canonical).is_some_and(|e| e.distrust)
+    }
+
+    /// The files whose uses are not known, and what making them needs to know.
+    pub fn pending(&self) -> Vec<Pending> {
+        self.files
+            .iter()
+            .filter(|(_, e)| e.refs.is_none())
+            .map(|(canonical, e)| Pending {
+                canonical: canonical.clone(),
+                path: e.path.clone(),
+                distrust: e.distrust,
+            })
+            .collect()
+    }
+
+    /// Keep `refs` as the uses of `canonical`, if the entry still holds the text with hash
+    /// `hash`, the text they were made from.
+    pub fn fill(&mut self, canonical: &Path, hash: u64, refs: FileRefs) {
+        if let Some(e) = self.files.get_mut(canonical)
+            && e.hash == hash
+        {
+            e.deps = refs.deps.clone();
+            e.refs = Some(refs);
+            e.distrust = false;
+        }
+    }
+
+    /// Every file, with its canonical path.
+    pub fn iter(&self) -> impl Iterator<Item = (&PathBuf, &Entry)> {
+        self.files.iter()
+    }
+
+    /// The places a use of `target` may name: itself, and for a function written in the
+    /// record's body and defined below ([`Sym::same`]) the other of its two places.
+    pub fn same_as(&self, target: &Place) -> Vec<Place> {
+        let mut places = vec![target.clone()];
+        let Some(e) = self.files.get(&*target.file) else {
+            return places;
+        };
+        for pair in e.syms.iter().filter_map(|s| s.same.as_ref()) {
+            if pair.contains(&(target.line, target.col)) {
+                for &(line, col) in pair {
+                    let p = Place {
+                        file: target.file.clone(),
+                        line,
+                        col,
+                    };
+                    if !places.contains(&p) {
+                        places.push(p);
+                    }
+                }
+            }
+        }
+        places
     }
 
     /// Bring the index up to date.
@@ -296,33 +464,63 @@ impl SymbolIndex {
         list: impl FnOnce() -> anyhow::Result<Vec<PathBuf>>,
         build: &mut dyn FnMut(&Path, &Path, &str) -> Vec<Sym>,
     ) -> anyhow::Result<()> {
+        // What changed under the index's feet, for the uses that depend on it.
+        let mut changed: Vec<PathBuf> = Vec::new();
+        let mut structural = false;
         if sweep || self.relist {
             // A walk that fails leaves the index as it was, and still due for one.
             let listed = list()?;
+            let first = self.files.is_empty();
             let mut kept = BTreeMap::new();
             for path in listed {
                 let canonical = super::canonical(&path);
                 let old = self.files.remove(&canonical);
+                let had = old.as_ref().map(|e| e.hash);
                 let force = self.dirty.contains(&canonical);
-                if let Some(e) = revalidate(old, &canonical, path, force, build) {
-                    kept.insert(canonical, e);
+                match revalidate(old, &canonical, path, force, build) {
+                    Some(e) => {
+                        match had {
+                            Some(h) if h != e.hash => changed.push(canonical.clone()),
+                            None if !first => structural = true,
+                            _ => {}
+                        }
+                        kept.insert(canonical, e);
+                    }
+                    None => structural = true,
                 }
             }
+            // A file of the index that the walk did not list is gone from the project.
+            structural |= !self.files.is_empty();
             self.files = kept;
         } else {
             for canonical in std::mem::take(&mut self.dirty) {
                 if let Some(old) = self.files.remove(&canonical) {
-                    let path = old.path.clone();
-                    if let Some(e) = revalidate(Some(old), &canonical, path, true, build) {
-                        self.files.insert(canonical, e);
+                    let (path, had) = (old.path.clone(), old.hash);
+                    match revalidate(Some(old), &canonical, path, true, build) {
+                        Some(e) => {
+                            if e.hash != had {
+                                changed.push(canonical.clone());
+                            }
+                            self.files.insert(canonical, e);
+                        }
+                        None => structural = true,
                     }
                 }
             }
         }
+        self.moved(&changed, structural);
         self.dirty.clear();
         self.relist = false;
         Ok(())
     }
+}
+
+/// A file of the index that has no uses yet ([`SymbolIndex::pending`]).
+pub struct Pending {
+    pub canonical: PathBuf,
+    pub path: PathBuf,
+    /// See [`Entry`]: its last check is not to be trusted.
+    pub distrust: bool,
 }
 
 /// `old`, if it still describes the file; else a new entry; `None` if the file is gone.

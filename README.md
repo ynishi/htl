@@ -388,8 +388,8 @@ as a server can be pointed at `htl lsp` for `.tl` files.
 
 It publishes diagnostics when a file is opened or saved, formats, offers `htl fix`'s fixes
 as quick fixes and a fix-all action, answers hover and go-to-definition, lists the symbols a
-file declares, and searches a symbol by name across the project. It does not yet check while
-typing, complete, rename or find references.
+file declares, searches a symbol by name across the project, and finds references. It does
+not yet check while typing, complete or rename.
 
 When a file is checked, what a diagnostic becomes, which file changes re-check the open
 ones and what the server leaves to `htl check` are in `htl lsp --help` and the module doc of

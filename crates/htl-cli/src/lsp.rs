@@ -182,7 +182,8 @@
 //! not one on disk), a name the report has nothing for. The location is a point: the line and
 //! column Teal records (the name for a variable or a parameter, the start of the statement for a
 //! function or a record), converted to LSP's UTF-16 column against the declaring file as it is
-//! on disk now.
+//! on disk now. On the name a header declares (`greet` of `function sample.greet`) it is the
+//! declaration itself, at its `function`.
 //!
 //! **Only for the text that was checked.** Both are positions in the text the check read, so
 //! they are answered only while the client's buffer is that text; a buffer that has been
@@ -294,6 +295,93 @@
 //! without `[layout] source = "."`). The reason is on stderr. An empty answer a client reads
 //! as "there is none" is the failure this distinction is for.
 //!
+//! # References
+//!
+//! `textDocument/references` lists every use of the declaration the name at the cursor
+//! stands for, in all the files of the project, so a client that changes a function finds
+//! its callers without searching text (which finds every word `greet`, a local of that name
+//! and a field of another record among them).
+//!
+//! **Which declaration.** The one the type index resolves the position to
+//! ([`htl::typeindex::TypeIndex::at`], what go-to-definition answers): from a use, the
+//! declaration it names, and from the name a declaration writes (`greet` of `function
+//! sample.greet`, a local's name), that declaration itself. A local's references are its
+//! uses in its scope, so a local of the same name in another function is not among them.
+//! What the answer lists is each use as the range of the name, in the file it is in; with
+//! `includeDeclaration` the declaration's own name is kept, and without it left out. A
+//! function a record's body declares (`f: function(..)`) and the module defines below is one
+//! declaration with two names, and both are kept or left out together; the request may be made
+//! at either. (A declaration whose name the check does not resolve is added, as the point the
+//! checker names it by, when `includeDeclaration` asks for it.)
+//!
+//! **What is indexed.** The files of the symbol index (see "Workspace symbols": the walk of
+//! `htl check <root>`, one list for both), and for each the uses
+//! [`htl::typeindex::TypeIndex::uses`] reads out of its check: every name that resolves to a
+//! declaration, and whether it is called there, which a call hierarchy is built on. Only a
+//! check can make them; a parse cannot say what `m.f` is. They are made at the first
+//! references request that asks about the project, and not before, so a session that never
+//! asks pays nothing. An open file contributes its last check, when that check read the text
+//! now on disk and nothing it read has changed since. Every other file is checked as it is on
+//! disk by that request, once, and kept: the first request is a check of every file that is
+//! not open (each check walks the file's `require` closure, as every check here does), and
+//! the ones after it are a lookup, plus what keeping current costs. The first request does not
+//! trust any open file's last check, which may be older than a change the index was not there
+//! to see: the open files are checked again for it, and the file the request is made in is
+//! checked before the position is resolved (a publish follows, as after any check).
+//!
+//! **Kept current.** By the symbol index's rules (checks of open files, watched `*.tl`
+//! events, a stat of each file for a client that does not watch, the stamp that is not trusted
+//! within two seconds of a write, a project dropped when a manifest changes). What the uses
+//! add is that they say where a name declared in *another* file is, so they go stale when
+//! that file changes and not only when their own does:
+//!
+//! - a file whose text changed takes with it the uses of every file whose check read it
+//!   (the closure its check recorded), which are made again at the next request;
+//! - a file appearing or going takes all of them: a new file can change what a `require` finds
+//!   in a file that did not read it;
+//! - a change to a `types/` declaration or a Rust source (which the symbol index survives)
+//!   takes all of them. A client that watches says so; one that does not is not told, so the
+//!   request fingerprints the files `htl dts` and the model read (every `.d.tl` under a
+//!   `types` directory, every `Cargo.toml` and every `.rs` under `src`, `examples`, `tests` or
+//!   `benches`, by path, modification time and length) and a change is treated as the
+//!   watcher's event is: the project is built again, its open files checked and the uses
+//!   made again. That is a second walk of the project directory (the `target`, `.git` and
+//!   other skipped directories are not entered) and a `stat` per such file on every request,
+//!   beside the walk and the `stat` per `.tl` file the symbol index already costs a client
+//!   that does not watch;
+//! - a file whose uses were taken for one of these reasons is not made again from the last
+//!   check of the open file, which read the files as they were: it is checked again. That
+//!   includes the file the request is made in, which is checked first, so that the position
+//!   is resolved against the files as they are (the request is then preceded by a publish for
+//!   it, as after any check).
+//!
+//! The index is of what is on disk; an unsaved buffer's text is not in it, as it is in no
+//! diagnostic. The request itself is answered only while the buffer of the file it is made
+//! in is the text the check read, like hover and definition.
+//!
+//! **`null`, not `[]`.** `[]` is "the position is a declaration and nothing uses it" (and
+//! `includeDeclaration` is false). `null` is "no answer": the position is on no name, the
+//! name has no declaration the report names, the declaration is in the standard library (a file
+//! Teal carries inside itself, as for definition), the buffer is not the checked text, the file
+//! was never checked, the file is not one the walk visits (it is in no module of the
+//! project, so none of its uses is indexed and "no uses" would be a guess), or the project's
+//! files cannot be listed (the reason is on stderr).
+//!
+//! **What cannot be resolved.** A use is listed only if the check resolved it, so what is
+//! missing is what the checker does not know:
+//!
+//! - a name whose type is `any` or is not known (a `require` that failed, an unannotated
+//!   parameter): `x.f` for such an `x` is no use of anything;
+//! - a field of a primitive type (`g.text`: Teal shares one `string` type among all of them,
+//!   so a field has no place) and a table's dynamic key (`t[name]`);
+//! - the key of a table constructor (`who` of `{ who = who }`) is a field's name, not the
+//!   local of that name, and is left out of that local's references, though it is not listed
+//!   as a use of the record's field either;
+//! - a call through an alias: `local g = m.greet` is a use of `greet` and `g(..)` is a use of
+//!   the local `g`;
+//! - the standard library, whose declarations have no file to answer with;
+//! - a file that does not parse, which has no index and so no uses.
+//!
 //! # Files that change the answer
 //!
 //! A file's diagnostics depend on more than the file: the project's `htl.toml` (lint levels,
@@ -341,7 +429,8 @@
 //! of any file of the project, not at the moment it is edited: a client that does not watch
 //! files has nothing to say when it changes. It does not see `types/` or Rust, which are not
 //! the project's own files at its root; a client that does not watch files has those at the
-//! next time the project is rebuilt for some other reason.
+//! next time the project is rebuilt for some other reason (a references request is the
+//! exception: it looks at them, see "References").
 //!
 //! # What it does not do yet
 //!
@@ -351,6 +440,7 @@
 //! is built, is published again only when it is: a save of the `.tl` that declares it does not
 //! rebuild the project.
 
+mod refs;
 mod symbols;
 
 use super::{auto_dts, load_config, warn_cargo_htl_mismatch};
@@ -363,7 +453,7 @@ use lsp_types::notification::{
     DidOpenTextDocument, DidSaveTextDocument, Exit, Notification as _, PublishDiagnostics,
 };
 use lsp_types::request::{
-    CodeActionRequest, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest,
+    CodeActionRequest, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest, References,
     RegisterCapability, Request as _, Shutdown, WorkspaceSymbolRequest,
 };
 use lsp_types::{
@@ -375,10 +465,10 @@ use lsp_types::{
     DocumentSymbolParams, DocumentSymbolResponse, FileSystemWatcher, GlobPattern,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
     HoverProviderCapability, Location, MarkupContent, MarkupKind, NumberOrString, OneOf, Position,
-    PublishDiagnosticsParams, Range, Registration, RegistrationParams, SaveOptions,
-    ServerCapabilities, SymbolInformation, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceEdit,
-    WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    PublishDiagnosticsParams, Range, ReferenceParams, Registration, RegistrationParams,
+    SaveOptions, ServerCapabilities, SymbolInformation, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri,
+    WorkspaceEdit, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -450,6 +540,7 @@ fn run_on(connection: &Connection) -> Result<ExitCode> {
         definition_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),
+        references_provider: Some(OneOf::Left(true)),
         code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
             code_action_kinds: Some(vec![CodeActionKind::QUICKFIX, fix_all_kind()]),
             work_done_progress_options: Default::default(),
@@ -677,6 +768,21 @@ impl Project {
         )?;
         project::file_view(&h, self.model.as_ref(), file)?;
         Ok(htl::fix::fix_file(&h, file, &self.fix)?.contents)
+    }
+
+    /// The check of `file` as it is on disk that keeps what the checker knows of its names,
+    /// and none of what `htl check` would say about it: for the uses of a file that is not
+    /// open. Under the view the file itself may read, as [`project::check_file`] sets it, and
+    /// with the search path put back.
+    fn indexed(&self, file: &Path) -> Result<htl::CheckInfo> {
+        let h = &self.checker;
+        let saved = h.search_path()?;
+        let found = (|| {
+            project::file_view(h, self.model.as_ref(), file)?;
+            h.check_indexed(file)
+        })();
+        h.set_search_path(&saved)?;
+        found
     }
 
     /// Check `file` as it is on disk, the way `htl check` reports it: everything the file
@@ -929,6 +1035,7 @@ impl<'c> Server<'c> {
                     GotoDefinition::METHOD,
                     DocumentSymbolRequest::METHOD,
                     WorkspaceSymbolRequest::METHOD,
+                    References::METHOD,
                 ]
                 .contains(&req.method.as_str())
                 {
@@ -1177,6 +1284,14 @@ impl<'c> Server<'c> {
                     .iter()
                     .any(|d| ck.starts_with(d) || d.starts_with(&ck))
         });
+        // What the check resolves a name against changed, though no `.tl` of the project did:
+        // the declarations the index keeps are as they were, the uses made against the old
+        // ones are not (module doc, "References").
+        for (k, index) in &mut self.indices {
+            if gone.contains(k) {
+                index.forget_refs();
+            }
+        }
         hit.sort();
         for uri in hit {
             if !stale.files.contains(&uri) {
@@ -1340,6 +1455,7 @@ impl<'c> Server<'c> {
             index.put(
                 &canonical(&path),
                 Entry::new(path.clone(), stamp, &text, syms),
+                deps.iter().map(|d| canonical(d)).collect(),
             );
         }
         if let Some(doc) = self.open.get_mut(uri) {
@@ -1356,7 +1472,7 @@ impl<'c> Server<'c> {
     }
 
     /// Answer `textDocument/formatting`, `codeAction`, `hover`, `definition`,
-    /// `documentSymbol` or the workspace-symbol request.
+    /// `documentSymbol`, `references` or the workspace-symbol request.
     fn document_request(&mut self, req: lsp_server::Request) -> Response {
         let id = req.id.clone();
         let bad = |e: serde_json::Error| {
@@ -1401,6 +1517,20 @@ impl<'c> Server<'c> {
                     Err(e) => bad(e),
                 }
             }
+            References::METHOD => match serde_json::from_value::<ReferenceParams>(params) {
+                Ok(p) => {
+                    let at = p.text_document_position;
+                    Response::new_ok(
+                        id.clone(),
+                        self.references(
+                            &at.text_document.uri,
+                            at.position,
+                            p.context.include_declaration,
+                        ),
+                    )
+                }
+                Err(e) => bad(e),
+            },
             WorkspaceSymbolRequest::METHOD => {
                 match serde_json::from_value::<WorkspaceSymbolParams>(params) {
                     Ok(p) => Response::new_ok(id.clone(), self.workspace_symbols(&p.query)),
@@ -1642,6 +1772,219 @@ impl<'c> Server<'c> {
         result
     }
 
+    /// Every use of the declaration the name at `at` stands for, across the files of its
+    /// project: where each is written, and with `include_declaration` the declaration
+    /// itself. `null` when the position resolves to no declaration the answer can name (not
+    /// a name, a name the report has no declaration for, a declaration in the standard
+    /// library, a buffer that is not the text the check read, a file nothing was checked
+    /// for, a project whose files cannot be listed); `[]` when it resolves and nothing but
+    /// the declaration uses it.
+    fn references(
+        &mut self,
+        uri: &Uri,
+        at: Position,
+        include_declaration: bool,
+    ) -> Option<Vec<Location>> {
+        let here = path_of(uri)?;
+        let key = self
+            .open
+            .get(uri)
+            .and_then(|d| d.project.clone())
+            .or_else(|| project_key(&here).ok())
+            .unwrap_or_else(|| htl::parent_dir(&here));
+        // A project whose manifests moved is built again and its open files are checked
+        // against it before it is asked, as for a workspace-symbol request.
+        for other in self.drop_moved([key.clone()]) {
+            self.check_one(&other);
+        }
+        if let Err(e) = self.refresh_symbols(&key, &here) {
+            eprintln!("htl lsp: no references for {}: {e:#}", key.display());
+            return None;
+        }
+        // A client that does not watch is not told that a `types/` declaration or a Rust
+        // source changed, and neither the project (which `htl dts` and the model were run
+        // for) nor the uses made against it would be rebuilt: the files that decide it are
+        // fingerprinted at each request, and a change is what a watcher's event would have
+        // been, so the project is built again, its open files checked against it and the
+        // uses made again.
+        if !self.watching
+            && self.projects.get(&key).is_some_and(|p| p.model.is_some())
+            && self
+                .indices
+                .get_mut(&key)
+                .is_some_and(|i| i.inputs_changed(project_inputs(&key)))
+        {
+            self.projects.remove(&key);
+            if let Some(index) = self.indices.get_mut(&key) {
+                index.forget_refs();
+            }
+            let mut files: Vec<Uri> = self
+                .open
+                .iter()
+                .filter(|(_, d)| d.project.as_ref() == Some(&key))
+                .map(|(u, _)| u.clone())
+                .collect();
+            files.sort();
+            for other in files {
+                self.check_one(&other);
+            }
+        }
+        // A file the answer needs the uses of that the walk does not visit (a file in no
+        // module of the project, a dependency's) has no uses indexed: there is nothing to
+        // answer with, and an answer from the declaration alone would say "no uses".
+        let held = self
+            .indices
+            .get(&key)
+            .is_some_and(|i| i.holds(&canonical(&here)));
+        if !held {
+            return None;
+        }
+        if let Some(index) = self.indices.get_mut(&key) {
+            index.first_refs();
+        }
+        // The file a file reads changed under it (a branch switch, a formatter, no save from
+        // the editor), or this is the first request and the last check may be older than the
+        // index: the last check names the declarations where they were. The check that
+        // answers the position is made again, as the uses of its project are.
+        if self
+            .indices
+            .get(&key)
+            .is_some_and(|i| i.distrusts(&canonical(&here)))
+        {
+            self.check_one(uri);
+        }
+        let (text, spelled, target) = {
+            let checked = self.checked_buffer(uri)?;
+            let lines = lines_of(&checked.text);
+            let (line, col) = byte_position(&lines, at)?;
+            let spelled = checked.types.at(&checked.text, line, col)?.declared?;
+            let target = refs::Place::of(&spelled)?;
+            (checked.text.clone(), spelled, target)
+        };
+        let here_canonical = canonical(&here);
+        let mut round = 0;
+        loop {
+            self.refresh_refs(&key);
+            let index = self.indices.get(&key)?;
+            let class = index.same_as(&target);
+            let mut hits: Vec<(&PathBuf, &symbols::Entry, &refs::Ref)> = Vec::new();
+            for (canonical, e) in index.iter() {
+                for r in e.refs.iter().flat_map(|f| &f.refs) {
+                    if class.contains(&r.declared) {
+                        hits.push((canonical, e, r));
+                    }
+                }
+            }
+            // The use that is the declaration's own name: the first use of it on the line the
+            // checker names the declaration at (`function` of `function M.f`, the name of a
+            // local, the type after `f:` in a record's body, whose name is before it). A
+            // function declared in the body and defined below has two, one per place. A
+            // declaration whose name the check did not resolve has none, and is added as the
+            // point the checker names.
+            let own: HashSet<usize> = class
+                .iter()
+                .filter_map(|p| {
+                    hits.iter()
+                        .enumerate()
+                        .filter(|(_, (c, _, r))| {
+                            **c == *p.file && r.declared == *p && r.line == p.line
+                        })
+                        .min_by_key(|(_, (_, _, r))| r.col)
+                        .map(|(i, _)| i)
+                })
+                .collect();
+            let mut out: Vec<Location> = Vec::new();
+            if include_declaration
+                && own.is_empty()
+                && let Some(point) = location_of(
+                    &here,
+                    uri,
+                    &spelled.file,
+                    &text,
+                    Some((spelled.line, spelled.col)),
+                )
+            {
+                out.push(point);
+            }
+            let mut gone = false;
+            for (i, (canonical, e, r)) in hits.iter().enumerate() {
+                if own.contains(&i) && !include_declaration {
+                    continue;
+                }
+                if !e.path.is_file() {
+                    gone = true;
+                    continue;
+                }
+                let target_uri = if **canonical == here_canonical {
+                    Some(uri.clone())
+                } else {
+                    std::path::absolute(&e.path).ok().and_then(|p| uri_of(&p))
+                };
+                if let Some(target_uri) = target_uri {
+                    out.push(Location {
+                        uri: target_uri,
+                        range: r.range,
+                    });
+                }
+            }
+            // A watcher names files, not the directory a file was in: a hit in a file that is
+            // gone says the project is to be walked again, and the answer made once more.
+            if gone && round == 0 {
+                round += 1;
+                if let Some(index) = self.indices.get_mut(&key) {
+                    index.relist();
+                }
+                if let Err(e) = self.refresh_symbols(&key, &here) {
+                    eprintln!("htl lsp: no references for {}: {e:#}", key.display());
+                    return None;
+                }
+                continue;
+            }
+            return Some(out);
+        }
+    }
+
+    /// Make the uses of every file of the project under `key` that has none: from the last
+    /// check of the file when it is open and that check read the text on disk and what it
+    /// read has not changed since, else from a check of the file as it is on disk. A project
+    /// whose symbol index is not there ([`refresh_symbols`](Self::refresh_symbols) failed)
+    /// has nothing made.
+    fn refresh_refs(&mut self, key: &Path) {
+        let Some(mut index) = self.indices.remove(key) else {
+            return;
+        };
+        if let Some(project) = self.projects.get(key) {
+            for p in index.pending() {
+                let text = read_lossy(&p.path);
+                let hash = symbols::hash_of(&text);
+                let open = self.open.values().find(|d| d.canonical == p.canonical);
+                let from_check = open
+                    .filter(|_| !p.distrust)
+                    .and_then(|d| d.checked.as_ref().map(|c| (d, c)))
+                    .filter(|(_, c)| c.text == text)
+                    .map(|(d, c)| refs::collect(&text, &c.types, d.deps.iter().cloned()));
+                let made = from_check.or_else(|| match project.indexed(&p.path) {
+                    // The text moved while the check ran: the positions are not its.
+                    Ok(_) if read_lossy(&p.path) != text => None,
+                    Ok(c) => Some(refs::collect(
+                        &text,
+                        &c.types,
+                        c.deps.iter().map(|d| canonical(d)),
+                    )),
+                    // No uses, and no closure: the next change to any file asks again.
+                    Err(e) => {
+                        eprintln!("htl lsp: no references from {}: {e:#}", p.path.display());
+                        Some(refs::FileRefs::default())
+                    }
+                });
+                if let Some(made) = made {
+                    index.fill(&p.canonical, hash, made);
+                }
+            }
+        }
+        self.indices.insert(key.to_path_buf(), index);
+    }
+
     /// The edits that make the buffer what `htl fmt` writes for it: `[]` when it already is,
     /// one edit over the changed span when not, and `null` when `htl fmt` could not format
     /// it.
@@ -1863,6 +2206,53 @@ impl Watched {
             (Some("Cargo.toml"), None) | (Some("src" | "examples" | "tests" | "benches"), Some(_))
         )
     }
+}
+
+/// A fingerprint of the files under `root` that the checker resolves names against and no
+/// walk of `.tl` files sees: the `.d.tl` under a `types` directory, and the Rust `htl dts`
+/// reads (`Cargo.toml`, and `.rs` under `src`, `examples`, `tests` or `benches`), each by
+/// path, modification time and length: what [`Watched`] names for a client that watches,
+/// and a client that does not has this instead (module doc, "References").
+fn project_inputs(root: &Path) -> u64 {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<(PathBuf, Option<std::time::SystemTime>, u64)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                if !htl::is_skipped_dir(&path, &[]) {
+                    walk(&path, root, out);
+                }
+                continue;
+            }
+            let read = match Watched::of(&path) {
+                Some(Watched::Types) => true,
+                // Any crate under the root, not only one at the root: which crate an
+                // `htl dts` run reads is not asked here.
+                Some(Watched::Rust) => {
+                    path.file_name().is_some_and(|n| n == "Cargo.toml")
+                        || path.strip_prefix(root).is_ok_and(|rel| {
+                            rel.components().any(|c| {
+                                ["src", "examples", "tests", "benches"]
+                                    .iter()
+                                    .any(|d| c.as_os_str() == *d)
+                            })
+                        })
+                }
+                _ => false,
+            };
+            if read && let Ok(m) = e.metadata() {
+                out.push((path, m.modified().ok(), m.len()));
+            }
+        }
+    }
+    let mut seen = Vec::new();
+    walk(root, root, &mut seen);
+    seen.sort();
+    let mut h = DefaultHasher::new();
+    seen.hash(&mut h);
+    h.finish()
 }
 
 /// The 1-based line and byte column of an LSP position in `lines`; `None` for a line the

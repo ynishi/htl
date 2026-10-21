@@ -3011,6 +3011,8 @@ local function decl_index(result, filename, src, report, reporter, sym_type)
                d.y, d.x = d.ny, d.nx
                d.detail = str_of(ft)
                d.body_fn = d.kind ~= "field"
+               -- Where the type is written, which a definition below takes over (`by`, `bx`).
+               d.ty_y, d.ty_x = ft.y, ft.x
             end
             d.ey = d.ey or d.ny
             children[#children + 1] = d
@@ -3121,6 +3123,7 @@ local function decl_index(result, filename, src, report, reporter, sym_type)
                if c.name == fname and c.body_fn then slot = i; break end
             end
             if slot then
+               d.by, d.bx = owner.children[slot].ty_y, owner.children[slot].ty_x
                owner.children[slot] = d
             else
                owner.children[#owner.children + 1] = d
