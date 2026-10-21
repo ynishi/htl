@@ -155,3 +155,220 @@ fn what_is_not_a_name_has_no_answer() {
     let p = at(&c, USER, "print(m.hello", 0).unwrap();
     assert!(p.ty.unwrap().starts_with("function("));
 }
+
+/// The tree as one line per declaration, indented by depth: kind, name, where it starts and
+/// ends (`end` just past it, `-` for "the end of the line"), where its name is, its type.
+fn outline(decls: &[htl_core::typeindex::Decl], depth: usize, out: &mut String) {
+    for d in decls {
+        let end = d.end_col.map_or("-".to_string(), |c| c.to_string());
+        let detail = d.detail.as_deref().unwrap_or("");
+        out.push_str(&format!(
+            "{}{:?} {} {}:{}..{}:{} @{}:{} {}\n",
+            "  ".repeat(depth),
+            d.kind,
+            d.name,
+            d.line,
+            d.col,
+            d.end_line,
+            end,
+            d.name_line,
+            d.name_col,
+            detail
+        ));
+        outline(&d.children, depth + 1, out);
+    }
+}
+
+fn outline_of(root: &Path, name: &str, text: &str) -> Option<String> {
+    write(&root.join(name), text);
+    let h = Htl::new().unwrap();
+    h.add_path(root).unwrap();
+    let c = h.check_indexed(&root.join(name)).unwrap();
+    let mut out = String::new();
+    outline(c.types.declarations()?, 0, &mut out);
+    Some(out)
+}
+
+const SHAPES: &str = "local record Greeting
+   who: string
+   cb: function(string): string
+   record Inner
+      a: number
+   end
+   enum Kind
+      \"a\"
+   end
+end
+
+local enum Color
+   \"red\"
+end
+
+local type Alias = Greeting
+
+local function helper(x: integer): integer
+   return x + 1
+end
+
+function Greeting.make(who: string): Greeting
+   return { who = who }
+end
+
+function Greeting:show(): string
+   return self.who
+end
+
+local v = 1
+local t = {
+   k = 1,
+}
+return Greeting
+";
+
+#[test]
+fn the_declarations_of_a_file_are_a_tree() {
+    let root = common::tempdir("htl-core-typeindex", "decls");
+    let got = outline_of(&root, "shapes.tl", SHAPES).unwrap();
+    // Positions: lines from 1 and byte columns from 1; a record function is a child of its
+    // record though it is written after the record's `end`; an enum's members are not listed.
+    let want = "\
+Record Greeting 1:1..10:4 @1:14 \n\
+\x20 Field who 2:4..2:- @2:4 string\n\
+\x20 Function cb 3:4..3:- @3:4 function(string): string\n\
+\x20 Record Inner 4:4..6:7 @4:11 \n\
+\x20   Field a 5:7..5:- @5:7 number\n\
+\x20 Enum Kind 7:4..9:7 @7:9 \n\
+\x20 Function make 22:1..24:4 @22:19 function(string): Greeting\n\
+\x20 Method show 26:1..28:4 @26:19 function(Greeting): string\n\
+Enum Color 12:1..14:4 @12:12 \n\
+Alias Alias 16:1..16:- @16:12 Greeting\n\
+Function helper 18:1..20:4 @18:16 function(integer): integer\n\
+Local v 30:1..30:- @30:7 integer\n\
+Local t 31:1..33:2 @31:7 record\n";
+    assert_eq!(got, want, "\n{got}");
+}
+
+#[test]
+fn a_function_of_a_record_declared_elsewhere_stands_at_the_top() {
+    let root = common::tempdir("htl-core-typeindex", "orphan");
+    write(&root.join("m.tl"), MODULE);
+    let user = "local m = require(\"m\")
+
+function m.extra(): string
+   return \"x\"
+end
+
+local up = m.hello
+return m
+";
+    let got = outline_of(&root, "user.tl", user).unwrap();
+    let want = "\
+Local m 1:1..1:23 @1:7 m\n\
+Function m.extra 3:1..5:4 @3:12 \n\
+Function up 7:1..7:- @7:7 function(string): string\n";
+    assert_eq!(got, want, "\n{got}");
+}
+
+#[test]
+fn a_file_that_does_not_parse_has_no_declarations_and_one_that_declares_none_has_an_empty_list() {
+    let root = common::tempdir("htl-core-typeindex", "none-decl");
+    assert_eq!(outline_of(&root, "bad.tl", "local x = (\n"), None);
+    assert_eq!(
+        outline_of(&root, "empty.tl", "print(1)\n").as_deref(),
+        Some("")
+    );
+    // The plain check keeps no index, and so no tree.
+    let h = Htl::new().unwrap();
+    h.add_path(&root).unwrap();
+    let plain = h.check_written(&root.join("empty.tl")).unwrap();
+    assert!(plain.types.declarations().is_none());
+}
+
+/// What tl puts in a record's `fields` that the record's body does not declare, and the
+/// shapes the first walk got wrong: the fields `is` takes from an interface are not listed
+/// under the record, a generic function field is a function, a nested `type X = record` has
+/// its name where it is written, a `local type` of a `require` is an alias, and a variable
+/// whose initialiser a macroexp expanded (a node with a `yend` and no `xend`) still has an
+/// outline.
+#[test]
+fn what_the_body_does_not_declare_is_not_its_child() {
+    let root = common::tempdir("htl-core-typeindex", "inherited");
+    write(&root.join("m.tl"), MODULE);
+    let text = "local interface Shape
+   area: function(Shape): number
+end
+
+local record Sq is Shape
+   side: number
+   id: function<T>(T): T
+   type Pt = record
+      x: number
+   end
+end
+
+function Sq:area(): number
+   return self.side * self.side
+end
+
+local type M = require(\"m\")
+
+local macroexp one(a: integer): {integer}
+   return { a }
+end
+
+local pair = one(3)
+return Sq
+";
+    let got = outline_of(&root, "shapes.tl", text).unwrap();
+    let want = "\
+Interface Shape 1:1..3:4 @1:17 \n\
+\x20 Function area 2:4..2:- @2:4 function(Shape): number\n\
+Record Sq 5:1..11:4 @5:14 \n\
+\x20 Field side 6:4..6:- @6:4 number\n\
+\x20 Function id 7:4..7:- @7:4 function<T>(T): T\n\
+\x20 Record Pt 8:14..10:7 @8:9 \n\
+\x20   Field x 9:7..9:- @9:7 number\n\
+\x20 Method area 13:1..15:4 @13:13 function(Shape): number\n\
+Alias M 17:1..17:28 @17:12 m\n\
+Function one 19:1..21:4 @19:16 function(integer): {integer}\n\
+Local pair 23:1..23:- @23:7 {integer}\n";
+    assert_eq!(got, want, "\n{got}");
+}
+
+#[test]
+fn a_function_declared_in_the_record_and_defined_below_is_one_child() {
+    let root = common::tempdir("htl-core-typeindex", "declared-defined");
+    let module = "local record M
+   f: function(integer): string
+   g: function(M, integer): string
+   h: function(): integer
+   n: integer
+end
+
+function M.f(n: integer): string
+   return tostring(n)
+end
+
+function M:g(n: integer): string
+   return tostring(n)
+end
+
+function M.extra(): integer
+   return 1
+end
+
+return M
+";
+    let got = outline_of(&root, "m.tl", module).unwrap();
+    // `f` and `g` are declared in the body and defined below: one entry each, at the
+    // definition (`g` a method, as `M:g` defines it). `h` is declared and never defined, so
+    // it stays at the body's line; `extra` is defined and never declared.
+    let want = "\
+Record M 1:1..6:4 @1:14 \n\
+\x20 Function h 4:4..4:- @4:4 function(): integer\n\
+\x20 Field n 5:4..5:- @5:4 integer\n\
+\x20 Function f 8:1..10:4 @8:12 function(integer): string\n\
+\x20 Method g 12:1..14:4 @12:12 function(M, integer): string\n\
+\x20 Function extra 16:1..18:4 @16:12 function(): integer\n";
+    assert_eq!(got, want, "\n{got}");
+}

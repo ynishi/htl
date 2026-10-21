@@ -2804,6 +2804,337 @@ local function require_closure(filename, result, env)
    return files, edges
 end
 
+-- The declarations of a file, as a tree, for `textDocument/documentSymbol` (and a project-wide
+-- symbol search after it): what `TypeIndex::declarations` (`typeindex.rs`) reads, whose module
+-- doc says what is in it and what is approximate. Read off `result.ast`, the checker's own
+-- tree, for the structure and the positions, and off the type report for the type strings;
+-- one walk over the file's top-level statements, not over their bodies.
+--
+--   { name, kind, y, x, ey, ex, ny, nx, detail, children }
+--
+-- `kind` is "local" | "function" | "method" | "field" | "record" | "interface" | "enum" |
+-- "alias". (`y`, `x`) is where the declaration starts, (`ey`, `ex`) just past where it ends
+-- (`ex` nil: the end of line `ey`), (`ny`, `nx`) the name. Columns are bytes from 1, lines
+-- from 1.
+--
+-- A record's children are its fields (the ones written in the record's body, in order), the
+-- nested records, enums and aliases, and the functions declared on it anywhere in the file
+-- (`function R.f`, `function R:m`), by position. tl keeps a record function in the record's
+-- `fields` as it does a body field, at the position of the `function` keyword: those entries
+-- are the functions' own declarations (below), and are not repeated as fields.
+local DECL_SKIP = { if_parent = true, type = true, newtype = true, decltuple = true, expected = true }
+
+local function decl_index(result, filename, src, report, reporter, sym_type)
+   local ast = result.ast
+   if type(ast) ~= "table" then return nil end
+   if not src then
+      local fd = io.open(filename, "rb")
+      if fd then src = fd:read("a"); fd:close() end
+   end
+   if not src then return nil end
+   local lines = {}
+   for l in (src .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = l end
+
+   local function str_of_id(id)
+      local ti = id and report.types[id]
+      return ti and ti.str or nil, ti
+   end
+   -- The type string of a type object of the AST, through the reporter that numbers them.
+   local function str_of(t)
+      if type(t) ~= "table" or not t.typeid then return nil end
+      local ok, id = pcall(reporter.get_typenum, reporter, t)
+      if not ok then return nil end
+      return str_of_id(id)
+   end
+   local function var_type(name, y, x)
+      local id = report.by_pos[filename] and report.by_pos[filename][y] and report.by_pos[filename][y][x]
+      if not id then id = sym_type[name .. ":" .. y] end
+      return str_of_id(id)
+   end
+
+   -- Where a statement starts: at its `local` or `global`, not at the name tl keys the node by.
+   local function decl_start(y, x)
+      local l = lines[y]
+      if not l then return x end
+      local pre = l:sub(1, x - 1)
+      return pre:match("^%s*()local%s+type%s+$") or pre:match("^%s*()local%s+macroexp%s+$")
+         or pre:match("^%s*()local%s+$") or pre:match("^%s*()global%s+type%s+$")
+         or pre:match("^%s*()global%s+$") or x
+   end
+
+   -- The name `name` on line `y`: the last one before column `x`, or (`after`) the first at or
+   -- after it. A field's `x` is where its type starts, so its name is before; a nested
+   -- `record Inner` is keyed at `record`, so its name is after.
+   local function find_name(name, y, x, after)
+      local l = lines[y]
+      if not l then return nil end
+      local pat = "%f[%w_]" .. escape_pattern(name) .. "%f[^%w_]"
+      local init, best = 1, nil
+      while true do
+         local s, e = l:find(pat, init)
+         if not s then break end
+         if after then
+            if s >= x then return s end
+         elseif s < x then
+            best = s
+         else
+            break
+         end
+         init = e + 1
+      end
+      return best
+   end
+   local function name_pos(name, y, x, after)
+      -- A nested `type Inner = record` is keyed at its `record`, after the name.
+      local s = find_name(name, y, x, after) or (after and find_name(name, y, x, false))
+      local line = y
+      -- `name:` and the type on the next line.
+      while not s and not after and line > 1 and y - line < 2 do
+         line = line - 1
+         s = find_name(name, line, math.huge)
+      end
+      if s then return line, s end
+      return y, x
+   end
+
+   -- The far end of a node: the largest `yend`/`xend` of it or what is inside it, else the
+   -- largest start. Only AST nodes are followed (a node has a `kind`, a type has a
+   -- `typename`): a nominal type's `found` points at the declaration it names, which may be
+   -- anywhere in the file. A node the parser closed (`yend` and `xend`, at its `end`, `}` or
+   -- `)`) holds nothing that ends later, so what is inside it is not entered: a function's
+   -- body is not walked to find the function's end. A node a macroexp expanded has a `yend`
+   -- and no `xend` (tl drops it), and stands for the end of that line.
+   local function extent(n, best, seen)
+      if type(n) ~= "table" or seen[n] then return end
+      seen[n] = true
+      if n.kind and not n.typename and n.y then
+         local y, x = n.yend or n.y, n.yend and n.xend and n.xend + 1 or nil
+         if y > best.y or (y == best.y and (x or 0) > (best.x or 0)) then best.y, best.x = y, x end
+         if n.yend and n.xend then return end
+      end
+      for i = 1, #n do extent(n[i], best, seen) end
+      for k, v in pairs(n) do
+         if type(k) ~= "number" and not DECL_SKIP[k] and type(v) == "table"
+            and not (v.typename and not v.kind) then
+            extent(v, best, seen)
+         end
+      end
+   end
+
+   -- The token that closes the nested declaration at (y, x), found by lexing the file once:
+   -- tl records no end for a record or enum written inside another.
+   local toks
+   local function end_of(y, x)
+      if toks == nil then
+         local ok, t = pcall(tl.lex, src, filename)
+         toks = ok and type(t) == "table" and t or false
+      end
+      if not toks then return nil end
+      local lo, hi = 1, #toks
+      while lo < hi do
+         local mid = (lo + hi) // 2
+         local t = toks[mid]
+         if t.y < y or (t.y == y and t.x < x) then lo = mid + 1 else hi = mid end
+      end
+      local depth = 0
+      for i = lo, #toks do
+         local t, nxt = toks[i], toks[i + 1]
+         if (t.tk == "record" or t.tk == "enum" or t.tk == "interface") and not (nxt and nxt.tk == ":") then
+            depth = depth + 1
+         elseif t.tk == "end" then
+            depth = depth - 1
+            if depth <= 0 then return t.y, t.x + 3 end
+         end
+      end
+      return nil
+   end
+
+   local function unwrap(def)
+      if type(def) == "table" and def.typename == "generic" and def.t then return def.t end
+      return def
+   end
+   local function type_kind(def)
+      def = unwrap(def)
+      if type(def) ~= "table" then return "alias" end
+      if def.typename == "record" then return "record" end
+      if def.typename == "interface" then return "interface" end
+      if def.typename == "enum" then return "enum" end
+      return "alias"
+   end
+
+   -- The record functions of the file, by the position tl keys their type at.
+   local fn_at = {}
+   for _, n in ipairs(ast) do
+      if n.kind == "record_function" then fn_at[n.y .. ":" .. n.x] = true end
+   end
+
+   local function by_pos_order(a, b)
+      if a.ny ~= b.ny then return a.ny < b.ny end
+      return a.nx < b.nx
+   end
+
+   local fill
+   -- A record's `def`: its body fields, and what is nested in it. The body is lines `y1` to
+   -- `y2` (`y2` nil: not known): what tl lists in `fields` outside it is not written in the
+   -- body. That is a field a `record R is I` takes from the interface (tl copies them into
+   -- the record with the interface's positions, in this file or another), and a record
+   -- function.
+   fill = function(def, children, y1, y2)
+      def = unwrap(def)
+      for _, fname in ipairs(def.field_order or {}) do
+         local ft = def.fields and def.fields[fname]
+         if type(ft) == "table" and ft.y and not fn_at[ft.y .. ":" .. ft.x]
+            and (ft.f == nil or ft.f == filename) and ft.y >= y1 and (not y2 or ft.y <= y2) then
+            local d = { name = fname, y = ft.y, x = ft.x, children = {} }
+            if ft.typename == "typedecl" then
+               local inner = unwrap(ft.def)
+               d.kind = type_kind(inner)
+               d.ny, d.nx = name_pos(fname, ft.y, ft.x, d.kind ~= "alias")
+               if d.kind == "alias" then d.y, d.x = d.ny, d.nx end
+               if d.kind == "record" or d.kind == "interface" or d.kind == "enum" then
+                  d.ey, d.ex = end_of(ft.y, ft.x)
+                  if d.kind ~= "enum" then fill(inner, d.children, ft.y, d.ey) end
+                  d._def = inner
+               else
+                  d.detail = str_of(inner)
+               end
+            else
+               -- A generic function's `function<T>(..)` is the function under the `generic`.
+               local fnt = unwrap(ft)
+               d.kind = fnt.typename == "function" and (fnt.is_method and "method" or "function") or "field"
+               d.ny, d.nx = name_pos(fname, ft.y, ft.x, false)
+               d.y, d.x = d.ny, d.nx
+               d.detail = str_of(ft)
+               d.body_fn = d.kind ~= "field"
+            end
+            d.ey = d.ey or d.ny
+            children[#children + 1] = d
+         end
+      end
+   end
+
+   local top, owners = {}, {}
+   local function push(d)
+      top[#top + 1] = d
+      return d
+   end
+   -- `A`, `A.B`: the names of the owner of `function A.B.f`.
+   local function owner_path(o)
+      if type(o) ~= "table" then return nil end
+      if (o.kind == "type_identifier" or o.kind == "identifier") and o.tk then return { o.tk } end
+      if o.kind == "op" and o.e1 and o.e2 and o.e2.tk then
+         local p = owner_path(o.e1)
+         if p then p[#p + 1] = o.e2.tk end
+         return p
+      end
+      return nil
+   end
+
+   for _, n in ipairs(ast) do
+      local k = n.kind
+      if k == "local_type" or k == "global_type" then
+         local v = n.var
+         local nt = n.value and n.value.newtype
+         local def = nt and nt.def
+         if v and v.tk and def then
+            local kind = type_kind(def)
+            local y, x = n.y, decl_start(n.y, n.x)
+            local d = { name = v.tk, kind = kind, y = y, x = x, ny = v.y, nx = v.x, children = {} }
+            if kind == "alias" then
+               d.detail = str_of(unwrap(def)) or str_of(nt)
+               d.ey = v.y
+            else
+               local yend = n.value.yend
+               d.ey, d.ex = yend, n.value.xend and n.value.xend + 1
+               d.ey = d.ey or v.y
+               if kind ~= "enum" then fill(def, d.children, y, yend) end
+               owners[v.tk] = d
+               d._def = unwrap(def)
+            end
+            push(d)
+         elseif v and v.tk and type(n.value) == "table" and n.value.kind and not n.value.newtype then
+            -- `local type M = require("m")`: an alias of what the module returns, whose
+            -- value is the `require` call and not a type.
+            local best = { y = n.y }
+            extent(n.value, best, {})
+            push({ name = v.tk, kind = "alias", y = n.y, x = decl_start(n.y, n.x), ny = v.y, nx = v.x,
+               ey = best.y, ex = best.x, detail = var_type(v.tk, v.y, v.x), children = {} })
+         end
+      elseif k == "local_function" or k == "global_function" or k == "local_macroexp" then
+         if n.name and n.name.tk then
+            local d = { name = n.name.tk, kind = "function", y = n.y, x = decl_start(n.y, n.x),
+               ny = n.name.y, nx = n.name.x, ey = n.yend or n.y, ex = n.xend and n.xend + 1,
+               children = {} }
+            d.detail = var_type(n.name.tk, n.name.y, n.name.x) or var_type(n.name.tk, n.y, n.x)
+            -- A global is in no scope list: the report's table of globals has its type.
+            if not d.detail and k == "global_function" then
+               d.detail = str_of_id(report.globals and report.globals[n.name.tk])
+            end
+            push(d)
+         end
+      elseif k == "local_declaration" or k == "global_declaration" then
+         local best = { y = n.y }
+         extent(n.exps, best, {})
+         for i, v in ipairs(n.vars or {}) do
+            if v.tk and v.y then
+               local detail, ti = var_type(v.tk, v.y, v.x)
+               if not detail and n.decltuple and n.decltuple.tuple then
+                  detail, ti = str_of(n.decltuple.tuple[i])
+               end
+               push({ name = v.tk, kind = (ti and ti.args ~= nil) and "function" or "local",
+                  y = n.y, x = decl_start(n.y, n.x), ny = v.y, nx = v.x, ey = best.y, ex = best.x,
+                  detail = detail, children = {} })
+            end
+         end
+      end
+   end
+
+   -- Record functions go under the record they are declared on, when it is declared in
+   -- this file; otherwise they stand at the top as `Owner.f`.
+   for _, n in ipairs(ast) do
+      if n.kind == "record_function" and n.name and n.name.tk then
+         local path = owner_path(n.fn_owner)
+         local owner = path and owners[path[1]]
+         for i = 2, path and #path or 0 do
+            local found
+            for _, c in ipairs(owner and owner.children or {}) do
+               if c.name == path[i] and c._def then found = c; break end
+            end
+            owner = found
+         end
+         local fname = n.name.tk
+         local d = { name = fname, kind = n.is_method and "method" or "function", y = n.y, x = n.x,
+            ny = n.name.y, nx = n.name.x, ey = n.yend or n.y, ex = n.xend and n.xend + 1, children = {} }
+         if owner and owner._def and owner._def.fields then
+            d.detail = str_of(owner._def.fields[fname])
+            -- A function declared in the record's body (`f: function(..)`) and defined here
+            -- is one function: the definition takes the body declaration's place. A
+            -- second definition of the name (an overload) is one more entry.
+            local slot
+            for i, c in ipairs(owner.children) do
+               if c.name == fname and c.body_fn then slot = i; break end
+            end
+            if slot then
+               owner.children[slot] = d
+            else
+               owner.children[#owner.children + 1] = d
+            end
+         else
+            d.name = (path and table.concat(path, ".") or "?") .. (n.is_method and ":" or ".") .. fname
+            push(d)
+         end
+      end
+   end
+   local function order(list)
+      table.sort(list, by_pos_order)
+      for _, d in ipairs(list) do
+         if #d.children > 0 then order(d.children) end
+      end
+   end
+   order(top)
+   return top
+end
+
 -- The file's type report as `CheckInfo::types` (`typeindex.rs`) reads it, for an editor's
 -- hover and go-to-definition: what tl knows of each position, copied out of the checker's
 -- tables so that nothing of the checker has to outlive the check.
@@ -2818,8 +3149,8 @@ end
 --          (`tl.symbols_in_scope` is the reader of this shape)
 --
 -- nil when the report has nothing for the file (a file that did not parse).
-local function type_index(result, filename)
-   local ok, report = pcall(tl.get_types, result)
+local function type_index(result, filename, src)
+   local ok, report, reporter = pcall(tl.get_types, result)
    if not ok or type(report) ~= "table" then return nil end
    local by_pos = report.by_pos and report.by_pos[filename]
    if not by_pos then return nil end
@@ -2848,13 +3179,24 @@ local function type_index(result, filename)
       end
    end
    local syms, names, m = {}, {}, 0
+   local sym_type = {}
    for i, s in ipairs(report.symbols_by_file and report.symbols_by_file[filename] or {}) do
       syms[m + 1], syms[m + 2], syms[m + 3] = s[1], s[2], s[4]
       m = m + 3
       names[i] = s[3]
-      if s[3] ~= "@{" and s[3] ~= "@}" then use(s[4]) end
+      if s[3] ~= "@{" and s[3] ~= "@}" then
+         use(s[4])
+         local key = s[3] .. ":" .. s[1]
+         if sym_type[key] == nil then sym_type[key] = s[4] end
+      end
    end
-   return { file = filename, at = at, types = rows, syms = syms, names = names }
+   -- After the rows above: reading a type's string out of the reporter may number types the
+   -- rows do not hold, which nothing in them names.
+   local t1 = os.clock()
+   local dok, decls = pcall(decl_index, result, filename, src, report, reporter, sym_type)
+   prof("decl_index", filename, t1)
+   return { file = filename, at = at, types = rows, syms = syms, names = names,
+      decls = dok and decls or nil }
 end
 
 -- opts.lints = false skips the lint pass (runtime `require` of an already type-checked
@@ -2972,7 +3314,7 @@ function H.check(filename, env, opts)
    local types
    if opts.index then
       t0 = os.clock()
-      types = type_index(result, filename)
+      types = type_index(result, filename, src)
       prof("type_index", filename, t0)
    end
    return { ok = #errors == 0, errors = errors, error_fixes = error_fixes, warnings = warnings, deps = deps,
