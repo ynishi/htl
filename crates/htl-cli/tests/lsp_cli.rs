@@ -9,6 +9,7 @@
 //! is answered after every message before it has been, so any publish the case did not read
 //! is in front of the answer.
 
+use lsp_types::notification::{DidChangeWatchedFiles, Notification as _};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -119,12 +120,28 @@ struct Client {
     next_id: u64,
     /// Notifications read while waiting for something else, in the order they came.
     backlog: Vec<Value>,
+    /// Every request the server sent, in the order they came; a request is answered with
+    /// [`Client::registration`] or not at all.
+    server_requests: Vec<Value>,
 }
 
 impl Client {
     /// Spawn `htl lsp` in `cwd` and do the handshake; the `initialize` result comes back
     /// beside the client.
     fn start(cwd: &Path, scratch: &Path) -> (Self, Value) {
+        Self::start_with(cwd, scratch, json!({}))
+    }
+
+    /// [`Client::start`] for a client that can take a watcher registration at run time.
+    fn start_watching(cwd: &Path, scratch: &Path) -> (Self, Value) {
+        Self::start_with(
+            cwd,
+            scratch,
+            json!({ "workspace": { "didChangeWatchedFiles": { "dynamicRegistration": true } } }),
+        )
+    }
+
+    fn start_with(cwd: &Path, scratch: &Path, capabilities: Value) -> (Self, Value) {
         let stderr = scratch.join("htl-lsp.stderr");
         let mut child = Command::new(common::htl_bin())
             .arg("lsp")
@@ -170,10 +187,11 @@ impl Client {
             stderr,
             next_id: 0,
             backlog: Vec::new(),
+            server_requests: Vec::new(),
         };
         let init = client.request(
             "initialize",
-            json!({ "processId": null, "rootUri": uri(cwd), "capabilities": {} }),
+            json!({ "processId": null, "rootUri": uri(cwd), "capabilities": capabilities }),
         );
         client.notify("initialized", json!({}));
         (client, init)
@@ -207,12 +225,47 @@ impl Client {
 
     fn read(&mut self) -> Value {
         match self.messages.recv_timeout(TIMEOUT) {
-            Ok(m) => m,
+            Ok(m) => {
+                if m.get("id").is_some() && m.get("method").is_some() {
+                    self.server_requests.push(m.clone());
+                }
+                m
+            }
             Err(e) => panic!(
                 "no message from htl lsp ({e}); its stderr:\n{}",
                 std::fs::read_to_string(&self.stderr).unwrap_or_default()
             ),
         }
+    }
+
+    /// The `client/registerCapability` request the server sends after the handshake, answered
+    /// as a client that took it would.
+    fn registration(&mut self) -> Value {
+        let request = loop {
+            if let Some(i) = self
+                .server_requests
+                .iter()
+                .position(|r| r["method"] == "client/registerCapability")
+            {
+                break self.server_requests.remove(i);
+            }
+            let m = self.read();
+            if m["method"] != "client/registerCapability" {
+                self.backlog.push(m);
+            }
+        };
+        self.send(json!({ "id": request["id"], "result": null }));
+        request
+    }
+
+    /// The watched-files notification: each of `files` changed (`2`), created (`1`) or
+    /// deleted (`3`).
+    fn watched(&mut self, changes: &[(&Path, u8)]) {
+        let changes: Vec<Value> = changes
+            .iter()
+            .map(|(f, t)| json!({ "uri": uri(f), "type": t }))
+            .collect();
+        self.notify(DidChangeWatchedFiles::METHOD, json!({ "changes": changes }));
     }
 
     fn open(&mut self, file: &Path) {
@@ -1317,5 +1370,274 @@ fn hover_and_definition_count_columns_in_utf16_units() {
     );
     drop(main);
     let (_, code) = client.finish();
+    assert_eq!(code, Some(0));
+}
+
+/// What a changed manifest does, for the cases below: a project with `src/g.tl`, which has
+/// one `no-global` lint at the scaffold's levels, and `src/main.tl`, which has nothing.
+fn global_project(name: &str) -> (common::TempDir, PathBuf, PathBuf, PathBuf) {
+    let (root, p) = project(name);
+    let g = p.join("src/g.tl");
+    write(&g, "global counter: number = 1\nreturn counter\n");
+    let main = p.join("src/main.tl");
+    (root, p, g, main)
+}
+
+/// `htl.toml` with `no-global` set to `level`: the scaffold's, and the rule under
+/// `[lint.rules]`, which the scaffold leaves out.
+fn set_no_global(p: &Path, level: &str) {
+    let config = std::fs::read_to_string(p.join("htl.toml")).unwrap();
+    let config = config
+        .split("\n[lint.rules]")
+        .next()
+        .unwrap()
+        .trim_end()
+        .to_string();
+    write(
+        &p.join("htl.toml"),
+        &format!("{config}\n\n[lint.rules]\nno-global = \"{level}\"\n"),
+    );
+}
+
+/// Acceptance 7, for a client that watches files: the server asks to watch what changes the
+/// answer, and a change to `htl.toml` re-publishes every open file of the project, as `htl
+/// check` now reports them, without a save.
+#[test]
+fn a_changed_htl_toml_rechecks_the_open_files_when_the_client_watches_files() {
+    let (root, p, g, main) = global_project("watch-config");
+    let (mut client, _) = Client::start_watching(&p, &root);
+    let r = client.registration();
+    let registration = &r["params"]["registrations"][0];
+    assert_eq!(registration["method"], DidChangeWatchedFiles::METHOD, "{r}");
+    let globs: Vec<&str> = registration["registerOptions"]["watchers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["globPattern"].as_str().unwrap())
+        .collect();
+    for wanted in [
+        "**/htl.toml",
+        "**/mlua-pkg.toml",
+        "**/types/**/*.d.tl",
+        "**/Cargo.toml",
+    ] {
+        assert!(globs.contains(&wanted), "{wanted} in {globs:?}");
+    }
+    assert!(globs.iter().any(|g| g.ends_with("/*.rs")), "{globs:?}");
+
+    client.open(&g);
+    client.open(&main);
+    let got = client.publishes(&[&g, &main]);
+    let before = checked(&p, "src/g.tl");
+    assert_eq!(before.len(), 1, "{before:?}");
+    assert_eq!(before[0].0, "no-global");
+    assert_eq!(published(&got[&g]), before);
+    assert_eq!(got[&g][0]["severity"], 2);
+
+    // The rule is turned off. Nothing is saved: the client says the file changed.
+    set_no_global(&p, "allow");
+    client.watched(&[(&p.join("htl.toml"), 2)]);
+    let got = client.publishes(&[&g, &main]);
+    assert!(checked(&p, "src/g.tl").is_empty());
+    assert_eq!(published(&got[&g]), checked(&p, "src/g.tl"));
+    assert!(got[&g].is_empty() && got[&main].is_empty(), "{got:?}");
+
+    // And turned up to `deny`: an error now, as `htl check` has it.
+    set_no_global(&p, "deny");
+    client.watched(&[(&p.join("htl.toml"), 2)]);
+    let got = client.publishes(&[&g, &main]);
+    let after = checked(&p, "src/g.tl");
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(published(&got[&g]), after);
+    assert_eq!(got[&g][0]["severity"], 1, "{}", got[&g][0]);
+
+    // Many events for one project are one re-check of each file: a second publish of a
+    // file before the rest is a failure of `publishes`.
+    set_no_global(&p, "warn");
+    client.watched(&[
+        (&p.join("htl.toml"), 2),
+        (&p.join("mlua-pkg.toml"), 2),
+        (&p.join("types/README.md"), 2),
+        (&p.join("htl.toml"), 2),
+    ]);
+    let got = client.publishes(&[&g, &main]);
+    assert_eq!(published(&got[&g]), checked(&p, "src/g.tl"));
+    assert_eq!(got[&g][0]["severity"], 2);
+
+    let (unread, code) = client.finish();
+    assert!(unread.is_empty(), "{unread:?}");
+    assert_eq!(code, Some(0));
+}
+
+/// Acceptance 7, for a client that does not watch files: no registration is sent, and the
+/// next save of a file in the project sees the edited `htl.toml` (and re-checks the project's
+/// other open files with it).
+#[test]
+fn a_changed_htl_toml_is_seen_at_the_next_save_when_the_client_does_not_watch_files() {
+    let (root, p, g, main) = global_project("watch-fallback");
+    let (mut client, _) = Client::start(&p, &root);
+    client.open(&g);
+    client.open(&main);
+    let got = client.publishes(&[&g, &main]);
+    assert_eq!(published(&got[&g]), checked(&p, "src/g.tl"));
+    assert_eq!(got[&g][0]["severity"], 2);
+
+    set_no_global(&p, "deny");
+    client.save(&main);
+    let got = client.publishes(&[&g, &main]);
+    let after = checked(&p, "src/g.tl");
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(published(&got[&g]), after);
+    assert_eq!(got[&g][0]["severity"], 1, "{}", got[&g][0]);
+    assert!(got[&main].is_empty(), "{:?}", got[&main]);
+
+    // An `htl.toml` that is the same as before is not a reason to check what was not saved.
+    set_no_global(&p, "deny");
+    client.save(&main);
+    let got = client.publishes(&[&main]);
+    assert!(got[&main].is_empty());
+
+    set_no_global(&p, "allow");
+    client.save(&g);
+    let got = client.publishes(&[&g, &main]);
+    assert!(got[&g].is_empty() && got[&main].is_empty(), "{got:?}");
+
+    // Everything before this was read, so a request the server made would have been seen.
+    let r = client.request("textDocument/completion", json!({}));
+    assert_eq!(r["error"]["code"], -32601, "{r}");
+    assert!(
+        client.server_requests.is_empty(),
+        "a client that does not watch files is not asked to: {:?}",
+        client.server_requests
+    );
+    let (unread, code) = client.finish();
+    assert!(unread.is_empty(), "{unread:?}");
+    assert_eq!(code, Some(0));
+}
+
+/// A `.d.tl` under `types/` is an input to the check of every file that requires it: one that
+/// appears, one that is edited, one that goes.
+#[test]
+fn a_changed_declaration_under_types_rechecks_the_file_that_requires_it() {
+    let (root, p) = project("watch-types");
+    let u = p.join("src/u.tl");
+    write(
+        &u,
+        "local x = require(\"xdecl\")\nlocal s: number = x.f()\nprint(s)\n",
+    );
+    let decl = p.join("types/xdecl.d.tl");
+    let declare = |ret: &str| {
+        write(
+            &decl,
+            &format!("local record xdecl\n   f: function(): {ret}\nend\nreturn xdecl\n"),
+        );
+    };
+    let (mut client, _) = Client::start_watching(&p, &root);
+    client.registration();
+    client.open(&u);
+    let got = client.publishes(&[&u]);
+    let missing = checked(&p, "src/u.tl");
+    assert_eq!(missing.len(), 1, "{missing:?}");
+    assert!(missing[0].3.contains("module not found"), "{missing:?}");
+    assert_eq!(published(&got[&u]), missing);
+
+    // Created: it declares what the file wants.
+    declare("number");
+    client.watched(&[(&decl, 1)]);
+    let got = client.publishes(&[&u]);
+    assert!(checked(&p, "src/u.tl").is_empty());
+    assert!(got[&u].is_empty(), "{:?}", got[&u]);
+
+    // Changed: it declares something else.
+    declare("string");
+    client.watched(&[(&decl, 2)]);
+    let got = client.publishes(&[&u]);
+    let wrong = checked(&p, "src/u.tl");
+    assert_eq!(wrong.len(), 1, "{wrong:?}");
+    assert_eq!(published(&got[&u]), wrong);
+
+    // Deleted: the module is not found again.
+    std::fs::remove_file(&decl).unwrap();
+    client.watched(&[(&decl, 3)]);
+    let got = client.publishes(&[&u]);
+    assert_eq!(published(&got[&u]), missing);
+
+    // Rust the project's crate does not read (and a file under `target/`) is no reason to.
+    client.watched(&[(&p.join("target/debug/build/x/out/gen.rs"), 2)]);
+    let (unread, code) = client.finish();
+    assert!(unread.is_empty(), "{unread:?}");
+    assert_eq!(code, Some(0));
+}
+
+/// A client that takes the registration and answers it with an error gets the fallback, and
+/// the refusal is said on stderr.
+#[test]
+fn a_refused_registration_is_said_and_the_fallback_still_works() {
+    let (root, p, g, _main) = global_project("watch-refused");
+    let (mut client, _) = Client::start_watching(&p, &root);
+    let request = loop {
+        let m = client.read();
+        if m["method"] == "client/registerCapability" {
+            break m;
+        }
+        client.backlog.push(m);
+    };
+    client.send(json!({
+        "id": request["id"],
+        "error": { "code": -32601, "message": "no watching here" }
+    }));
+    client.open(&g);
+    let got = client.publishes(&[&g]);
+    assert_eq!(got[&g][0]["severity"], 2);
+    set_no_global(&p, "deny");
+    client.save(&g);
+    let got = client.publishes(&[&g]);
+    assert_eq!(got[&g][0]["severity"], 1, "{}", got[&g][0]);
+    let stderr = client.stderr.clone();
+    let (unread, code) = client.finish();
+    assert!(unread.is_empty(), "{unread:?}");
+    assert_eq!(code, Some(0));
+    let said = std::fs::read_to_string(stderr).unwrap();
+    assert!(said.contains("refused to watch files"), "{said}");
+    assert!(said.contains("no watching here"), "{said}");
+}
+
+/// Rust that `htl dts` reads is an input too: a change under the crate's `src/` rebuilds the
+/// project (which runs `htl dts` again) and re-checks the open file; the `.rs` files cargo
+/// writes under `target/`, which it does not read, are not a reason to.
+#[test]
+fn a_changed_rust_source_rechecks_the_open_files_of_its_crate_and_target_does_not() {
+    let root = tempdir("watch-rust");
+    let out = Command::new(common::htl_bin())
+        .args(["new", "sample", "--embed"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let p = root.join("sample");
+    let main = p.join("src/main.tl");
+    let (mut client, _) = Client::start_watching(&p, &root);
+    client.registration();
+    client.open(&main);
+    let got = client.publishes(&[&main]);
+    assert_eq!(published(&got[&main]), checked(&p, "src/main.tl"));
+
+    client.watched(&[(&p.join("target/debug/build/x/out/gen.rs"), 2)]);
+    // An answer to a request is after everything before it was done.
+    let r = client.request("textDocument/completion", json!({}));
+    assert_eq!(r["error"]["code"], -32601, "{r}");
+    assert!(
+        client
+            .backlog
+            .iter()
+            .all(|m| m["method"] != "textDocument/publishDiagnostics"),
+        "a file under target/ is not one htl dts reads: {:?}",
+        client.backlog
+    );
+    client.watched(&[(&p.join("src/lib.rs"), 2)]);
+    let got = client.publishes(&[&main]);
+    assert_eq!(published(&got[&main]), checked(&p, "src/main.tl"));
+    let (unread, code) = client.finish();
+    assert!(unread.is_empty(), "{unread:?}");
     assert_eq!(code, Some(0));
 }

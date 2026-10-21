@@ -704,8 +704,11 @@ binary carries, `provided by the environment`.
     /// under the project it belongs to: the same resolution rules, lint levels,
     /// `-- htl: allow(..)` comments and `.d.tl` declarations `htl check` applies, and the
     /// same messages and lines. Saving a file also re-checks the other open files that
-    /// require it. Diagnostics are not computed while typing, and `htl.toml` is read once
-    /// per session. Anything the server has to say about itself goes to stderr.
+    /// require it. A change to `htl.toml`, `mlua-pkg.toml`, `mlua-pkg.lock`, a `.d.tl` under
+    /// `types/` or the Rust `htl dts` reads re-checks the open files of that project when the
+    /// client watches files (`didChangeWatchedFiles`); for any client, the three
+    /// manifests are noticed at the next open or save in the project. Diagnostics are not computed
+    /// while typing. Anything the server has to say about itself goes to stderr.
     Lsp,
 }
 
