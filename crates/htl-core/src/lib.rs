@@ -321,7 +321,8 @@ pub struct CheckInfo {
     /// a declaration file either.
     pub record_sites: Vec<RecordSite>,
     /// The types and declarations of the file's names, by position: what an editor asks for
-    /// on hover and go-to-definition ([`typeindex`]). Empty unless the check was
+    /// on hover and go-to-definition, and the tree of what the file declares for an outline
+    /// ([`typeindex`]). Empty unless the check was
     /// [`Htl::check_indexed`], which is the only one that copies it out of the checker.
     pub types: typeindex::TypeIndex,
 }

@@ -55,11 +55,65 @@
 //! - **A field of a primitive type** has no position of its own in the report: Teal shares
 //!   one type for every `string`, so a `name: string` field has nowhere to point.
 //!
+//! # Declarations
+//!
+//! The index also keeps what the file declares, as a tree ([`TypeIndex::declarations`]): what
+//! an editor's outline lists and a symbol search matches. It is read off the checker's syntax
+//! tree for the structure and the positions, and off the report for the type strings, in one
+//! walk over the file's top-level statements (their bodies are not entered), so it is the
+//! file's own declarations and not the locals of a function.
+//!
+//! - **Top level**: every `local` / `global` variable (a [`DeclKind::Function`] if what it
+//!   holds is a function), `local function` and `global function`, `local macroexp`, and
+//!   every `record`, `interface`, `enum` and `type` alias (`local type M = require("m")`
+//!   included), in the order written.
+//! - **A record's children**: its fields, the records, enums and aliases nested in it, and
+//!   the functions declared on it anywhere in the file — `function R.f` is a
+//!   [`DeclKind::Function`] and `function R:m` a [`DeclKind::Method`], whatever the
+//!   position, so a module record's functions, which are written after its `end`, are its
+//!   children. They are in position order. A `function R.f` whose record is not declared
+//!   in this file (a field of a record a `require` brought in) stands at the top level, named
+//!   `R.f`, and has no type string. A field written in the body whose type is a function is a
+//!   function too — and when the file also defines it (`f: function(integer): string` in
+//!   the body, `function R.f(n: integer): string` below, the way a module declares its API
+//!   in the record and defines it after), the two are **one** child: the definition's, named
+//!   `f`, with the definition's range (`function` to `end`) and name, and the type. A body
+//!   declaration with no definition in this file stays as the body wrote it, and so does a
+//!   definition with no body declaration. A second definition of the name (an overload)
+//!   is one more entry.
+//!   A nested `record` is one more level of the same. The fields a `record R is I` takes
+//!   from `I` are not listed under `R`: they are written in `I`.
+//!
+//! What is approximate:
+//!
+//! - **A range is the declaration's extent where the checker records one**: a function, and
+//!   a `record`/`interface`/`enum` of the top level, run from their first token (`local`,
+//!   `global`, `function`) to their `end`. A nested `record` / `enum` runs to its `end`, found
+//!   by lexing the file once. A variable runs to the end of the last token of its initialiser
+//!   that the tree positions (a table or a function's `end` included); a field, an alias,
+//!   and anything the tree gives no end to, run from the name to the end of the line it is on.
+//!   A multi-line field type or alias is therefore cut at its first line.
+//! - **A field's name** is not in the report (a `name: string` has the position of
+//!   `string`, if any), so it is found by looking for the name before the type on the line
+//!   (or the two above it). A name written in a way that has no such text (a `["quoted key"]`)
+//!   is given the position of its type.
+//! - **An enum's members** are not listed: Teal keeps them as a set, without an order or a
+//!   position.
+//! - **A record function's range is not inside its record's.** The record ends where its
+//!   body does, and `function R.f` is written after it; the function is still its child.
+//!
+//! The tree is `None` — not an empty one — when the checker kept no tree for the file: it did
+//! not parse. A file that parses and declares nothing has `Some` of an empty list.
+//!
 //! # What it costs
 //!
-//! One pass over the report's positions at check time, with each distinct type copied once.
-//! `HTL_PROFILE=1` prints it as `type_index`; it is only done by
-//! [`Htl::check_indexed`](crate::Htl::check_indexed), which `htl check` does not call.
+//! One pass over the report's positions at check time, with each distinct type copied once,
+//! and the declaration walk above, which visits the top-level statements and the initialisers
+//! of the variables among them; it makes a few dozen to a few hundred small tables for a
+//! source file and reads the type string of each. `HTL_PROFILE=1` prints them as `type_index`
+//! (the whole, the declaration walk included) and `decl_index` (the part that is the walk); it
+//! is only done by [`Htl::check_indexed`](crate::Htl::check_indexed), which `htl check` does
+//! not call.
 
 use crate::CheckInfo;
 use anyhow::Result;
@@ -99,6 +153,62 @@ pub struct TypeAt {
     pub declared: Option<Place>,
 }
 
+/// What a [`Decl`] is. Which Teal construct each is, and which positions they have, is in
+/// the module doc (Declarations).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclKind {
+    /// A `local` or `global` variable that does not hold a function.
+    Local,
+    /// A function: `local function`, `global function`, `function R.f`, a record field typed
+    /// as a function, or a variable that holds one.
+    Function,
+    /// `function R:m`, or a record field typed as a method.
+    Method,
+    /// A field of a record that is not a function.
+    Field,
+    /// A `record` (`local`, `global` or nested).
+    Record,
+    /// An `interface`.
+    Interface,
+    /// An `enum`.
+    Enum,
+    /// A `type X = ...` that names another type.
+    Alias,
+}
+
+/// One declaration of a file ([`TypeIndex::declarations`]). Lines are counted from 1 and
+/// columns are byte columns from 1, as in [`Place`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decl {
+    /// The name as written (`greet`); `R.f` for a record function whose record is declared
+    /// elsewhere.
+    pub name: String,
+    /// What it is.
+    pub kind: DeclKind,
+    /// Its type as Teal writes it, when the report has one: a variable's, a function's, a
+    /// field's, the type an alias names. Not set for a record, interface or enum, whose
+    /// name is its type.
+    pub detail: Option<String>,
+    /// Line the declaration starts on: its first token (`local`, `global`, `function`), or
+    /// the name for a field.
+    pub line: usize,
+    /// Byte column of that first token.
+    pub col: usize,
+    /// Line it ends on.
+    pub end_line: usize,
+    /// The byte column just past its last character, or `None` for "the end of `end_line`"
+    /// (where the checker records no end, see the module doc).
+    pub end_col: Option<usize>,
+    /// Line of the name.
+    pub name_line: usize,
+    /// Byte column the name starts at; the name is `name.len()` bytes long (for a
+    /// `R.f` that stands at the top level, the `f` is the part this points at).
+    pub name_col: usize,
+    /// Fields, nested types and functions, in position order; empty but for a record or
+    /// interface.
+    pub children: Vec<Decl>,
+}
+
 /// The positions of a checked file that an editor asks about. Empty ([`Default`]) for a
 /// check that was not asked to keep it, or one whose file the checker could not read.
 #[derive(Debug, Clone, Default)]
@@ -110,6 +220,8 @@ pub struct TypeIndex {
     at: Vec<(u32, u32, u32)>,
     types: HashMap<u32, Ty>,
     symbols: Vec<Symbol>,
+    /// The file's declarations; `None` when the checker kept no tree for it.
+    decls: Option<Vec<Decl>>,
 }
 
 #[derive(Debug, Clone)]
@@ -141,7 +253,15 @@ impl TypeIndex {
     /// Whether there is nothing in it: the check was not asked to keep one, or the file did
     /// not parse.
     pub fn is_empty(&self) -> bool {
-        self.at.is_empty() && self.symbols.is_empty()
+        self.at.is_empty() && self.symbols.is_empty() && self.decls.is_none()
+    }
+
+    /// What the file declares, as a tree (the module doc's Declarations says of what, and
+    /// how approximate its ranges are), in the order written. `None` is "not known" — the
+    /// check kept no index, or the file did not parse — and is not the same answer as `Some`
+    /// of an empty slice, a file that declares nothing.
+    pub fn declarations(&self) -> Option<&[Decl]> {
+        self.decls.as_deref()
     }
 
     /// Read the table `type_index` (`prelude.lua`) builds.
@@ -198,11 +318,17 @@ impl TypeIndex {
                 link: c[2],
             })
             .collect();
+        // The tree is an extra of an extra: one that cannot be read is no tree, and leaves
+        // the rest of the index as it was.
+        let decls = t
+            .get::<Option<Table>>("decls")?
+            .and_then(|list| read_decls(&list).ok());
         Ok(Self {
             file: PathBuf::from(t.get::<String>("file")?),
             at,
             types,
             symbols,
+            decls,
         })
     }
 
@@ -300,6 +426,55 @@ impl TypeIndex {
         }
         None
     }
+}
+
+impl Decl {
+    /// The part of the name that [`name_col`](Decl::name_col) points at: `f` for the `R.f` of
+    /// a record function whose record is not declared in the file, the whole name otherwise.
+    pub fn short_name(&self) -> &str {
+        self.name.rsplit(['.', ':']).next().unwrap_or(&self.name)
+    }
+}
+
+/// The rows `decl_index` (`prelude.lua`) builds, each with its `children`.
+fn read_decls(list: &Table) -> Result<Vec<Decl>> {
+    let mut out = Vec::new();
+    for row in list.sequence_values::<Table>() {
+        let row = row?;
+        let int = |key: &str| -> Result<usize> {
+            Ok(row.get::<Option<i64>>(key)?.unwrap_or(1).max(1) as usize)
+        };
+        let kind = match row.get::<String>("kind")?.as_str() {
+            "local" => DeclKind::Local,
+            "function" => DeclKind::Function,
+            "method" => DeclKind::Method,
+            "field" => DeclKind::Field,
+            "record" => DeclKind::Record,
+            "interface" => DeclKind::Interface,
+            "enum" => DeclKind::Enum,
+            _ => DeclKind::Alias,
+        };
+        let (name_line, name_col) = (int("ny")?, int("nx")?);
+        let children = match row.get::<Option<Table>>("children")? {
+            Some(children) => read_decls(&children)?,
+            None => Vec::new(),
+        };
+        out.push(Decl {
+            name: row.get("name")?,
+            kind,
+            detail: row.get("detail")?,
+            line: int("y")?,
+            col: int("x")?,
+            end_line: row
+                .get::<Option<i64>>("ey")?
+                .map_or(name_line, |n| n.max(1) as usize),
+            end_col: row.get::<Option<i64>>("ex")?.map(|n| n.max(1) as usize),
+            name_line,
+            name_col,
+            children,
+        });
+    }
+    Ok(out)
 }
 
 impl Ty {
