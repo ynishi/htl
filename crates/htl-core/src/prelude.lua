@@ -254,13 +254,19 @@ function H.lint_rules()
    return lint.rule_names()
 end
 
+-- Format source text; `filename` only names it in an error. Returns formatted text, or
+-- nil, err.
+function H.format_text(src, filename, indent)
+   return fmt_mod.format(src, filename, { indent = indent })
+end
+
 -- Format a file's source. Returns formatted text, or nil, err.
 function H.format(filename, indent)
    local fd, err = io.open(filename, "rb")
    if not fd then return nil, "could not open " .. filename .. ": " .. tostring(err) end
    local src = fd:read("a")
    fd:close()
-   return fmt_mod.format(src, filename, { indent = indent })
+   return H.format_text(src, filename, indent)
 end
 
 H.GEN_TARGET = "5.4"

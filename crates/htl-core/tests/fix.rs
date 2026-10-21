@@ -1,8 +1,8 @@
 //! `htl::fix`: fixes carried by diagnostics, the safe/unsafe gate, applying, passes,
 //! dry run, and the revert on a fix that makes things worse.
 
-use htl_core::fix::{FixOptions, fix_file, unified_diff};
-use htl_core::{Applicability, Htl};
+use htl_core::fix::{Disposition, FixOptions, apply_fix, fix_file, unified_diff};
+use htl_core::{Applicability, Edit, Fix, Htl};
 use std::path::Path;
 
 mod common;
@@ -551,4 +551,143 @@ fn the_items_a_check_carries_are_what_its_text_says() {
         }
     }
     assert_eq!(c.error_items[0].rule.as_deref(), Some("forward-ref"));
+}
+
+fn fix(applicability: Applicability, edits: Vec<Edit>) -> Fix {
+    Fix {
+        applicability,
+        edits,
+    }
+}
+
+fn insert(line: usize, col: usize, text: &str) -> Edit {
+    Edit {
+        line,
+        col,
+        end_line: line,
+        end_col: col,
+        text: text.into(),
+    }
+}
+
+/// The one place the gate is written: what `--rule`, `[fix] disable`, `[fix] unsafe`,
+/// `--unsafe` and `suggest` make of a fix.
+#[test]
+fn disposition_is_the_gate_htl_fix_applies() {
+    let safe = fix(Applicability::Safe, vec![]);
+    let unsafe_ = fix(Applicability::Unsafe, vec![]);
+    let suggest = fix(Applicability::Suggest, vec![]);
+    let plain = FixOptions::default();
+    assert_eq!(
+        plain.disposition("r", &safe),
+        Disposition::Apply(Applicability::Safe)
+    );
+    assert_eq!(plain.disposition("r", &unsafe_), Disposition::NeedsUnsafe);
+    assert_eq!(plain.disposition("r", &suggest), Disposition::Suggestion);
+
+    let asked = FixOptions {
+        unsafe_fixes: true,
+        ..FixOptions::default()
+    };
+    assert_eq!(
+        asked.disposition("r", &unsafe_),
+        Disposition::Apply(Applicability::Unsafe)
+    );
+    assert_eq!(asked.disposition("r", &suggest), Disposition::Suggestion);
+
+    let promoted = FixOptions {
+        promoted: vec!["r".into()],
+        ..FixOptions::default()
+    };
+    assert_eq!(promoted.effective("r", &unsafe_), Applicability::Safe);
+    assert_eq!(promoted.effective("other", &unsafe_), Applicability::Unsafe);
+    assert_eq!(
+        promoted.disposition("r", &unsafe_),
+        Disposition::Apply(Applicability::Safe)
+    );
+    // Promotion is of `unsafe` only: a suggestion stays one.
+    assert_eq!(promoted.disposition("r", &suggest), Disposition::Suggestion);
+
+    let off = FixOptions {
+        disabled: vec!["r".into()],
+        promoted: vec!["r".into()],
+        ..FixOptions::default()
+    };
+    assert_eq!(off.disposition("r", &safe), Disposition::Disabled);
+    let only = FixOptions {
+        only: vec!["a".into()],
+        ..FixOptions::default()
+    };
+    assert_eq!(only.disposition("r", &safe), Disposition::OutOfScope);
+    assert_eq!(
+        only.disposition("a", &safe),
+        Disposition::Apply(Applicability::Safe)
+    );
+    assert!(Disposition::Disabled.reason().is_some() && Disposition::OutOfScope.reason().is_none());
+}
+
+/// `apply_fix` is the applier `htl fix` runs: edits at 1-based byte positions, all or none,
+/// an insertion at the end of the file allowed, a position that is not in the text refused.
+#[test]
+fn apply_fix_applies_edits_as_htl_fix_does() {
+    let src = "local a = 0\r\nlocal b = 1\n";
+    let two = fix(
+        Applicability::Safe,
+        vec![insert(1, 8, ": number"), insert(2, 8, ": number")],
+    );
+    assert_eq!(
+        apply_fix(src, &two).as_deref(),
+        Some("local a: number = 0\r\nlocal b: number = 1\n")
+    );
+    let replace = fix(
+        Applicability::Safe,
+        vec![Edit {
+            line: 1,
+            col: 11,
+            end_line: 2,
+            end_col: 6,
+            text: "|".into(),
+        }],
+    );
+    assert_eq!(
+        apply_fix(src, &replace).as_deref(),
+        Some("local a = | b = 1\n")
+    );
+    let tail = fix(Applicability::Safe, vec![insert(3, 1, "-- end\n")]);
+    assert_eq!(
+        apply_fix(src, &tail).as_deref(),
+        Some("local a = 0\r\nlocal b = 1\n-- end\n")
+    );
+    // Not in the text: nothing, rather than half.
+    assert_eq!(
+        apply_fix(src, &fix(Applicability::Safe, vec![insert(9, 1, "x")])),
+        None
+    );
+    assert_eq!(
+        apply_fix(src, &fix(Applicability::Safe, vec![insert(0, 0, "x")])),
+        None
+    );
+}
+
+/// `format_text` formats what it is given, with the indent of the file.
+#[test]
+fn format_text_is_format_file_for_text() {
+    let dir = tempdir("format-text");
+    let file = dir.join("m.tl");
+    let messy = "local function f(x: number): number\n        return x+1\nend\nreturn f\n";
+    write(&file, messy);
+    let h = Htl::new().unwrap();
+    for indent in [2, 3] {
+        assert_eq!(
+            h.format_text(messy, &file, indent).unwrap(),
+            h.format_file(&file, indent).unwrap()
+        );
+    }
+    // Text that is not what the file holds is what is formatted.
+    let other = "local function g()\n  return 1\nend\nreturn g\n";
+    assert_eq!(
+        h.format_text(other, &file, 3).unwrap(),
+        "local function g()\n   return 1\nend\nreturn g\n"
+    );
+    assert!(h.format_text("local x = = 1", &file, 3).is_err());
 }
