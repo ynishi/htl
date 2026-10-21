@@ -727,6 +727,7 @@ impl CheckInfoJson {
             markers: marker_sites_from_json(&self.markers),
             record_sites: record_sites_from_json(&self.record_sites),
             closure_requires: closure_requires_from_json(&self.closure_requires),
+            types: Default::default(),
         }
     }
 }

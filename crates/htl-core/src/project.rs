@@ -830,6 +830,10 @@ pub enum Fresh {
     /// For a caller that outlives an edit — `htl lsp`, which checks the same files again
     /// after every save.
     Disk,
+    /// [`Fresh::Disk`] that also keeps the file's [`types`](CheckInfo::types)
+    /// ([`Htl::check_indexed`]): for `htl lsp`, which answers hover and go-to-definition
+    /// from the check it made of the file.
+    DiskIndexed,
 }
 
 /// Check one file and say to `sink` everything it reports ([`file_findings`]), under the
@@ -857,6 +861,7 @@ pub fn check_file<O: Output>(
         let c = match fresh {
             Fresh::Stored => h.check(f)?,
             Fresh::Disk => h.check_written(f)?,
+            Fresh::DiskIndexed => h.check_indexed(f)?,
         };
         let lints_said = file_findings(h, sink, f, &c, w)?;
         Ok((c, lints_said))

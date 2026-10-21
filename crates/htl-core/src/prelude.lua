@@ -2804,8 +2804,62 @@ local function require_closure(filename, result, env)
    return files, edges
 end
 
+-- The file's type report as `CheckInfo::types` (`typeindex.rs`) reads it, for an editor's
+-- hover and go-to-definition: what tl knows of each position, copied out of the checker's
+-- tables so that nothing of the checker has to outlive the check.
+--
+--   at     y, x, type id, ... -- one triple per `by_pos` entry, in no order (Rust sorts)
+--   types  { id, str, file, y, x, tfile, ty, tx, fn } -- each type id `at` or a symbol names, once.
+--          `file`/`y`/`x` are the type's own position (where the function is declared; for a
+--          nominal type, where the name was written), `tfile`/`ty`/`tx` where its `ref`
+--          chain ends (the record a name stands for)
+--   syms   y, x, link, ... and names -- `symbols_by_file`, flattened. `link` is a type id
+--          for a symbol, and for the `@{` / `@}` scope marks the index of the other end
+--          (`tl.symbols_in_scope` is the reader of this shape)
+--
+-- nil when the report has nothing for the file (a file that did not parse).
+local function type_index(result, filename)
+   local ok, report = pcall(tl.get_types, result)
+   if not ok or type(report) ~= "table" then return nil end
+   local by_pos = report.by_pos and report.by_pos[filename]
+   if not by_pos then return nil end
+   local rows, seen = {}, {}
+   local function use(id)
+      if seen[id] then return end
+      seen[id] = true
+      local ti = report.types[id]
+      if not ti then return end
+      local row = { id = id, str = ti.str, file = ti.file, y = ti.y, x = ti.x, fn = ti.args ~= nil }
+      local last, depth = ti, 0
+      while last.ref and depth < 8 do
+         local nxt = report.types[last.ref]
+         if not nxt then break end
+         last, depth = nxt, depth + 1
+      end
+      if last ~= ti then row.tfile, row.ty, row.tx = last.file, last.y, last.x end
+      rows[#rows + 1] = row
+   end
+   local at, n = {}, 0
+   for y, line in pairs(by_pos) do
+      for x, id in pairs(line) do
+         at[n + 1], at[n + 2], at[n + 3] = y, x, id
+         n = n + 3
+         use(id)
+      end
+   end
+   local syms, names, m = {}, {}, 0
+   for i, s in ipairs(report.symbols_by_file and report.symbols_by_file[filename] or {}) do
+      syms[m + 1], syms[m + 2], syms[m + 3] = s[1], s[2], s[4]
+      m = m + 3
+      names[i] = s[3]
+      if s[3] ~= "@{" and s[3] ~= "@}" then use(s[4]) end
+   end
+   return { file = filename, at = at, types = rows, syms = syms, names = names }
+end
+
 -- opts.lints = false skips the lint pass (runtime `require` of an already type-checked
 -- module: nobody reads lints there, and the pass costs more than the check itself).
+-- opts.index = true keeps the file's type report in the result (`type_index`).
 -- opts.seed = false checks with a cold env (no store): what is on disk right now, rather
 -- than what the store remembers. A caller that just wrote the file has to ask this way —
 -- tl.check_file returns early when the env already has the file loaded, which a seed puts
@@ -2915,11 +2969,17 @@ function H.check(filename, env, opts)
          end
       end
    end
+   local types
+   if opts.index then
+      t0 = os.clock()
+      types = type_index(result, filename)
+      prof("type_index", filename, t0)
+   end
    return { ok = #errors == 0, errors = errors, error_fixes = error_fixes, warnings = warnings, deps = deps,
       lints = lints, lint_fixes = lint_fixes, requires = requires, dependency_errors = dep_errors,
       error_items = error_items, warning_items = warning_items, lint_items = lint_items,
       global_sites = global_sites, closure_requires = closure_requires, markers = markers,
-      record_sites = record_sites_found,
+      record_sites = record_sites_found, type_index = types,
       syntax_errors = #(result.syntax_errors or {}), result = result, src = src }
 end
 
@@ -2929,6 +2989,12 @@ end
 -- `H.set_deps`).
 function H.check_written(filename)
    return H.check(filename, nil, { seed = false, store = false })
+end
+
+-- `H.check_written` that also keeps the file's type report (`type_index`, above): the check
+-- `Htl::check_indexed` is.
+function H.check_indexed(filename)
+   return H.check(filename, nil, { seed = false, store = false, index = true })
 end
 
 -- A file that checked but did not generate: the one error it has is that, in both forms a
