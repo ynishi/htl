@@ -372,3 +372,108 @@ Record M 1:1..6:4 @1:14 \n\
 \x20 Function extra 16:1..18:4 @16:12 function(): integer\n";
     assert_eq!(got, want, "\n{got}");
 }
+
+/// [`outline`] without the type column: what a parse alone can say.
+fn shape(decls: &[htl_core::typeindex::Decl], depth: usize, out: &mut String) {
+    for d in decls {
+        let end = d.end_col.map_or("-".to_string(), |c| c.to_string());
+        out.push_str(&format!(
+            "{}{:?} {} {}:{}..{}:{} @{}:{}\n",
+            "  ".repeat(depth),
+            d.kind,
+            d.name,
+            d.line,
+            d.col,
+            d.end_line,
+            end,
+            d.name_line,
+            d.name_col
+        ));
+        shape(&d.children, depth + 1, out);
+    }
+}
+
+/// `Htl::declarations_of` reads the same tree a check keeps, without the types: the same
+/// kinds, names and positions, nothing in `detail`.
+#[test]
+fn the_declarations_of_a_parse_are_the_ones_of_a_check_without_types() {
+    let root = common::tempdir("htl-core-typeindex", "parse-only");
+    write(&root.join("m.tl"), MODULE);
+    let orphan = "local m = require(\"m\")
+
+function m.extra(): string
+   return \"x\"
+end
+
+local lit = function(): integer return 1 end
+return m
+";
+    let h = Htl::new().unwrap();
+    h.add_path(&root).unwrap();
+    for (name, text) in [
+        ("shapes.tl", SHAPES),
+        ("m.tl", MODULE),
+        ("orphan.tl", orphan),
+    ] {
+        write(&root.join(name), text);
+        let checked = h.check_indexed(&root.join(name)).unwrap();
+        let mut want = String::new();
+        shape(checked.types.declarations().unwrap(), 0, &mut want);
+        let parsed = h.declarations_of(&root.join(name)).unwrap().unwrap();
+        let mut got = String::new();
+        shape(&parsed, 0, &mut got);
+        assert_eq!(got, want, "{name}");
+        assert!(!got.is_empty());
+        fn no_types(ds: &[htl_core::typeindex::Decl]) -> bool {
+            ds.iter()
+                .all(|d| d.detail.is_none() && no_types(&d.children))
+        }
+        assert!(no_types(&parsed), "{name}");
+    }
+}
+
+/// The one kind a type decides: a variable that holds a function without writing one
+/// (`local up = m.hello`) is a variable until the checker says what it holds.
+#[test]
+fn a_variable_holding_a_function_by_name_is_a_function_only_once_checked() {
+    let root = common::tempdir("htl-core-typeindex", "var-fn");
+    write(&root.join("m.tl"), MODULE);
+    let user = "local m = require(\"m\")\nlocal up = m.hello\nreturn up\n";
+    write(&root.join("user.tl"), user);
+    let h = Htl::new().unwrap();
+    h.add_path(&root).unwrap();
+    let parsed = h.declarations_of(&root.join("user.tl")).unwrap().unwrap();
+    assert_eq!(parsed[1].kind, htl_core::typeindex::DeclKind::Local);
+    let checked = h.check_indexed(&root.join("user.tl")).unwrap();
+    let kind = checked.types.declarations().unwrap()[1].kind;
+    assert_eq!(kind, htl_core::typeindex::DeclKind::Function);
+}
+
+/// A type error is not looked for; a syntax error leaves no tree; a file that declares
+/// nothing has an empty one; a file that is not there has none.
+#[test]
+fn declarations_of_ignore_type_errors_and_stop_at_syntax_errors() {
+    let root = common::tempdir("htl-core-typeindex", "parse-errors");
+    let h = Htl::new().unwrap();
+    h.add_path(&root).unwrap();
+    let typed_wrong = "local function f(x: integer): string
+   return x
+end
+local n: integer = \"not a number\"
+";
+    write(&root.join("wrong.tl"), typed_wrong);
+    assert!(!h.check_written(&root.join("wrong.tl")).unwrap().ok());
+    let got = h.declarations_of(&root.join("wrong.tl")).unwrap().unwrap();
+    let names: Vec<_> = got.iter().map(|d| d.name.as_str()).collect();
+    assert_eq!(names, ["f", "n"]);
+    write(&root.join("bad.tl"), "local x = (\n");
+    assert!(h.declarations_of(&root.join("bad.tl")).unwrap().is_none());
+    write(&root.join("empty.tl"), "print(1)\n");
+    assert_eq!(
+        h.declarations_of(&root.join("empty.tl"))
+            .unwrap()
+            .map(|d| d.len()),
+        Some(0)
+    );
+    assert!(h.declarations_of(&root.join("gone.tl")).unwrap().is_none());
+}

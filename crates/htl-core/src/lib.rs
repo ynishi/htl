@@ -2073,6 +2073,30 @@ impl Htl {
         read_checkinfo(&t)
     }
 
+    /// What a file declares, from its syntax alone: the tree [`typeindex::TypeIndex::declarations`]
+    /// holds, without checking the file.
+    ///
+    /// For a caller that lists the declarations of many files and has no use for their
+    /// types, which is the project-wide symbol search of `htl lsp`: a check type-checks the
+    /// file and what it requires, and this parses the file and walks its top-level
+    /// statements, so a project of hundreds of files is read in the time of a few checks.
+    /// The structure, the kinds and the positions are the same as a check's
+    /// ([`typeindex`] says what is in them and what is approximate); what is missing is the
+    /// type strings, so every [`typeindex::Decl::detail`] is `None`. A record function whose
+    /// record a `require` brought in stands at the top level as `R.f`, as it does after a
+    /// check.
+    ///
+    /// `Ok(None)` when the file cannot be read or has a syntax error: the tree of a file
+    /// that does not parse is not its declarations, and it is not the same answer as
+    /// `Ok(Some)` of an empty list, a file that declares nothing. A type error does not
+    /// matter, since nothing is type-checked. `[lang] async` is honoured: the file is read
+    /// as the checker would read it.
+    pub fn declarations_of(&self, file: &Path) -> Result<Option<Vec<typeindex::Decl>>> {
+        let f: Function = self.h.get("declarations_of")?;
+        let rows: Option<Table> = f.call(path_str(file))?;
+        rows.map(|rows| typeindex::read_decls(&rows)).transpose()
+    }
+
     /// Type-check and generate Lua source. `None` code means errors (see `CheckInfo`).
     ///
     /// The code is a whole file: it ends with exactly one newline, whether or not the `.tl`
