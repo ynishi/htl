@@ -97,7 +97,7 @@
 //!
 //! Every request is answered about the files as the messages before it left them: a
 //! request is preceded by the checks those messages made stale, as a `shutdown` is. (That
-//! is true of the four requests below; any other is refused as unknown.)
+//! is true of the requests below; any other is refused as unknown.)
 //!
 //! Every edit is one `TextEdit` over the span in which the buffer and the new text differ
 //! (the text they share at both ends is left out, so the cursor, folds and marks outside it
@@ -214,6 +214,86 @@
 //! and declares nothing gets. An open file whose check found type errors still has its
 //! outline, as it still has hover.
 //!
+//! # Workspace symbols
+//!
+//! The workspace-symbol request searches the declarations of the whole
+//! project by name, so a client finds `greet` without knowing which file declares it. The
+//! answer is a flat list of `SymbolInformation`: the name (`R.f` for a record function whose
+//! record is declared in another file), the kind (the outline's), the file and the range of
+//! the name, and as `containerName` the record a field or a function is declared on.
+//!
+//! **What is indexed.** The `.tl` files `htl check <root>` walks for the project: the
+//! project's own sources, its tests and the modules it patches, not an installed or vendored
+//! dependency, and no file that no module of the project holds (the walk is
+//! [`Project::source_files`], made of the calls `htl check` makes, so the two cannot
+//! disagree). For each file, the tree of declarations the type index keeps for an open file
+//! ([`htl::typeindex::TypeIndex::declarations`]), flattened. A file that is not open has no
+//! check, and is not checked for this: [`Htl::declarations_of`] parses it and walks its
+//! top-level statements, which costs a parse of the file and nothing of what it requires
+//! (no type check, no `require` followed). What that
+//! leaves out is the type strings, which this answer has no field for, and one kind: a
+//! variable that holds a function it did not write (`local f = m.hello`) is a `Variable`
+//! until a check says it is a function. A file that does not parse has no declarations,
+//! and is not an error: its syntax error is a diagnostic of its own. A file with a type
+//! error is listed.
+//!
+//! **Which projects.** Those of the open files, so a request about a file of one project is
+//! not an answer about another; when no file is open, the projects of the workspace folders
+//! the client named at `initialize`. A directory that is no project (a file opened outside any
+//! `htl.toml`) has its open files and nothing else, for there is no walk to make. The index
+//! of a project is built at the first request that asks about it, not before, so a session
+//! that never searches pays nothing.
+//!
+//! **Kept current.** Each file's entry holds the stamp (modification time and length) of the
+//! file and a hash of the text its symbols were read from; an entry is replaced only when the
+//! text moved, so a refresh parses the files that changed and no others.
+//!
+//! - A check of an open file (open, save, or a dependency's save) puts the declarations of
+//!   that check in as the file's entry: fresher than a read of the disk, and kinds the types
+//!   decide. A file whose last check read the text now on disk gets its entry from that check
+//!   when the index is built, too.
+//! - A client that watches files (the registration was accepted) says when a `.tl` under the
+//!   project is made, changed or deleted (`**/*.tl` is in the registration). A file the
+//!   index holds is read again at the next request, or dropped if it is gone; a file it does
+//!   not hold makes the next request walk the project again. A request answered between
+//!   events reads no file, and stats only the files its hits are in: a watcher names files,
+//!   so a directory deleted or renamed is one event the glob does not match, and a hit in a
+//!   file that is gone makes the project walked again and the search made once more.
+//! - A client that does not (it never said it could, or refused) is not told, and the index
+//!   cannot know: before each answer the project is walked again and every file stamped, and a
+//!   file whose stamp moved, one that appeared and one that went are put right. That is a
+//!   directory walk and a `stat` per file on every request, however large the project, and
+//!   nothing is read or parsed that did not change: the price of an answer that is not stale.
+//!   A stamp is not proof of the text: one write can land in the same tick of the file
+//!   system's clock as the one before and leave the same length, so a file written in the
+//!   last two seconds is read and compared with the text its entry came from, however its
+//!   stamp looks (git's index treats such "racily clean" entries alike). A directory that is
+//!   no project is listed this way whether or not the client watches, since which files are
+//!   open is what lists it and no watcher says that.
+//! - A project that is dropped because a manifest changed ("Files that change the answer")
+//!   takes its index with it, and the next request builds it again. One dropped for a
+//!   declaration under `types/` or a Rust source keeps it: what a file declares is its
+//!   syntax, which neither changes.
+//!
+//! The index is of what is on disk, or what the last check read. The text of an unsaved
+//! buffer is not in it, as it is in no diagnostic.
+//!
+//! **The bound.** At most [`symbols::MAX_RESULTS`] symbols are answered (1000), because the
+//! protocol has no paging for this request. The order is by how well the name matches, the
+//! query being a case-insensitive substring: the name itself first (`greet`, `GREET`), then
+//! names that start with the query, then names that hold it; inside each by path, line and
+//! column, so the same query on the same files is the same answer. A project with more
+//! matches than the bound gets the best of them and a line on stderr says how many there
+//! were; a client that wants one of the rest narrows the query. An empty query matches
+//! everything and so lists the first thousand by path. The match is on the name as written
+//! (`f` of an `R.f`, and the whole `R.f` too).
+//!
+//! **`null`, not `[]`.** `[]` is "an index was built and nothing in it matches". `null` is
+//! "there is no index to ask": no file is open and the workspace folders are in no project,
+//! or the project cannot be loaded, or `htl check` would refuse to walk it (a flat layout
+//! without `[layout] source = "."`). The reason is on stderr. An empty answer a client reads
+//! as "there is none" is the failure this distinction is for.
+//!
 //! # Files that change the answer
 //!
 //! A file's diagnostics depend on more than the file: the project's `htl.toml` (lint levels,
@@ -228,7 +308,8 @@
 //! says it takes a dynamic registration for it, the server sends one
 //! `client/registerCapability` request after the handshake, with these globs ([`WATCHED`]):
 //! `**/htl.toml`, `**/mlua-pkg.toml`, `**/mlua-pkg.lock`, `**/types/**/*.d.tl`,
-//! `**/Cargo.toml` and `**/{src,examples,tests,benches}/**/*.rs`. The last two are what
+//! `**/*.tl` (the symbol index's, see "Workspace symbols"), `**/Cargo.toml` and
+//! `**/{src,examples,tests,benches}/**/*.rs`. The last two are what
 //! `htl dts` reads ([`htl::dts::generate_crate_to`] walks those four directories under the
 //! crate's `Cargo.toml`), and nothing else is registered, so a client does not watch every
 //! `.rs` of a workspace (nor the `target/` that holds most of them). A change to a file that
@@ -270,6 +351,8 @@
 //! is built, is published again only when it is: a save of the `.tl` that declares it does not
 //! rebuild the project.
 
+mod symbols;
+
 use super::{auto_dts, load_config, warn_cargo_htl_mismatch};
 use anyhow::{Context, Result};
 use htl::Htl;
@@ -281,7 +364,7 @@ use lsp_types::notification::{
 };
 use lsp_types::request::{
     CodeActionRequest, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest,
-    RegisterCapability, Request as _, Shutdown,
+    RegisterCapability, Request as _, Shutdown, WorkspaceSymbolRequest,
 };
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
@@ -293,14 +376,16 @@ use lsp_types::{
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
     HoverProviderCapability, Location, MarkupContent, MarkupKind, NumberOrString, OneOf, Position,
     PublishDiagnosticsParams, Range, Registration, RegistrationParams, SaveOptions,
-    ServerCapabilities, SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind,
+    ServerCapabilities, SymbolInformation, TextDocumentSyncCapability, TextDocumentSyncKind,
     TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceEdit,
+    WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::str::FromStr;
+use symbols::{Entry, Stamp, SymbolIndex};
 
 /// Run the server on stdio until the client says `exit` (or goes away).
 ///
@@ -364,6 +449,7 @@ fn run_on(connection: &Connection) -> Result<ExitCode> {
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
+        workspace_symbol_provider: Some(OneOf::Left(true)),
         code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
             code_action_kinds: Some(vec![CodeActionKind::QUICKFIX, fix_all_kind()]),
             work_done_progress_options: Default::default(),
@@ -380,7 +466,7 @@ fn run_on(connection: &Connection) -> Result<ExitCode> {
             }),
         )
         .context("finishing the handshake")?;
-    Server::new(connection, dynamic_watch).run()
+    Server::new(connection, dynamic_watch, workspace_of(&params)).run()
 }
 
 /// What the server knows about a project, built when its first file is opened.
@@ -523,6 +609,57 @@ impl Project {
         self.checker.format_text(text, file, indent)
     }
 
+    /// The `.tl` files the symbol index covers: the ones `htl check` walks for the project
+    /// (`htl check <root>`: the walk of the project root, without the dependencies the model
+    /// says are not the project's own, and keeping what a module of the project holds), so the
+    /// index and the checker never disagree about which files are the project's. A project
+    /// `htl check` refuses to walk (one laid out flat without `[layout] source = "."`) is an
+    /// error here too.
+    ///
+    /// A directory that is no project has no walk to answer with: its files are the open ones
+    /// (`open`, the paths of the open files of that directory).
+    fn source_files(&self, root: &Path, open: &[PathBuf]) -> Result<Vec<PathBuf>> {
+        let Some(model) = self.model.as_ref() else {
+            return Ok(open.to_vec());
+        };
+        let paths = [root.to_path_buf()];
+        let skip = project::not_walked(Some(model), &paths, htl::model::Purpose::Check);
+        let (files, _outside) = project::held_by_modules(
+            Some(model),
+            &paths,
+            htl::collect_tl_skipping(&paths, &skip)?,
+        )?;
+        Ok(files)
+    }
+
+    /// The declarations of `path`, whose text is `text`, as flat symbols: from the last check
+    /// of the file if it is open and that check read this text, else from the parse of the
+    /// file that [`Htl::declarations_of`] makes. A file that does not parse has none.
+    fn symbols_of(
+        &self,
+        open: &[&Doc],
+        canonical: &Path,
+        path: &Path,
+        text: &str,
+    ) -> Vec<symbols::Sym> {
+        let checked = open
+            .iter()
+            .find(|d| d.canonical == canonical)
+            .and_then(|d| d.checked.as_ref())
+            .filter(|c| c.text == text);
+        if let Some(decls) = checked.and_then(|c| c.types.declarations()) {
+            return symbols::flatten(text, decls);
+        }
+        match self.checker.declarations_of(path) {
+            Ok(Some(decls)) => symbols::flatten(text, &decls),
+            Ok(None) => Vec::new(),
+            Err(e) => {
+                eprintln!("htl lsp: no symbols for {}: {e:#}", path.display());
+                Vec::new()
+            }
+        }
+    }
+
     /// `file` as `htl fix <file>` would leave it, or `None` when it would not change it.
     ///
     /// A dry run of [`htl::fix::fix_file`] (which checks, applies, re-checks and reverts what
@@ -662,17 +799,30 @@ struct Server<'c> {
     shutting_down: bool,
     /// Whether the client takes a `client/registerCapability` for file watchers.
     dynamic_watch: bool,
+    /// Whether the client took the registration: only then are the `didChangeWatchedFiles`
+    /// notifications taken to say every change to a `.tl` (module doc, "Workspace symbols").
+    watching: bool,
+    /// The folders the client opened the workspace on, for a symbol search made before any
+    /// file is open.
+    workspace: Vec<PathBuf>,
+    /// The symbols of each project a workspace-symbol request has asked about, by project
+    /// root. A project dropped because a manifest moved takes its index with it; one dropped
+    /// for a declaration or a Rust source keeps it (what a file declares does not depend on
+    /// either), and is loaded again by the next request.
+    indices: HashMap<PathBuf, SymbolIndex>,
 }
 
 /// The id of the one request the server sends, so that its response is known when it comes.
 const REGISTER_ID: &str = "htl-watched-files";
 
 /// What the client is asked to watch (module doc, "Files that change the answer").
-const WATCHED: [&str; 6] = [
+const WATCHED: [&str; 7] = [
     "**/htl.toml",
     "**/mlua-pkg.toml",
     "**/mlua-pkg.lock",
     "**/types/**/*.d.tl",
+    // The sources whose declarations the workspace-symbol request lists.
+    "**/*.tl",
     // What `htl dts` reads to write declarations: a crate's manifest and the Rust under the
     // four directories it walks ([`htl::dts::generate_crate_to`]), nowhere else.
     "**/Cargo.toml",
@@ -680,13 +830,16 @@ const WATCHED: [&str; 6] = [
 ];
 
 impl<'c> Server<'c> {
-    fn new(connection: &'c Connection, dynamic_watch: bool) -> Self {
+    fn new(connection: &'c Connection, dynamic_watch: bool, workspace: Vec<PathBuf>) -> Self {
         Self {
             connection,
             projects: HashMap::new(),
             open: HashMap::new(),
             shutting_down: false,
             dynamic_watch,
+            watching: false,
+            workspace,
+            indices: HashMap::new(),
         }
     }
 
@@ -775,6 +928,7 @@ impl<'c> Server<'c> {
                     HoverRequest::METHOD,
                     GotoDefinition::METHOD,
                     DocumentSymbolRequest::METHOD,
+                    WorkspaceSymbolRequest::METHOD,
                 ]
                 .contains(&req.method.as_str())
                 {
@@ -795,14 +949,15 @@ impl<'c> Server<'c> {
             // The only request the server sends is the watcher registration. A client that
             // refuses it still gets the fallback (module doc); the refusal is said.
             Message::Response(r) => {
-                if r.id == RequestId::from(REGISTER_ID.to_string())
-                    && let Err(e) = r.response_result
-                {
-                    eprintln!(
-                        "htl lsp: the client refused to watch files ({}): {}; the manifests \
-                         are compared at each check instead",
-                        e.code, e.message
-                    );
+                if r.id == RequestId::from(REGISTER_ID.to_string()) {
+                    match r.response_result {
+                        Ok(_) => self.watching = true,
+                        Err(e) => eprintln!(
+                            "htl lsp: the client refused to watch files ({}): {}; the manifests \
+                             are compared at each check instead",
+                            e.code, e.message
+                        ),
+                    }
                 }
             }
         }
@@ -932,6 +1087,8 @@ impl<'c> Server<'c> {
     /// batch. Which projects and which files each kind of change reaches is [`Watched`].
     fn watched(&mut self, paths: &[PathBuf], stale: &mut Stale) {
         let mut gone: Vec<PathBuf> = Vec::new();
+        // The projects a manifest drops: the only ones whose symbol index goes with them.
+        let mut gone_manifest: Vec<PathBuf> = Vec::new();
         let mut manifest_dirs: Vec<PathBuf> = Vec::new();
         let mut hit: Vec<Uri> = Vec::new();
         // Where each open document's crate is, asked once per document for the batch.
@@ -947,6 +1104,15 @@ impl<'c> Server<'c> {
                 .clone()
         };
         for path in paths {
+            // A `.tl` is the symbol index's, and nothing else's: its check is the save's.
+            if is_tl(path) {
+                let path = canonical_dir_of(path);
+                for (root, index) in &mut self.indices {
+                    if path.starts_with(canonical_key(root)) {
+                        index.event(&path);
+                    }
+                }
+            }
             let Some(kind) = Watched::of(path) else {
                 continue;
             };
@@ -983,6 +1149,9 @@ impl<'c> Server<'c> {
                         .is_some_and(|c| Watched::reads_rust(&path, c)),
                 };
                 if reached {
+                    if kind == Watched::Manifest {
+                        gone_manifest.extend(key.clone());
+                    }
                     gone.extend(key);
                     if !hit.contains(uri) {
                         hit.push(uri.clone());
@@ -993,6 +1162,17 @@ impl<'c> Server<'c> {
         self.projects.retain(|k, _| {
             let ck = canonical_key(k);
             !gone.contains(k)
+                && !manifest_dirs
+                    .iter()
+                    .any(|d| ck.starts_with(d) || d.starts_with(&ck))
+        });
+        // A declaration under `types/` or a Rust source changes what a check says, not what a
+        // file declares or which files the walk visits: the index is kept, and the project
+        // is loaded again by the next request that asks it. A manifest decides the walk and
+        // `[lang]`, so the index of a project it reaches goes with the project.
+        self.indices.retain(|k, _| {
+            let ck = canonical_key(k);
+            !gone_manifest.contains(k)
                 && !manifest_dirs
                     .iter()
                     .any(|d| ck.starts_with(d) || d.starts_with(&ck))
@@ -1052,6 +1232,7 @@ impl<'c> Server<'c> {
         }
         for k in &moved {
             self.projects.remove(k);
+            self.indices.remove(k);
         }
         let mut files: Vec<Uri> = self
             .open
@@ -1097,6 +1278,7 @@ impl<'c> Server<'c> {
         // check runs then leaves the disk unlike `text`, and the check's fixes are dropped,
         // where a text read only after would match the disk and hand out the old text's
         // fixes.
+        let stamp = Stamp::of(&path);
         let text = read_lossy(&path);
         let outcome = self.project(&key, &path).and_then(|p| {
             let done = p.check(&path, &open)?;
@@ -1147,6 +1329,19 @@ impl<'c> Server<'c> {
             types = htl::typeindex::TypeIndex::default();
         }
         let diagnostics = findings.iter().map(|f| f.lsp.clone()).collect();
+        // The symbol index, if the project has one, takes this check's declarations for the
+        // file: fresher than a read of the disk, and kinds the types decide (module doc,
+        // "Workspace symbols").
+        if let Some(index) = self.indices.get_mut(&key)
+            && let Some(stamp) = stamp
+            && let Some(decls) = types.declarations()
+        {
+            let syms = symbols::flatten(&text, decls);
+            index.put(
+                &canonical(&path),
+                Entry::new(path.clone(), stamp, &text, syms),
+            );
+        }
         if let Some(doc) = self.open.get_mut(uri) {
             doc.deps = deps.iter().map(|d| canonical(d)).collect();
             doc.checked = Some(Checked {
@@ -1160,8 +1355,8 @@ impl<'c> Server<'c> {
         self.publish(uri.clone(), diagnostics);
     }
 
-    /// Answer `textDocument/formatting`, `codeAction`, `hover`, `definition` or
-    /// `documentSymbol`.
+    /// Answer `textDocument/formatting`, `codeAction`, `hover`, `definition`,
+    /// `documentSymbol` or the workspace-symbol request.
     fn document_request(&mut self, req: lsp_server::Request) -> Response {
         let id = req.id.clone();
         let bad = |e: serde_json::Error| {
@@ -1203,6 +1398,12 @@ impl<'c> Server<'c> {
                     Ok(p) => {
                         Response::new_ok(id.clone(), self.document_symbols(&p.text_document.uri))
                     }
+                    Err(e) => bad(e),
+                }
+            }
+            WorkspaceSymbolRequest::METHOD => {
+                match serde_json::from_value::<WorkspaceSymbolParams>(params) {
+                    Ok(p) => Response::new_ok(id.clone(), self.workspace_symbols(&p.query)),
                     Err(e) => bad(e),
                 }
             }
@@ -1280,6 +1481,165 @@ impl<'c> Server<'c> {
         Some(DocumentSymbolResponse::Nested(
             decls.iter().map(|d| symbol_of(&lines, d)).collect(),
         ))
+    }
+
+    /// The declarations of the project's files whose name has `query` in it, as the answer to
+    /// a workspace-symbol request. The projects asked are those of the open files, else those
+    /// of the workspace folders. `null` when no project's index could be made (none to ask, or
+    /// the one there is cannot be loaded or walked: the reason is on stderr); `[]` when an
+    /// index was made and nothing in it matches.
+    fn workspace_symbols(&mut self, query: &str) -> Option<WorkspaceSymbolResponse> {
+        let mut docs: Vec<(&Uri, &Doc)> = self.open.iter().collect();
+        docs.sort_by(|a, b| a.0.cmp(b.0));
+        let mut asked: Vec<(PathBuf, PathBuf)> = Vec::new();
+        for (_, d) in docs {
+            let key = d
+                .project
+                .clone()
+                .or_else(|| project_key(&d.path).ok())
+                .unwrap_or_else(|| htl::parent_dir(&d.path));
+            if !asked.iter().any(|(k, _)| *k == key) {
+                asked.push((key, d.path.clone()));
+            }
+        }
+        if asked.is_empty() {
+            for dir in &self.workspace {
+                match htl::model::Project::find_root(dir) {
+                    Ok(Some(found)) => {
+                        if !asked.iter().any(|(k, _)| *k == found.root) {
+                            asked.push((found.root, dir.clone()));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => eprintln!("htl lsp: no symbols for {}: {e:#}", dir.display()),
+                }
+            }
+            if asked.is_empty() {
+                eprintln!(
+                    "htl lsp: no symbols to search: no file is open and no workspace folder \
+                     is in a project"
+                );
+                return None;
+            }
+        }
+        // A project whose manifests moved is built again, and its open files are checked
+        // against it, before it is asked (as before a formatting request).
+        for other in self.drop_moved(asked.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>()) {
+            self.check_one(&other);
+        }
+        let mut built: Vec<&PathBuf> = Vec::new();
+        for (key, file) in &asked {
+            match self.refresh_symbols(key, file) {
+                Ok(()) => built.push(key),
+                Err(e) => eprintln!("htl lsp: no symbols for {}: {e:#}", key.display()),
+            }
+        }
+        if built.is_empty() {
+            return None;
+        }
+        // A watcher names files, not the directories they were in: a directory deleted or
+        // renamed is one event for the directory, which `**/*.tl` does not match, and its
+        // files would stay in the index. A hit on a file that is gone says so; the indices
+        // that hold it walk their project again, and the search is made once more.
+        let mut out = self.symbol_answer(&built, query);
+        if !out.1.is_empty() {
+            let mut again: Vec<&PathBuf> = Vec::new();
+            for key in &built {
+                if let Some(index) = self.indices.get_mut(*key)
+                    && index.entries().any(|e| out.1.contains(&e.path))
+                {
+                    index.relist();
+                    again.push(*key);
+                }
+            }
+            for key in again {
+                let file = &asked.iter().find(|(k, _)| k == key).expect("asked").1;
+                if let Err(e) = self.refresh_symbols(key, file) {
+                    eprintln!("htl lsp: no symbols for {}: {e:#}", key.display());
+                }
+            }
+            out = self.symbol_answer(&built, query);
+        }
+        Some(WorkspaceSymbolResponse::Flat(out.0))
+    }
+
+    /// The search of a workspace-symbol request over the indices of `built`, and the files
+    /// among its hits that are no longer there (left out of the answer).
+    fn symbol_answer(
+        &self,
+        built: &[&PathBuf],
+        query: &str,
+    ) -> (Vec<SymbolInformation>, Vec<PathBuf>) {
+        let (hits, total) = symbols::search(
+            built
+                .iter()
+                .filter_map(|k| self.indices.get(*k))
+                .flat_map(SymbolIndex::entries),
+            query,
+        );
+        if total > hits.len() {
+            eprintln!(
+                "htl lsp: {total} symbols match {query:?}; the first {} are answered",
+                hits.len()
+            );
+        }
+        let mut gone: Vec<PathBuf> = Vec::new();
+        let mut uri: Option<(&Path, Option<Uri>)> = None;
+        let mut out = Vec::with_capacity(hits.len());
+        for h in hits {
+            if uri.as_ref().is_none_or(|(p, _)| *p != h.path) {
+                let target = if h.path.is_file() {
+                    std::path::absolute(h.path).ok().and_then(|p| uri_of(&p))
+                } else {
+                    if !gone.iter().any(|g| g == h.path) {
+                        gone.push(h.path.to_path_buf());
+                    }
+                    None
+                };
+                uri = Some((h.path, target));
+            }
+            let Some((_, Some(target))) = &uri else {
+                continue;
+            };
+            #[allow(deprecated)]
+            out.push(SymbolInformation {
+                name: h.sym.name.clone(),
+                kind: h.sym.kind,
+                tags: None,
+                deprecated: None,
+                location: Location {
+                    uri: target.clone(),
+                    range: h.sym.range,
+                },
+                container_name: h.sym.container.clone(),
+            });
+        }
+        (out, gone)
+    }
+
+    /// Bring the symbol index of the project under `key` up to date, making it (and loading
+    /// the project, from `file`) if the session has not met it.
+    fn refresh_symbols(&mut self, key: &Path, file: &Path) -> Result<()> {
+        self.project(key, file)?;
+        let mut index = self.indices.remove(key).unwrap_or_default();
+        let project = &self.projects[key];
+        let open: Vec<&Doc> = self.open.values().collect();
+        // The files of a directory that is no project: the open ones.
+        let own: Vec<PathBuf> = open
+            .iter()
+            .filter(|d| d.project.as_deref() == Some(key) || htl::parent_dir(&d.path) == key)
+            .map(|d| d.path.clone())
+            .collect();
+        // A directory that is no project is listed by its open files, which no watcher
+        // reports: it is listed again each time (that costs a `stat` per open file).
+        let sweep = !self.watching || project.model.is_none();
+        let result = index.refresh(
+            sweep,
+            || project.source_files(key, &own),
+            &mut |canonical, path, text| project.symbols_of(&open, canonical, path, text),
+        );
+        self.indices.insert(key.to_path_buf(), index);
+        result
     }
 
     /// The edits that make the buffer what `htl fmt` writes for it: `[]` when it already is,
@@ -1609,6 +1969,38 @@ fn params<P: serde::de::DeserializeOwned>(n: Notification) -> Option<P> {
     }
 }
 
+/// Whether `path` names a Teal source (`m.tl`, not the declaration file `m.d.tl`).
+fn is_tl(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.ends_with(".tl") && !n.ends_with(".d.tl"))
+}
+
+/// The folders a client opened the workspace on: `workspaceFolders`, else `rootUri`, else
+/// `rootPath`, in the `initialize` parameters.
+fn workspace_of(params: &serde_json::Value) -> Vec<PathBuf> {
+    let uri_path = |v: &serde_json::Value| {
+        v.as_str()
+            .and_then(|u| Uri::from_str(u).ok())
+            .and_then(|u| path_of(&u))
+    };
+    let folders: Vec<PathBuf> = params
+        .get("workspaceFolders")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| a.iter().filter_map(|f| uri_path(&f["uri"])).collect())
+        .unwrap_or_default();
+    if !folders.is_empty() {
+        return folders;
+    }
+    if let Some(root) = uri_path(&params["rootUri"]) {
+        return vec![root];
+    }
+    params["rootPath"]
+        .as_str()
+        .map(|p| vec![PathBuf::from(p)])
+        .unwrap_or_default()
+}
+
 /// The file a `file:` URI names, percent-decoded. `None` for any other scheme.
 fn path_of(uri: &Uri) -> Option<PathBuf> {
     url::Url::parse(uri.as_str()).ok()?.to_file_path().ok()
@@ -1875,7 +2267,6 @@ fn clamped<'a>(lines: &[&'a str], line: usize, col: usize) -> (usize, &'a str, u
 /// far as the index knows it ([`htl::typeindex`], "Declarations"; an unknown end is the end of
 /// the line) and `selectionRange` is the name, which `range` is made to contain.
 fn symbol_of(lines: &[&str], d: &htl::typeindex::Decl) -> DocumentSymbol {
-    use htl::typeindex::DeclKind;
     let start = position_at(lines, d.line, d.col);
     let end = position_at(lines, d.end_line, d.end_col.unwrap_or(usize::MAX));
     let name_start = position_at(lines, d.name_line, d.name_col);
@@ -1889,16 +2280,7 @@ fn symbol_of(lines: &[&str], d: &htl::typeindex::Decl) -> DocumentSymbol {
     DocumentSymbol {
         name: d.name.clone(),
         detail: d.detail.clone(),
-        kind: match d.kind {
-            DeclKind::Local => SymbolKind::VARIABLE,
-            DeclKind::Function => SymbolKind::FUNCTION,
-            DeclKind::Method => SymbolKind::METHOD,
-            DeclKind::Field => SymbolKind::FIELD,
-            DeclKind::Record => SymbolKind::STRUCT,
-            DeclKind::Interface => SymbolKind::INTERFACE,
-            DeclKind::Enum => SymbolKind::ENUM,
-            DeclKind::Alias => SymbolKind::TYPE_PARAMETER,
-        },
+        kind: symbols::kind_of(d.kind),
         tags: None,
         deprecated: None,
         range: Range::new(start.min(name_start), end.max(name_end)),

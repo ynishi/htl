@@ -2825,6 +2825,11 @@ end
 local DECL_SKIP = { if_parent = true, type = true, newtype = true, decltuple = true, expected = true }
 
 local function decl_index(result, filename, src, report, reporter, sym_type)
+   -- `report` / `reporter` / `sym_type` nil: the declarations of a file that was parsed and
+   -- not checked (`H.declarations_of`). The structure and the positions are the parser's,
+   -- so they are the same; no type string is known, and every `detail` is nil.
+   report = report or { types = {}, by_pos = {} }
+   sym_type = sym_type or {}
    local ast = result.ast
    if type(ast) ~= "table" then return nil end
    if not src then
@@ -2841,7 +2846,7 @@ local function decl_index(result, filename, src, report, reporter, sym_type)
    end
    -- The type string of a type object of the AST, through the reporter that numbers them.
    local function str_of(t)
-      if type(t) ~= "table" or not t.typeid then return nil end
+      if not reporter or type(t) ~= "table" or not t.typeid then return nil end
       local ok, id = pcall(reporter.get_typenum, reporter, t)
       if not ok then return nil end
       return str_of_id(id)
@@ -3081,7 +3086,8 @@ local function decl_index(result, filename, src, report, reporter, sym_type)
                if not detail and n.decltuple and n.decltuple.tuple then
                   detail, ti = str_of(n.decltuple.tuple[i])
                end
-               push({ name = v.tk, kind = (ti and ti.args ~= nil) and "function" or "local",
+               push({ name = v.tk, kind = ((ti and ti.args ~= nil) or (n.exps and n.exps[i] and n.exps[i].kind == "function"))
+                  and "function" or "local",
                   y = n.y, x = decl_start(n.y, n.x), ny = v.y, nx = v.x, ey = best.y, ex = best.x,
                   detail = detail, children = {} })
             end
@@ -3323,6 +3329,32 @@ function H.check(filename, env, opts)
       global_sites = global_sites, closure_requires = closure_requires, markers = markers,
       record_sites = record_sites_found, type_index = types,
       syntax_errors = #(result.syntax_errors or {}), result = result, src = src }
+end
+
+-- The declarations of a file from its syntax alone, as `decl_index` builds them: no type
+-- check, no `require` followed, so it costs a parse of the file and the walk over its
+-- top-level statements. `Htl::declarations_of` (`lib.rs`) is the reader. nil when the file
+-- cannot be read or does not parse (a syntax error: the tree is not the file's), which is
+-- not the same answer as an empty list, a file that declares nothing.
+--
+-- The vendored parser is called directly (`raw_parse`), not the wrapper that follows
+-- `require` names through the project's search: nothing here reads a module name, and that
+-- wrapper keeps errors for the check that comes next, which this is not.
+function H.declarations_of(filename)
+   local fd = io.open(filename, "rb")
+   if not fd then return nil end
+   local src = fd:read("a")
+   fd:close()
+   if not src then return nil end
+   local ok, ast, errs
+   if H.lang_async then
+      ok, ast, errs = pcall(async_parse, src, filename)
+   else
+      ok, ast, errs = pcall(raw_parse, src, filename)
+   end
+   if not ok or type(ast) ~= "table" or (errs and #errs > 0) then return nil end
+   local dok, decls = pcall(decl_index, { ast = ast }, filename, src)
+   return dok and decls or nil
 end
 
 -- `H.check` of what is on disk right now: a fresh env, nothing seeded, nothing stored --

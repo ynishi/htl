@@ -105,6 +105,13 @@
 //! The tree is `None` — not an empty one — when the checker kept no tree for the file: it did
 //! not parse. A file that parses and declares nothing has `Some` of an empty list.
 //!
+//! [`Htl::declarations_of`](crate::Htl::declarations_of) makes the same tree for a file that
+//! was not checked, from a parse alone (a project-wide symbol search lists files it has no
+//! reason to check). The kinds, names and positions are the same; no type string is known, so
+//! every [`Decl::detail`] is `None`, and the one kind a type decides — a variable that holds a
+//! function it did not write (`local f = m.hello`) — is [`DeclKind::Local`] there and
+//! [`DeclKind::Function`] after a check.
+//!
 //! # What it costs
 //!
 //! One pass over the report's positions at check time, with each distinct type copied once,
@@ -437,7 +444,7 @@ impl Decl {
 }
 
 /// The rows `decl_index` (`prelude.lua`) builds, each with its `children`.
-fn read_decls(list: &Table) -> Result<Vec<Decl>> {
+pub(crate) fn read_decls(list: &Table) -> Result<Vec<Decl>> {
     let mut out = Vec::new();
     for row in list.sequence_values::<Table>() {
         let row = row?;
