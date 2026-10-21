@@ -2828,6 +2828,9 @@ local function decl_index(result, filename, src, report, reporter, sym_type)
    -- `report` / `reporter` / `sym_type` nil: the declarations of a file that was parsed and
    -- not checked (`H.declarations_of`). The structure and the positions are the parser's,
    -- so they are the same; no type string is known, and every `detail` is nil.
+   -- Only a checked file has type objects worth reading: the rows carry `ty` / `at` /
+   -- `members` / `returned` (below) for it, and none on the parse-only path.
+   local typed = reporter ~= nil
    report = report or { types = {}, by_pos = {} }
    sym_type = sym_type or {}
    local ast = result.ast
@@ -2967,6 +2970,66 @@ local function decl_index(result, filename, src, report, reporter, sym_type)
       return "alias"
    end
 
+   -- What `TypeInfo` / `TypeExpr` (`typeindex.rs`) read: the structure of a type object, where
+   -- `detail` is its printed form. `typename` decides which field holds what (vendor/tl.lua,
+   -- `show_type_base`): `elements` of an array, `keys` and `values` of a map, `types` of a
+   -- union and a tupletable, `names` of a nominal.
+   local PRIMS = {
+      string = true, number = true, integer = true, boolean = true, any = true,
+      ["nil"] = true, thread = true, userdata = true,
+   }
+   local function place_of(t)
+      return { f = t.f, y = t.y, x = t.x }
+   end
+   local type_expr
+   type_expr = function(t, depth)
+      t = unwrap(t)
+      if type(t) ~= "table" or depth > 16 then
+         return { k = "other", text = str_of(t) or "?" }
+      end
+      local tn = t.typename
+      if PRIMS[tn] then
+         return { k = "prim", name = tn }
+      elseif tn == "array" and t.elements then
+         return { k = "array", elem = type_expr(t.elements, depth + 1) }
+      elseif tn == "map" and t.keys and t.values then
+         return { k = "map", key = type_expr(t.keys, depth + 1), value = type_expr(t.values, depth + 1) }
+      elseif (tn == "tupletable" or tn == "union") and t.types then
+         local list = {}
+         for i, m in ipairs(t.types) do list[i] = type_expr(m, depth + 1) end
+         if tn == "tupletable" then return { k = "tuple", elems = list } end
+         return { k = "union", members = list }
+      elseif tn == "function" then
+         return { k = "fn" }
+      elseif tn == "nominal" and t.names and #t.names == 1 and t.names[1] == "userdata"
+         and not (type(t.found) == "table" and t.found.f == filename) then
+         -- tl has no primitive `userdata`: the name is a global interface of its standard
+         -- library. A file that declares a type of that name is left as the nominal it is.
+         return { k = "prim", name = "userdata" }
+      elseif tn == "nominal" and t.names and not t.typevals then
+         -- `found` is set by tl's resolution of the name, and only then.
+         local row = { k = "nominal", names = { table.unpack(t.names) } }
+         if type(t.found) == "table" then row.f, row.y, row.x = t.found.f, t.found.y, t.found.x end
+         return row
+      end
+      return { k = "other", text = str_of(t) or tostring(tn) }
+   end
+   -- Both sides of `returned` with `generic` and `typedecl` taken off, so that the declaration
+   -- and `result.type` (the type of what the file returns) meet at the record itself.
+   local function bare(t)
+      while type(t) == "table" and ((t.typename == "generic" and t.t) or (t.typename == "typedecl" and t.def)) do
+         t = t.typename == "generic" and t.t or t.def
+      end
+      return t
+   end
+   local returned_def = typed and bare(result.type) or nil
+   -- `members` come unsorted: Rust sorts them, bytewise.
+   local function members_of(def)
+      local out = {}
+      for m in pairs(def.enumset or {}) do out[#out + 1] = m end
+      return out
+   end
+
    -- The record functions of the file, by the position tl keys their type at.
    local fn_at = {}
    for _, n in ipairs(ast) do
@@ -2976,6 +3039,18 @@ local function decl_index(result, filename, src, report, reporter, sym_type)
    local function by_pos_order(a, b)
       if a.ny ~= b.ny then return a.ny < b.ny end
       return a.nx < b.nx
+   end
+
+   -- What a record's header says beyond its fields, from the checker's type object and not
+   -- from the text: `is I` leaves a non-empty `interface_list` on the def, and a `where`
+   -- clause is stored as the meta field `__is`, a function type whose `macroexp` is the
+   -- clause (vendor/tl.lua, parse_record_like_type). Both are set on the row only when true.
+   local function header_flags(d, def)
+      def = unwrap(def)
+      if type(def) ~= "table" then return end
+      if type(def.interface_list) == "table" and #def.interface_list > 0 then d.interfaces = true end
+      local is = type(def.meta_fields) == "table" and def.meta_fields.__is
+      if type(is) == "table" and is.macroexp then d.where = true end
    end
 
    local fill
@@ -3000,8 +3075,19 @@ local function decl_index(result, filename, src, report, reporter, sym_type)
                   d.ey, d.ex = end_of(ft.y, ft.x)
                   if d.kind ~= "enum" then fill(inner, d.children, ft.y, d.ey) end
                   d._def = inner
+                  if typed then
+                     if d.kind == "record" then
+                        d.returned, d.at = inner == returned_def, place_of(ft)
+                        header_flags(d, inner)
+                     elseif d.kind == "enum" then
+                        d.members, d.at = members_of(inner), place_of(ft)
+                     else
+                        d.at = place_of(ft)
+                     end
+                  end
                else
                   d.detail = str_of(inner)
+                  if typed then d.ty = type_expr(inner, 0) end
                end
             else
                -- A generic function's `function<T>(..)` is the function under the `generic`.
@@ -3011,6 +3097,7 @@ local function decl_index(result, filename, src, report, reporter, sym_type)
                d.y, d.x = d.ny, d.nx
                d.detail = str_of(ft)
                d.body_fn = d.kind ~= "field"
+               if typed then d.ty = type_expr(ft, 0) end
                -- Where the type is written, which a definition below takes over (`by`, `bx`).
                d.ty_y, d.ty_x = ft.y, ft.x
             end
@@ -3050,6 +3137,7 @@ local function decl_index(result, filename, src, report, reporter, sym_type)
             if kind == "alias" then
                d.detail = str_of(unwrap(def)) or str_of(nt)
                d.ey = v.y
+               if typed then d.ty = type_expr(def, 0) end
             else
                local yend = n.value.yend
                d.ey, d.ex = yend, n.value.xend and n.value.xend + 1
@@ -3057,6 +3145,16 @@ local function decl_index(result, filename, src, report, reporter, sym_type)
                if kind ~= "enum" then fill(def, d.children, y, yend) end
                owners[v.tk] = d
                d._def = unwrap(def)
+               if typed then
+                  if kind == "record" then
+                     d.returned, d.at = d._def == returned_def, place_of(nt)
+                     header_flags(d, d._def)
+                  elseif kind == "enum" then
+                     d.members, d.at = members_of(d._def), place_of(nt)
+                  else
+                     d.at = place_of(nt)
+                  end
+               end
             end
             push(d)
          elseif v and v.tk and type(n.value) == "table" and n.value.kind and not n.value.newtype then
@@ -3137,6 +3235,8 @@ local function decl_index(result, filename, src, report, reporter, sym_type)
             end
             if slot then
                d.by, d.bx = owner.children[slot].ty_y, owner.children[slot].ty_x
+               -- The body's type is still the field's type; the definition only moves it.
+               d.ty = owner.children[slot].ty
                owner.children[slot] = d
             else
                owner.children[#owner.children + 1] = d

@@ -156,6 +156,9 @@ pub mod task;
 // mlua-batteries' or the executor's — it exists for whatever else a binary links in,
 // outside this crate's own dependency graph.
 pub mod registry;
+// The run-time shape of each record and enum a checked file declares (`htl shapes`): pure,
+// from what a check produced to the text of the files that are written.
+pub mod shapes;
 pub mod teal;
 pub mod testing;
 // What the checker knows of each position of a file, kept for an editor's hover and
