@@ -191,38 +191,90 @@
 //! undone. (Diagnostics while typing, which would let them follow the buffer, are a later
 //! step.)
 //!
+//! # Files that change the answer
+//!
+//! A file's diagnostics depend on more than the file: the project's `htl.toml` (lint levels,
+//! the resolution rules, `[fix]`, `[fmt]`), its `mlua-pkg.toml` and `mlua-pkg.lock` (which
+//! modules a `require` can reach), the declarations under `types/`, and the Rust that `htl
+//! dts` writes declarations from. A [`Project`] is built from those once, so a change to any
+//! of them has to drop it, and the open files of the project have to be checked again —
+//! without being saved, since it is not they that changed. There are two ways the server
+//! learns of it, and either alone is enough for the manifests.
+//!
+//! **The client says so** (the `didChangeWatchedFiles` notification). If the client's `initialize`
+//! says it takes a dynamic registration for it, the server sends one
+//! `client/registerCapability` request after the handshake, with these globs ([`WATCHED`]):
+//! `**/htl.toml`, `**/mlua-pkg.toml`, `**/mlua-pkg.lock`, `**/types/**/*.d.tl`,
+//! `**/Cargo.toml` and `**/{src,examples,tests,benches}/**/*.rs`. The last two are what
+//! `htl dts` reads ([`htl::dts::generate_crate_to`] walks those four directories under the
+//! crate's `Cargo.toml`), and nothing else is registered, so a client does not watch every
+//! `.rs` of a workspace (nor the `target/` that holds most of them). A change to a file that
+//! `htl dts` would not read is dropped on arrival ([`Watched::reads_rust`]), for a client that
+//! cannot narrow its globs. Which projects a file reaches:
+//!
+//! - a manifest: the projects whose root is under its directory or above it, and every open
+//!   file under that directory, which has its project looked up again (a new `htl.toml` in a
+//!   subdirectory makes a project of the files under it);
+//! - a `.d.tl` under a `types` directory: the projects it is in (the model scans `types/` when
+//!   it is built, so a declaration that appears or goes is as much a change as one that is
+//!   edited; a project whose `[layout] types` is elsewhere is reached by the fallback below
+//!   if at all);
+//! - Rust: the projects whose crate `htl dts` reads that file for. They are rebuilt, which
+//!   runs `htl dts` again, and a `.d.tl` it writes is another event and another rebuild that
+//!   writes nothing (it writes a file only when it differs), so it settles at once.
+//!
+//! The events of a batch drop projects and nothing else, so a hundred events for one project
+//! (a branch switch) are one rebuild, made by the checks the batch leads to; the open files of
+//! the project are each checked once.
+//!
+//! **The server looks** (the fallback, and what makes this work on a client that does not
+//! watch files, or refuses the registration — which is said on stderr). Before it checks
+//! the files of a project, and before it formats one, it reads the project's `htl.toml`,
+//! `mlua-pkg.toml` and `mlua-pkg.lock` and compares them with what the project was built
+//! from ([`Manifests`]); if any differs, the project is rebuilt, and every open file of it is
+//! checked, not only the one that asked. The cost is reading three small files per check (a
+//! few kilobytes, microseconds beside a check). It sees a manifest at the next open or save
+//! of any file of the project, not at the moment it is edited: a client that does not watch
+//! files has nothing to say when it changes. It does not see `types/` or Rust, which are not
+//! the project's own files at its root; a client that does not watch files has those at the
+//! next time the project is rebuilt for some other reason.
+//!
 //! # What it does not do yet
 //!
-//! A project's `htl.toml`, `mlua-pkg.toml`, `types/` and the Rust sources `htl dts` reads
-//! are read once, when the first file of the project is opened; a change there needs the
-//! server restarted until they are watched. The findings no single file carries (a require
-//! cycle, a contract no host enforces) are not reported: they need the whole walk, and the
-//! scope here is the open files and what they require.
+//! The findings no single file carries (a require cycle, a contract no host enforces) are not
+//! reported: they need the whole walk, and the scope here is the open files and what they
+//! require. A `---@contract` type, which `htl dts` publishes as a declaration when the project
+//! is built, is published again only when it is: a save of the `.tl` that declares it does not
+//! rebuild the project.
 
 use super::{auto_dts, load_config, warn_cargo_htl_mismatch};
 use anyhow::{Context, Result};
 use htl::Htl;
 use htl::project::{self, Collect, Sink};
-use lsp_server::{Connection, ErrorCode, Message, Notification, Response};
+use lsp_server::{Connection, ErrorCode, Message, Notification, RequestId, Response};
 use lsp_types::notification::{
-    Cancel, DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
-    Exit, Notification as _, PublishDiagnostics,
+    Cancel, DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument,
+    DidOpenTextDocument, DidSaveTextDocument, Exit, Notification as _, PublishDiagnostics,
 };
 use lsp_types::request::{
-    CodeActionRequest, Formatting, GotoDefinition, HoverRequest, Request as _, Shutdown,
+    CodeActionRequest, Formatting, GotoDefinition, HoverRequest, RegisterCapability, Request as _,
+    Shutdown,
 };
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
     CodeActionProviderCapability, CodeActionTriggerKind, DiagnosticRelatedInformation,
-    DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+    DiagnosticSeverity, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    DidChangeWatchedFilesRegistrationOptions, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentFormattingParams,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
-    HoverProviderCapability, Location, MarkupContent, MarkupKind, NumberOrString, OneOf, Position,
-    PublishDiagnosticsParams, Range, SaveOptions, ServerCapabilities, TextDocumentSyncCapability,
+    FileSystemWatcher, GlobPattern, GotoDefinitionParams, GotoDefinitionResponse, Hover,
+    HoverContents, HoverParams, HoverProviderCapability, Location, MarkupContent, MarkupKind,
+    NumberOrString, OneOf, Position, PublishDiagnosticsParams, Range, Registration,
+    RegistrationParams, SaveOptions, ServerCapabilities, TextDocumentSyncCapability,
     TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri,
     WorkspaceEdit,
 };
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::str::FromStr;
@@ -261,9 +313,16 @@ pub fn serve() -> Result<ExitCode> {
 /// The handshake, then the loop, over any [`Connection`]: stdio for the server, an
 /// in-memory pair for a test.
 fn run_on(connection: &Connection) -> Result<ExitCode> {
-    let (id, _params) = connection
+    let (id, params) = connection
         .initialize_start()
         .context("waiting for the client's initialize request")?;
+    // A client that can take a registration at run time says so; one that cannot is not
+    // sent a request it would answer with an error (module doc, "Files that change the
+    // answer").
+    let dynamic_watch = params
+        .pointer("/capabilities/workspace/didChangeWatchedFiles/dynamicRegistration")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
     let capabilities = ServerCapabilities {
         // Open, close and save to know when to check; the text of every change to answer
         // formatting about the buffer. A change is stored and not checked (module doc).
@@ -297,7 +356,7 @@ fn run_on(connection: &Connection) -> Result<ExitCode> {
             }),
         )
         .context("finishing the handshake")?;
-    Server::new(connection).run()
+    Server::new(connection, dynamic_watch).run()
 }
 
 /// What the server knows about a project, built when its first file is opened.
@@ -324,12 +383,68 @@ struct Project {
     /// set no fix is offered: which fixes `htl fix` would apply is not a question with an
     /// answer.
     fix_error: Option<String>,
+    /// The manifest files as they were when the rest was built from them, to tell whether
+    /// they still are (module doc, "Files that change the answer").
+    manifests: Manifests,
+}
+
+/// The files at a project's root that decide what a [`Project`] is, and a hash of each as
+/// it was read: `htl.toml` (lint levels, resolution, `[fix]`, `[fmt]`, the toolchain pin),
+/// `mlua-pkg.toml` (the dependencies and so the modules a name resolves to) and
+/// `mlua-pkg.lock` (which version of them).
+///
+/// Compared by content and not by modification time: they are a few kilobytes, reading
+/// three of them is what a check spends nothing on, and a content hash has no clock
+/// granularity to be wrong about (an edit that keeps the size and lands in the same tick of
+/// a coarse file system is still seen).
+struct Manifests {
+    seen: Vec<(PathBuf, Option<u64>)>,
+}
+
+impl Manifests {
+    /// The names, as the other crates spell them.
+    fn names() -> [&'static str; 3] {
+        [
+            htl::config::CONFIG_NAME,
+            htl::pkg::MANIFEST_NAME,
+            htl::pkg::LOCKFILE_NAME,
+        ]
+    }
+
+    fn read(root: &Path) -> Self {
+        let seen = Self::names()
+            .iter()
+            .map(|n| {
+                let p = root.join(n);
+                let h = hash_of(&p);
+                (p, h)
+            })
+            .collect();
+        Self { seen }
+    }
+
+    /// Whether any of them reads differently now (or has appeared or gone).
+    fn changed(&self) -> bool {
+        self.seen.iter().any(|(p, h)| hash_of(p) != *h)
+    }
+}
+
+/// A hash of the file's bytes; `None` when it cannot be read (no such file).
+fn hash_of(path: &Path) -> Option<u64> {
+    let bytes = std::fs::read(path).ok()?;
+    let mut h = DefaultHasher::new();
+    bytes.hash(&mut h);
+    Some(h.finish())
 }
 
 impl Project {
-    /// The project `file` belongs to, set up as `htl check` sets one up: config, then the
-    /// declarations generated from Rust, then the model, the lint scope, the checker.
-    fn load(file: &Path) -> Result<Self> {
+    /// The project `file` belongs to (`root` is its key), set up as `htl check` sets one
+    /// up: config, then the declarations generated from Rust, then the model, the lint
+    /// scope, the checker.
+    fn load(file: &Path, root: &Path) -> Result<Self> {
+        // Taken before anything is read: an edit that lands while the project loads then
+        // leaves the manifests unlike this, and the next check loads again.
+        let manifests = Manifests::read(root);
         let cfg = load_config(file)?;
         warn_cargo_htl_mismatch(file);
         // A file `htl dts` writes is an input to the check; the failure to write one is
@@ -369,6 +484,7 @@ impl Project {
             checker,
             fix,
             fix_error,
+            manifests,
         })
     }
 
@@ -520,20 +636,70 @@ struct Server<'c> {
     open: HashMap<Uri, Doc>,
     /// Set by the `shutdown` request: from then on only `exit` is answered.
     shutting_down: bool,
+    /// Whether the client takes a `client/registerCapability` for file watchers.
+    dynamic_watch: bool,
 }
 
+/// The id of the one request the server sends, so that its response is known when it comes.
+const REGISTER_ID: &str = "htl-watched-files";
+
+/// What the client is asked to watch (module doc, "Files that change the answer").
+const WATCHED: [&str; 6] = [
+    "**/htl.toml",
+    "**/mlua-pkg.toml",
+    "**/mlua-pkg.lock",
+    "**/types/**/*.d.tl",
+    // What `htl dts` reads to write declarations: a crate's manifest and the Rust under the
+    // four directories it walks ([`htl::dts::generate_crate_to`]), nowhere else.
+    "**/Cargo.toml",
+    "**/{src,examples,tests,benches}/**/*.rs",
+];
+
 impl<'c> Server<'c> {
-    fn new(connection: &'c Connection) -> Self {
+    fn new(connection: &'c Connection, dynamic_watch: bool) -> Self {
         Self {
             connection,
             projects: HashMap::new(),
             open: HashMap::new(),
             shutting_down: false,
+            dynamic_watch,
         }
+    }
+
+    /// Ask the client to tell us when the files in [`WATCHED`] change. The answer comes back
+    /// as a `Message::Response` ([`Self::apply`]).
+    fn register_watchers(&self) {
+        let options = DidChangeWatchedFilesRegistrationOptions {
+            watchers: WATCHED
+                .iter()
+                .map(|g| FileSystemWatcher {
+                    glob_pattern: GlobPattern::String((*g).to_string()),
+                    // Create, change and delete: a manifest that appears or goes changes the
+                    // answer as much as one that is edited.
+                    kind: None,
+                })
+                .collect(),
+        };
+        let params = RegistrationParams {
+            registrations: vec![Registration {
+                id: REGISTER_ID.to_string(),
+                method: DidChangeWatchedFiles::METHOD.to_string(),
+                register_options: serde_json::to_value(options).ok(),
+            }],
+        };
+        let request = lsp_server::Request::new(
+            RequestId::from(REGISTER_ID.to_string()),
+            RegisterCapability::METHOD.to_string(),
+            params,
+        );
+        self.send(request.into());
     }
 
     /// Read a batch, apply it, check what it made stale; until `exit`.
     fn run(&mut self) -> Result<ExitCode> {
+        if self.dynamic_watch {
+            self.register_watchers();
+        }
         loop {
             let Ok(first) = self.connection.receiver.recv() else {
                 eprintln!("htl lsp: the client closed the connection without `exit`");
@@ -601,8 +767,19 @@ impl<'c> Server<'c> {
                 self.send(response.into());
             }
             Message::Notification(n) => return self.notification(n, stale),
-            // The server sends no request, so there is nothing a response answers.
-            Message::Response(_) => {}
+            // The only request the server sends is the watcher registration. A client that
+            // refuses it still gets the fallback (module doc); the refusal is said.
+            Message::Response(r) => {
+                if r.id == RequestId::from(REGISTER_ID.to_string())
+                    && let Err(e) = r.response_result
+                {
+                    eprintln!(
+                        "htl lsp: the client refused to watch files ({}): {}; the manifests \
+                         are compared at each check instead",
+                        e.code, e.message
+                    );
+                }
+            }
         }
         None
     }
@@ -644,6 +821,13 @@ impl<'c> Server<'c> {
                         stale.changed.push(doc.canonical);
                         self.publish(uri, Vec::new());
                     }
+                }
+            }
+            DidChangeWatchedFiles::METHOD => {
+                if let Some(p) = params::<DidChangeWatchedFilesParams>(n) {
+                    let paths: Vec<PathBuf> =
+                        p.changes.iter().filter_map(|c| path_of(&c.uri)).collect();
+                    self.watched(&paths, stale);
                 }
             }
             // Other notifications (`initialized` was consumed by the handshake, the
@@ -715,6 +899,87 @@ impl<'c> Server<'c> {
         }
     }
 
+    /// Files the client says changed: drop the projects they belong to, so the next check
+    /// builds them again, and make the open files of those projects stale.
+    ///
+    /// Dropping is all that is done here, so any number of events for one project (a `git
+    /// checkout` touches hundreds of files) is one rebuild, at the check that follows the
+    /// batch. Which projects and which files each kind of change reaches is [`Watched`].
+    fn watched(&mut self, paths: &[PathBuf], stale: &mut Stale) {
+        let mut gone: Vec<PathBuf> = Vec::new();
+        let mut manifest_dirs: Vec<PathBuf> = Vec::new();
+        let mut hit: Vec<Uri> = Vec::new();
+        // Where each open document's crate is, asked once per document for the batch.
+        let mut crates: HashMap<PathBuf, Option<PathBuf>> = HashMap::new();
+        // A project's root and a crate's are found by walking up from a canonical
+        // directory, and a key outside any project is the file's directory as the client
+        // named it; the paths of the events are the client's. Everything is compared in
+        // canonical form, or a project under a symlinked directory is reached by nothing.
+        let mut keys: HashMap<PathBuf, PathBuf> = HashMap::new();
+        let mut canonical_key = |k: &Path| -> PathBuf {
+            keys.entry(k.to_path_buf())
+                .or_insert_with(|| canonical(k))
+                .clone()
+        };
+        for path in paths {
+            let Some(kind) = Watched::of(path) else {
+                continue;
+            };
+            let path = canonical_dir_of(path);
+            let dir = htl::parent_dir(&path);
+            if kind == Watched::Manifest {
+                manifest_dirs.push(dir.clone());
+            }
+            for (uri, doc) in &mut self.open {
+                let key = doc.project.clone();
+                let reached = match kind {
+                    // A manifest decides the project of every file under its directory,
+                    // including one that has none yet or whose project is another: the
+                    // walk up is asked again for those. A project whose root is on the
+                    // way up from the manifest (or under it) is rebuilt.
+                    Watched::Manifest => {
+                        let under = doc.canonical.starts_with(&dir) || doc.path.starts_with(&dir);
+                        if under {
+                            doc.project = None;
+                        }
+                        under
+                            || key.as_ref().is_some_and(|k| {
+                                let k = canonical_key(k);
+                                k.starts_with(&dir) || dir.starts_with(&k)
+                            })
+                    }
+                    Watched::Types => key
+                        .as_ref()
+                        .is_some_and(|k| path.starts_with(canonical_key(k))),
+                    Watched::Rust => crates
+                        .entry(doc.path.clone())
+                        .or_insert_with(|| htl::dts::find_cargo_package_root(&doc.path))
+                        .as_deref()
+                        .is_some_and(|c| Watched::reads_rust(&path, c)),
+                };
+                if reached {
+                    gone.extend(key);
+                    if !hit.contains(uri) {
+                        hit.push(uri.clone());
+                    }
+                }
+            }
+        }
+        self.projects.retain(|k, _| {
+            let ck = canonical_key(k);
+            !gone.contains(k)
+                && !manifest_dirs
+                    .iter()
+                    .any(|d| ck.starts_with(d) || d.starts_with(&ck))
+        });
+        hit.sort();
+        for uri in hit {
+            if !stale.files.contains(&uri) {
+                stale.files.push(uri);
+            }
+        }
+    }
+
     /// Check what the batch left stale, and the open files that require a file it saved,
     /// opened or closed, each once.
     fn check_all(&mut self, stale: &Stale) {
@@ -728,9 +993,49 @@ impl<'c> Server<'c> {
             .map(|(u, _)| u.clone())
             .collect();
         dependents.sort();
-        for uri in stale.files.iter().chain(&dependents) {
+        let mut files: Vec<Uri> = stale.files.iter().chain(&dependents).cloned().collect();
+        // A document whose walk up has not answered yet is asked here, so that the project
+        // its check will use is among the ones compared.
+        let keys: HashSet<PathBuf> = files
+            .iter()
+            .filter_map(|u| {
+                let d = self.open.get(u)?;
+                d.project.clone().or_else(|| project_key(&d.path).ok())
+            })
+            .collect();
+        for uri in self.drop_moved(keys) {
+            if !files.contains(&uri) {
+                files.push(uri);
+            }
+        }
+        for uri in &files {
             self.check_one(uri);
         }
+    }
+
+    /// The projects among `keys` whose manifests read differently than when they were
+    /// built (module doc, "Files that change the answer"): dropped, so that the next use
+    /// builds them again, and their open files returned in URI order, since what such a
+    /// project says changes for every open file of it and not only for the one that asked.
+    fn drop_moved(&mut self, keys: impl IntoIterator<Item = PathBuf>) -> Vec<Uri> {
+        let moved: Vec<PathBuf> = keys
+            .into_iter()
+            .filter(|k| self.projects.get(k).is_some_and(|p| p.manifests.changed()))
+            .collect();
+        if moved.is_empty() {
+            return Vec::new();
+        }
+        for k in &moved {
+            self.projects.remove(k);
+        }
+        let mut files: Vec<Uri> = self
+            .open
+            .iter()
+            .filter(|(_, d)| d.project.as_ref().is_some_and(|k| moved.contains(k)))
+            .map(|(u, _)| u.clone())
+            .collect();
+        files.sort();
+        files
     }
 
     /// Check one open document and publish what it reports.
@@ -946,6 +1251,12 @@ impl<'c> Server<'c> {
             return None;
         }
         let buffer = self.open.get(uri).and_then(|d| d.buffer.clone());
+        // A project whose manifests moved is built again for this answer; its open files
+        // are checked against the new one first, as a check of any of them would have them,
+        // or they would keep what the old one said with nothing left to notice the change.
+        for other in self.drop_moved([key.clone()]) {
+            self.check_one(&other);
+        }
         let result = (|| {
             let before = match buffer {
                 Some(text) => text,
@@ -1078,9 +1389,13 @@ impl<'c> Server<'c> {
 
     /// The project under `key`, loaded for `file` if the session has not met it yet. A
     /// project that failed to load is not remembered, so the next save tries again.
+    ///
+    /// Whether its manifests have changed is asked by the callers, before they come here
+    /// ([`Self::drop_moved`]): a project rebuilt here would leave its other open files with
+    /// what the old one said.
     fn project(&mut self, key: &Path, file: &Path) -> Result<&Project> {
         if !self.projects.contains_key(key) {
-            let loaded = Project::load(file)?;
+            let loaded = Project::load(file, key)?;
             self.projects.insert(key.to_path_buf(), loaded);
         }
         Ok(&self.projects[key])
@@ -1099,6 +1414,47 @@ impl<'c> Server<'c> {
     fn send(&self, message: Message) {
         // A closed connection is noticed by the next read.
         let _ = self.connection.sender.send(message);
+    }
+}
+
+/// What a changed file is to a project (module doc, "Files that change the answer").
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Watched {
+    /// `htl.toml`, `mlua-pkg.toml` or `mlua-pkg.lock`.
+    Manifest,
+    /// A `.d.tl` under a directory named `types`.
+    Types,
+    /// A Rust source or `Cargo.toml` (whether `htl dts` reads it is [`Self::reads_rust`]).
+    Rust,
+}
+
+impl Watched {
+    fn of(path: &Path) -> Option<Self> {
+        let name = path.file_name()?.to_str()?;
+        if Manifests::names().contains(&name) {
+            Some(Self::Manifest)
+        } else if name.ends_with(".d.tl") && path.components().any(|c| c.as_os_str() == "types") {
+            Some(Self::Types)
+        } else if name == "Cargo.toml" || name.ends_with(".rs") {
+            Some(Self::Rust)
+        } else {
+            None
+        }
+    }
+
+    /// Whether `htl dts` reads `path` for the crate at `root`: its `Cargo.toml`, or a `.rs`
+    /// under `src`, `examples`, `tests` or `benches` (the walk of
+    /// [`htl::dts::generate_crate_to`]). The `.rs` files cargo writes under `target/` are
+    /// not, which is most of the Rust events a build makes.
+    fn reads_rust(path: &Path, root: &Path) -> bool {
+        let Ok(rel) = path.strip_prefix(root) else {
+            return false;
+        };
+        let mut parts = rel.components().map(|c| c.as_os_str());
+        matches!(
+            (parts.next().and_then(|p| p.to_str()), parts.next()),
+            (Some("Cargo.toml"), None) | (Some("src" | "examples" | "tests" | "benches"), Some(_))
+        )
     }
 }
 
@@ -1227,6 +1583,16 @@ fn project_key(file: &Path) -> Result<PathBuf> {
 
 fn canonical(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// `p` in its canonical directory, with its own name kept: a file a watcher reports may be
+/// gone (a delete), and a manifest that is a symlink is still the manifest of the directory
+/// it is in, not of the one it points into.
+fn canonical_dir_of(p: &Path) -> PathBuf {
+    match (p.parent(), p.file_name()) {
+        (Some(dir), Some(name)) => canonical(dir).join(name),
+        _ => p.to_path_buf(),
+    }
 }
 
 /// The diagnostic for a check that could not be made (an `htl.toml` that does not parse,

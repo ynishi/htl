@@ -85,6 +85,7 @@ htl = "0.8"                    # embedding: engine + proc macros in one import
 | `htl types add <library> [--from dir] [--force]` | the declarations a library never shipped, from [teal-types](https://github.com/teal-language/teal-types), into `types/` with the commit they came from recorded beside each |
 | `htl cache status [path] [--entries] [--format json]` / `htl cache clear [path]` | report what the store holds, or empty it (see Caching) |
 | `htl dts [dir]` | write the `.d.tl` files this project declares: from Rust source, the ones `#[host_module]` / `#[derive(TealRecord)]` ask for, no build needed; from Teal, the module each `---@contract` type is declared in; from the crate graph, the ones a dependency ships (`[package.metadata.htl] dts`) into `types/<crate>/`. Every command that reads the project does this first (`check` / `run` / `test` / `build` / `fix` / `unused` / `adopt` / `resolve` / `gen`); exits non-zero when something it was asked to write could not be — a crate's declaration, or a `---@contract` type that cannot be published — never on a file it only [left in place](https://docs.rs/htl/latest/htl/dep_dts/index.html), and with nothing to write at all (no Cargo package above, no contract type) it is an error |
+| `htl lsp` | a language server on stdio, whose diagnostics are `htl check`'s (see Editors) |
 
 Exit code 1 is a verdict (an error in a file, a finding at `deny`, a failing test, a name
 that resolves to nothing); 2 is a command that could not reach one (a directory in no
@@ -347,6 +348,51 @@ each in a state of its own, on the executor (Async) — a test may call a host's
 as it calls any other. Matchers, snapshots, the seeded `t.rng()`, `--coverage` /
 `--lcov` / `--junit`, and the `--lib` contract for another library:
 [`htl::testing`](https://docs.rs/htl/latest/htl/testing/index.html).
+
+## Editors (`htl lsp`)
+
+`htl lsp` is a language server on stdio, and what it reports is what `htl check` reports for
+the file: the project's resolution rules, lint levels, `-- htl: allow(..)` comments and `.d.tl`
+declarations, with the same messages and lines. No extension is shipped; a client that can
+start a language server by command starts it as `htl lsp`.
+
+Neovim (0.11 or later), in `init.lua`:
+
+```lua
+vim.lsp.config('htl', {
+  cmd = { 'htl', 'lsp' },
+  filetypes = { 'teal' },
+  root_markers = { 'htl.toml', 'mlua-pkg.toml' },
+})
+vim.lsp.enable('htl')
+```
+
+Helix, in `languages.toml`:
+
+```toml
+[language-server.htl]
+command = "htl"
+args = ["lsp"]
+
+[[language]]
+name = "teal"
+scope = "source.teal"
+file-types = ["tl"]
+roots = ["htl.toml", "mlua-pkg.toml"]
+comment-token = "--"
+language-servers = ["htl"]
+```
+
+VS Code has no `htl` extension; a generic language-client extension that runs a command
+as a server can be pointed at `htl lsp` for `.tl` files.
+
+It publishes diagnostics when a file is opened or saved, formats, offers `htl fix`'s fixes
+as quick fixes and a fix-all action, and answers hover and go-to-definition. It does not yet
+check while typing, complete, rename or find references.
+
+When a file is checked, what a diagnostic becomes, which file changes re-check the open
+ones and what the server leaves to `htl check` are in `htl lsp --help` and the module doc of
+[`crates/htl-cli/src/lsp.rs`](https://github.com/ynishi/htl/blob/main/crates/htl-cli/src/lsp.rs).
 
 ## Async
 
