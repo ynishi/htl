@@ -1081,23 +1081,11 @@ fn judged(found: &htl::verdict::Findings, policy: &htl::verdict::Policy) -> Stri
     out
 }
 
-/// The lint selection `htl.toml` puts in force, applied to `h`: the rules `htl check`
-/// reports under, at the levels it judges them by. A command that checks without it
-/// reports what the project turned off and judges nothing.
 /// Hand the checker the project's `[lang]`: whether `async` / `await` are keywords in the
-/// files it is about to read. Beside [`config_lints`] on every command that parses.
+/// files it is about to read. For a command that parses without a checker of the project's
+/// ([`checker_for`] sets this itself).
 fn config_lang(h: &Htl, cfg: &project::Config) -> Result<()> {
     h.set_lang(&project::lang_of(cfg))
-}
-
-fn config_lints(h: &Htl, cfg: &project::Config) -> Result<htl::lint::Lints> {
-    let spec = cfg
-        .as_ref()
-        .map(|(_, _, c)| c.lint_spec())
-        .unwrap_or_default();
-    let lints = htl::lint::Lints::parse(&spec)?;
-    h.select_lints(lints.selection())?;
-    Ok(lints)
 }
 
 /// (Re)generate the `.d.tl` files this project declares: the ones a Rust crate's
@@ -1390,7 +1378,7 @@ fn cmd_shapes(dir: Option<&Path>) -> Result<ExitCode> {
         Some(d) => d.to_path_buf(),
         None => std::env::current_dir()?,
     };
-    let (h, cfg, model) = checker_for(&start)?;
+    let ProjectChecker { h, cfg, model, .. } = checker_for(&start, true)?;
     let Some((root, _, _)) = cfg else {
         bail!(
             "no htl.toml at or above {}: `htl shapes` writes into a project",
@@ -1599,24 +1587,6 @@ fn announce_shape(rel: &Path, g: Generated) -> bool {
         }
     }
     false
-}
-
-/// The project `start` belongs to, with `h` set up for its sources the way `htl check`
-/// sets up its checker: the model's directories on the search path, its installed
-/// dependencies made reachable. `None`, with nothing on the path, outside a project.
-///
-/// What one file may read beyond that — the test root, for a file under it; its own
-/// directory, for a file in no project — is [`project::file_view`], asked per file.
-fn apply_model(
-    h: &Htl,
-    cfg: &project::Config,
-    start: &Path,
-) -> Result<Option<htl::model::Project>> {
-    let model = project::model_of(cfg, start)?;
-    if let Some(m) = &model {
-        h.apply_model(m, htl::model::View::Source)?;
-    }
-    Ok(model)
 }
 
 /// What the run wrote, and — when a target was asked for by name — what it left alone. The
@@ -2590,18 +2560,15 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
     } else {
         paths.to_vec()
     };
-    let cfg = load_config(&paths[0])?;
-    // A dry run writes nothing, the declarations generated before the check included.
-    auto_dts_to(&paths[0], !flags.dry_run)?;
-    let model = project::model_of(&cfg, &paths[0])?;
     // What `htl check` holds a file to, resolved the same way and read by the same checker,
-    // so a file this run leaves reports what a check of it would.
-    let scope = project::Scope::new(&cfg, model.as_ref(), &paths[0], None)?;
-    let h = project::checker(
-        model.as_ref(),
-        scope.lints.selection(),
-        &project::lang_of(&cfg),
-    )?;
+    // so a file this run leaves reports what a check of it would. A dry run writes nothing,
+    // the declarations generated before the check included.
+    let ProjectChecker {
+        h,
+        cfg,
+        model,
+        scope,
+    } = checker_for(&paths[0], !flags.dry_run)?;
     let opts = FixOptions {
         unsafe_fixes: flags.unsafe_fixes,
         promoted: cfg
@@ -3262,26 +3229,11 @@ fn print_adopt(rep: &htl::adopt::Report, detail: bool) {
 /// A report, so both forms go to stdout (README, "Machine-readable output").
 fn cmd_resolve(module: &str, path: Option<&Path>, json: bool) -> Result<ExitCode> {
     let start = path.unwrap_or(Path::new("."));
-    let cfg = load_config(start)?;
     // The declarations a check generates before it reads anything are inputs to the
     // answer — `types/<crate>/` is written by `htl dts` — and a report without them would
-    // describe a project nobody checks.
-    auto_dts(start)?;
-    let h = Htl::new()?;
-    // First, so that the project's own directories go in front of it as they do under
-    // `htl run`: `add_path` prepends, and the report prints the order it searched.
-    h.install_std()?;
-    // `std.fs` / `std.proc`, registered at this binary's entry (`register_libraries`):
-    // right after `install_std`, so every install call here reads in the same order the
-    // other commands give them. Not for the reason the comment above gives `install_std`
-    // itself: a project that carries its own `types/std/fs.d.tl` is answered from there
-    // regardless of where this directory sits, because the project's model answers a
-    // name it has on its own before any directory on the path is searched at all
-    // (`htl_core::registry`'s own doc, "Which copy wins when a project has one too").
-    // Order only matters here for a name outside the model, which `add_path`'s prepend
-    // rule then decides among whatever directories claim it.
-    h.install_registered()?;
-    let model = apply_model(&h, &cfg, start)?;
+    // describe a project nobody checks; `checker_for` writes them. The search order the
+    // report prints is `project::checker`'s, the one `htl check` reads under.
+    let ProjectChecker { h, cfg, model, .. } = checker_for(start, true)?;
     let rep = htl::resolve::resolve(
         &h,
         module,
@@ -3696,34 +3648,73 @@ fn report_check(
     Ok(fail)
 }
 
-/// A checker set up the way `htl check` sets one up for the project `start` is in, and what
-/// it was set up from: the declarations the project publishes written first (`auto_dts`),
-/// the project's lint selection and `[lang]`, the model's directories on the search path
-/// and its dependencies reachable, `std.*` and the libraries this binary registers
-/// installed. The config is `None` outside a project, and so is the model when there is
-/// neither an `htl.toml` nor an `mlua-pkg.toml`.
+/// What [`checker_for`] set up, and what it set it up from.
+struct ProjectChecker {
+    /// The checker: the lint selection and `[lang]` of the project, its test library,
+    /// `std.*`, the libraries this binary registers and `htl.task`, then the model's
+    /// directories on the search path with its dependencies reachable.
+    h: Htl,
+    /// The config around the starting path; `None` outside a project.
+    cfg: project::Config,
+    /// The project model; `None` when there is neither an `htl.toml` nor an
+    /// `mlua-pkg.toml`.
+    model: Option<htl::model::Project>,
+    /// What `htl check` holds a file to: the lint selection `h` was configured from
+    /// (`scope.lints`), and the contracts and host modules a walk reads. A command
+    /// that judges what it generates asks the same `Lints` for its levels, so the
+    /// rules `h` runs and the rules the command reports under are one answer.
+    scope: project::Scope,
+}
+
+/// A checker set up for the project `start` is in, through the two library functions
+/// `htl check` goes through: [`project::Scope::new`] for the lint input, and
+/// [`project::checker`] for the checker built from it: declarations written, model
+/// loaded, scope, checker. A command that parses `.tl` and resolves requires calls this
+/// and does not assemble a checker itself, so a `require` the checker resolves for
+/// `htl check` is one `htl gen`, `htl run`, `htl build`, `htl resolve`, `htl shapes` and
+/// `htl fix` resolve too, at the same lint levels. They each used to spell the install
+/// calls out, in an order of their own, and `htl check` agreed with none of them: `htl
+/// gen` did not install `htl.task`, and found its declaration only when a check or a run
+/// had left it in the temporary directory first.
 ///
-/// What a file may read beyond that — the directory of a file that belongs to no project —
-/// is [`project::file_view`], asked per file by the command that has one. `cmd_gen` and
-/// `cmd_shapes` come through here; `cmd_run` and `cmd_build` spell the same calls out, and
-/// move here when they are next touched.
-fn checker_for(start: &Path) -> Result<(Htl, project::Config, Option<htl::model::Project>)> {
-    let h = Htl::new()?;
-    auto_dts(start)?;
+/// `write_dts` is the one difference between callers: whether the declarations the
+/// project publishes (`auto_dts`) are written before anything is read. `htl fix
+/// --dry-run` is the only caller that passes `false`; what it then checks is the
+/// declarations as they are on disk.
+///
+/// What one file may read beyond what the model gives — the test root, for a file under
+/// it; its own directory, for a file in no project — is [`project::file_view`], asked per
+/// file by the command that has one.
+///
+/// The sites that do not come through here, and why:
+/// - `cmd_fmt` only parses, and resolves no `require`, so it has no search path to set up.
+/// - `htl check` and the language server hold a [`project::Scope`] of their own across
+///   many files and call [`project::checker`] directly.
+/// - the proc macros in `htl-macros` (`include_tl!`, `include_bundle!`) check inside
+///   `rustc`, which has no `main` that called `register_installer`: see the module doc of
+///   `htl_core::registry`.
+fn checker_for(start: &Path, write_dts: bool) -> Result<ProjectChecker> {
     let cfg = load_config(start)?;
-    config_lints(&h, &cfg)?;
-    config_lang(&h, &cfg)?;
-    let model = apply_model(&h, &cfg, start)?;
-    h.install_std()?;
-    h.install_registered()?;
-    Ok((h, cfg, model))
+    auto_dts_to(start, write_dts)?;
+    let model = project::model_of(&cfg, start)?;
+    let scope = project::Scope::new(&cfg, model.as_ref(), start, None)?;
+    let h = project::checker(
+        model.as_ref(),
+        scope.lints.selection(),
+        &project::lang_of(&cfg),
+    )?;
+    Ok(ProjectChecker {
+        h,
+        cfg,
+        model,
+        scope,
+    })
 }
 
 fn cmd_gen(file: &Path, out: Option<&Path>) -> Result<ExitCode> {
     // The search path `htl check` gives this file, so `htl gen` resolves what `htl check`
-    // resolved and a file the checker accepts is one this command can emit. Same calls, in
-    // the same order, as `cmd_run` and `cmd_build`.
-    let (h, _cfg, model) = checker_for(file)?;
+    // resolved and a file the checker accepts is one this command can emit.
+    let ProjectChecker { h, model, .. } = checker_for(file, true)?;
     project::file_view(&h, model.as_ref(), file)?;
     let (code, c) = h.gen_lua(file)?;
     text_sink().checkinfo(&c);
@@ -3744,21 +3735,14 @@ fn cmd_gen(file: &Path, out: Option<&Path>) -> Result<ExitCode> {
 
 fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
     let bytes = fs::read(file).with_context(|| format!("reading {}", file.display()))?;
-    let h = Htl::new()?;
-    auto_dts(file)?;
     // The search path `htl check` gives this file, so `htl run` resolves what `htl check`
-    // resolved rather than failing on a `require` the checker was happy with. Same calls
-    // as `cmd_gen` and `cmd_build`; before the bundle branch because a bundle carries its
-    // own modules and gains nothing from it either way.
-    let cfg = load_config(file)?;
-    config_lints(&h, &cfg)?;
-    config_lang(&h, &cfg)?;
+    // resolved rather than failing on a `require` the checker was happy with. Before the
+    // bundle branch because a bundle carries its own modules and gains nothing from it
+    // either way.
+    let ProjectChecker { h, cfg, model, .. } = checker_for(file, true)?;
+    // The executor's `[async]` is not part of what a check reads; nothing starts a task
+    // before `load_bundle` / `run_root`, so setting it once the checker is up is early enough.
     h.configure_async(async_config(&cfg))?;
-    let model = apply_model(&h, &cfg, file)?;
-    h.install_test_lib()?;
-    h.install_std()?;
-    h.install_registered()?;
-    h.install_task_lib()?;
     if Bundle::is_bundle(&bytes) {
         let b = Bundle::decode(&bytes)?;
         // A bundle's frames are as good as its payload: stripped bytecode has no lines to
@@ -3902,20 +3886,19 @@ fn cmd_build(
     mut opts: htl::link::LinkOptions,
     cache_flags: BuildCache,
 ) -> Result<ExitCode> {
-    let h = Htl::new()?;
-    auto_dts(entry)?;
     // `std.*` resolves to its declaration and nothing else, so the linker files it under
     // the host's modules — which is what it is: the binary that runs the bundle preloads
     // it, as `htl run` does before `run_bundle`.
-    h.install_std()?;
-    h.install_registered()?;
-    let cfg = load_config(entry)?;
+    let ProjectChecker {
+        h,
+        cfg,
+        model,
+        scope,
+    } = checker_for(entry, true)?;
     // The rules and levels `htl check` uses: a bundle is judged as a check of its closure
     // would be, and a rule the project turned off is not reported here either.
-    let lints = config_lints(&h, &cfg)?;
-    config_lang(&h, &cfg)?;
+    let lints = scope.lints;
     let policy = htl::verdict::Policy::resolve(cfg.as_ref().map(|(_, _, c)| c), false);
-    let model = apply_model(&h, &cfg, entry)?;
     // The names the host provides are the model's — `#[host_module]`s in the crate around
     // the project, `[build] host`, `std.*` — so the bundle leaves out what the host
     // registers without anyone restating it; `--host` adds to them.
@@ -3950,7 +3933,7 @@ fn cmd_build(
             &[entry.to_path_buf()],
             htl::model::Purpose::Check,
         );
-        return cmd_build_dir(&h, entry, out, main, &opts, &skip, &cfg);
+        return cmd_build_dir(&h, entry, out, main, &opts, &skip, &lints, &policy);
     }
     project::file_view(&h, model.as_ref(), entry)?;
     // The name the entry is served under: the one the project's model gives the file,
@@ -3962,11 +3945,8 @@ fn cmd_build(
     // a build sees one closure, and only `htl check`, which sees the project, bounds the
     // store (`cache.rs`).
     let root = project::store_root(model.as_ref());
-    let spec = cfg
-        .as_ref()
-        .map(|(_, _, c)| c.lint_spec())
-        .unwrap_or_default();
-    let lint = (!spec.is_empty()).then_some(spec.as_str());
+    // `htl.toml`'s spec as the scope joined it, the one `lints` was parsed from.
+    let lint = (!scope.spec.is_empty()).then_some(scope.spec.as_str());
     let cache_opts = project::cache_options(
         cache_flags.use_cache,
         Some(cache::Mode::PerModule),
@@ -4046,6 +4026,9 @@ fn cmd_build(
 }
 
 /// The older form: every `.tl` under a directory, module names from their paths.
+// Eight because the two judgments `cmd_build` already holds are handed in rather than
+// asked for again from the config.
+#[allow(clippy::too_many_arguments)]
 fn cmd_build_dir(
     h: &Htl,
     dir: &Path,
@@ -4053,12 +4036,11 @@ fn cmd_build_dir(
     entry: &str,
     opts: &htl::link::LinkOptions,
     skip: &[PathBuf],
-    cfg: &project::Config,
+    lints: &htl::lint::Lints,
+    policy: &htl::verdict::Policy,
 ) -> Result<ExitCode> {
-    // Judged as the file form is: `htl.toml`'s rules and levels, its `strict`.
-    let lints = config_lints(h, cfg)?;
-    config_lang(h, cfg)?;
-    let policy = &htl::verdict::Policy::resolve(cfg.as_ref().map(|(_, _, c)| c), false);
+    // `lints` and `policy` are the file form's, passed in by `cmd_build`: `htl.toml`'s rules
+    // and levels, its `strict`.
     h.add_path(dir)?;
     let files = htl::collect_tl_skipping(&[dir.to_path_buf()], skip)?;
     let mut b = Bundle {
