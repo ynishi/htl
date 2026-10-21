@@ -151,8 +151,11 @@ impl TypeIndex {
                 .sequence_values::<i64>()
                 .collect::<mlua::Result<_>>()?)
         };
-        let mut at: Vec<(u32, u32, u32)> = ints("at")?
-            .chunks_exact(3)
+        let at_ints = ints("at")?;
+        let mut at: Vec<(u32, u32, u32)> = at_ints
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|c| (c[0] as u32, c[1] as u32, c[2] as u32))
             .collect();
         at.sort_unstable();
@@ -182,8 +185,11 @@ impl TypeIndex {
             .get::<Table>("names")?
             .sequence_values::<String>()
             .collect::<mlua::Result<_>>()?;
-        let symbols = ints("syms")?
-            .chunks_exact(3)
+        let sym_ints = ints("syms")?;
+        let symbols = sym_ints
+            .as_chunks::<3>()
+            .0
+            .iter()
             .zip(names)
             .map(|(c, name)| Symbol {
                 line: c[0] as u32,
