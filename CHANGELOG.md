@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/ynishi/htl/compare/v0.17.0...v0.18.0) - 2026-10-22
+
+### Added
+
+- htl check reports lshape-version when the lshape the project supplies is not the one its lshape declaration is written for, or its version cannot be read
+- lshape's declaration states the lshape it is written for on its second line, -- lshape: 0.3, and htl::shapes reads it, reads the runtime's _VERSION without running it, and gives the verdict as a lshape-version finding
+
 ## [0.17.0](https://github.com/ynishi/htl/compare/v0.16.0...v0.17.0) - 2026-10-22
 
 ### Added
