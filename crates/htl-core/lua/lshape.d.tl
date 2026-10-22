@@ -8,22 +8,26 @@
 local record lshape
    -- What a container of shapes takes: `T.shape`, `T.partial`, `T.tuple`, `T.any_of`,
    -- `T.discriminated`, `CheckOpts.registry`, `check.default_registry` and `luacats.gen` hold
-   -- shapes of different type arguments side by side, and `reflect` hands them out. Teal's generics are invariant, so a
-   -- `Schema<string>` is not a `Schema<any>` and `{string : Schema<any>}` would refuse
-   -- `{ name = T.string }`; `AnySchema` has no type argument, and every `Schema<T>` is one.
-   -- It carries the modifiers, so a holder of an `AnySchema` can still chain them.
+   -- shapes of different type arguments side by side, `T.array_of` and `T.map_of` take one
+   -- as an overload, and `reflect` hands them out. Teal's
+   -- generics are invariant, so a `Schema<string>` is not a `Schema<any>` and
+   -- `{string : Schema<any>}` would refuse `{ name = T.string }`; `AnySchema` has no type
+   -- argument, and every `Schema<T>` is one.
+   -- It carries the modifiers, so a holder of an `AnySchema` can chain them. They return
+   -- `AnySchema` and not `self`: Teal does not resolve the `self` a call returns, so a second
+   -- modifier after the first had nothing to index.
    interface AnySchema
-      is_optional: function(self): self
-      describe: function(self, doc: string): self
-      min: function(self, n: number): self
-      max: function(self, n: number): self
-      min_len: function(self, n: integer): self
-      max_len: function(self, n: integer): self
+      is_optional: function(self): AnySchema
+      describe: function(self, doc: string): AnySchema
+      min: function(self, n: number): AnySchema
+      max: function(self, n: number): AnySchema
+      min_len: function(self, n: integer): AnySchema
+      max_len: function(self, n: integer): AnySchema
    end
 
-   -- A shape. The modifiers are redeclared here to return `Schema<T>`: `AnySchema`'s `self`
-   -- resolves to a `Schema` with no type argument, and a chain through it would hand `assert`
-   -- an unresolved `T` that accepts any read. `:is_optional()` is how a generated record says
+   -- A shape. The modifiers are redeclared here to return `Schema<T>`: `AnySchema`'s return
+   -- `AnySchema` has no type argument, and a chain through it would hand `assert` an
+   -- unresolved `T` that accepts any read. `:is_optional()` is how a generated record says
    -- a field may be nil, and is read by the record, not here.
    record Schema<T> is AnySchema
       is_optional: function(self: Schema<T>): Schema<T>
@@ -48,8 +52,13 @@ local record lshape
       fn: Schema<function>
       any: Schema<any>
       shape: function<T>({string : AnySchema}, ?ShapeOpts): Schema<T>
+      -- `array_of` and `map_of` take a `Schema<E>` and hand back the container of `E`; given an
+      -- `AnySchema` (one `reflect` hands out, or a variable typed so) the element is `any`.
+      -- The generic overload comes first, so a `Schema<E>` keeps its `E`.
       array_of: function<E>(Schema<E>): Schema<{E}>
+      array_of: function(AnySchema): Schema<{any}>
       map_of: function<K, V>(Schema<K>, Schema<V>): Schema<{K : V}>
+      map_of: function(AnySchema, AnySchema): Schema<{any : any}>
       tuple: function<T>({AnySchema}): Schema<T>
       one_of: function<E>({E}): Schema<E>
       literal: function<T>(T): Schema<T>

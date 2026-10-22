@@ -1757,3 +1757,53 @@ print(p, s, f)
         );
     }
 }
+
+/// A holder of an `AnySchema` chains as many modifiers as it likes, and wraps it in
+/// `array_of` and `map_of`, as it does in every other container.
+#[test]
+fn an_any_schema_chains_modifiers_and_goes_into_array_of_and_map_of() {
+    let errors = lshape_errors(
+        "local lshape = require(\"lshape\")
+local T = lshape.t
+local A: lshape.AnySchema = T.string
+local two: lshape.AnySchema = A:describe(\"d\"):is_optional():max_len(3)
+local arr: lshape.Schema<{any}> = T.array_of(A)
+local map: lshape.Schema<{any : any}> = T.map_of(T.string, A)
+local field = lshape.reflect.fields(T.shape({ name = T.string }))[1]
+local listed: lshape.Schema<{any}> = T.array_of(field.type)
+print(two, arr, map, listed)
+",
+    );
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+/// Control: the `AnySchema` overloads of `array_of` and `map_of` do not take a call that passes
+/// a `Schema<E>`, whose element type is still inferred; and a chain on an `AnySchema` is an
+/// `AnySchema`, not `any`, so a key it does not have is an error.
+#[test]
+fn the_any_schema_overloads_leave_the_typed_ones_and_a_chain_typed() {
+    let errors = lshape_errors(
+        "local lshape = require(\"lshape\")
+local T = lshape.t
+local A: lshape.AnySchema = T.string
+local a: lshape.Schema<{integer}> = T.array_of(T.string)
+local m: lshape.Schema<{string : integer}> = T.map_of(T.string, T.string)
+local n = A:describe(\"d\"):is_optional():nope()
+print(a, m, n)
+",
+    );
+    assert_eq!(errors.len(), 3, "{errors:?}");
+    for (i, (line, want)) in [
+        (4, "got string, expected integer"),
+        (5, "got string, expected integer"),
+        (6, "invalid key 'nope'"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert!(
+            errors[i].contains(&format!("use.tl:{line}:")) && errors[i].contains(want),
+            "{errors:?}"
+        );
+    }
+}
