@@ -2781,6 +2781,7 @@ fn cmd_fix(paths: &[PathBuf], flags: FixFlags) -> Result<ExitCode> {
     // A dry run publishes nothing either.
     let mut whole = scope.whole(&cfg, model.as_ref());
     whole.publish = !flags.dry_run;
+    whole.checker = Some(&h);
     let w = project::project_findings(&mut sink, &whole, &infos);
     found.errors += w.errors;
     found.lints += w.lints;

@@ -29,7 +29,10 @@
 //!   supplies states its own version as a `_VERSION` field ([`runtime_version`] reads it
 //!   from the source without running it), and [`lshape_version_finding`] is the verdict of
 //!   the two, a lint; [`lshape_runtime`] picks which candidate of a resolution is that
-//!   lshape. None of these opens a file: the caller reads the text.
+//!   lshape. None of these opens a file: the caller reads the text. `htl check` is that
+//!   caller, as the project-level lint `lshape-version` ([`VERSION_RULE`];
+//!   [`project_findings`](crate::project::project_findings) reads the two files); `htl
+//!   shapes` does not judge the pair.
 //!   What holds shapes side by side (`T.shape`, the `registry` of a check; the comment on
 //!   `AnySchema` in that file lists the rest) takes `lshape.AnySchema`, a supertype with no
 //!   type argument, because Teal's generics are invariant and a `Schema<string>` is not a
@@ -174,15 +177,17 @@ pub const LSHAPE_DTL: &str = include_str!("../lua/lshape.d.tl");
 /// The rule a note is said under.
 const RULE: &str = "shapes";
 
-/// The rule the findings about the lshape version are said under.
-const VERSION_RULE: &str = "lshape-version";
+/// The rule the findings about the lshape version are said under: the name
+/// `htl check --lint` and `[lint.rules]` take for them, and the one entry of
+/// [`crate::lint::RULES`] they are registered as. Spelled once, here, so that the findings
+/// and the registry cannot disagree about it.
+pub const VERSION_RULE: &str = "lshape-version";
 
 /// What a declaration's `-- lshape:` line can get wrong: the text after the colon is not a
 /// Cargo version requirement.
 ///
-/// Kept apart from the line number, which [`declared_requirement`] returns beside the
-/// requirement and cannot return beside an error without making the error a pair; the
-/// caller that reports it ([`lshape_requirement_finding`]) already has both.
+/// Kept apart from the line number, which [`declared_requirement`] returns beside it, so
+/// the caller that reports a malformed line ([`lshape_requirement_finding`]) has both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReqError {
     /// What followed `lshape:` on the line, trimmed: the text that is not a requirement.
@@ -215,15 +220,17 @@ impl std::error::Error for ReqError {}
 ///   [`HEADER`]; a hand-written declaration of lshape is not this module's to judge), or it
 ///   is one and has no `-- lshape:` line among its leading comment lines (written before
 ///   the line existed). Neither is checked.
-/// - `Some(Err(_))`: the line is there and what follows it is not a requirement.
-/// - `Some(Ok((req, line)))`: the requirement, and its 1-based line, which is where a
-///   finding about it points.
+/// - `Some((line, Err(_)))`: the line is there and what follows it is not a requirement.
+/// - `Some((line, Ok(req)))`: the requirement.
+///
+/// `line` is 1-based and given either way, since a finding about the requirement, good or
+/// malformed, points at it.
 ///
 /// "Among the leading comment lines" is the run of lines that start with `--`, from the
 /// first line to the first line that does not; the first `lshape:` line in it wins. Text
 /// only, so that this is a function of what the caller read and the caller decides whether
 /// and when to read.
-pub fn declared_requirement(text: &str) -> Option<Result<(semver::VersionReq, usize), ReqError>> {
+pub fn declared_requirement(text: &str) -> Option<(usize, Result<semver::VersionReq, ReqError>)> {
     let mut lines = text.lines();
     if !lines.next()?.starts_with(HEADER) {
         return None;
@@ -234,13 +241,13 @@ pub fn declared_requirement(text: &str) -> Option<Result<(semver::VersionReq, us
             continue;
         };
         let value = value.trim();
-        return Some(match semver::VersionReq::parse(value) {
-            Ok(req) => Ok((req, i + 2)),
-            Err(e) => Err(ReqError {
+        return Some((
+            i + 2,
+            semver::VersionReq::parse(value).map_err(|e| ReqError {
                 text: value.to_string(),
                 reason: e.to_string(),
             }),
-        });
+        ));
     }
     None
 }
