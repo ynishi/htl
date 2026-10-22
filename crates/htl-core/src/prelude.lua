@@ -4,6 +4,7 @@
 local tl = require("tl")
 local lint = require("htl.lint")
 local fmt_mod = require("htl.fmt")
+local runtime_version = require("htl.runtime_version")
 -- Not `require("htl.search")`: that name is a project's to use, and `package.preload`
 -- never carries this chunk (see `search.lua`'s header, and `Htl::from_lua`). Handed in as
 -- this chunk's first argument instead, the same way a split runtime state's prelude
@@ -3517,6 +3518,33 @@ function H.declarations_of(filename)
    if not ok or type(ast) ~= "table" or (errs and #errs > 0) then return nil end
    local dok, decls = pcall(decl_index, { ast = ast }, filename, src)
    return dok and decls or nil
+end
+
+-- The `_VERSION` a module's source states about itself (`runtime_version.lua` says what
+-- counts), for `shapes::runtime_version`: "found", text | "not_literal" | "missing" |
+-- "unparsable", error. `chunk` names the source and decides the language it is parsed as
+-- (`.tl` is Teal, anything else Lua). Source that does not parse is "unparsable" with the
+-- parser's first error as `line:col: message`, not "missing": a module with no `_VERSION`
+-- and a module the parser refuses are fixed in different places.
+--
+-- Parsed with the vendored parser directly (`raw_parse`) for the reason `H.declarations_of`
+-- gives: the wrapper keeps errors about `require` names for the check of that file, and this
+-- is a question about a file, not a check of it.
+function H.runtime_version(src, chunk)
+   local lang = chunk:sub(-3) == ".tl" and "tl" or "lua"
+   local ok, ast, errs
+   if H.lang_async and lang == "tl" then
+      ok, ast, errs = pcall(async_parse, src, chunk, lang)
+   else
+      ok, ast, errs = pcall(raw_parse, src, chunk, lang)
+   end
+   if not ok then return "unparsable", tostring(ast) end
+   if errs and #errs > 0 then
+      local e = errs[1]
+      return "unparsable", string.format("%d:%d: %s", e.y or 0, e.x or 0, e.msg or "syntax error")
+   end
+   if type(ast) ~= "table" then return "unparsable", "the parser returned no syntax tree" end
+   return runtime_version.read(ast)
 end
 
 -- `H.check` of what is on disk right now: a fresh env, nothing seeded, nothing stored --

@@ -22,7 +22,14 @@
 //!   lshape.Schema<m.Request>` per shape, so a Teal caller gets the record back from the
 //!   schema value ([`Output::dtl`]);
 //! - `<types>/lshape.d.tl`, the declaration of lshape the generated shapes are written
-//!   against ([`LSHAPE_DTL`]), once per project. It declares lshape 0.3's public surface.
+//!   against ([`LSHAPE_DTL`]), once per project. It declares lshape 0.3's public surface,
+//!   and says which lshape that is on its second line, `-- lshape: 0.3`, a Cargo
+//!   requirement ([`declared_requirement`] reads it from any file that starts with
+//!   [`HEADER`], a copy or one an older htl wrote included). The lshape the project
+//!   supplies states its own version as a `_VERSION` field ([`runtime_version`] reads it
+//!   from the source without running it), and [`lshape_version_finding`] is the verdict of
+//!   the two, a lint; [`lshape_runtime`] picks which candidate of a resolution is that
+//!   lshape. None of these opens a file: the caller reads the text.
 //!   What holds shapes side by side (`T.shape`, the `registry` of a check; the comment on
 //!   `AnySchema` in that file lists the rest) takes `lshape.AnySchema`, a supertype with no
 //!   type argument, because Teal's generics are invariant and a `Schema<string>` is not a
@@ -144,8 +151,13 @@
 //! that a hand-written file of the same name is never touched.
 
 use crate::CheckInfo;
+use crate::Htl;
 use crate::MarkerSite;
+#[cfg(all(feature = "pkg", feature = "dts"))]
+use crate::ModuleKind;
 use crate::diagnostic::{Diagnostic, Severity};
+#[cfg(all(feature = "pkg", feature = "dts"))]
+use crate::resolve::{Candidate, Resolution};
 use crate::typeindex::{Decl, DeclKind, Place, Prim, TypeExpr, TypeInfo, Where};
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -161,6 +173,243 @@ pub const LSHAPE_DTL: &str = include_str!("../lua/lshape.d.tl");
 
 /// The rule a note is said under.
 const RULE: &str = "shapes";
+
+/// The rule the findings about the lshape version are said under.
+const VERSION_RULE: &str = "lshape-version";
+
+/// What a declaration's `-- lshape:` line can get wrong: the text after the colon is not a
+/// Cargo version requirement.
+///
+/// Kept apart from the line number, which [`declared_requirement`] returns beside the
+/// requirement and cannot return beside an error without making the error a pair; the
+/// caller that reports it ([`lshape_requirement_finding`]) already has both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReqError {
+    /// What followed `lshape:` on the line, trimmed: the text that is not a requirement.
+    pub text: String,
+    /// Why `semver` refused it, in its words.
+    pub reason: String,
+}
+
+impl std::fmt::Display for ReqError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "`{}` is not a version requirement: {}",
+            self.text, self.reason
+        )
+    }
+}
+
+impl std::error::Error for ReqError {}
+
+/// The lshape requirement a declaration states, and the line it states it on.
+///
+/// The requirement is written in the declaration itself, `-- lshape: 0.3` among the
+/// comment lines that open the file, in Cargo's grammar (`0.3` is `>=0.3.0, <0.4.0`; the
+/// grammar of `[toolchain] htl`). It is read from the text the project has, not from
+/// [`LSHAPE_DTL`], so a copy of the declaration, or one an older htl wrote, says which
+/// lshape it was written for and not which one this binary would write today.
+///
+/// - `None`: the file is not one `htl shapes` writes (its first line does not start with
+///   [`HEADER`]; a hand-written declaration of lshape is not this module's to judge), or it
+///   is one and has no `-- lshape:` line among its leading comment lines (written before
+///   the line existed). Neither is checked.
+/// - `Some(Err(_))`: the line is there and what follows it is not a requirement.
+/// - `Some(Ok((req, line)))`: the requirement, and its 1-based line, which is where a
+///   finding about it points.
+///
+/// "Among the leading comment lines" is the run of lines that start with `--`, from the
+/// first line to the first line that does not; the first `lshape:` line in it wins. Text
+/// only, so that this is a function of what the caller read and the caller decides whether
+/// and when to read.
+pub fn declared_requirement(text: &str) -> Option<Result<(semver::VersionReq, usize), ReqError>> {
+    let mut lines = text.lines();
+    if !lines.next()?.starts_with(HEADER) {
+        return None;
+    }
+    for (i, line) in lines.enumerate() {
+        let comment = line.strip_prefix("--")?;
+        let Some(value) = comment.trim_start().strip_prefix("lshape:") else {
+            continue;
+        };
+        let value = value.trim();
+        return Some(match semver::VersionReq::parse(value) {
+            Ok(req) => Ok((req, i + 2)),
+            Err(e) => Err(ReqError {
+                text: value.to_string(),
+                reason: e.to_string(),
+            }),
+        });
+    }
+    None
+}
+
+/// The candidate of a resolution of `lshape` that is the library itself: the first, in the
+/// order the searchers consult them, that is not a declaration.
+///
+/// A declaration (`types/lshape.d.tl`, which `htl shapes` writes) is what the checker
+/// reads for `require("lshape")` once it exists, so the resolution's winner is usually the
+/// declaration, and says nothing about whether a module is there to load. The library is
+/// the first candidate behind it that is an implementation, Teal or Lua. `None` is a
+/// project with no lshape on its path: `htl shapes` refuses to write shapes against it,
+/// and a version check has nothing to read.
+///
+/// One definition, because both `htl shapes` and the version check ask the question, and
+/// two answers could disagree.
+///
+/// On the project layer's features (`pkg` and `dts`) like [`crate::resolve`], whose
+/// answer this reads; the rest of this module does not need them.
+#[cfg(all(feature = "pkg", feature = "dts"))]
+pub fn lshape_runtime(res: &Resolution) -> Option<&Candidate> {
+    res.candidates
+        .iter()
+        .find(|c| c.kind != ModuleKind::Declaration)
+}
+
+/// What a module's source says its version is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeVersion {
+    /// A `_VERSION` field assigned a string literal that is a version.
+    Found(semver::Version),
+    /// The source parses and assigns no `_VERSION` field.
+    Missing,
+    /// The source does not parse (as Teal for a `.tl` chunk, as Lua otherwise); the
+    /// parser's first error, `line:col: message`. Kept apart from [`Missing`](Self::Missing)
+    /// because the fix is in a different place: the file, not its version field.
+    Unparsable(String),
+    /// The field is there and is not a string literal (`_VERSION = make()`): the version is
+    /// only known by running the module, which a check does not do.
+    NotLiteral,
+    /// The field is a string literal that is not a `major.minor.patch` version; the text.
+    NotSemver(String),
+}
+
+/// The version a module states about itself, read from its source without running it.
+///
+/// `src` is the module's text and `chunk` names it: a name ending in `.tl` is parsed as
+/// Teal, any other as Lua. `h` is the checker whose Teal parser reads it, which is why
+/// this is not a text search: the parser is in the Lua state, and it is what tells a
+/// `_VERSION` that is assigned from one in a comment or a string. `runtime_version.lua`
+/// says which two forms count (`M._VERSION = "0.3.0"` and a `_VERSION = "0.3.0"` field of
+/// a table constructor) and which wins when there are several.
+///
+/// `Err` is the Lua state failing, not the module saying something unreadable; that is a
+/// [`RuntimeVersion`] other than `Found`.
+pub fn runtime_version(h: &Htl, src: &str, chunk: &str) -> anyhow::Result<RuntimeVersion> {
+    let (kind, text) = h.version_field(src, chunk)?;
+    Ok(match (kind.as_str(), text) {
+        ("found", Some(text)) => match semver::Version::parse(&text) {
+            Ok(v) => RuntimeVersion::Found(v),
+            Err(_) => RuntimeVersion::NotSemver(text),
+        },
+        ("not_literal", _) => RuntimeVersion::NotLiteral,
+        ("unparsable", text) => RuntimeVersion::Unparsable(
+            text.unwrap_or_else(|| "the parser gave no error".to_string()),
+        ),
+        ("missing", _) => RuntimeVersion::Missing,
+        (other, _) => anyhow::bail!("runtime_version.lua answered an unknown kind `{other}`"),
+    })
+}
+
+/// The verdict on a declaration's requirement against the runtime it is meant for: `None`
+/// when they agree, the lint `lshape-version` when they do not or when the runtime does
+/// not say.
+///
+/// The finding is at `decl_path:req_line`, the requirement's own line, because that is the
+/// line a person edits or regenerates. The paths are spelled as the caller passes them and
+/// are not canonicalized here.
+///
+/// - `Found(v)`: compared by Cargo's rule on `req`, after dropping `v`'s pre-release and
+///   build parts. `0.3.1-dev` is not in `^0.3` by Cargo's rule (a pre-release matches only
+///   a requirement that names one), but a runtime in development of 0.3.1 is a 0.3
+///   runtime, and the finding is about which line of releases the two share. On 0.x a
+///   minor is the unit of compatibility, so a runtime newer by a minor is reported as well
+///   as an older one. The message names both versions and the two ways out: move the
+///   runtime to match the declaration, or regenerate the declaration with an htl that
+///   declares the runtime's version.
+/// - anything else: the runtime's version could not be read, and the message names
+///   `runtime_path` and says why. A runtime that does not say is not a pass; the check
+///   would otherwise stop checking the day lshape changes how it writes its version.
+pub fn lshape_version_finding(
+    req: &semver::VersionReq,
+    req_line: usize,
+    decl_path: &Path,
+    runtime_path: &Path,
+    rv: &RuntimeVersion,
+) -> Option<Diagnostic> {
+    let message = match rv {
+        RuntimeVersion::Found(v) => {
+            let release = semver::Version::new(v.major, v.minor, v.patch);
+            if req.matches(&release) {
+                return None;
+            }
+            format!(
+                "this declaration is written for lshape {req}, but the lshape at {} is version {v}. \
+                 Either move that lshape to a version that satisfies {req}, or regenerate this \
+                 declaration with an htl that declares lshape {v}",
+                runtime_path.display()
+            )
+        }
+        RuntimeVersion::Missing => unreadable(
+            req,
+            runtime_path,
+            "it assigns no `_VERSION` field (`M._VERSION = \"x.y.z\"`) that can be read",
+        ),
+        RuntimeVersion::Unparsable(err) => unreadable(
+            req,
+            runtime_path,
+            &format!("it does not parse ({err}), so no `_VERSION` can be read from it"),
+        ),
+        RuntimeVersion::NotLiteral => unreadable(
+            req,
+            runtime_path,
+            "its `_VERSION` is not a string literal, so it is only known by running it",
+        ),
+        RuntimeVersion::NotSemver(text) => unreadable(
+            req,
+            runtime_path,
+            &format!("its `_VERSION` is \"{text}\", which is not a version (major.minor.patch)"),
+        ),
+    };
+    Some(Diagnostic::new(
+        Severity::Lint,
+        decl_path.display().to_string(),
+        req_line,
+        1,
+        message,
+        Some(VERSION_RULE),
+    ))
+}
+
+/// The sentence of [`lshape_version_finding`] for a runtime whose version cannot be read.
+fn unreadable(req: &semver::VersionReq, runtime_path: &Path, why: &str) -> String {
+    format!(
+        "could not read the version of lshape at {}: {why}, so it cannot be compared with the \
+         lshape {req} this declaration is written for",
+        runtime_path.display()
+    )
+}
+
+/// The finding for a `-- lshape:` line whose text is not a requirement
+/// ([`declared_requirement`]'s `Some(Err(_))`): the same lint as
+/// [`lshape_version_finding`], at the same line, because a requirement that cannot be read
+/// leaves the declaration unchecked the way an unreadable runtime does, and the person who
+/// sees one wants the other's switch (`[lint]`). Separate from it because it has no runtime
+/// to name and no version to compare.
+pub fn lshape_requirement_finding(decl_path: &Path, line: usize, err: &ReqError) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Lint,
+        decl_path.display().to_string(),
+        line,
+        1,
+        format!(
+            "{err}; the `-- lshape:` line says which lshape this declaration is written for, \
+             as a Cargo requirement (`-- lshape: 0.3`), and nothing can be checked against it"
+        ),
+        Some(VERSION_RULE),
+    )
+}
 
 /// One file to lower.
 #[derive(Debug, Clone, Copy)]

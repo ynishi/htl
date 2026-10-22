@@ -187,6 +187,8 @@ pub(crate) const PRELUDE_REGISTRY_KEY: &str = "htl.prelude";
 const TL_SRC: &str = include_str!("../vendor/tl.lua");
 const LINT_SRC: &str = include_str!("lint.lua");
 const FMT_SRC: &str = include_str!("fmt.lua");
+/// The `_VERSION` reader behind [`shapes::runtime_version`] (`runtime_version.lua`).
+const RUNTIME_VERSION_SRC: &str = include_str!("runtime_version.lua");
 const PRELUDE: &str = include_str!("prelude.lua");
 /// `require` resolution shared by the checker prelude and a split runtime state's
 /// (`search.lua`, loaded by both `from_lua` and
@@ -194,7 +196,7 @@ const PRELUDE: &str = include_str!("prelude.lua");
 const SEARCH_SRC: &str = include_str!("search.lua");
 
 /// A hash of the Lua the checker is made of: the vendored `tl`, the lints, the formatter,
-/// the search chunk and the prelude. Two builds with the same value generate the same Lua
+/// the `_VERSION` reader, the search chunk and the prelude. Two builds with the same value generate the same Lua
 /// for the same input, whatever else differs about them.
 ///
 /// The run cache stamps its entries with this ([`cache`]). The CLI also stamps them with
@@ -208,7 +210,14 @@ pub fn checker_identity() -> &'static str {
     static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     ID.get_or_init(|| {
         let mut h = blake3::Hasher::new();
-        for src in [TL_SRC, LINT_SRC, FMT_SRC, SEARCH_SRC, PRELUDE] {
+        for src in [
+            TL_SRC,
+            LINT_SRC,
+            FMT_SRC,
+            RUNTIME_VERSION_SRC,
+            SEARCH_SRC,
+            PRELUDE,
+        ] {
             h.update(src.as_bytes());
             h.update(b"\0");
         }
@@ -1987,9 +1996,15 @@ impl Htl {
             .set_name("=htl-fmt")
             .into_function()
             .context("compiling htl fmt.lua")?;
+        let runtime_version_loader: Function = lua
+            .load(RUNTIME_VERSION_SRC)
+            .set_name("=htl-runtime-version")
+            .into_function()
+            .context("compiling htl runtime_version.lua")?;
         preload.set("tl", tl_loader)?;
         preload.set("htl.lint", lint_loader)?;
         preload.set("htl.fmt", fmt_loader)?;
+        preload.set("htl.runtime_version", runtime_version_loader)?;
         // Not `package.preload["htl.search"]`: a project's own `require("htl.search")`
         // (a `src/htl/search.tl` of its own — nothing reserves that name) must reach its
         // module, in a shared state exactly as it does in a split one, where this chunk
@@ -2223,6 +2238,16 @@ impl Htl {
         let (out, err): (Option<String>, Option<String>) =
             f.call((text, path_str(file), indent))?;
         out.ok_or_else(|| anyhow!("{}", err.unwrap_or_else(|| "format failed".into())))
+    }
+
+    /// The `_VERSION` field a module's source states, as the prelude's reader gives it
+    /// (`runtime_version.lua`): `("found", Some(text))`, `("not_literal", None)`,
+    /// `("missing", None)` or `("unparsable", Some(first parse error))`. The source is parsed, not run; `chunk` names it and decides
+    /// whether it is read as Teal (`.tl`) or Lua. [`shapes::runtime_version`] is the typed
+    /// reader of this and the one to call.
+    pub(crate) fn version_field(&self, src: &str, chunk: &str) -> Result<(String, Option<String>)> {
+        let f: Function = self.h.get("runtime_version")?;
+        Ok(f.call((src, chunk))?)
     }
 
     /// Drop Lua's default search path (cwd-relative `./?.lua` etc.) so only directories
