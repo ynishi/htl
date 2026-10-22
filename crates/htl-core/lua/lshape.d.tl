@@ -34,6 +34,7 @@ local record lshape
       map_of: function<K, V>(Schema<K>, Schema<V>): Schema<{K : V}>
       tuple: function<T>({Schema<any>}): Schema<T>
       one_of: function<E>({E}): Schema<E>
+      literal: function<T>(T): Schema<T>
       any_of: function<T>({Schema<any>}): Schema<T>
    end
 

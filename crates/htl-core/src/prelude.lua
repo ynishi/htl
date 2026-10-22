@@ -3041,16 +3041,62 @@ local function decl_index(result, filename, src, report, reporter, sym_type)
       return a.nx < b.nx
    end
 
+   -- The source text of the range (y1, x1) to (y2, x2), inclusive, with each line trimmed and
+   -- the lines joined by one space: one line of text for a message. `nil` when a position is
+   -- missing or lies outside the file.
+   local function span_text(y1, x1, y2, x2)
+      if not (y1 and x1 and y2 and x2) then return nil end
+      local out = {}
+      for y = y1, y2 do
+         local l = lines[y]
+         if not l then return nil end
+         l = l:sub(y == y1 and x1 or 1, y == y2 and x2 or -1)
+         out[#out + 1] = l:match("^%s*(.-)%s*$")
+      end
+      return table.concat(out, " ")
+   end
+
+   -- A `where` clause (`m`, its `macroexp`) as the row `typeindex.rs` reads: `{ field, value }`
+   -- when the expression is `self.<field> == "<string>"` (either side), `{ other = text }`
+   -- when it is anything else. `value` is `conststr`, the text between the quotes as tl keeps
+   -- it, escapes unprocessed, which is also how an enum's members are keyed. A `[[long]]`
+   -- string is not that, and stays an `other`. The text runs from the clause's own start
+   -- (the node tl builds for it, not `exp`, whose position is its operator's) to its end.
+   local function where_row(m)
+      local e = m.exp
+      if type(e) == "table" and e.kind == "op" and e.op and e.op.op == "==" and e.e1 and e.e2 then
+         local a, b = e.e1, e.e2
+         if a.kind == "string" then a, b = b, a end
+         if b.kind == "string" and b.conststr ~= nil and not b.is_longstring
+            and a.kind == "op" and a.op and a.op.op == "."
+            and type(a.e1) == "table" and a.e1.kind == "variable" and a.e1.tk == "self"
+            and type(a.e2) == "table" and a.e2.kind == "identifier" and a.e2.tk then
+            return { field = a.e2.tk, value = b.conststr }
+         end
+      end
+      return { other = span_text(m.y, m.x, m.yend, m.xend) or "where clause" }
+   end
+
    -- What a record's header says beyond its fields, from the checker's type object and not
    -- from the text: `is I` leaves a non-empty `interface_list` on the def, and a `where`
    -- clause is stored as the meta field `__is`, a function type whose `macroexp` is the
-   -- clause (vendor/tl.lua, parse_record_like_type). Both are set on the row only when true.
+   -- clause (vendor/tl.lua, parse_record_like_type). A hand-written `metamethod __is` is the
+   -- same meta field, and is told from a clause by its macroexp: a clause's is built as a
+   -- method, with no `macroexp` token to write. `interfaces` is set on the row only when
+   -- true; `where` is the row `where_row` makes, and is set when the record has an `__is`.
    local function header_flags(d, def)
       def = unwrap(def)
       if type(def) ~= "table" then return end
       if type(def.interface_list) == "table" and #def.interface_list > 0 then d.interfaces = true end
       local is = type(def.meta_fields) == "table" and def.meta_fields.__is
-      if type(is) == "table" and is.macroexp then d.where = true end
+      if type(is) == "table" then
+         local m = is.macroexp
+         if type(m) == "table" and m.is_method then
+            d.where = where_row(m)
+         else
+            d.where = { other = "metamethod __is" }
+         end
+      end
    end
 
    local fill

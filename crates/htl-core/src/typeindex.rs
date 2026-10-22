@@ -151,7 +151,7 @@
 //! - a field, and a function the record's body declares: its type as a [`TypeExpr`];
 //! - a type alias: the type it names, as a [`TypeExpr`];
 //! - a record: whether it is the record the file returns, the place of its own
-//!   declaration (`at`), and whether its header says `is` or `where`;
+//!   declaration (`at`), whether its header says `is`, and its `where` clause ([`Where`]);
 //! - an enum: its members, sorted, and `at`;
 //! - an interface: `at`.
 //!
@@ -367,11 +367,13 @@ pub enum TypeInfo {
         /// non-empty `interface_list` of the record), not from the text. `htl shapes` does not
         /// lower such a record in this release.
         interfaces: bool,
-        /// Whether the header carries a `where` clause: `record R where self.x > 0`. Teal
+        /// The record's `where` clause, when it has one: `record R where self.x > 0`. Teal
         /// stores it as the record's `__is` meta field, a function whose `macroexp` is the
-        /// clause, and a record with one is a tagged member of a union, which a shape cannot
-        /// say. `htl shapes` does not lower such a record in this release.
-        where_clause: bool,
+        /// clause, and a record with one is a tagged member of a union (`o is R` runs the
+        /// clause). A hand-written `metamethod __is` is the same meta field and is
+        /// [`Where::Other`], since the index does not read a function body. `None` for a
+        /// record with neither.
+        where_clause: Option<Where>,
     },
     /// An enum.
     Enum {
@@ -386,6 +388,35 @@ pub enum TypeInfo {
         /// The place of the interface's own declaration, as for [`TypeInfo::Record`].
         at: Place,
     },
+}
+
+/// The `where` clause of a record (`where_clause` of [`TypeInfo::Record`]), reduced to the
+/// one form a tag is read from.
+///
+/// A record with `where self.status == "ok"` is told from the others of a union by the clause
+/// alone, so that form is kept as data: the field the tag is in and the string it holds.
+/// Every other clause (a comparison with a number, a call, a field of a field) is kept as the
+/// text Teal read, for a reader to say what it met.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum Where {
+    /// `self.<field> == "<value>"`, or the same with the two sides swapped. `field` is one
+    /// identifier (`self.a.b` and `self["a"]` are [`Other`](Where::Other)). `value` is the
+    /// text between the quotes as Teal keeps it, escapes unprocessed, which is also how the
+    /// `members` of a [`TypeInfo::Enum`] hold a member: a value is compared with a member as
+    /// it stands, and is written as a Lua string the way a member is. A `[[long]]` string is
+    /// not this form.
+    Tag {
+        /// The field of `self` the clause compares.
+        field: String,
+        /// The string the field is compared with.
+        value: String,
+    },
+    /// Any other clause: its source text, from the first token to the last, with a line
+    /// break and the indentation after it read as one space (`where clause` where the
+    /// checker gave no position to cut it by). A hand-written `metamethod __is` is this too,
+    /// with the text `metamethod __is`.
+    Other(String),
 }
 
 /// A type as the checker's type object has it, reduced to what a program tells apart
@@ -891,12 +922,15 @@ fn read_info(row: &Table, kind: DeclKind) -> Result<Option<TypeInfo>> {
             .map(|ty| read_type(&ty).map(|ty| TypeInfo::Alias { ty }))
             .transpose()?,
         DeclKind::Record => match row.get::<Option<Table>>("at")? {
-            Some(at) => read_place(&at)?.map(|at| TypeInfo::Record {
-                returned: row.get::<Option<bool>>("returned").ok().flatten() == Some(true),
-                at,
-                interfaces: row.get::<Option<bool>>("interfaces").ok().flatten() == Some(true),
-                where_clause: row.get::<Option<bool>>("where").ok().flatten() == Some(true),
-            }),
+            Some(at) => {
+                let where_clause = read_where(row.get::<Option<Table>>("where")?)?;
+                read_place(&at)?.map(|at| TypeInfo::Record {
+                    returned: row.get::<Option<bool>>("returned").ok().flatten() == Some(true),
+                    at,
+                    interfaces: row.get::<Option<bool>>("interfaces").ok().flatten() == Some(true),
+                    where_clause,
+                })
+            }
             None => None,
         },
         DeclKind::Interface => match row.get::<Option<Table>>("at")? {
@@ -923,6 +957,23 @@ fn read_info(row: &Table, kind: DeclKind) -> Result<Option<TypeInfo>> {
         },
         DeclKind::Local => None,
     })
+}
+
+/// The `where` of a row of `decl_index` (`prelude.lua`'s `where_row`) as a [`Where`]: a
+/// `{ field, value }` is a tag, anything else a clause that is not one.
+fn read_where(t: Option<Table>) -> Result<Option<Where>> {
+    let Some(t) = t else {
+        return Ok(None);
+    };
+    let field = t.get::<Option<String>>("field")?;
+    let value = t.get::<Option<String>>("value")?;
+    Ok(Some(match (field, value) {
+        (Some(field), Some(value)) => Where::Tag { field, value },
+        _ => Where::Other(
+            t.get::<Option<String>>("other")?
+                .unwrap_or_else(|| "where clause".to_string()),
+        ),
+    }))
 }
 
 /// A `{ k = .., .. }` table of `prelude.lua`'s `type_expr` as a [`TypeExpr`].
