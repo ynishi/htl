@@ -1614,3 +1614,146 @@ print(o, v)
         "{errors:?}"
     );
 }
+
+/// The combinators `lshape.t` has beyond the ones a generated shape uses are declared:
+/// `partial`, `discriminated` over shapes that carry the tag, `pattern` and `ref`, each where a
+/// `Schema<T>` goes.
+#[test]
+fn the_shipped_lshape_declaration_declares_partial_discriminated_pattern_and_ref() {
+    let errors = lshape_errors(
+        "local lshape = require(\"lshape\")
+local T = lshape.t
+local record P
+   name: string
+end
+local record Ok
+   kind: string
+end
+local record Err
+   kind: string
+   msg: string
+end
+local record Reply
+   ok: Ok
+   err: Err
+end
+local p: lshape.Schema<P> = T.partial({ name = T.string })
+local ok: lshape.Schema<Ok> = T.shape({ kind = T.literal(\"ok\") })
+local err: lshape.Schema<Err> = T.shape({ kind = T.literal(\"err\"), msg = T.string })
+local d: lshape.Schema<Reply> = T.discriminated(\"kind\", { ok = ok, err = err })
+local s: lshape.Schema<string> = T.pattern(\"^a\")
+local r: lshape.Schema<P> = T.ref(\"P\")
+print(p, d, s, r)
+",
+    );
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+/// `check`, `reflect` and `luacats` are declared and typed: `assert_dev` hands back the record,
+/// `assert` by registry name hands back `any`, the dev-mode switch and the default registry
+/// are there to read and assign, and a field and a generated file come out as `string`.
+#[test]
+fn the_shipped_lshape_declaration_declares_check_reflect_and_luacats() {
+    let errors = lshape_errors(
+        "local lshape = require(\"lshape\")
+local T = lshape.t
+local record User
+   name: string
+end
+local S: lshape.Schema<User> = T.shape({ name = T.string })
+local v: any = {}
+local u: User = lshape.check.assert_dev(v, S)
+local named: any = lshape.check.assert(v, \"User\")
+local dev_named: any = lshape.check.assert_dev(v, \"User\", \"where\", { registry = { User = S } })
+local dev: boolean = lshape.check.is_dev_mode()
+local var: string = lshape.check.dev_env_var
+lshape.check.default_registry = { User = S }
+local f: lshape.Field = lshape.reflect.fields(S)[1]
+local n: string = f.name
+local o: boolean = f.optional
+lshape.reflect.walk(S, function(node: lshape.AnySchema) print(node) end)
+local g: string = lshape.luacats.gen({ User = S }, \"x\")
+local c: string = lshape.luacats.class_for(\"X\", S)
+print(u, named, dev_named, dev, var, n, o, g, c)
+",
+    );
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+/// What `reflect` hands out is an `AnySchema`, and `check`, `assert` and `assert_dev` take it
+/// back: a field's schema and a node of a walk can be checked against.
+#[test]
+fn the_shipped_lshape_declaration_checks_against_what_reflect_hands_out() {
+    let errors = lshape_errors(
+        "local lshape = require(\"lshape\")
+local T = lshape.t
+local record User
+   name: string
+end
+local S: lshape.Schema<User> = T.shape({ name = T.string })
+local f: lshape.Field = lshape.reflect.fields(S)[1]
+local ok: boolean = lshape.check.check(\"x\", f.type)
+local a: any = lshape.check.assert(\"x\", f.type)
+lshape.reflect.walk(S, function(node: lshape.AnySchema)
+   lshape.check.assert_dev(1, node, \"walk\")
+end)
+print(ok, a)
+",
+    );
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+/// Control: what `assert_dev` hands back is typed as `assert`'s is, so a wrong read after it is
+/// an error; the overload for a registry name does not swallow the call that passes a schema.
+#[test]
+fn the_shipped_lshape_declaration_types_what_assert_dev_returns() {
+    let errors = lshape_errors(
+        "local lshape = require(\"lshape\")
+local T = lshape.t
+local record User
+   name: string
+end
+local S: lshape.Schema<User> = T.shape({ name = T.string })
+local v: any = {}
+local n: integer = lshape.check.assert_dev(v, S).name
+print(n)
+",
+    );
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].contains("use.tl:8:") && errors[0].contains("got string, expected integer"),
+        "{errors:?}"
+    );
+}
+
+/// Control: the results of `pattern`, `luacats.gen` and `reflect.fields` and the type of
+/// `default_registry` are not `any`; a wrong use of each is an error.
+#[test]
+fn the_shipped_lshape_declaration_refuses_a_wrong_use_of_the_new_surface() {
+    let errors = lshape_errors(
+        "local lshape = require(\"lshape\")
+local T = lshape.t
+local S: lshape.Schema<string> = T.string
+local p: lshape.Schema<integer> = T.pattern(\"x\")
+local s: integer = lshape.luacats.gen({})
+local f: integer = lshape.reflect.fields(S)[1].name
+lshape.check.default_registry = 42
+print(p, s, f)
+",
+    );
+    assert_eq!(errors.len(), 4, "{errors:?}");
+    for (i, (line, want)) in [
+        (4, "got string, expected integer"),
+        (5, "got string, expected integer"),
+        (6, "got string, expected integer"),
+        (7, "got integer"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert!(
+            errors[i].contains(&format!("use.tl:{line}:")) && errors[i].contains(want),
+            "{errors:?}"
+        );
+    }
+}
