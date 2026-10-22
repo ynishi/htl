@@ -993,9 +993,9 @@ fn the_lshape_declaration_admits_the_vendored_lshape_version() {
     let htl::shapes::RuntimeVersion::Found(version) = rv else {
         panic!("the vendored lshape states no readable _VERSION: {rv:?}");
     };
-    let (req, line) = htl::shapes::declared_requirement(htl::shapes::LSHAPE_DTL)
-        .expect("LSHAPE_DTL states the lshape it declares")
-        .expect("and it is a requirement");
+    let (line, req) = htl::shapes::declared_requirement(htl::shapes::LSHAPE_DTL)
+        .expect("LSHAPE_DTL states the lshape it declares");
+    let req = req.expect("and it is a requirement");
     assert_eq!(line, 2);
     assert!(
         req.matches(&version),
@@ -1013,4 +1013,330 @@ fn the_lshape_declaration_admits_the_vendored_lshape_version() {
             "{req} admits {n}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------
+// `lshape-version`: `htl check` compares the requirement the declaration states on its
+// second line with the `_VERSION` of the lshape the project supplies.
+// ---------------------------------------------------------------------------------------
+
+/// What the vendored lshape says its version is, as the fixture spells it.
+const RUNTIME_VERSION_LINE: &str = "M._VERSION = \"0.3.0\"";
+
+/// Everything a run said, stdout and stderr together: which stream a finding is on is not
+/// what these cases are about.
+fn said(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned() + &stderr(out)
+}
+
+/// The lines of a run that are `lshape-version` findings.
+fn version_findings(out: &Output) -> Vec<String> {
+    said(out)
+        .lines()
+        .filter(|l| l.contains("[htl lshape-version]"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// A project with lshape vendored and the declaration `htl shapes` writes in place, so that
+/// `htl check` has a requirement (`^0.3`) and a runtime (`0.3.0`) to compare.
+fn declared_project(name: &str) -> common::TempDir {
+    let root = project(name);
+    let out = htl(&root, &["shapes"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(read(&root.join("types/lshape.d.tl")).starts_with(htl::shapes::HEADER));
+    root
+}
+
+/// Vendor lshape afresh, then rewrite the runtime's `_VERSION` line: `line` replaces it, and
+/// `None` removes it. Starting from the fixture each time means a case never inherits what
+/// the one before it did to the file. The line is asserted to be there first, so a fixture
+/// that stops spelling it this way fails here instead of making every case below pass on an
+/// unchanged file.
+fn set_runtime_version(root: &Path, line: Option<&str>) {
+    vendor_lshape(root);
+    let init = root.join("src/lshape/init.lua");
+    let text = read(&init);
+    assert!(
+        text.contains(RUNTIME_VERSION_LINE),
+        "the vendored init.lua no longer has `{RUNTIME_VERSION_LINE}`"
+    );
+    let replaced = match line {
+        Some(l) => text.replace(RUNTIME_VERSION_LINE, l),
+        None => text
+            .lines()
+            .filter(|l| !l.contains(RUNTIME_VERSION_LINE))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    write(&init, &replaced);
+}
+
+/// The finding of a runtime that is not the lshape the declaration is written for, as it is
+/// asserted below: at the requirement's line, naming the requirement as printed (`^0.3`),
+/// the runtime's version and its file.
+fn assert_mismatch(out: &Output, runtime_version: &str) {
+    let found = version_findings(out);
+    assert_eq!(found.len(), 1, "{}", said(out));
+    let f = &found[0];
+    assert!(f.starts_with("lint: types/lshape.d.tl:2:1: "), "{f}");
+    assert!(f.contains("lshape ^0.3"), "{f}");
+    assert!(
+        f.contains(&format!("src/lshape/init.lua is version {runtime_version}")),
+        "{f}"
+    );
+}
+
+/// Acceptance 1, 2, 3 and 5, and the way out of 2: a runtime the requirement admits is not
+/// reported, and one it does not is, a minor away in either direction.
+///
+/// The cases share one project and one declaration and move only the vendored runtime's
+/// `_VERSION`, so the first run is the control for every later one: the same check, nothing
+/// from the rule until the version leaves `^0.3`. `0.3.1-dev` is the pre-release a
+/// development tree has, and it is a 0.3.
+///
+/// The lint is `warn`: it fails `--strict` and not a plain run, and `[lint.rules]` turns it
+/// off, which is the one way out a generated file has.
+#[test]
+fn a_runtime_outside_the_requirement_is_reported_and_one_inside_it_is_not() {
+    let root = declared_project("version-range");
+
+    let clean = htl(&root, &["check", "--strict"]);
+    assert_eq!(clean.status.code(), Some(0), "{}", said(&clean));
+    assert!(version_findings(&clean).is_empty(), "{}", said(&clean));
+
+    for inside in ["0.3.1-dev", "0.3.9", "0.3.0+build.5"] {
+        set_runtime_version(&root, Some(&format!("M._VERSION = \"{inside}\"")));
+        let out = htl(&root, &["check", "--strict"]);
+        assert_eq!(out.status.code(), Some(0), "{inside}: {}", said(&out));
+        assert!(
+            version_findings(&out).is_empty(),
+            "{inside}: {}",
+            said(&out)
+        );
+    }
+
+    // Newer by a minor, and older by one: both are reported, with the verdict on the run.
+    for outside in ["0.4.0", "0.2.9"] {
+        set_runtime_version(&root, Some(&format!("M._VERSION = \"{outside}\"")));
+        let plain = htl(&root, &["check"]);
+        assert_eq!(plain.status.code(), Some(0), "{outside}: {}", said(&plain));
+        assert_mismatch(&plain, outside);
+
+        let strict = htl(&root, &["check", "--strict"]);
+        assert_eq!(
+            strict.status.code(),
+            Some(1),
+            "{outside}: {}",
+            said(&strict)
+        );
+        assert_mismatch(&strict, outside);
+    }
+
+    // The way out: `[lint.rules]`, and then the same mismatch fails nothing and is not said.
+    set_runtime_version(&root, Some("M._VERSION = \"0.4.0\""));
+    write(
+        &root.join("htl.toml"),
+        "[check]\n\n[lint.rules]\nlshape-version = \"allow\"\n",
+    );
+    let off = htl(&root, &["check", "--strict"]);
+    assert_eq!(off.status.code(), Some(0), "{}", said(&off));
+    assert!(version_findings(&off).is_empty(), "{}", said(&off));
+    // And the control for that: back on, the same tree is reported again.
+    write(&root.join("htl.toml"), "[check]\n");
+    assert_mismatch(&htl(&root, &["check"]), "0.4.0");
+}
+
+/// A runtime that is not UTF-8 (a Latin-1 byte in a comment of a vendored library) is still
+/// read: the version is compared as for any other file, and a warn-level rule does not turn
+/// a plain run into a failure over the encoding of a comment.
+#[test]
+fn a_runtime_with_a_latin1_comment_is_read_like_any_other() {
+    let root = declared_project("version-latin1");
+    set_runtime_version(&root, Some("M._VERSION = \"0.4.0\""));
+    let init = root.join("src/lshape/init.lua");
+    let mut bytes = b"-- caf\xe9\n".to_vec();
+    bytes.extend(std::fs::read(&init).unwrap());
+    std::fs::write(&init, bytes).unwrap();
+    assert!(std::str::from_utf8(&std::fs::read(&init).unwrap()).is_err());
+
+    let out = htl(&root, &["check"]);
+    assert_eq!(out.status.code(), Some(0), "{}", said(&out));
+    assert_mismatch(&out, "0.4.0");
+}
+
+/// Acceptance 7: a run that replays every module from the cache is judged the same. The
+/// first run checks the files and stores them; the second changes no file, says `[cached]`
+/// for all of them, and still says the finding, because the rule reads the two files and not
+/// the checks. Changing only the runtime between the two runs, which no module's cache key
+/// holds, moves the verdict with it.
+#[test]
+fn a_run_replayed_from_the_cache_reports_the_same_finding() {
+    let root = declared_project("version-cached");
+    set_runtime_version(&root, Some("M._VERSION = \"0.4.0\""));
+
+    let cold = htl(&root, &["check"]);
+    assert!(!stderr(&cold).contains("[cached]"), "{}", said(&cold));
+    assert_mismatch(&cold, "0.4.0");
+
+    let warm = htl(&root, &["check"]);
+    assert!(
+        stderr(&warm).contains("[cached]"),
+        "every module replays on a second run: {}",
+        said(&warm)
+    );
+    assert_eq!(version_findings(&warm), version_findings(&cold));
+    assert_mismatch(&warm, "0.4.0");
+
+    // The runtime moves and no module does: still replayed, and no longer reported.
+    set_runtime_version(&root, Some("M._VERSION = \"0.3.0\""));
+    let fixed = htl(&root, &["check", "--strict"]);
+    assert!(stderr(&fixed).contains("[cached]"), "{}", said(&fixed));
+    assert_eq!(fixed.status.code(), Some(0), "{}", said(&fixed));
+    assert!(version_findings(&fixed).is_empty(), "{}", said(&fixed));
+}
+
+/// Acceptance 4: a runtime that does not state its version in a form that can be read is
+/// reported as that, naming the file, and is not taken as a pass. Each shape of "cannot be
+/// read" gets its own message, and every one of them fails `--strict` like a mismatch.
+#[test]
+fn a_runtime_whose_version_cannot_be_read_is_reported_not_passed() {
+    let root = declared_project("version-unreadable");
+    // The control: the same project reads clean until the line is changed below.
+    let clean = htl(&root, &["check", "--strict"]);
+    assert_eq!(clean.status.code(), Some(0), "{}", said(&clean));
+
+    let cases: [(Option<&str>, &str); 3] = [
+        (None, "assigns no `_VERSION` field"),
+        (
+            Some("M._VERSION = tostring(3) .. \".0.0\""),
+            "is not a string literal",
+        ),
+        (
+            Some("M._VERSION = \"three\""),
+            "\"three\", which is not a version",
+        ),
+    ];
+    for (line, why) in cases {
+        set_runtime_version(&root, line);
+        let out = htl(&root, &["check", "--strict"]);
+        assert_eq!(out.status.code(), Some(1), "{why}: {}", said(&out));
+        let found = version_findings(&out);
+        assert_eq!(found.len(), 1, "{why}: {}", said(&out));
+        let f = &found[0];
+        assert!(f.starts_with("lint: types/lshape.d.tl:2:1: "), "{f}");
+        assert!(
+            f.contains("could not read the version of lshape at src/lshape/init.lua"),
+            "{f}"
+        );
+        assert!(f.contains(why), "{why}: {f}");
+    }
+}
+
+/// Acceptance 6, and what else is left unchecked: a declaration that does not state a
+/// requirement (one an older htl wrote, or a hand-written one) is not judged, however far
+/// the runtime is from what it declares, and neither is a project with no lshape runtime.
+/// A requirement that is not one is said at its own line instead of skipped.
+///
+/// Every "nothing" is paired with the run that does report: the same runtime at `0.4.0`
+/// against the declaration with its line, so a rule that never fired could not pass.
+#[test]
+fn a_declaration_without_a_requirement_or_a_runtime_to_read_is_not_checked() {
+    let root = declared_project("version-unchecked");
+    set_runtime_version(&root, Some("M._VERSION = \"0.4.0\""));
+    let decl = root.join("types/lshape.d.tl");
+    let with_line = read(&decl);
+    assert_mismatch(&htl(&root, &["check"]), "0.4.0");
+
+    // A declaration from before the line existed: the header, without line 2.
+    let without_line: String = with_line
+        .lines()
+        .enumerate()
+        .filter(|(i, _)| *i != 1)
+        .map(|(_, l)| format!("{l}\n"))
+        .collect();
+    assert!(!without_line.contains("-- lshape:"), "{without_line}");
+    write(&decl, &without_line);
+    let old = htl(&root, &["check", "--strict"]);
+    assert_eq!(old.status.code(), Some(0), "{}", said(&old));
+    assert!(version_findings(&old).is_empty(), "{}", said(&old));
+
+    // Not the file `htl shapes` writes (its first line is not the header): not read at all,
+    // whatever it says.
+    write(
+        &decl,
+        &with_line.replacen(htl::shapes::HEADER, "-- A hand-written declaration of", 1),
+    );
+    let hand = htl(&root, &["check", "--strict"]);
+    assert_eq!(hand.status.code(), Some(0), "{}", said(&hand));
+    assert!(version_findings(&hand).is_empty(), "{}", said(&hand));
+
+    // A requirement line that is not a requirement is said, at the line, with the text.
+    write(
+        &decl,
+        &with_line.replacen("-- lshape: 0.3", "-- lshape: banana", 1),
+    );
+    let bad = htl(&root, &["check", "--strict"]);
+    assert_eq!(bad.status.code(), Some(1), "{}", said(&bad));
+    let found = version_findings(&bad);
+    assert_eq!(found.len(), 1, "{}", said(&bad));
+    assert!(
+        found[0].starts_with("lint: types/lshape.d.tl:2:1: "),
+        "{}",
+        found[0]
+    );
+    assert!(
+        found[0].contains("`banana` is not a version requirement"),
+        "{}",
+        found[0]
+    );
+
+    // No lshape on the module path: nothing to read a version from, and the declaration
+    // alone is not a finding. The control is the same project with the runtime back.
+    write(&decl, &with_line);
+    std::fs::remove_dir_all(root.join("src/lshape")).unwrap();
+    let none = htl(&root, &["check", "--strict"]);
+    assert!(version_findings(&none).is_empty(), "{}", said(&none));
+    set_runtime_version(&root, Some("M._VERSION = \"0.4.0\""));
+    assert_mismatch(&htl(&root, &["check"]), "0.4.0");
+}
+
+/// Acceptance 8: the rule has a name a project can set and an explanation `--explain`
+/// prints, and the listing names it with the level a project that says nothing gets.
+#[test]
+fn the_rule_is_listed_and_explained() {
+    let root = common::tempdir("htl-cli-shapes", "version-explain");
+    let list = htl(&root, &["check", "--list-lints"]);
+    assert_eq!(list.status.code(), Some(0), "{}", said(&list));
+    let listing = said(&list);
+    let line = listing
+        .lines()
+        .find(|l| l.split_whitespace().next() == Some("lshape-version"))
+        .unwrap_or_else(|| panic!("not in the listing: {listing}"));
+    assert!(line.split_whitespace().last() == Some("warn"), "{line}");
+
+    let explain = htl(&root, &["check", "--explain", "lshape-version"]);
+    assert_eq!(explain.status.code(), Some(0), "{}", said(&explain));
+    let text = said(&explain);
+    assert!(text.starts_with("lshape-version  (default: warn"), "{text}");
+    for needle in ["-- lshape: 0.3", "_VERSION", "0.3.1-dev", "[lint.rules]"] {
+        assert!(text.contains(needle), "`{needle}` not in {text}");
+    }
+}
+
+/// `htl fix` asks the same project-level question as `htl check`, so a mismatch is said, and
+/// counted, by it as well: the verdict of the two cannot differ on one tree.
+#[test]
+fn htl_fix_judges_the_same_mismatch_as_htl_check() {
+    let root = declared_project("version-fix");
+    let clean = htl(&root, &["fix", "--dry-run"]);
+    assert_eq!(clean.status.code(), Some(0), "{}", said(&clean));
+    assert!(version_findings(&clean).is_empty(), "{}", said(&clean));
+
+    set_runtime_version(&root, Some("M._VERSION = \"0.4.0\""));
+    // `htl fix` has no `--strict`; the project's `[lint] strict` is what makes a warn count.
+    write(&root.join("htl.toml"), "[check]\n\n[lint]\nstrict = true\n");
+    let out = htl(&root, &["fix", "--dry-run"]);
+    assert_eq!(out.status.code(), Some(1), "{}", said(&out));
+    assert_mismatch(&out, "0.4.0");
 }

@@ -1837,9 +1837,9 @@ mod lshape_version {
     /// every other case here pass for the wrong reason).
     #[test]
     fn the_shipped_declaration_states_its_requirement_on_line_two() {
-        let (r, line) = declared_requirement(LSHAPE_DTL)
-            .expect("the shipped declaration has the line")
-            .expect("and it is a requirement");
+        let (line, r) =
+            declared_requirement(LSHAPE_DTL).expect("the shipped declaration has the line");
+        let r = r.expect("and it is a requirement");
         assert_eq!(line, 2);
         assert_eq!(r, req("0.3"));
         assert!(r.matches(&version("0.3.0")) && r.matches(&version("0.3.9")));
@@ -1901,12 +1901,12 @@ mod lshape_version {
     #[test]
     fn declared_requirement_gives_the_line_it_found_the_requirement_on() {
         let text = format!("{HEADER}: x\n-- prose\n-- more prose\n-- lshape: ^0.5.1\nlocal x");
-        let (r, line) = declared_requirement(&text).unwrap().unwrap();
+        let (line, r) = declared_requirement(&text).unwrap();
         assert_eq!(line, 4);
-        assert_eq!(r, req("^0.5.1"));
+        assert_eq!(r.unwrap(), req("^0.5.1"));
         // CRLF files are the same file.
         let crlf = text.replace('\n', "\r\n");
-        assert_eq!(declared_requirement(&crlf).unwrap().unwrap().1, 4);
+        assert_eq!(declared_requirement(&crlf).unwrap().0, 4);
     }
 
     #[test]
@@ -1915,6 +1915,7 @@ mod lshape_version {
             let text = format!("{HEADER}\n-- lshape: {bad}\n");
             let err = declared_requirement(&text)
                 .expect("the line is there")
+                .1
                 .expect_err(bad);
             assert_eq!(err.text, bad, "{bad:?}");
             assert!(!err.reason.is_empty(), "{bad:?}");
@@ -1922,8 +1923,18 @@ mod lshape_version {
         }
         // A range is a requirement; it is not refused for being more than `0.3`.
         let text = format!("{HEADER}\n-- lshape: >=0.3.2, <0.5\n");
-        let (r, _) = declared_requirement(&text).unwrap().unwrap();
+        let r = declared_requirement(&text).unwrap().1.unwrap();
         assert!(r.matches(&version("0.4.0")) && !r.matches(&version("0.3.1")));
+    }
+
+    /// The line comes back beside an error too, which is what a finding about a malformed
+    /// line points at.
+    #[test]
+    fn declared_requirement_keeps_the_line_beside_an_error() {
+        let bad = format!("{HEADER}\n-- prose\n-- lshape: banana\nlocal x");
+        let (line, parsed) = declared_requirement(&bad).unwrap();
+        assert_eq!(line, 3);
+        assert_eq!(parsed.unwrap_err().text, "banana");
     }
 
     // -- runtime_version -----------------------------------------------------------------
@@ -2197,7 +2208,7 @@ mod lshape_version {
         );
         // And the reader of a real file gets the same through `declared_requirement`.
         let text = format!("{HEADER}\n-- lshape: banana\n");
-        let err = declared_requirement(&text).unwrap().unwrap_err();
+        let err = declared_requirement(&text).unwrap().1.unwrap_err();
         assert!(
             lshape_requirement_finding(Path::new(DECL), 2, &err)
                 .message

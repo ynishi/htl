@@ -6,7 +6,7 @@
 //! written` and `left in place` lines are not: they are the command reporting on the
 //! declarations it was asked to write, carry no rule name, and are in no listing here.
 //! Twenty-one of them are
-//! implemented in `lint.lua`, eight in the project layer and seven by the vendored Teal
+//! implemented in `lint.lua`, nine in the project layer and seven by the vendored Teal
 //! compiler, and that difference used to decide what a project could say about them: the
 //! registry was `L.DEFAULT` in `lint.lua`, so `--lint` and `[lint]` knew the thirteen and
 //! answered `unknown lint rule: contract` to a name htl had just printed.
@@ -77,6 +77,7 @@
 //! | `contract-unenforced` | warn | a contract the host never builds resolvers for, so it is documentation rather than a run-time guarantee. Say where the enforcement lives with `[[contract]] enforced_by` when the scan cannot see it |
 //! | `require-cycle` | warn | a loop in the require graph of the files `htl check <dir>` just checked, e.g. `a.tl -> b.tl -> a.tl`. Teal types the back edge as an opaque circular require, so without this the symptom is "cannot index" somewhere else. The graph is the one that runs: a `local type x = require("x")` the generator erases is no edge, so two files importing each other's records for annotations alone are not a loop |
 //! | `global-redeclaration` | warn | one global name declared at two sites — a site being the file, line and column of the declared name — among everything the run's files brought into scope through their requires. Two `.d.tl` each declaring `global VERSION: string` is the case: the checker keeps the first it walks and says nothing about the second when the types agree, and nothing else did. Reported once per name, at the later site, naming the earlier, whether or not the types agree: the checker's own `cannot redeclare global with a different type` is raised only where one environment walks both declarations, which depends on the walk order, and this does not. The sites ride on each check ([`crate::CheckInfo::global_sites`]), so a declaration file, which the walk never visits, and a run replayed from the cache both count |
+//! | `lshape-version` | warn | a project's declaration of lshape (`types/lshape.d.tl`, which `htl shapes` writes) whose `-- lshape: 0.3` line, on its second line, names a different lshape line than the `_VERSION` of the lshape the project supplies (`src/lshape/init.lua`): the project checks clean against names the runtime has since removed, or lacks. Both are read as text, the version from the runtime's syntax tree, and nothing is run. On 0.x a minor away in either direction is reported; a pre-release or build suffix on the runtime's version is dropped first, so `0.3.1-dev` is a 0.3. A runtime whose version cannot be read is reported as that, not passed. A declaration with no such line, and a project whose model holds no lshape runtime (one reached only through `package.path`, or preloaded by a host), are not checked. A generated file has no inline allow, so `[lint]` is how it is turned off |
 //! | `unmarked-struct` | allow | a record declared in one of the project's own files (not a dependency's, patched or not, nor a `.d.tl`), built whole at every one of its construction sites — at least one, and every one already setting every field the record's own body declares — that carries no `---@struct`. A census of the sites `struct-fields` already walks, not a prediction: marking the record this names cannot make `struct-fields` report anything new on the spot. Off by default because what it reports is not an accident but a record the project is free to leave unmarked (#304); a project that wants the "could have" list enforced in CI, with a file and a line, raises it. A record built short at even one site, and one with no construction site at all, are not reported either way |
 //! | `unmarked-sealed` | allow | a record declared in one of the project's own files (not a dependency's, patched or not, nor a `.d.tl`), built and cast only in the file that declares it — at least one site, literal or cast, every one of them there — that carries no `---@sealed`. A census of the sites `sealed-record` already walks, not a prediction: `sealed-record` with no function list treats any site inside the declaring file as allowed, so marking the record this names cannot make it report anything new on the spot. Off by default for the same reason `unmarked-struct` is (#304). A record built or cast in any other file, and one with no site at all, are not reported either way |
 //!
@@ -397,7 +398,7 @@ impl Rule {
     }
 }
 
-/// Every rule there is. The first thirty-six are the lint surface, in the order
+/// Every rule there is. The first thirty-seven are the lint surface, in the order
 /// `htl check --list-lints` prints them: the file-level rules first, in the order
 /// `lint.lua` runs them, then the ones the project layer asks once the files have been
 /// checked, then the warning kinds the vendored Teal compiler reports for itself. The last
@@ -478,6 +479,15 @@ pub const RULES: &[Rule] = &[
         "global-redeclaration",
         Side::Rust,
         explain::GLOBAL_REDECLARATION,
+    ),
+    // `warn` for the reason the project layer's others are: a project lands here by
+    // upgrading one side and not the other, not on purpose. The name is the one the
+    // findings are built with (`shapes::VERSION_RULE`), so the registry and the findings
+    // cannot spell it two ways.
+    Rule::warn(
+        crate::shapes::VERSION_RULE,
+        Side::Rust,
+        explain::LSHAPE_VERSION,
     ),
     // `allow`, unlike the six above: what this reports is not a state the project landed
     // in by accident, and not a defect `nil-return-unchecked` or `htlx-available` argue
@@ -1231,6 +1241,57 @@ walks both declarations, which depends on the walk order. This does not depend o
 the sites ride on each check, so a declaration file, which the walk never visits, and a
 run replayed from the cache both count. Declare the name once, in the module that owns
 it, and require that module."#;
+
+    /// `lshape-version`.
+    pub const LSHAPE_VERSION: &str = r#"The declaration of lshape the project has was written for another lshape than the one the
+project supplies.
+
+`htl shapes` writes `types/lshape.d.tl`, which declares one version of lshape's public
+surface and says which on its second line, `-- lshape: 0.3`: a Cargo version requirement,
+the grammar of `[toolchain] htl`. The lshape runtime is the project's own, vendored or
+installed, and states its version as `M._VERSION = "0.3.0"`. When the two differ the
+project type-checks clean and fails at run time, because lshape is 0.x and a minor release
+may remove a name: a later htl can ship the declaration of 0.4 while the project still has
+0.3, and a project that upgrades lshape and keeps the old declaration is in the same place.
+
+What is compared: the requirement on that line, read from the declaration the project has
+(so a copy of it, or one an older htl wrote, states its own), against the `_VERSION` of the
+first module `require("lshape")` could load that is not a declaration. Both are read as
+text and nothing is run: the version comes from the runtime's syntax tree, as a
+`<table>._VERSION = "<string>"` assignment or a `_VERSION = "<string>"` field of a table
+constructor, never from a pattern over the text. The finding is at the requirement's line
+in the declaration and names both versions.
+
+Cargo's caret rule decides, so on 0.x `0.3` admits 0.3.z and nothing else: a runtime newer
+by a minor is reported as well as an older one. A pre-release or build suffix on the
+runtime's version is dropped before comparing, so `0.3.1-dev` is a 0.3.
+
+Reported as well, because a runtime that does not say is not a pass: a runtime whose
+`_VERSION` cannot be read (not assigned, not a string literal, not a `major.minor.patch`
+version, or the file does not parse) — the message names the file and says why — and a
+`-- lshape:` line that is not a requirement, at that line.
+
+Not checked: a declaration that is not the one `htl shapes` writes (its first line does not
+start with its header), one written before the requirement line existed, a project that has
+no declaration of lshape, and a run outside a project. Nor is an lshape the project model
+does not hold — one reached only through `package.path` or `LUA_PATH` (installed by
+LuaRocks, say, outside the project's directories and dependencies), or one a host preloads:
+the rule looks for the declaration and the runtime only among the files of the project
+model (its `src/`, `types/` and dependencies), so a runtime only the search path reaches is
+not read and the pair is not judged, with nothing said. Vendor lshape into the project, as
+`src/lshape/`, for the check to see it.
+`htl shapes` itself does not run this: it is a property of the project, said by `htl check`.
+
+Two ways out. Move the lshape runtime to a version the requirement admits; or regenerate
+the declaration with an htl that declares the runtime's version (`htl shapes`, run by the
+htl that was built for that lshape; `cargo install htl-cli --version <x>` chooses it). To
+keep a mismatch on purpose, set the rule in `[lint.rules]` of `htl.toml` —
+`lshape-version = "allow"` — or pass `--lint lshape-version=allow`. That is the only way: a
+generated file has no place for an inline `-- htl: allow(...)`, and an edit to the
+`-- lshape:` line is undone by the next `htl shapes`.
+
+`warn` by default, so `--strict` fails on it. It reads the two files on every run, so a run
+that replays every module from the cache is judged the same as one that checked them."#;
 
     /// `unmarked-struct`.
     pub const UNMARKED_STRUCT: &str = r#"A record declared in one of the project's own files — not a dependency's, patched or

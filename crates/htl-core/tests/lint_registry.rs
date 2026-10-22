@@ -42,6 +42,7 @@ fn the_registry_knows_the_rules_the_project_layer_reports_under() {
         "contract-unenforced",
         "require-cycle",
         "global-redeclaration",
+        "lshape-version",
     ] {
         let r = RULES
             .iter()

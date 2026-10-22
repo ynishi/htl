@@ -782,6 +782,7 @@ impl Scope {
             contract_problems: &self.contract_problems,
             cargo_root: self.cargo_root.as_deref(),
             publish: true,
+            checker: None,
         }
     }
 }
@@ -1333,7 +1334,11 @@ pub fn check<O: Output>(
         c.store_run(&run_key, &files, &cfg_inputs, &dirs, &modules);
     }
     // What the project says about itself as a whole, once the files have been checked.
-    let whole = project_findings(sink, &scope.whole(cfg, model), &infos);
+    // The checker the walk built, when it built one: a run that replayed everything has
+    // none, and what needs one builds it ([`Whole::checker`]).
+    let mut judged = scope.whole(cfg, model);
+    judged.checker = h.as_ref();
+    let whole = project_findings(sink, &judged, &infos);
     n_err += whole.errors;
     n_lint += whole.lints;
     // Nothing else removes an entry, and this is the only moment the whole set is in hand.
@@ -1383,6 +1388,11 @@ pub struct Whole<'a> {
     /// Whether the contracts' types are written where they are published. A dry run
     /// works out the same problems and writes nothing ([`crate::contract::publish_to`]).
     pub publish: bool,
+    /// A checker the run already has, set up for this project ([`checker`]): what
+    /// `lshape-version` resolves `lshape` with and parses its runtime with. `None` when the
+    /// run built none (every module replayed from the cache), and then the rule builds one
+    /// itself, and only if the project has something for it to check.
+    pub checker: Option<&'a Htl>,
 }
 
 /// How many errors and lints [`project_findings`] said.
@@ -1391,7 +1401,7 @@ pub struct WholeCounts {
     /// A name with more than one owner, an `[imports]` entry naming no dependency.
     pub errors: usize,
     /// `require-cycle`, the `contract` problems of markers and publishing,
-    /// `contract-unenforced`.
+    /// `contract-unenforced`, `lshape-version`.
     pub lints: usize,
 }
 
@@ -1447,10 +1457,123 @@ fn walk_is_the_whole_project(declared_in: &HashSet<PathBuf>, checked: &HashSet<P
     !declared_in.is_empty() && declared_in.is_subset(checked)
 }
 
+/// Whether a file of the model could be the declaration of `lshape` and state a
+/// requirement: a `.d.tl` under a root of a module, at one of the paths the name `lshape`
+/// can have ([`crate::naming::candidates`]), that starts with the `htl shapes` header and has
+/// a `-- lshape:` line ([`crate::shapes::declared_requirement`]).
+///
+/// A `stat` per spelling per root and a read of what is there; no walk
+/// and no Lua. A superset of what the resolution reads, on purpose, because it is the
+/// question "is there anything for the version check to do", asked before a checker is
+/// paid for ([`lshape_version_findings`]); the resolution is the one that decides.
+fn lshape_requirements_in(model: &crate::model::Project) -> bool {
+    model
+        .modules
+        .iter()
+        .filter(|m| m.owner != crate::model::Owner::Contract)
+        .any(|m| {
+            let spellings: Vec<PathBuf> = crate::naming::candidates(&m.mount, "lshape")
+                .into_iter()
+                .filter(|rel| rel.to_string_lossy().ends_with(".d.tl"))
+                .collect();
+            m.roots.iter().any(|(_, root)| {
+                spellings.iter().any(|rel| {
+                    std::fs::read_to_string(root.join(rel))
+                        .is_ok_and(|text| crate::shapes::declared_requirement(&text).is_some())
+                })
+            })
+        })
+}
+
+/// The `lshape-version` findings: the lshape requirement the project's declaration of
+/// lshape states, against the `_VERSION` of the lshape the project supplies
+/// ([`crate::shapes`] has the verdicts; this is the part that reads the two files).
+///
+/// `lshape` is resolved once, as `htl shapes` resolves it ([`crate::resolve::resolve`]).
+/// The declaration is the file the resolution reads, when that is a declaration; the runtime
+/// is the first candidate that is not one ([`crate::shapes::lshape_runtime`]). Nothing is
+/// found when there is no project (a file in none has no model to resolve in), when the name
+/// resolves to no declaration that states a requirement (a hand-written one, one an older
+/// htl wrote), or when the model holds no runtime. Only the model's files are looked at
+/// ([`lshape_requirements_in`], and the model answers `require("lshape")` once the
+/// declaration is one of them, so the search path behind it is not consulted): an lshape
+/// reached only through `package.path`, or preloaded by a host, is not checked.
+///
+/// The Lua state is the expensive part, and a run that replays every module from the cache
+/// built none, so it is not made before there is a requirement to compare: first
+/// [`lshape_requirements_in`] (a few `stat`s), then the checker the run already has
+/// ([`Whole::checker`]) or one built here. A project with no lshape pays for the `stat`s
+/// only.
+///
+/// Paths in the findings are spelled as the other project-level findings spell theirs
+/// ([`display_path`]). `Err` is the check failing to run (a Lua state that will not start,
+/// a runtime that cannot be read), which the caller says rather than passes over.
+fn lshape_version_findings(w: &Whole<'_>) -> Result<Vec<Diagnostic>> {
+    use crate::resolve::Status;
+    use crate::{ModuleKind, shapes};
+    let (Some((root, _, _)), Some(model)) = (w.config.as_ref(), w.model) else {
+        return Ok(Vec::new());
+    };
+    if !lshape_requirements_in(model) {
+        return Ok(Vec::new());
+    }
+    let built;
+    let h = match w.checker {
+        Some(h) => h,
+        None => {
+            built = checker(Some(model), w.lints.selection(), &lang_of(w.config))?;
+            &built
+        }
+    };
+    let res = crate::resolve::resolve(h, "lshape", Some(root), Some(model))?;
+    let Some(decl) = res
+        .candidates
+        .iter()
+        .find(|c| c.status == Status::Read && c.kind == ModuleKind::Declaration)
+    else {
+        return Ok(Vec::new());
+    };
+    let decl_path = root.join(&decl.path);
+    let text = std::fs::read_to_string(&decl_path)
+        .map_err(|e| anyhow::anyhow!("reading {}: {e}", display_path(&decl_path)))?;
+    let decl_shown = PathBuf::from(display_path(&decl_path));
+    let (line, req) = match shapes::declared_requirement(&text) {
+        None => return Ok(Vec::new()),
+        Some((line, Ok(req))) => (line, req),
+        Some((line, Err(e))) => {
+            return Ok(vec![shapes::lshape_requirement_finding(
+                &decl_shown,
+                line,
+                &e,
+            )]);
+        }
+    };
+    let Some(runtime) = shapes::lshape_runtime(&res) else {
+        return Ok(Vec::new());
+    };
+    let runtime_path = root.join(&runtime.path);
+    // Read as bytes and decoded lossily: a Latin-1 comment in a vendored library is not a
+    // reason for a warn-level rule to fail the run, and `_VERSION`'s literal is ASCII.
+    let bytes = std::fs::read(&runtime_path)
+        .map_err(|e| anyhow::anyhow!("reading {}: {e}", display_path(&runtime_path)))?;
+    let src = String::from_utf8_lossy(&bytes);
+    let version = shapes::runtime_version(h, &src, &runtime.path)?;
+    Ok(shapes::lshape_version_finding(
+        &req,
+        line,
+        &decl_shown,
+        Path::new(&display_path(&runtime_path)),
+        &version,
+    )
+    .into_iter()
+    .collect())
+}
+
 /// Say, to `sink`, what the project says about itself as a whole: cycles in the require
 /// graph of `infos` (the files just checked), contract markers that could not become a
 /// contract or be published, `[imports]` entries naming no dependency, names two modules
-/// implement, and contracts no host enforces.
+/// implement, contracts no host enforces, and a declaration of lshape written for another
+/// lshape than the project's ([`lshape_version_findings`]).
 ///
 /// None of these belongs to one file, so no file's check carries them; a command that
 /// judges the project has to ask for them as well as for its files'. Publishing the
@@ -1475,6 +1598,40 @@ pub fn project_findings<O: Output>(
         for d in w.lints.keep(crate::global_redeclarations(infos)) {
             sink.diagnostic(&d);
             out.lints += 1;
+        }
+    }
+    // The declaration of lshape the project has (`htl shapes` writes one) against the
+    // lshape it supplies. Read off two files, not off the checks, so a run replayed from the
+    // cache is judged the same as one that checked everything.
+    if w.lints.on(crate::shapes::VERSION_RULE) {
+        match lshape_version_findings(w) {
+            Ok(found) => {
+                for d in w.lints.keep(found) {
+                    sink.diagnostic(&d);
+                    out.lints += 1;
+                }
+            }
+            // A check that could not be made is not a check that passed: said as an error,
+            // at the file that is the project's to fix the setting in.
+            Err(e) => {
+                // `lshape_version_findings` answers `Ok` early without a config, so an
+                // error always has one to point at.
+                let at = w
+                    .config
+                    .as_ref()
+                    .map_or_else(String::new, |(_, p, _)| display_path(p));
+                sink.diagnostic(&Diagnostic::new(
+                    Severity::Error,
+                    at,
+                    1,
+                    1,
+                    format!(
+                        "could not compare the lshape declaration with the lshape runtime: {e:#}"
+                    ),
+                    None,
+                ));
+                out.errors += 1;
+            }
         }
     }
     // Both rules below answer "only here" / "short nowhere else" about a record from
