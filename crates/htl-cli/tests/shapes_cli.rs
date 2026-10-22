@@ -6,6 +6,7 @@
 //! `require("lshape")` is `src/lshape/init.lua` (the files are `tests/fixtures/lshape/`, with
 //! the README saying where they come from). Nothing here needs a network.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -859,4 +860,121 @@ fn a_hand_written_file_in_the_way_of_a_removal_is_left_alone() {
         "return { mine = true }\n"
     );
     assert!(!root.join("types/shapes/extra.d.tl").exists());
+}
+
+/// Prints `<module>.<key>` for every key of every table `lshape` exports, one per line, the
+/// keys that start with `_` (`_VERSION`, `_internal`: not the public surface) left out. The
+/// modules are whatever tables `lshape` holds, so no name is listed here. It is Teal, as
+/// `htl run` checks what it runs, and reads `lshape` through [`LSHAPE_AS_A_TABLE`] and not
+/// through `LSHAPE_DTL`, which is the thing this lists the keys to compare with.
+const LSHAPE_EXPORTS_TL: &str = "local lshape = require(\"lshape\")
+for module, value in pairs(lshape) do
+   if module:sub(1, 1) ~= \"_\" then
+      if value is {string : any} then
+         for key in pairs(value) do
+            if key:sub(1, 1) ~= \"_\" then print(module .. \".\" .. key) end
+         end
+      else
+         print(module)
+      end
+   end
+end
+";
+
+/// A declaration of lshape that says only that it is a table, for [`LSHAPE_EXPORTS_TL`].
+const LSHAPE_AS_A_TABLE: &str = "local lshape: {string : any}
+return lshape
+";
+
+/// What lshape exports, as `<module>.<key>`: read at run time from the vendored copy, by
+/// `htl run` in a project that carries it, so the set is lshape's and not a list kept here.
+fn lshape_exports() -> BTreeSet<String> {
+    let root = project("exports");
+    write(&root.join("types/lshape.d.tl"), LSHAPE_AS_A_TABLE);
+    write(&root.join("src/exports.tl"), LSHAPE_EXPORTS_TL);
+    let out = htl(&root, &["run", "src/exports.tl"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let mut keys: BTreeSet<String> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    // The one export that is not there at load: `check.default_registry` is a field the
+    // host assigns (lshape's `check.lua` says so and starts it at nil), so `pairs` does not
+    // see it, and it is the surface all the same. Named here, once, for that reason, and
+    // only while the vendored `check.lua` still assigns it, so a lshape that drops it fails.
+    assert!(
+        read(&root.join("src/lshape/check.lua")).contains("\nM.default_registry = nil\n"),
+        "the vendored check.lua no longer starts `default_registry` at nil"
+    );
+    keys.insert("check.default_registry".to_string());
+    keys
+}
+
+/// What `LSHAPE_DTL` declares, as `<module>.<key>`, read from the type index of the file
+/// itself, not from a list: the fields of the `lshape` record are the modules, each named by
+/// the record that is its type, and the fields and functions of that record are the keys.
+/// A nested type (`Schema`, `Field`, `ShapeOpts`) is a type and not a key, so it is not one.
+fn declared_surface() -> BTreeSet<String> {
+    use htl::typeindex::{Decl, DeclKind};
+
+    let root = common::tempdir("htl-cli-shapes", "declared");
+    write(&root.join("lshape.d.tl"), htl::shapes::LSHAPE_DTL);
+    let h = htl::Htl::new().unwrap();
+    h.add_path(&root).unwrap();
+    let info = h.check_indexed(&root.join("lshape.d.tl")).unwrap();
+    assert!(info.errors.is_empty(), "{:?}", info.errors);
+    let decls = info.types.declarations().expect("the index was kept");
+    let lshape = decls
+        .iter()
+        .find(|d| d.name == "lshape" && d.kind == DeclKind::Record)
+        .expect("the file declares `local record lshape`");
+
+    let is_key = |d: &Decl| {
+        matches!(
+            d.kind,
+            DeclKind::Field | DeclKind::Function | DeclKind::Method
+        )
+    };
+    let mut keys = BTreeSet::new();
+    for module in lshape.children.iter().filter(|d| is_key(d)) {
+        let record = module.detail.as_deref().and_then(|ty| {
+            lshape
+                .children
+                .iter()
+                .find(|d| d.kind == DeclKind::Record && d.name == ty)
+        });
+        match record {
+            Some(record) => {
+                for key in record.children.iter().filter(|d| is_key(d)) {
+                    keys.insert(format!("{}.{}", module.name, key.name));
+                }
+            }
+            None => {
+                keys.insert(module.name.clone());
+            }
+        }
+    }
+    keys
+}
+
+/// Acceptance 3: the declaration covers exactly lshape's exports, in both directions. A key
+/// lshape exports and the file leaves out is a call the checker refuses; a field the file
+/// declares and lshape does not export is a call the checker lets through and Lua cannot
+/// make. Neither set is typed in here: one is read from the running lshape, the other from
+/// the type index of `LSHAPE_DTL`, so a lshape that grows a function fails this until the
+/// declaration does.
+#[test]
+fn the_lshape_declaration_covers_exactly_what_lshape_exports() {
+    let exported = lshape_exports();
+    let declared = declared_surface();
+    let undeclared: Vec<_> = exported.difference(&declared).collect();
+    let unexported: Vec<_> = declared.difference(&exported).collect();
+    assert!(
+        undeclared.is_empty() && unexported.is_empty(),
+        "exported by lshape but not declared: {undeclared:?}\n\
+         declared but not exported by lshape: {unexported:?}"
+    );
+    // A guard on the readers: two empty sets would agree.
+    assert!(!exported.is_empty());
 }
