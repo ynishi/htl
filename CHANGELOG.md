@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0](https://github.com/ynishi/htl/compare/v0.16.0...v0.17.0) - 2026-10-22
+
+### Added
+
+- lshape's declaration covers lshape 0.3's whole public surface, partial, discriminated, pattern, ref, assert_dev, reflect and luacats included, checked against the vendored lshape's exports in both directions
+- lshape's declaration takes a container of shapes as lshape.AnySchema, so a hand-built T.shape({ name = T.string }) type-checks against what htl shapes ships
+- htl shapes lowers a record with a where clause that tags it, its tag field written as T.literal, and the index carries the clause as TypeInfo::Record's where_clause: Option<Where>
+
+### Fixed
+
+- lshape.AnySchema chains any number of modifiers, and T.array_of / T.map_of take one, as every other container of shapes does
+
 ## [0.16.0](https://github.com/ynishi/htl/compare/v0.15.0...v0.16.0) - 2026-10-21
 
 ### Added
