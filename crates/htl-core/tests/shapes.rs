@@ -55,6 +55,21 @@ impl Project {
     }
 }
 
+impl Project {
+    /// The file of module `module`, checked with the index kept and its errors left in
+    /// `info`: for a case the checker refuses by itself (the lowering is still told no).
+    fn check_failing(&self, module: &str) -> Checked {
+        let rel = PathBuf::from(format!("{}.tl", module.replace('.', "/")));
+        let info = self.h.check_indexed(&self.root.join(&rel)).unwrap();
+        assert!(!info.errors.is_empty(), "{module}: expected a check error");
+        Checked {
+            module: module.to_string(),
+            rel,
+            info,
+        }
+    }
+}
+
 impl Checked {
     fn source(&self) -> Source<'_> {
         Source {
@@ -699,7 +714,8 @@ return M
 }
 
 /// A union of two records, `where` ones (Teal allows them), has no shape: a tag is what
-/// tells them apart. `is I` and `where` on a record are refused too. Nothing is written.
+/// tells them apart. `is I` on a record is refused, and so is a `where` clause that is not a
+/// tag (`where true`). Nothing is written.
 #[test]
 fn what_cannot_be_lowered_refuses_the_whole_file() {
     let p = Project::new(
@@ -743,8 +759,10 @@ return M
         text,
         [
             "main.tl:4:14: `Circle` takes fields from an interface (`is`); not lowered yet",
+            "main.tl:4:14: `Circle` has a `where` clause on `kind`, which the record's body does not declare; the tag needs a field",
             "main.tl:7:14: `Square` takes fields from an interface (`is`); not lowered yet",
-            "main.tl:11:14: `Alone` has a `where` clause; not lowered yet",
+            "main.tl:7:14: `Square` has a `where` clause on `kind`, which the record's body does not declare; the tag needs a field",
+            "main.tl:11:14: `Alone` has a `where` clause that is not `self.<field> == \"<tag>\"`, so it has no tag to read: `true`; not lowered",
             "main.tl:15:14: `Plain` takes fields from an interface (`is`); not lowered yet",
             "main.tl:20:7: `M.Holder.shape`: `Circle | Square` is a union of records; a tag is what tells them apart (#512)",
         ]
@@ -755,6 +773,194 @@ return M
             .iter()
             .any(|n| n.message.contains("`Circle` has a shape")),
         "{notes:?}"
+    );
+}
+
+/// A record with `where self.f == "v"`, alone, is a shape of its own: the tag field is
+/// written as the one value in place of the type it was declared with, and stays a field.
+/// The tag is a `string` or an enum with the member, and the enum's own shape is still
+/// written. A tag written the other way round (`"v" == self.f`) is the same tag.
+#[test]
+fn a_where_record_lowers_with_its_tag_as_a_literal() {
+    let p = Project::new(
+        "where-tag",
+        &[(
+            "main.tl",
+            "local record M
+   enum Level
+      \"info\"
+      \"warn\"
+   end
+   type Alias = Level
+   record Ok where self.status == \"ok\"
+      status: string
+      n: integer
+   end
+   record Warn
+      where \"warn\" == self.level
+      level: Level
+      msg: string   ---@optional
+   end
+   record Aliased where self.level == \"info\"
+      level: Alias
+   end
+   record Quoted where self.s == 'say \"hi\"'
+      s: string
+   end
+   record Plain
+      status: string
+   end
+end
+return M
+",
+        )],
+    );
+    let (out, notes) = written(p.check("main").alone());
+    assert_eq!(
+        out.lua,
+        lua_head("main.tl")
+            + "
+M.Level = T.one_of({ \"info\", \"warn\" })
+
+M.Ok = T.shape({
+   status = T.literal(\"ok\"),
+   n = T.integer,
+}, { open = false })
+
+M.Warn = T.shape({
+   level = T.literal(\"warn\"),
+   msg = T.string:is_optional(),
+}, { open = false })
+
+M.Aliased = T.shape({
+   level = T.literal(\"info\"),
+}, { open = false })
+
+M.Quoted = T.shape({
+   s = T.literal(\"say \\\"hi\\\"\"),
+}, { open = false })
+
+M.Plain = T.shape({
+   status = T.string,
+}, { open = false })
+
+return M
+"
+    );
+    assert_eq!(notes, Vec::<String>::new());
+    assert_eq!(
+        out.dtl,
+        dtl_head("main.tl", "main")
+            + "local lshape = require(\"lshape\")
+local type main = require(\"main\")
+local record shapes_main
+   Level: lshape.Schema<main.Level>
+   Ok: lshape.Schema<main.Ok>
+   Warn: lshape.Schema<main.Warn>
+   Aliased: lshape.Schema<main.Aliased>
+   Quoted: lshape.Schema<main.Quoted>
+   Plain: lshape.Schema<main.Plain>
+end
+return shapes_main
+"
+    );
+}
+
+/// A tag that cannot be read as the one value of a field is a problem at the record: a
+/// clause that is not `self.f == "v"`, a field the body does not declare, a field that is
+/// not a `string` or an enum with the member, and a field that is optional. Teal accepts
+/// each of these sources, so the lowering is what says no.
+#[test]
+fn a_where_record_with_no_readable_tag_is_a_problem_at_the_record() {
+    let p = Project::new(
+        "where-refuse",
+        &[(
+            "main.tl",
+            "local interface Tagged
+   kind: string
+end
+local record Compare
+   where self.n > 0
+   n: integer
+end
+local record Hand
+   metamethod __is: function(self: Hand): boolean
+   n: integer
+end
+local record Wide
+   where self.n >
+      0 and
+      true
+   n: integer
+end
+local record Inherited is Tagged where self.kind == \"k\"
+end
+local record Any where self.v == \"x\"
+   v: any
+end
+local record Many where self.v == \"x\"
+   v: string | integer
+end
+local record Marked where self.v == \"x\"
+   v: string   ---@optional
+end
+local record Nilable where self.v == \"x\"
+   v: string | nil
+end
+local record M
+   record Fine where self.k == \"fine\"
+      k: string
+   end
+end
+return M
+",
+        )],
+    );
+    let c = p.check("main");
+    let text = refused(c.alone());
+    assert_eq!(
+        text,
+        [
+            "main.tl:4:14: `Compare` has a `where` clause that is not `self.<field> == \"<tag>\"`, so it has no tag to read: `self.n > 0`; not lowered",
+            "main.tl:8:14: `Hand` has a `where` clause that is not `self.<field> == \"<tag>\"`, so it has no tag to read: `metamethod __is`; not lowered",
+            "main.tl:12:14: `Wide` has a `where` clause that is not `self.<field> == \"<tag>\"`, so it has no tag to read: `self.n > 0 and true`; not lowered",
+            "main.tl:18:14: `Inherited` takes fields from an interface (`is`); not lowered yet",
+            "main.tl:18:14: `Inherited` has a `where` clause on `kind`, which the record's body does not declare; the tag needs a field",
+            "main.tl:20:14: `Any` has a `where` clause on `v`, which is `any`; a tag is a `string` or an enum with the member \"x\"",
+            "main.tl:23:14: `Many` has a `where` clause on `v`, which is `string | integer`; a tag is a `string` or an enum with the member \"x\"",
+            "main.tl:26:14: `Marked` has a `where` clause on `v`, which is optional; a tag is always there",
+            "main.tl:29:14: `Nilable` has a `where` clause on `v`, which is optional; a tag is always there",
+        ]
+    );
+}
+
+/// An enum tag has to have the member. Teal refuses the clause itself (`is not a member
+/// of`), so this source fails its check and the index is still kept: the lowering says no
+/// in its own words, and nothing is written for a tag that no value can have.
+#[test]
+fn an_enum_tag_without_the_member_is_a_problem_at_the_record() {
+    let p = Project::new(
+        "where-enum",
+        &[(
+            "main.tl",
+            "local record M
+   enum Level
+      \"info\"
+   end
+   record Bad where self.level == \"warn\"
+      level: Level
+   end
+end
+return M
+",
+        )],
+    );
+    let c = p.check_failing("main");
+    assert_eq!(
+        refused(c.alone()),
+        [
+            "main.tl:5:11: `M.Bad` has a `where` clause on `level`, which is `Level`, an enum without the member \"warn\""
+        ]
     );
 }
 
@@ -1280,7 +1486,8 @@ fn the_shipped_lshape_declaration_checks() {
 local s: lshape.Schema<{string}> = lshape.t.array_of(lshape.t.string):is_optional()
 local m: lshape.Schema<{string : integer}> = lshape.t.map_of(lshape.t.string, lshape.t.integer)
 local v: {string} = lshape.check.assert({}, s, \"where\", { registry = {} })
-print(m, v, lshape.t.table, lshape.t.fn, lshape.t.any)
+local tag: lshape.Schema<string> = lshape.t.literal(\"ok\")
+print(m, v, tag, lshape.t.table, lshape.t.fn, lshape.t.any)
 ",
         )],
     );

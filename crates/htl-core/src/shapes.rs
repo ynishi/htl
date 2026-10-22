@@ -50,6 +50,7 @@
 //! | `record R` marked `---@extensible` | `{ open = true }` |
 //! | field `f: X` | `f = <X>` |
 //! | field marked `---@optional` | `<X>:is_optional()` |
+//! | `record R where self.f == "v"` | the shape of `R` as above, with `f = T.literal("v")` in place of the type `f` is declared with (`f` stays a field; its type is `string` or an enum with the member `v`) |
 //! | `string` `number` `integer` `boolean` `any` | `T.string` `T.number` `T.integer` `T.boolean` `T.any` |
 //! | `nil`, as the whole type of a field | `T.any` |
 //! | `thread` `userdata` | `T.any --[[ thread ]]` (lshape has no primitive; the comment names the type) |
@@ -74,7 +75,11 @@
 //! | a type declared outside the project's sources (a dependency's record, a type htl's library declares, `local type M = require(..)`) | it has no shape |
 //! | the record a module returns, an interface | a module is not a type a value has, and a value is checked against a record: each is said so, not called outside the project ([`RefEntry::NoShape`]) |
 //! | a generic (`Box<integer>`), a type variable, an empty table, ... | it has no shape |
-//! | `record R is I`, a `where` clause | not lowered yet |
+//! | `record R is I` | not lowered yet |
+//! | a `where` clause that is not `self.f == "v"` (or `"v" == self.f`), a hand-written `metamethod __is` | it has no tag to read: the clause is quoted |
+//! | `where self.f == "v"` and the body declares no `f` | the tag needs a field |
+//! | `where self.f == "v"` and `f` is neither a `string` nor an enum with the member `v` | a tag is one of those |
+//! | `where self.f == "v"` and `f` is optional (`---@optional`, `X \| nil`) | a tag is always there |
 //! | a name two declarations lower to | rename one |
 //! | an alias that refers back to itself | |
 //! | a cycle of files, `shapes.a` needing `shapes.b` and back | a Lua `require` loop: [`module_cycles`] |
@@ -86,9 +91,12 @@
 //!   to one not yet built. The field that closes the cycle is written `T.table --[[
 //!   recursive: Name ]]` and a note is printed: the check there is fail-open (any table
 //!   passes). lshape's `T.ref` is the later answer.
-//! - **`is I` and `where` are refused.** The fields of `record R is I` are written in `I`,
-//!   with their own markers, and the index does not list them under `R`; a record with a
-//!   `where` clause is a tagged member of a union. Both are a problem at the record.
+//! - **`is I` is refused.** The fields of `record R is I` are written in `I`, with their own
+//!   markers, and the index does not list them under `R`. It is a problem at the record.
+//! - **A `where` record is lowered alone, not as a member of a union.** Its tag field is the
+//!   one value, but `A | B` of two records is still a problem (#512): nothing yet says which
+//!   record a value is. The tag of an enum declared in another file is taken as written:
+//!   its members are not known here, and Teal refuses a value that is not one of them.
 //! - **A file that fails its check, a module named `shapes`, a `.d.tl`** are the caller's:
 //!   see the subcommand.
 //!
@@ -134,7 +142,7 @@
 use crate::CheckInfo;
 use crate::MarkerSite;
 use crate::diagnostic::{Diagnostic, Severity};
-use crate::typeindex::{Decl, DeclKind, Place, Prim, TypeExpr, TypeInfo};
+use crate::typeindex::{Decl, DeclKind, Place, Prim, TypeExpr, TypeInfo, Where};
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -426,6 +434,9 @@ enum Ex {
     /// `T | nil`: the shape of `T`, and nil allowed. At the top of a field the field is
     /// optional instead; this is what stays when the union is inside a container.
     Optional(Box<Ex>),
+    /// The one value a tag field can have (`where self.status == "ok"`): `T.literal(..)`, the
+    /// member text as an enum keeps it ([`lua_member`]).
+    Literal(String),
 }
 
 impl Ex {
@@ -438,7 +449,7 @@ impl Ex {
                 v.siblings(out);
             }
             Ex::Tuple(es) | Ex::AnyOf(es) => es.iter().for_each(|e| e.siblings(out)),
-            Ex::Raw(_) | Ex::Other { .. } => {}
+            Ex::Raw(_) | Ex::Other { .. } | Ex::Literal(_) => {}
         }
     }
 }
@@ -719,22 +730,27 @@ impl<'a> Lowering<'a> {
             return Body::Enum(members.to_vec());
         }
         // What the header says is the checker's: the index flags `is I` and `where`.
+        let mut tag: Option<(&str, &str)> = None;
         if let Some(TypeInfo::Record {
             interfaces,
             where_clause,
             ..
         }) = &d.info
         {
-            let what = if *interfaces {
-                Some("takes fields from an interface (`is`)")
-            } else if *where_clause {
-                Some("has a `where` clause")
-            } else {
-                None
-            };
-            if let Some(what) = what {
-                let message = format!("`{qual}` {what}; not lowered yet");
+            if *interfaces {
+                let message =
+                    format!("`{qual}` takes fields from an interface (`is`); not lowered yet");
                 self.problem(d.name_line, d.name_col, message);
+            }
+            match where_clause {
+                Some(Where::Tag { field, value }) => tag = Some((field, value)),
+                Some(Where::Other(text)) => {
+                    let message = format!(
+                        "`{qual}` has a `where` clause that is not `self.<field> == \"<tag>\"`, so it has no tag to read: `{text}`; not lowered"
+                    );
+                    self.problem(d.name_line, d.name_col, message);
+                }
+                None => {}
             }
         }
         let open = self.marked("extensible", "record", d, &qual);
@@ -743,6 +759,8 @@ impl<'a> Lowering<'a> {
         let mut children: Vec<&Decl> = d.children.iter().collect();
         children.sort_by_key(|f| f.body.unwrap_or((f.line, f.col)));
         let mut fields = Vec::new();
+        // Where the tag field is among `fields`, and whether its type is a record.
+        let mut tag_at: Option<(usize, bool)> = None;
         for f in children {
             let Some(TypeInfo::Field { ty }) = &f.info else {
                 continue;
@@ -756,7 +774,7 @@ impl<'a> Lowering<'a> {
             let site = format!("{qual}.{}", f.name);
             let optional = self.marked("optional", "field", f, &site);
             let mut trail = Vec::new();
-            let Some((ex, _)) = self.lower_ty(ty, f, &site, &mut trail) else {
+            let Some((ex, is_record)) = self.lower_ty(ty, f, &site, &mut trail) else {
                 continue;
             };
             // A field whose type is `T | nil` is an optional field of `T`.
@@ -764,6 +782,9 @@ impl<'a> Lowering<'a> {
                 Ex::Optional(inner) => (*inner, true),
                 ex => (ex, optional),
             };
+            if tag.is_some_and(|(field, _)| field == f.name) {
+                tag_at = Some((fields.len(), is_record));
+            }
             fields.push(Field {
                 name: f.name.clone(),
                 ex,
@@ -773,7 +794,83 @@ impl<'a> Lowering<'a> {
                 site,
             });
         }
+        if let Some((field, value)) = tag {
+            self.tag(d, &qual, field, value, tag_at, &mut fields);
+        }
         Body::Record { open, fields }
+    }
+
+    /// The tag field of a record with `where self.<field> == "<value>"`, whose shape is the
+    /// one value (`T.literal`) in place of the type it was declared with. A problem, said at
+    /// the record, when the clause cannot be read as a tag of this record: the body declares
+    /// no such field, its type is not a `string` or an enum with the member, or it is
+    /// optional (a value with no tag is not the record the clause selects).
+    ///
+    /// `at` is the field's place in `fields` and whether its type is a record; `None` when it
+    /// was not lowered: the body does not declare it, it is a method or a function with no
+    /// field type to read, or a problem was already said at the field.
+    fn tag(
+        &mut self,
+        d: &Decl,
+        qual: &str,
+        field: &str,
+        value: &str,
+        at: Option<(usize, bool)>,
+        fields: &mut [Field],
+    ) {
+        let child = d.children.iter().find(|c| {
+            c.name == field
+                && matches!(
+                    c.kind,
+                    DeclKind::Field | DeclKind::Function | DeclKind::Method
+                )
+        });
+        let Some((i, is_record)) = at else {
+            let message = match child {
+                // Lowered with a problem already said at the field.
+                Some(c) if matches!(c.info, Some(TypeInfo::Field { .. })) => return,
+                // A method, or a function written outside the body: no type to read.
+                Some(_) => format!(
+                    "`{qual}` has a `where` clause on `{field}`, which has no field type to read; a tag is a `string` or an enum with the member \"{value}\""
+                ),
+                None => format!(
+                    "`{qual}` has a `where` clause on `{field}`, which the record's body does not declare; the tag needs a field"
+                ),
+            };
+            self.problem(d.name_line, d.name_col, message);
+            return;
+        };
+        let detail = child.and_then(|c| c.detail.as_deref()).unwrap_or("?");
+        let f = &mut fields[i];
+        let not_a_tag = || {
+            format!(
+                "`{qual}` has a `where` clause on `{field}`, which is `{detail}`; a tag is a `string` or an enum with the member \"{value}\""
+            )
+        };
+        let message = if f.optional {
+            Some(format!(
+                "`{qual}` has a `where` clause on `{field}`, which is optional; a tag is always there"
+            ))
+        } else {
+            match &f.ex {
+                Ex::Raw(t) if t == "T.string" => None,
+                // An enum of another file: its members are not known here, and Teal has
+                // already refused a value that is not one of them (`is not a member of`).
+                Ex::Other { .. } if !is_record => None,
+                Ex::Sibling(k) => match self.cands[*k].kind {
+                    CandKind::Enum { members } if members.iter().any(|m| m == value) => None,
+                    CandKind::Enum { .. } => Some(format!(
+                        "`{qual}` has a `where` clause on `{field}`, which is `{detail}`, an enum without the member \"{value}\""
+                    )),
+                    CandKind::Record => Some(not_a_tag()),
+                },
+                _ => Some(not_a_tag()),
+            }
+        };
+        match message {
+            Some(message) => self.problem(d.name_line, d.name_col, message),
+            None => f.ex = Ex::Literal(value.to_string()),
+        }
     }
 
     /// The shape of `ty`, and whether it is a record (what a union counts). `None` once a
@@ -1049,6 +1146,7 @@ impl<'a> Lowering<'a> {
                 requires.insert(module.clone());
                 format!("require(\"shapes.{module}\").{name}")
             }
+            Ex::Literal(raw) => format!("T.literal({})", lua_member(raw)),
             Ex::Optional(e) => format!("{}:is_optional()", self.expr(e, cur, pos, field, requires)),
             Ex::Array(e) => format!("T.array_of({})", self.expr(e, cur, pos, field, requires)),
             Ex::Map(k, v) => format!(

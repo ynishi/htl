@@ -1110,7 +1110,7 @@ return M
             interfaces,
             where_clause,
             ..
-        }) => (*interfaces, *where_clause),
+        }) => (*interfaces, where_clause.is_some()),
         other => panic!("{name}: {other:?}"),
     };
     assert_eq!(flags("Plain"), (false, false));
@@ -1119,6 +1119,92 @@ return M
     assert_eq!(flags("NestedIs"), (true, false));
     assert_eq!(flags("NestedWhere"), (false, true));
     assert_eq!(flags("NestedPlain"), (false, false));
+}
+
+/// The `where` clause of a record is data when it is `self.<field> == "<string>"`, either
+/// way round, with the string as an enum would keep it as a member; any other clause is the
+/// text the checker read, cut from its first token to its last, and a hand-written
+/// `metamethod __is` is that name.
+#[test]
+fn a_where_clause_is_a_tag_or_its_text() {
+    use htl_core::typeindex::{TypeInfo, Where};
+    let root = common::tempdir("htl-core-typeindex", "where-clause");
+    let text = "local record Left where self.status == \"ok\"
+   status: string
+end
+local record Right
+   where \"ok\" == self.status
+   status: string
+end
+local record Single where self.status == 'say \\\"hi\\\"'
+   status: string
+end
+local record Number where self.n > 0
+   n: integer
+end
+local record Deep where self.a.b == \"x\"
+   a: {string : string}
+end
+local record Index where self[\"s\"] == \"x\"
+   s: string
+end
+local record Wide
+   where self.n >
+      0 and
+      true
+   n: integer
+end
+local record Both where \"a\" == \"a\"
+   n: integer
+end
+local record Long where self.s == [[x]]
+   s: string
+end
+local record Hand
+   metamethod __is: function(self: Hand): boolean
+   n: integer
+end
+local record Macro
+   metamethod __is: function(self: Macro): boolean = macroexp(self: Macro): boolean return self.s == \"x\" end
+   s: string
+end
+local record M
+   record Nested where self.kind == \"nested\"
+      kind: string
+   end
+end
+return M
+";
+    write(&root.join("m.tl"), text);
+    let h = Htl::new().unwrap();
+    h.add_path(&root).unwrap();
+    let c = h.check_indexed(&root.join("m.tl")).unwrap();
+    assert!(c.errors.is_empty(), "{:?}", c.errors);
+    let decls = c.types.declarations().unwrap();
+    let clause = |name: &str| match &find(decls, name).unwrap().info {
+        Some(TypeInfo::Record { where_clause, .. }) => where_clause.clone(),
+        other => panic!("{name}: {other:?}"),
+    };
+    let tag = |field: &str, value: &str| {
+        Some(Where::Tag {
+            field: field.to_string(),
+            value: value.to_string(),
+        })
+    };
+    let other = |text: &str| Some(Where::Other(text.to_string()));
+    assert_eq!(clause("Left"), tag("status", "ok"));
+    assert_eq!(clause("Right"), tag("status", "ok"));
+    // The text between the quotes, escapes as written: the way an enum keeps a member.
+    assert_eq!(clause("Single"), tag("status", "say \\\"hi\\\""));
+    assert_eq!(clause("Number"), other("self.n > 0"));
+    assert_eq!(clause("Deep"), other("self.a.b == \"x\""));
+    assert_eq!(clause("Index"), other("self[\"s\"] == \"x\""));
+    assert_eq!(clause("Wide"), other("self.n > 0 and true"));
+    assert_eq!(clause("Both"), other("\"a\" == \"a\""));
+    assert_eq!(clause("Long"), other("self.s == [[x]]"));
+    assert_eq!(clause("Hand"), other("metamethod __is"));
+    assert_eq!(clause("Macro"), other("metamethod __is"));
+    assert_eq!(clause("Nested"), tag("kind", "nested"));
 }
 
 /// What of a declaration is its own code (`Decl::fn_body`): a function's extent, and for a
