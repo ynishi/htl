@@ -978,3 +978,39 @@ fn the_lshape_declaration_covers_exactly_what_lshape_exports() {
     // A guard on the readers: two empty sets would agree.
     assert!(!exported.is_empty());
 }
+
+/// Acceptance 9: the requirement `LSHAPE_DTL` states admits the `_VERSION` of the lshape
+/// the declaration is tested against. The version is read the way `htl check` reads it
+/// (`runtime_version`, from the source), not by a pattern here, so a lshape that stops
+/// writing it as a literal fails this too; and the requirement is read the way it reads
+/// that (`declared_requirement`), not copied in. When lshape moves to 0.4 and the
+/// fixture with it, this is what says the declaration's line 2 has to move as well.
+#[test]
+fn the_lshape_declaration_admits_the_vendored_lshape_version() {
+    let init = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lshape/init.lua");
+    let h = htl::Htl::new().unwrap();
+    let rv = htl::shapes::runtime_version(&h, &read(&init), "init.lua").unwrap();
+    let htl::shapes::RuntimeVersion::Found(version) = rv else {
+        panic!("the vendored lshape states no readable _VERSION: {rv:?}");
+    };
+    let (req, line) = htl::shapes::declared_requirement(htl::shapes::LSHAPE_DTL)
+        .expect("LSHAPE_DTL states the lshape it declares")
+        .expect("and it is a requirement");
+    assert_eq!(line, 2);
+    assert!(
+        req.matches(&version),
+        "LSHAPE_DTL declares lshape {req}, the vendored lshape is {version}"
+    );
+    // The guard bites: the same reading of the same file against the neighbouring
+    // minors says no, so a requirement that admitted everything would not pass it.
+    let neighbours = [
+        format!("{}.{}.0", version.major, version.minor + 1),
+        format!("{}.{}.9", version.major, version.minor.saturating_sub(1)),
+    ];
+    for n in neighbours {
+        assert!(
+            !req.matches(&semver::Version::parse(&n).unwrap()),
+            "{req} admits {n}"
+        );
+    }
+}

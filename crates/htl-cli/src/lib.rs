@@ -1392,11 +1392,7 @@ fn cmd_shapes(dir: Option<&Path>) -> Result<ExitCode> {
     // implementation, not a declaration: after a first run `types/lshape.d.tl` is a row of
     // its own, and says nothing about whether a Lua module is there to load.
     let lshape = htl::resolve::resolve(&h, "lshape", Some(&root), Some(&model))?;
-    if !lshape
-        .candidates
-        .iter()
-        .any(|c| c.kind != htl::ModuleKind::Declaration)
-    {
+    if htl::shapes::lshape_runtime(&lshape).is_none() {
         eprintln!(
             "shapes: lshape is not on the path (no Lua or Teal module answers require(\"lshape\")); vendor or install it, then rerun"
         );
