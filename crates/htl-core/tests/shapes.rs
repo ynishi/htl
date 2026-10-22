@@ -1496,3 +1496,121 @@ print(m, v, tag, lshape.t.table, lshape.t.fn, lshape.t.any)
     let c = p.check("use");
     assert!(c.info.errors.is_empty(), "{:?}", c.info.errors);
 }
+
+/// A file written against the shipped declaration, checked: the errors it reports.
+fn lshape_errors(body: &str) -> Vec<String> {
+    let p = Project::new("lshape-decl-use", &[("use.tl", body)]);
+    write(&p.root.join("types/lshape.d.tl"), shapes::LSHAPE_DTL);
+    p.h.add_path(&p.root.join("types")).unwrap();
+    let info = p.h.check_indexed(&p.root.join("use.tl")).unwrap();
+    info.errors.iter().map(|e| format!("{e:?}")).collect()
+}
+
+/// `T.shape` takes the fields of a record whatever their type arguments, and what `assert`
+/// hands back is the record: Teal's generics are invariant, so this is `AnySchema`'s doing.
+#[test]
+fn the_shipped_lshape_declaration_takes_a_shape_of_mixed_fields() {
+    let errors = lshape_errors(
+        "local lshape = require(\"lshape\")
+local T = lshape.t
+local record User
+   name: string
+   age: integer
+end
+local S: lshape.Schema<User> = T.shape({ name = T.string, age = T.integer })
+local v: any = {}
+local us = lshape.check.assert(v, T.array_of(S))
+local first: User = us[1]
+local o: lshape.Schema<string> = T.string:describe(\"x\"):max_len(3):is_optional()
+print(first, o)
+",
+    );
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+/// `AnySchema` is what a container takes, and a `Schema<T>` is one; the other containers
+/// (`tuple`, `any_of`, the `registry` of `check`) take it too.
+#[test]
+fn the_shipped_lshape_declaration_has_any_schema_for_containers() {
+    let errors = lshape_errors(
+        "local lshape = require(\"lshape\")
+local T = lshape.t
+local record User
+   name: string
+end
+local S: lshape.Schema<User> = T.shape({ name = T.string })
+local function takes(s: lshape.AnySchema): lshape.AnySchema return s end
+takes(T.string)
+takes(S)
+local a = T.tuple({ T.string, T.integer })
+local b = T.any_of({ T.string, S })
+lshape.check.assert({}, S, \"where\", { registry = { User = S } })
+print(a, b)
+",
+    );
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+/// Control: `AnySchema` is not `any`; a number where a shape goes is still refused.
+#[test]
+fn the_shipped_lshape_declaration_refuses_a_non_shape_for_any_schema() {
+    let errors = lshape_errors(
+        "local lshape = require(\"lshape\")
+local function takes(s: lshape.AnySchema): lshape.AnySchema return s end
+takes(42)
+",
+    );
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].contains("got integer, expected lshape.AnySchema"),
+        "{errors:?}"
+    );
+}
+
+/// Control: what `assert` hands back is typed, so a wrong read after it is an error.
+#[test]
+fn the_shipped_lshape_declaration_types_what_assert_returns() {
+    let errors = lshape_errors(
+        "local lshape = require(\"lshape\")
+local T = lshape.t
+local record User
+   name: string
+end
+local S: lshape.Schema<User> = T.shape({ name = T.string })
+local v: any = {}
+local us = lshape.check.assert(v, T.array_of(S))
+local first: User = us[1]
+local bad: integer = first.name
+print(bad)
+",
+    );
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].contains("got string, expected integer"),
+        "{errors:?}"
+    );
+}
+
+/// Control: a modifier keeps the type argument, so a chain is still typed: a shape of
+/// `string` through `:describe()` is not a `Schema<integer>`, and `assert` on it hands back a
+/// `string`.
+#[test]
+fn the_shipped_lshape_declaration_keeps_the_type_argument_through_a_chain() {
+    let errors = lshape_errors(
+        "local lshape = require(\"lshape\")
+local T = lshape.t
+local o: lshape.Schema<integer> = T.string:describe(\"x\")
+local v: integer = lshape.check.assert({}, T.string:is_optional())
+print(o, v)
+",
+    );
+    assert_eq!(errors.len(), 2, "{errors:?}");
+    assert!(
+        errors[0].contains("use.tl:3:") && errors[0].contains("got string, expected integer"),
+        "{errors:?}"
+    );
+    assert!(
+        errors[1].contains("use.tl:4:") && errors[1].contains("got string, expected integer"),
+        "{errors:?}"
+    );
+}

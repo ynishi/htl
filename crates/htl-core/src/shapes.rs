@@ -23,6 +23,9 @@
 //!   schema value ([`Output::dtl`]);
 //! - `<types>/lshape.d.tl`, the declaration of lshape the generated shapes are written
 //!   against ([`LSHAPE_DTL`]), once per project.
+//!   Its container combinators (`T.shape`, `T.tuple`, `T.any_of`, the `registry` of a check)
+//!   take `lshape.AnySchema`, a supertype with no type argument, because Teal's generics are
+//!   invariant and a `Schema<string>` is not a `Schema<any>`; every `Schema<T>` is an `AnySchema`.
 //!
 //! The boundary is then one call, and the casts after it go:
 //!
