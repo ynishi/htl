@@ -18,10 +18,13 @@
 //! `types::Value` is `types.Value` and not `any`) — any other qualified path
 //! (`crate::geom::Point`, a type with no matching `uses` entry, or one pointed at
 //! `htl.task` itself) keeps only its last segment, the same as a bare identifier.
-//! There is no reflection on types in either direction: a Rust field of type `Foo` is
-//! declared as `Foo`, and it is on the host that a Teal `Foo` exists; the module a
-//! `---@contract` type is declared in goes the other way, Teal to `.d.tl`, with each
-//! signature carried across as it was written ([`crate::contract::publish`]).
+//! A declaration is written from the source text and not by reflection on types: a Rust
+//! field of type `Foo` is declared as `Foo`, and it is on the host that a Teal `Foo`
+//! exists; the module a `---@contract` type is declared in goes the other way, Teal to
+//! `.d.tl`, with each signature carried across as it was written
+//! ([`crate::contract::publish`]). What does read the checker's types is the generation
+//! from Teal: `htl shapes` ([`crate::shapes`]) and `htl rs` ([`crate::rsgen`]) lower Teal
+//! records and enums to an lshape shape and to a Rust struct.
 //! An `Option<T>` *parameter* is declared `name?: T` where Teal accepts the mark (a
 //! trailing run of them); a field and a return value stay `T`, because a Teal record
 //! field is nilable already and a return position has no `?`, while the mark on a

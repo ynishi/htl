@@ -502,7 +502,7 @@ impl RefTable {
         }
     }
 
-    fn key(&self, p: &Place) -> (PathBuf, usize, usize) {
+    pub(crate) fn key(&self, p: &Place) -> Key {
         ((self.canon)(&p.file), p.line, p.col)
     }
 
@@ -560,34 +560,35 @@ pub enum Lowered {
 }
 
 /// What kind of declaration a [`Cand`] is.
-enum CandKind<'a> {
+pub(crate) enum CandKind<'a> {
     /// A record; its fields are `Cand::decl`'s children.
     Record,
     /// An enum, with its members (sorted bytewise).
     Enum { members: &'a [String] },
 }
 
-/// A declaration the lowering writes a shape for.
-struct Cand<'a> {
-    decl: &'a Decl,
+/// A declaration the lowering writes a shape for. Shared with [`crate::rsgen`], which lowers
+/// the same declarations: what a project's own records and enums are is decided here, once.
+pub(crate) struct Cand<'a> {
+    pub(crate) decl: &'a Decl,
     /// The declaration's path as the markers spell it: `M.Outer.Inner`.
-    qual: String,
+    pub(crate) qual: String,
     /// The shape's name: `Outer_Inner`.
-    name: String,
+    pub(crate) name: String,
     /// Whether the returned record contains it, so its type is nameable from outside.
-    reachable: bool,
-    at: &'a Place,
-    kind: CandKind<'a>,
+    pub(crate) reachable: bool,
+    pub(crate) at: &'a Place,
+    pub(crate) kind: CandKind<'a>,
 }
 
 impl Cand<'_> {
-    fn is_record(&self) -> bool {
+    pub(crate) fn is_record(&self) -> bool {
         matches!(self.kind, CandKind::Record)
     }
 }
 
 /// The declarations to lower, in position order, with the shape name of each.
-fn candidates(decls: &[Decl]) -> Vec<Cand<'_>> {
+pub(crate) fn candidates(decls: &[Decl]) -> Vec<Cand<'_>> {
     fn walk<'a>(
         decls: &'a [Decl],
         qual: &mut Vec<&'a str>,
@@ -728,7 +729,7 @@ enum Body {
     Enum(Vec<String>),
 }
 
-type Key = (PathBuf, usize, usize);
+pub(crate) type Key = (PathBuf, usize, usize);
 
 struct Lowering<'a> {
     src: &'a Source<'a>,
@@ -779,7 +780,7 @@ pub fn lower(src: &Source, refs: &RefTable) -> Lowered {
     l.run()
 }
 
-fn collect_aliases<'a>(
+pub(crate) fn collect_aliases<'a>(
     decls: &'a [Decl],
     aliases: &mut Vec<&'a Decl>,
     returned: &mut Option<Key>,
@@ -802,7 +803,86 @@ fn collect_aliases<'a>(
     }
 }
 
-fn rel_display(p: &Path) -> String {
+/// The fields of the record `d` that have a type to lower, with that type, in the order the
+/// body declares them: a function the file defines below its record stands where the
+/// definition is, and `body` is where the record wrote its type. A nested type, and a
+/// function or method written outside the body (no field type to read), are not fields.
+///
+/// Shared with [`crate::rsgen`]: what a record's fields are is decided here, once.
+pub(crate) fn record_fields(d: &Decl) -> Vec<(&Decl, &TypeExpr)> {
+    let mut children: Vec<&Decl> = d.children.iter().collect();
+    children.sort_by_key(|f| f.body.unwrap_or((f.line, f.col)));
+    children
+        .into_iter()
+        .filter(|f| {
+            matches!(
+                f.kind,
+                DeclKind::Field | DeclKind::Function | DeclKind::Method
+            )
+        })
+        .filter_map(|f| match &f.info {
+            Some(TypeInfo::Field { ty }) => Some((f, ty)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The marker `marker` on the declaration `name` of kind `kind`, when the census has one.
+/// `Err` is the sentence for a census that puts it on a line the declaration is not on: the
+/// caller says it as a problem at the declaration.
+///
+/// Shared with [`crate::rsgen`], which reads `---@struct`, `---@optional` and
+/// `---@extensible` the way this module does.
+pub(crate) fn marker_on(
+    markers: &[MarkerSite],
+    marker: &str,
+    kind: &str,
+    d: &Decl,
+    name: &str,
+) -> Result<bool, String> {
+    let Some(site) = markers
+        .iter()
+        .find(|s| s.marker == marker && s.kind == kind && s.name == name)
+    else {
+        return Ok(false);
+    };
+    if site.line == d.line || site.line == d.name_line {
+        return Ok(true);
+    }
+    Err(format!(
+        "`{name}`: the marker census puts `---@{marker}` on line {} and the declaration is on line {}",
+        site.line, d.name_line
+    ))
+}
+
+/// The alias of the file whose candidates are `cands` that a nominal named `names` resolved
+/// to at `declared`. Shared with [`crate::rsgen`].
+///
+/// Teal places an alias's declaration at the type it is written as (`type Pts = {Point}`
+/// is declared at `{`), which no field of [`Decl`] records: after the place of the alias or
+/// its name, an alias on the line `declared` is on, with the last name written, is the one;
+/// then, for a bare name, the alias of that name.
+pub(crate) fn alias_in<'a>(
+    aliases: &[&'a Decl],
+    cands: &[Cand],
+    refs: &RefTable,
+    names: &[String],
+    declared: &Place,
+) -> Option<&'a Decl> {
+    let key = refs.key(declared);
+    let this_file = cands.first().map(|c| refs.key(c.at).0);
+    if this_file.as_ref() != Some(&key.0) {
+        return None;
+    }
+    let find = |hit: &dyn Fn(&Decl) -> bool| aliases.iter().copied().find(|a| hit(a));
+    find(&|a| [(a.line, a.col), (a.name_line, a.name_col)].contains(&(key.1, key.2)))
+        .or_else(|| {
+            find(&|a| (a.line == key.1 || a.name_line == key.1) && names.last() == Some(&a.name))
+        })
+        .or_else(|| find(&|a| names.len() == 1 && names[0] == a.name))
+}
+
+pub(crate) fn rel_display(p: &Path) -> String {
     p.components()
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
         .collect::<Vec<_>>()
@@ -965,22 +1045,13 @@ impl<'a> Lowering<'a> {
     /// The marker `marker` on the declaration `name` of kind `kind`, when the census has
     /// one — and says so at a line the declaration is on.
     fn marked(&mut self, marker: &str, kind: &str, d: &Decl, name: &str) -> bool {
-        let sites: &[MarkerSite] = &self.src.info.markers;
-        let Some(site) = sites
-            .iter()
-            .find(|s| s.marker == marker && s.kind == kind && s.name == name)
-        else {
-            return false;
-        };
-        if site.line == d.line || site.line == d.name_line {
-            return true;
+        match marker_on(&self.src.info.markers, marker, kind, d, name) {
+            Ok(on) => on,
+            Err(message) => {
+                self.problem(d.name_line, d.name_col, message);
+                false
+            }
         }
-        let message = format!(
-            "`{name}`: the marker census puts `---@{marker}` on line {} and the declaration is on line {}",
-            site.line, d.name_line
-        );
-        self.problem(d.name_line, d.name_col, message);
-        false
     }
 
     /// The lowering of candidate `i`.
@@ -1014,23 +1085,10 @@ impl<'a> Lowering<'a> {
             }
         }
         let open = self.marked("extensible", "record", d, &qual);
-        // In the order the body declares them: a function the file defines below its record
-        // stands where the definition is, and `body` is where the record wrote its type.
-        let mut children: Vec<&Decl> = d.children.iter().collect();
-        children.sort_by_key(|f| f.body.unwrap_or((f.line, f.col)));
         let mut fields = Vec::new();
         // Where the tag field is among `fields`, and whether its type is a record.
         let mut tag_at: Option<(usize, bool)> = None;
-        for f in children {
-            let Some(TypeInfo::Field { ty }) = &f.info else {
-                continue;
-            };
-            if !matches!(
-                f.kind,
-                DeclKind::Field | DeclKind::Function | DeclKind::Method
-            ) {
-                continue;
-            }
+        for (f, ty) in record_fields(d) {
             let site = format!("{qual}.{}", f.name);
             let optional = self.marked("optional", "field", f, &site);
             let mut trail = Vec::new();
@@ -1289,15 +1347,7 @@ impl<'a> Lowering<'a> {
 
     /// The alias of this file a nominal named `names` resolved to at `declared`.
     fn alias_for(&self, names: &[String], declared: &Place) -> Option<&'a Decl> {
-        let key = self.refs.key(declared);
-        let this_file = self.cands.first().map(|c| self.refs.key(c.at).0);
-        let in_file = this_file.as_ref() == Some(&key.0);
-        self.aliases.iter().copied().find(|a| {
-            let by_place = [(a.line, a.col), (a.name_line, a.name_col)]
-                .iter()
-                .any(|&(l, c)| in_file && (l, c) == (key.1, key.2));
-            by_place || (in_file && names.len() == 1 && names[0] == a.name)
-        })
+        alias_in(&self.aliases, &self.cands, self.refs, names, declared)
     }
 
     /// The text of both files, and the modules the Lua requires.
@@ -1456,6 +1506,59 @@ impl<'a> Lowering<'a> {
         }
         out.push_str(&format!("end\nreturn shapes_{id}\n"));
         out
+    }
+}
+
+/// What [`lower_project`] made of a project's sources.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectShapes {
+    /// The lowering of each source, in the order the sources were given.
+    pub lowered: Vec<Lowered>,
+    /// The groups of written modules that require each other ([`module_cycles`]): a Lua
+    /// `require` loop the generated files cannot be loaded through. A command refuses the
+    /// modules in a group and writes the rest.
+    pub cycles: Vec<Vec<String>>,
+}
+
+/// The table of the declarations of every one of `sources` ([`declared_shapes`] of each, for
+/// each that kept an index), keyed with `canon`.
+///
+/// Pass 1 of lowering a project, as a function of its own so that a later module that needs
+/// to know where a declaration is, without lowering, builds the table the same way.
+pub(crate) fn ref_table(sources: &[Source], canon: fn(&Path) -> PathBuf) -> RefTable {
+    let mut refs = RefTable::new(canon);
+    for s in sources {
+        if let Some(decls) = s.info.types.declarations() {
+            refs.extend(declared_shapes(s.module, decls));
+        }
+    }
+    refs
+}
+
+/// Lower every one of `sources` against the table of all of them, and find the cycles among
+/// the modules that came out written.
+///
+/// A shape names the shapes of other files, so a source is lowered only after the table of
+/// every source is built (two passes). `canon` canonicalises the file of a place, as
+/// [`RefTable::new`] takes it: this module reads no file, so the caller brings that.
+///
+/// It is pure, and lives in Core so that each command that lowers the project's own modules
+/// runs the same two passes; a copy per command is what drifted in #515.
+pub fn lower_project(sources: &[Source], canon: fn(&Path) -> PathBuf) -> ProjectShapes {
+    let refs = ref_table(sources, canon);
+    let lowered: Vec<Lowered> = sources.iter().map(|s| lower(s, &refs)).collect();
+    // Shapes that need each other's cannot be loaded: Lua's `require` would loop.
+    let edges: Vec<(String, Vec<String>)> = sources
+        .iter()
+        .zip(&lowered)
+        .filter_map(|(s, l)| match l {
+            Lowered::Written { requires, .. } => Some((s.module.to_string(), requires.clone())),
+            _ => None,
+        })
+        .collect();
+    ProjectShapes {
+        lowered,
+        cycles: module_cycles(&edges),
     }
 }
 

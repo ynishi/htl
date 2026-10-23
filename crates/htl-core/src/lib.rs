@@ -159,6 +159,10 @@ pub mod registry;
 // The run-time shape of each record and enum a checked file declares (`htl shapes`): pure,
 // from what a check produced to the text of the files that are written.
 pub mod shapes;
+// The Rust types of the records and enums a checked file declares (`htl rs`): pure, as
+// `shapes` is. It validates a Rust type in `[rust.types]` with `syn`, which `dts` brings.
+#[cfg(feature = "dts")]
+pub mod rsgen;
 pub mod teal;
 pub mod testing;
 // What the checker knows of each position of a file, kept for an editor's hover and

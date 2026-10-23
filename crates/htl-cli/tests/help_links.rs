@@ -169,7 +169,7 @@ fn the_short_help_stays_a_summary() {
         "`htl -h` grew a URL; that belongs in --help:\n{short}"
     );
     let lines = short.lines().count();
-    assert!(lines <= 30, "`htl -h` is {lines} lines:\n{short}");
+    assert!(lines <= 31, "`htl -h` is {lines} lines:\n{short}");
 }
 
 /// clap's own check of the tree the two tests above walk.

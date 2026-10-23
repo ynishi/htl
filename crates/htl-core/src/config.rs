@@ -52,6 +52,13 @@
 //! [lang]
 //! async = true              # async / await are keywords (local async function f, async local
 //!                           # x = e, await x, await f()); off, they are ordinary names
+//!
+//! [rust]                    # htl rs: Rust types written from Teal records and enums
+//! modules = ["ev"]          # the modules written; absent or empty, htl rs writes nothing
+//! # out = "src/teal_types.rs"   # where; default "<source>/teal_types.rs"
+//!
+//! [rust.types]
+//! "ev.Event.at" = "u32"     # a field's Rust type, in place of the lowered one
 //! ```
 //!
 //! Found by walking up from a file or directory, like `mlua-pkg.toml`. Command-line
@@ -112,6 +119,10 @@ pub struct HtlConfig {
     /// `await`, off unless the project says so.
     #[serde(default)]
     pub lang: LangConfig,
+    /// `[rust]` — which modules `htl rs` writes Rust types for, where, and how a field's
+    /// Rust type is overridden.
+    #[serde(default)]
+    pub rust: RustConfig,
     /// Static counterpart of `TealResolver::expect_type` / `require_fields`: files
     /// directly under `dir` must return `type`; checked by the `contract` lint.
     #[serde(default)]
@@ -534,6 +545,43 @@ impl LangConfig {
     pub fn async_on(&self) -> bool {
         self.async_.unwrap_or(false)
     }
+}
+
+/// `[rust]`: the Rust types `htl rs` writes from this project's Teal records and enums.
+///
+/// ```toml
+/// [rust]
+/// modules = ["ev", "geom.types"]     # the modules whose records and enums are written
+/// out = "src/teal_types.rs"          # where; default "<source>/teal_types.rs"
+///
+/// [rust.types]
+/// "ev.Event.at" = "u32"              # a field's Rust type, in place of the lowered one
+/// ```
+///
+/// What is lowered, how a key of `types` finds its field, and what refuses a run is the
+/// module doc of [`crate::rsgen`]; this is where the keys are read from.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RustConfig {
+    /// The modules (`ev`, `geom.types`: the names `require` takes) whose records and enums
+    /// `htl rs` writes. Absent or empty: `htl rs` writes nothing, and removes the file an
+    /// earlier run wrote. The opt-in is per module, because a module of shared types is the
+    /// unit a Rust host imports. A name that is no module of the project's own sources is a
+    /// problem, not a no-op.
+    #[serde(default)]
+    pub modules: Vec<String>,
+    /// The file `htl rs` writes, relative to `htl.toml`. Absent: `teal_types.rs` in the
+    /// source directory (`[layout] source`). A file there that `htl rs` did not write is
+    /// never overwritten. Only the command reads this; the lowering does not.
+    #[serde(default)]
+    pub out: Option<PathBuf>,
+    /// `<module>.<type>.<field>` to a Rust type, written as Rust writes it: `"ev.Event.at" =
+    /// "u32"`. The field gets exactly that type: it is not wrapped in an `Option`, and
+    /// nothing checks that it crosses as the Teal type does, the way `#[teal(as = "..")]` is
+    /// the author's statement on the Rust side. A key that matches no field, a key that
+    /// matches two, and a value that does not parse as a Rust type are each a problem.
+    #[serde(default)]
+    pub types: std::collections::BTreeMap<String, String>,
 }
 
 /// `[async]`: the executor a program runs on (`htl run`, `htl test`, and

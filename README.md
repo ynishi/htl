@@ -85,6 +85,7 @@ htl = "0.8"                    # embedding: engine + proc macros in one import
 | `htl types add <library> [--from dir] [--force]` | the declarations a library never shipped, from [teal-types](https://github.com/teal-language/teal-types), into `types/` with the commit they came from recorded beside each |
 | `htl cache status [path] [--entries] [--format json]` / `htl cache clear [path]` | report what the store holds, or empty it (see Caching) |
 | `htl dts [dir]` | write the `.d.tl` files this project declares: from Rust source, the ones `#[host_module]` / `#[derive(TealRecord)]` ask for, no build needed; from Teal, the module each `---@contract` type is declared in; from the crate graph, the ones a dependency ships (`[package.metadata.htl] dts`) into `types/<crate>/`. Every command that reads the project does this first (`check` / `run` / `test` / `build` / `fix` / `unused` / `adopt` / `resolve` / `gen`); exits non-zero when something it was asked to write could not be — a crate's declaration, or a `---@contract` type that cannot be published — never on a file it only [left in place](https://docs.rs/htl/latest/htl/dep_dts/index.html), and with nothing to write at all (no Cargo package above, no contract type) it is an error |
+| `htl rs [dir] [--check]` | the other direction of `htl dts`, from Teal: write one Rust file (`src/teal_types.rs`, or `[rust] out`) holding a `struct` per record and an `enum` per enum of the modules `[rust] modules` lists, deriving `TealRecord`, so a type designed in Teal is not copied into Rust by hand (a field is `Option<T>` unless its record is `---@struct`; `[rust.types]` sets a field's Rust type). A type the mapping has no row for is a problem at its `file:line:col` and nothing is written; a file it did not write is never touched. `--check` writes nothing and exits 1 when the file is stale (see [`htl::rsgen`](https://docs.rs/htl/latest/htl/rsgen/index.html)) |
 | `htl lsp` | a language server on stdio, whose diagnostics are `htl check`'s (see Editors) |
 
 Exit code 1 is a verdict (an error in a file, a finding at `deny`, a failing test, a name
@@ -681,7 +682,9 @@ same command again with the block deleted to go back.
 - No Luau: PUC Lua 5.4 / LuaJIT via mlua features, and no dual bytecode-plus-source
   payload (see Bundles, Portability).
 - `.d.tl` files are written syntactically, from Rust source and from Teal (the module a
-  `---@contract` type is declared in); there is no reflection on types either way.
+  `---@contract` type is declared in), not by reflection on the types. What does read the
+  checker's types is the other generation: `htl shapes` and `htl rs` lower Teal records
+  and enums to an lshape shape and to a Rust struct, from what a check knows of the file.
 
 ## License
 

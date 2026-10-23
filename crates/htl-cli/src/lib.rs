@@ -422,6 +422,41 @@ Examples:
         /// Project root or any path inside it (default: current directory)
         dir: Option<PathBuf>,
     },
+    /// Write a Rust struct for each record and a Rust enum for each enum that the modules
+    /// listed in `[rust] modules` declare
+    ///
+    /// Reads the project's own `.tl` files, as `htl shapes` does, and writes one file,
+    /// `<source>/teal_types.rs` unless `[rust] out` says otherwise: one `pub mod` per module
+    /// segment, each record a `struct` and each enum a unit-only `enum` deriving
+    /// `::htl::TealRecord`, so that a host reads a Lua table as the struct and writes it
+    /// back. The record is the source: nothing generated is to be edited. A field is
+    /// `Option<T>` unless its record is marked `---@struct` and the field is neither
+    /// `---@optional` nor `T | nil`; `[rust.types] "ev.Event.at" = "u32"` gives one field
+    /// the Rust type written there. What is lowered, the mapping, and every case that is
+    /// refused (a function field, a generic, a union, a tuple, `---@extensible`, a type of
+    /// a module that is not listed, a name Rust cannot have, ...) is the module doc of
+    /// `htl::rsgen`; a run with any such problem names each at `file:line:col` and writes
+    /// nothing.
+    ///
+    /// Reports `htl rs: wrote <path>` or `htl rs: <path> is current` on stderr; a file
+    /// whose text would not change is not touched. A target that exists and does not begin
+    /// with the line `htl rs` writes is not one of its own and is never overwritten or
+    /// removed: it exits non-zero, saying so. With `[rust] modules` empty (the default) it
+    /// writes nothing, and removes a file an earlier run wrote. A type error in any own
+    /// file, listed or not, is reported and nothing is written.
+    ///
+    /// `--check` writes nothing: it compares what would be written with the file, and
+    /// exits non-zero with `htl rs: <path> is stale; run htl rs` when they differ, the file
+    /// is missing, or `[rust] modules` is empty and a file `htl rs` wrote is still there.
+    /// The file is committed, and this is how CI says it has fallen behind the Teal.
+    Rs {
+        /// Project root or any path inside it (default: current directory)
+        dir: Option<PathBuf>,
+        /// Compare instead of write: exit non-zero when the file is not what `htl rs` would
+        /// write
+        #[arg(long)]
+        check: bool,
+    },
     /// Create a new Teal project directory
     ///
     /// README, "Layout of a project": https://github.com/ynishi/htl#layout-of-a-project-htl-new
@@ -926,6 +961,7 @@ fn real_main(cli: Cli) -> Result<ExitCode> {
         },
         Cmd::Dts { dir } => cmd_dts(dir.as_deref()),
         Cmd::Shapes { dir } => cmd_shapes(dir.as_deref()),
+        Cmd::Rs { dir, check } => cmd_rs(dir.as_deref(), check),
         Cmd::New {
             name,
             lib,
@@ -1297,30 +1333,44 @@ fn report_dts(results: &[(PathBuf, bool)], root: &Path) {
     );
 }
 
-/// One source file `htl shapes` read, with the check that was kept for it.
-struct ShapeFile {
-    /// The project-relative path, for the header and the diagnostics.
-    rel: PathBuf,
-    /// The module name the file answers to.
-    module: String,
-    info: htl::CheckInfo,
-}
-
-/// What became of one file `htl shapes` writes.
+/// What became of one file a command that generates files (`htl shapes`, `htl rs`) writes.
 enum Generated {
     Wrote,
     Current,
-    /// It was its own and the module it was generated for lowers to nothing now.
+    /// It was its own and what it was generated for lowers to nothing now.
     Removed,
-    /// It exists and does not start with the header `htl shapes` writes: not its own.
+    /// It exists and does not start with the header the command writes: not its own.
     Foreign,
 }
 
-/// Whether the file at `path` exists and starts with the header `htl shapes` writes.
-fn written_by_shapes(path: &Path) -> bool {
-    fs::read_to_string(path)
-        .map(|cur| cur.starts_with(htl::shapes::HEADER))
-        .unwrap_or(false)
+/// The commands that write generated files, which share the rules for them (`written_by`,
+/// `remove_generated`, `write_generated`) and say what became of a file in the words of
+/// their own (`announce`).
+#[derive(Clone, Copy)]
+enum Writer {
+    Shapes,
+    Rs,
+}
+
+impl Writer {
+    /// What starts the first line of every file the command writes.
+    fn header(self) -> &'static str {
+        match self {
+            Writer::Shapes => htl::shapes::HEADER,
+            Writer::Rs => htl::rsgen::HEADER,
+        }
+    }
+}
+
+/// Whether the file at `path` exists and starts with the header `who` writes: one `who`
+/// wrote. No file is `false`; a file that is there and cannot be read is an error, not
+/// "somebody else's", so a permission problem is reported as one.
+fn written_by(path: &Path, who: Writer) -> Result<bool> {
+    match fs::read_to_string(path) {
+        Ok(cur) => Ok(cur.starts_with(who.header())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
 }
 
 /// The two files a module lowers to: `<source>/shapes/<module>.lua` and
@@ -1333,13 +1383,13 @@ fn shape_targets(source: &Path, types: &Path, module: &str) -> [PathBuf; 2] {
     ]
 }
 
-/// Remove a file `htl shapes` wrote for a module that lowers to nothing now. `None` when
-/// there is no such file; a file that is not its own is left (`Foreign`).
-fn remove_generated(path: &Path) -> Result<Option<Generated>> {
+/// Remove a file `who` wrote for what lowers to nothing now. `None` when there is no such
+/// file; a file that is not its own is left (`Foreign`).
+fn remove_generated(path: &Path, who: Writer) -> Result<Option<Generated>> {
     if !path.exists() {
         return Ok(None);
     }
-    if !written_by_shapes(path) {
+    if !written_by(path, who)? {
         return Ok(Some(Generated::Foreign));
     }
     fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
@@ -1352,9 +1402,9 @@ fn canonical_path(p: &Path) -> PathBuf {
 }
 
 /// Write `text` to `path` when it would change, unless the file is somebody's: a target
-/// that exists and whose first line is not the one `htl shapes` writes is left as it is.
-fn write_generated(path: &Path, text: &str) -> Result<Generated> {
-    if path.exists() && !written_by_shapes(path) {
+/// that exists and whose first line is not the header `who` writes is left as it is.
+fn write_generated(path: &Path, text: &str, who: Writer) -> Result<Generated> {
+    if path.exists() && !written_by(path, who)? {
         return Ok(Generated::Foreign);
     }
     let changed = htl::write_if_changed_when(path, text, true)
@@ -1406,27 +1456,19 @@ fn cmd_shapes(dir: Option<&Path>) -> Result<ExitCode> {
     let shown = |p: &Path| p.strip_prefix(&root).unwrap_or(p).to_path_buf();
 
     // The files, and the modules they answer to. A module called `shapes` is in the
-    // namespace the generated modules are written under.
-    let paths = [source.clone()];
-    let skip = project::not_walked(Some(&model), &paths, htl::model::Purpose::Own);
-    let mut modules = Vec::new();
+    // namespace the generated modules are written under; that is a rule of this command, so
+    // it is said here, before any file is checked.
+    let modules = project::own_modules(&model)?;
     let mut collides = false;
-    for file in htl::collect_tl_skipping(&paths, &skip)? {
-        let Some(place) = model.locate(&file) else {
-            continue;
-        };
-        if place.module.owner != htl::model::Owner::Own {
-            continue;
-        }
-        if place.name == "shapes" || place.name.starts_with("shapes.") {
+    for (file, name) in &modules {
+        if name == "shapes" || name.starts_with("shapes.") {
             eprintln!(
                 "shapes: module `{}` ({}) is in the namespace the generated modules are written under (shapes.*); rename it, then rerun",
-                place.name,
-                shown(&file).display()
+                name,
+                shown(file).display()
             );
             collides = true;
         }
-        modules.push((file, place.name));
     }
     if collides {
         return Ok(ExitCode::FAILURE);
@@ -1435,71 +1477,45 @@ fn cmd_shapes(dir: Option<&Path>) -> Result<ExitCode> {
     // Pass 1: check every file, keeping the index.
     let mut sink = text_sink();
     let mut failed = false;
-    let mut checked = Vec::new();
-    for (file, module) in modules {
-        let info = h.check_indexed(&file)?;
+    let checked = project::check_own_modules(&h, &root, modules)?;
+    for f in &checked {
         // A file whose check fails is reported, fails the run, and is lowered all the same:
         // the index is kept for any file that parsed, and a field whose type did not
         // resolve is refused at that field by the lowering itself. What this buys is the
         // first run. A file that requires `shapes.<m>` before that module exists fails its
         // check on that line and nothing else; written anyway, the second run is clean.
         // Skipped, a file that asserts its own records could never be written at all.
-        if runs_fail(&info) {
-            sink.checkinfo(&info);
+        if f.failed {
+            sink.checkinfo(&f.info);
             failed = true;
-        }
-        checked.push(ShapeFile {
-            rel: shown(&file),
-            module,
-            info,
-        });
-    }
-    let mut refs = htl::shapes::RefTable::new(canonical_path);
-    for f in &checked {
-        if let Some(decls) = f.info.types.declarations() {
-            refs.extend(htl::shapes::declared_shapes(&f.module, decls));
         }
     }
 
-    // Pass 2: lower each file against the table.
-    let lowered: Vec<htl::shapes::Lowered> = checked
+    // The table of declarations, and each file lowered against it.
+    let sources: Vec<htl::shapes::Source> = checked
         .iter()
-        .map(|f| {
-            htl::shapes::lower(
-                &htl::shapes::Source {
-                    module: &f.module,
-                    rel_path: &f.rel,
-                    info: &f.info,
-                },
-                &refs,
-            )
+        .map(|f| htl::shapes::Source {
+            module: &f.module,
+            rel_path: &f.rel,
+            info: &f.info,
         })
         .collect();
-    // Shapes that need each other's cannot be loaded: Lua's `require` would loop.
-    let edges: Vec<(String, Vec<String>)> = checked
-        .iter()
-        .zip(&lowered)
-        .filter_map(|(f, l)| match l {
-            htl::shapes::Lowered::Written { requires, .. } => {
-                Some((f.module.clone(), requires.clone()))
-            }
-            _ => None,
-        })
-        .collect();
-    let cycles = htl::shapes::module_cycles(&edges);
+    let htl::shapes::ProjectShapes { lowered, cycles } =
+        htl::shapes::lower_project(&sources, canonical_path);
     let in_cycle = |module: &str| cycles.iter().find(|g| g.iter().any(|m| m == module));
 
     // A module that is refused keeps the files an earlier run wrote for it, which still
     // validate against the old shape: said, not left standing in silence.
-    let say_stale = |module: &str| {
+    let say_stale = |module: &str| -> Result<()> {
         for target in shape_targets(&source, &types, module) {
-            if written_by_shapes(&target) {
+            if written_by(&target, Writer::Shapes)? {
                 eprintln!(
                     "shapes: {} left as it was and is stale: the module is refused above",
                     shown(&target).display()
                 );
             }
         }
+        Ok(())
     };
 
     for (f, l) in checked.iter().zip(&lowered) {
@@ -1510,8 +1526,8 @@ fn cmd_shapes(dir: Option<&Path>) -> Result<ExitCode> {
                 // its records, and its files stay.
                 if f.info.types.declarations().is_some() {
                     for target in shape_targets(&source, &types, &f.module) {
-                        if let Some(g) = remove_generated(&target)? {
-                            failed |= announce_shape(&shown(&target), g);
+                        if let Some(g) = remove_generated(&target, Writer::Shapes)? {
+                            failed |= announce(Writer::Shapes, &shown(&target), g);
                         }
                     }
                 }
@@ -1521,7 +1537,7 @@ fn cmd_shapes(dir: Option<&Path>) -> Result<ExitCode> {
                     .iter()
                     .chain(problems)
                     .for_each(|d| sink.diagnostic(d));
-                say_stale(&f.module);
+                say_stale(&f.module)?;
                 failed = true;
             }
             htl::shapes::Lowered::Written { output, notes, .. } => {
@@ -1545,20 +1561,29 @@ fn cmd_shapes(dir: Option<&Path>) -> Result<ExitCode> {
                         ),
                         None,
                     ));
-                    say_stale(&f.module);
+                    say_stale(&f.module)?;
                     failed = true;
                     continue;
                 }
                 let [lua, dtl] = shape_targets(&source, &types, &f.module);
-                failed |= announce_shape(&shown(&lua), write_generated(&lua, &output.lua)?);
-                failed |= announce_shape(&shown(&dtl), write_generated(&dtl, &output.dtl)?);
+                failed |= announce(
+                    Writer::Shapes,
+                    &shown(&lua),
+                    write_generated(&lua, &output.lua, Writer::Shapes)?,
+                );
+                failed |= announce(
+                    Writer::Shapes,
+                    &shown(&dtl),
+                    write_generated(&dtl, &output.dtl, Writer::Shapes)?,
+                );
             }
         }
     }
     let lshape_dtl = types.join("lshape.d.tl");
-    failed |= announce_shape(
+    failed |= announce(
+        Writer::Shapes,
         &shown(&lshape_dtl),
-        write_generated(&lshape_dtl, htl::shapes::LSHAPE_DTL)?,
+        write_generated(&lshape_dtl, htl::shapes::LSHAPE_DTL, Writer::Shapes)?,
     );
     Ok(if failed {
         ExitCode::FAILURE
@@ -1567,18 +1592,148 @@ fn cmd_shapes(dir: Option<&Path>) -> Result<ExitCode> {
     })
 }
 
-/// Say what became of one generated file, one line on stderr. `true` when the file was not
-/// its to write, which fails the run.
-fn announce_shape(rel: &Path, g: Generated) -> bool {
-    match g {
-        Generated::Wrote => eprintln!("shapes: wrote {}", rel.display()),
-        Generated::Current => eprintln!("shapes: current {}", rel.display()),
-        Generated::Removed => eprintln!("shapes: removed {}", rel.display()),
-        Generated::Foreign => {
-            eprintln!(
-                "shapes: {} exists and was not written by htl shapes; move it aside",
-                rel.display()
-            );
+/// `htl rs`: the module doc of `htl::rsgen` says what is lowered and how; this is the part
+/// that reads and writes files.
+///
+/// The project's own sources are checked (`project::own_sources`, which `htl shapes` walks
+/// too) and handed to `htl::rsgen::generate`, whose answer is then written, or, under
+/// `--check`, compared with the file. Nothing is written when any own file fails its check,
+/// or when `generate` refuses.
+fn cmd_rs(dir: Option<&Path>, check: bool) -> Result<ExitCode> {
+    let start = match dir {
+        Some(d) => d.to_path_buf(),
+        None => std::env::current_dir()?,
+    };
+    // `--check` writes nothing, the `.d.tl` files every command refreshes first included.
+    let ProjectChecker { h, cfg, model, .. } = checker_for(&start, !check)?;
+    let Some((root, _, cfg)) = cfg else {
+        bail!(
+            "no htl.toml at or above {}: `htl rs` writes into a project",
+            start.display()
+        );
+    };
+    let Some(model) = model else {
+        bail!("no project at or above {}", start.display());
+    };
+    let Some(source) = model.own().roots.source.clone() else {
+        bail!("the project at {} has no source directory", root.display());
+    };
+    let out = match &cfg.rust.out {
+        Some(p) => root.join(p),
+        None => source.join("teal_types.rs"),
+    };
+    let shown = out.strip_prefix(&root).unwrap_or(&out).to_path_buf();
+    let spec = htl::rsgen::Spec {
+        modules: cfg.rust.modules.clone(),
+        types: cfg.rust.types.clone(),
+    };
+
+    // Nothing is asked for: nothing is checked, and a file an earlier run wrote is no longer
+    // wanted. One that is somebody's is none of this command's business.
+    if spec.modules.is_empty() {
+        eprintln!("htl rs: nothing to write ([rust] modules is empty)");
+        if !written_by(&out, Writer::Rs)? {
+            return Ok(ExitCode::SUCCESS);
+        }
+        if check {
+            eprintln!("htl rs: {} is stale; run htl rs", shown.display());
+            return Ok(ExitCode::FAILURE);
+        }
+        if let Some(g) = remove_generated(&out, Writer::Rs)? {
+            announce(Writer::Rs, &shown, g);
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    // A file that fails its check is reported, and nothing is written: a record that does
+    // not check is not one a Rust type can be generated from. (`htl shapes` lowers such a
+    // file all the same, for a reason that is its own: it requires the module it is
+    // generating, on the first run.) The listed modules are not the only ones that count:
+    // a type of an unlisted module is what a listed one's field resolves against.
+    let mut sink = text_sink();
+    let checked = project::own_sources(&h, &root, &model)?;
+    let mut failed = false;
+    for f in checked.iter().filter(|f| f.failed) {
+        sink.checkinfo(&f.info);
+        failed = true;
+    }
+    if failed {
+        eprintln!("htl rs: {} not written", shown.display());
+        return Ok(ExitCode::FAILURE);
+    }
+
+    let sources: Vec<htl::shapes::Source> = checked
+        .iter()
+        .map(|f| htl::shapes::Source {
+            module: &f.module,
+            rel_path: &f.rel,
+            info: &f.info,
+        })
+        .collect();
+    let text = match htl::rsgen::generate(&sources, &spec, canonical_path) {
+        htl::rsgen::Rendered::Text { text, notes } => {
+            notes.iter().for_each(|d| sink.diagnostic(d));
+            text
+        }
+        htl::rsgen::Rendered::Refused { problems, notes } => {
+            notes
+                .iter()
+                .chain(&problems)
+                .for_each(|d| sink.diagnostic(d));
+            eprintln!("htl rs: {} not written", shown.display());
+            return Ok(ExitCode::FAILURE);
+        }
+        // `modules` was not empty above.
+        htl::rsgen::Rendered::Nothing => return Ok(ExitCode::SUCCESS),
+    };
+
+    // A target somebody else wrote is never touched, under `--check` as well: the answer
+    // to "is it what htl rs would write" is no, and the way out is the same.
+    if out.exists() && !written_by(&out, Writer::Rs)? {
+        return Ok(announce_exit(Writer::Rs, &shown, Generated::Foreign));
+    }
+    if check {
+        let stale = htl::write_if_changed_when(&out, &text, false)
+            .with_context(|| format!("reading {}", out.display()))?;
+        if stale {
+            eprintln!("htl rs: {} is stale; run htl rs", shown.display());
+            return Ok(ExitCode::FAILURE);
+        }
+        return Ok(announce_exit(Writer::Rs, &shown, Generated::Current));
+    }
+    Ok(announce_exit(
+        Writer::Rs,
+        &shown,
+        write_generated(&out, &text, Writer::Rs)?,
+    ))
+}
+
+/// [`announce`], as the exit code of a command whose only file this is.
+fn announce_exit(who: Writer, rel: &Path, g: Generated) -> ExitCode {
+    if announce(who, rel, g) {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Say what became of one generated file, one line on stderr, in the words of the command
+/// that wrote it. `true` when the file was not its to write, which fails the run.
+fn announce(who: Writer, rel: &Path, g: Generated) -> bool {
+    let rel = rel.display();
+    match (who, g) {
+        (Writer::Shapes, Generated::Wrote) => eprintln!("shapes: wrote {rel}"),
+        (Writer::Shapes, Generated::Current) => eprintln!("shapes: current {rel}"),
+        (Writer::Shapes, Generated::Removed) => eprintln!("shapes: removed {rel}"),
+        (Writer::Shapes, Generated::Foreign) => {
+            eprintln!("shapes: {rel} exists and was not written by htl shapes; move it aside");
+            return true;
+        }
+        (Writer::Rs, Generated::Wrote) => eprintln!("htl rs: wrote {rel}"),
+        (Writer::Rs, Generated::Current) => eprintln!("htl rs: {rel} is current"),
+        (Writer::Rs, Generated::Removed) => eprintln!("htl rs: removed {rel}"),
+        (Writer::Rs, Generated::Foreign) => {
+            eprintln!("htl rs: {rel} is not written by htl rs; move it, or set [rust] out");
             return true;
         }
     }
@@ -3717,7 +3872,7 @@ fn cmd_gen(file: &Path, out: Option<&Path>) -> Result<ExitCode> {
     text_sink().checkinfo(&c);
     // Judged on its errors alone (`Policy::ERRORS_ONLY`): the warnings and lints above are
     // reported, and `htl check` is where they are judged.
-    let (Some(code), false) = (code, runs_fail(&c)) else {
+    let (Some(code), false) = (code, htl::verdict::fails_on_errors(&c)) else {
         return Ok(ExitCode::FAILURE);
     };
     // Written as it came back. This command used to append the final newline itself, which
@@ -3754,7 +3909,7 @@ fn cmd_run(file: &Path, args: &[String]) -> Result<ExitCode> {
     let (code, c) = h.gen_lua(file)?;
     text_sink().checkinfo(&c);
     // As `htl gen`: errors stop it, the rest is reported (`Policy::ERRORS_ONLY`).
-    let (Some(code), false) = (code, runs_fail(&c)) else {
+    let (Some(code), false) = (code, htl::verdict::fails_on_errors(&c)) else {
         return Ok(ExitCode::FAILURE);
     };
     run_root(
@@ -3850,21 +4005,6 @@ fn run_root(h: &Htl, entry: Entry, args: &[String]) -> Result<ExitCode> {
             ExitCode::FAILURE
         }
     })
-}
-
-/// Whether `htl run` / `htl gen` stop at the check `c`: [`htl::verdict::verdict`] under
-/// [`Policy::ERRORS_ONLY`](htl::verdict::Policy::ERRORS_ONLY), so an error does and
-/// nothing else.
-fn runs_fail(c: &htl::CheckInfo) -> bool {
-    htl::verdict::verdict(
-        &htl::verdict::Findings {
-            errors: c.errors.len(),
-            warnings: c.warnings.len(),
-            lints: c.lints.len(),
-            denied: 0,
-        },
-        &htl::verdict::Policy::ERRORS_ONLY,
-    )
 }
 
 /// The run cache as `htl build` was asked to use it: `--no-cache` and `--explain-cache`,
