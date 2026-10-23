@@ -136,6 +136,23 @@ pub fn verdict(findings: &Findings, policy: &Policy) -> bool {
                 || (policy.strict && (findings.warnings > 0 || findings.lints > 0))))
 }
 
+/// Whether `htl run`, `htl gen`, and every command that generates from a file stop at its
+/// check `c`: [`verdict`] under [`Policy::ERRORS_ONLY`], so an error does and nothing else.
+///
+/// Here, and not in each command, so that the commands that generate agree on which check
+/// stops them ([`project::own_sources`](crate::project::own_sources) records it per file).
+pub fn fails_on_errors(c: &crate::CheckInfo) -> bool {
+    verdict(
+        &Findings {
+            errors: c.errors.len(),
+            warnings: c.warnings.len(),
+            lints: c.lints.len(),
+            denied: 0,
+        },
+        &Policy::ERRORS_ONLY,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
