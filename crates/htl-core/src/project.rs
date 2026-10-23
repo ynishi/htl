@@ -325,6 +325,96 @@ pub fn not_walked(
     model.map(|m| m.not_walked(purpose)).unwrap_or_default()
 }
 
+/// One `.tl` file of the project's own source directory, checked with its type index kept.
+///
+/// What every command that lowers the project's own modules (`htl shapes`, `htl rs`) starts
+/// from. It is a value in Core, built by [`own_sources`], so that the commands do not each
+/// keep a copy of the walk and the check that could drift from the others (#515).
+#[derive(Debug)]
+pub struct OwnSource {
+    /// The file, as the walk of the source directory spelled it.
+    pub file: PathBuf,
+    /// `file` relative to the project root (`src/main.tl`), or `file` itself when it is not
+    /// under the root: what a header and a diagnostic show.
+    pub rel: PathBuf,
+    /// The module name the file answers to (`main`, `knl.foo`), as
+    /// [`Project::locate`](crate::model::Project::locate) gives it.
+    pub module: String,
+    /// The check of `file` with the index kept ([`Htl::check_indexed`]). It is kept whether
+    /// or not the check passed: the index is there for any file that parsed.
+    pub info: CheckInfo,
+    /// Whether the check stops a command that generates from the file
+    /// ([`verdict::fails_on_errors`](crate::verdict::fails_on_errors)): it has an error.
+    /// Warnings and lints do not. A command reports such a file and fails its run, and may
+    /// still lower the file, since a field whose type did not resolve is refused at that
+    /// field by the lowering itself.
+    pub failed: bool,
+}
+
+/// The `.tl` files of the project's own source directory and the module each answers to,
+/// in walk order, without checking any of them.
+///
+/// Separate from [`own_sources`] for a command that has a rule of its own over the module
+/// names (`htl shapes` refuses a module in `shapes.*`) and says so before any file is
+/// checked and any check is reported. A file that no module of the project's own holds is
+/// left out, as is whatever the model says a walk for [`Purpose::Own`] does not enter.
+///
+/// It is an error for the project to have no source directory.
+///
+/// [`Purpose::Own`]: crate::model::Purpose::Own
+pub fn own_modules(model: &crate::model::Project) -> Result<Vec<(PathBuf, String)>> {
+    let Some(source) = model.own().roots.source.clone() else {
+        anyhow::bail!("the project has no source directory");
+    };
+    let paths = [source];
+    let skip = not_walked(Some(model), &paths, crate::model::Purpose::Own);
+    let mut modules = Vec::new();
+    for file in crate::collect_tl_skipping(&paths, &skip)? {
+        let Some(place) = model.locate(&file) else {
+            continue;
+        };
+        if place.module.owner != crate::model::Owner::Own {
+            continue;
+        }
+        modules.push((file, place.name));
+    }
+    Ok(modules)
+}
+
+/// Check each of `modules` (from [`own_modules`]) with the type index kept, in order, and
+/// say which fail.
+///
+/// Nothing is reported here: the caller walks the result and says what it says.
+/// An error of the checker itself (not a finding about the file) ends the run.
+pub fn check_own_modules(
+    h: &Htl,
+    root: &Path,
+    modules: Vec<(PathBuf, String)>,
+) -> Result<Vec<OwnSource>> {
+    let mut out = Vec::with_capacity(modules.len());
+    for (file, module) in modules {
+        let info = h.check_indexed(&file)?;
+        out.push(OwnSource {
+            rel: file.strip_prefix(root).unwrap_or(&file).to_path_buf(),
+            failed: crate::verdict::fails_on_errors(&info),
+            file,
+            module,
+            info,
+        });
+    }
+    Ok(out)
+}
+
+/// The project's own sources, each checked with its type index kept: [`own_modules`], then
+/// [`check_own_modules`].
+///
+/// This is the walk and the check that every command lowering the project's own modules
+/// shares, once. A command with a rule over module names that must say so before any check
+/// is reported calls the two halves itself.
+pub fn own_sources(h: &Htl, root: &Path, model: &crate::model::Project) -> Result<Vec<OwnSource>> {
+    check_own_modules(h, root, own_modules(model)?)
+}
+
 /// `files` split into those a module of the project holds and those none does, in walk
 /// order. A module holds a file one of its roots names ([`Project::locate`]) and, for a
 /// module other than the project's own, any file in its home. A project is its modules, and the project
