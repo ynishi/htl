@@ -1,5 +1,5 @@
 //! The Rust types of the records and enums a project's modules declare, lowered from what the
-//! checker knows of the files (`htl rs`).
+//! checker knows of the files (`htl rs`, `htl::teal_types!()`).
 //!
 //! The types that cross between Teal and a Rust host are written in one place only when that
 //! place is Rust: `#[derive(TealRecord)]` writes the `.d.tl` from a struct. A project that
@@ -7,9 +7,10 @@
 //! returns) would copy each record into a struct by hand, with nothing to say when the copy
 //! has fallen behind. This module is the other direction, the way [`shapes`]
 //! is for lshape: **the record is the source, and the Rust type is generated from it**, into
-//! one file the project commits. Nothing here reads a file or runs a process; the caller (the
-//! `htl rs` subcommand) hands over what a check produced ([`Source`]) and writes, or
-//! compares, what comes back ([`Rendered`]).
+//! one file the project commits (`htl rs`) or into the crate at `cargo build`
+//! (`htl::teal_types!()`). Nothing here reads a file or runs a process; the caller (the
+//! `htl rs` subcommand or `htl-macros`) hands over what a check produced ([`Source`]) and
+//! writes, compares, or parses what comes back ([`Rendered`]).
 //!
 //! # What is written
 //!

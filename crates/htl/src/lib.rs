@@ -3,7 +3,8 @@
 //! Umbrella crate: everything from [`htl_core`] plus, with the default `macros`
 //! feature, the proc macros from `htl-macros`. Generated code from the macros refers
 //! to `::htl::...`, so depend on this crate (not on `htl-core` directly) when you use
-//! `include_tl!` / `include_tl_bytes!` / `#[derive(TealRecord)]` / `#[host_module]`.
+//! `include_tl!` / `include_tl_bytes!` / `teal_types!` / `#[derive(TealRecord)]` /
+//! `#[host_module]`.
 //!
 //! # Embedding
 //!
@@ -158,7 +159,9 @@ once `h` is built."
 pub use htl_core::*;
 
 #[cfg(feature = "macros")]
-pub use htl_macros::{TealRecord, host_module, include_bundle, include_tl, include_tl_bytes};
+pub use htl_macros::{
+    TealRecord, host_module, include_bundle, include_tl, include_tl_bytes, teal_types,
+};
 
 #[cfg(all(feature = "macros", feature = "ffi"))]
 pub use htl_macros::c_export;

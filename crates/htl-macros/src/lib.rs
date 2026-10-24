@@ -2,6 +2,7 @@
 //!
 //! - `include_tl!("path.tl")`        -> `&'static str` generated Lua, Teal-checked at build time
 //! - `include_tl_bytes!("path.tl")`  -> `&'static [u8]` stripped Lua 5.4 bytecode, same check
+//! - `teal_types!()`                 -> the `pub mod ... { ... }` items `htl rs` writes, from `htl.toml`
 //! - `#[derive(TealRecord)]`         -> Teal `record` / `enum` / `type` decl + `IntoLua` / `FromLua`
 //! - `#[host_module(name = "...")]`  -> `UserData` impl + Teal `.d.tl` from a plain `impl` block
 //! - `#[c_export(prefix = "...")]`   -> `extern "C"` wrappers + C header from the same `impl` block
@@ -673,6 +674,168 @@ fn expand_include(rel: &str, bytes: bool) -> Result<TokenStream, String> {
         #payload
     }}
     .into())
+}
+
+// ------------------------------------------------------------------ teal_types!
+
+/// `teal_types!()` -> the `pub mod ... { ... }` items `htl rs` writes, generated at
+/// `cargo build` from `htl.toml` (`[rust] modules` and `[rust.types]`) through
+/// [`htl_core::rsgen::generate`], for a project that does not commit generated Rust.
+///
+/// Every `.tl` source file checked (and every `.d.tl` or `.tl` it resolved) and
+/// `htl.toml` are `include_str!`-tracked, so editing a `.tl` record or `[rust.types]`
+/// triggers a rebuild without `cargo clean`. A Teal type error in any own source file, or
+/// a shape `rsgen::generate` refuses, becomes a `compile_error!` at the macro's span,
+/// naming the Teal file and line. Before checking, like [`include_tl!`], it regenerates
+/// every `#[host_module]`'s `.d.tl` it can see from the Rust source (`regenerate_crate`).
+#[proc_macro]
+pub fn teal_types(input: TokenStream) -> TokenStream {
+    let _ = parse_macro_input!(input as syn::parse::Nothing);
+    match expand_teal_types() {
+        Ok(ts) => ts,
+        // Item position (`htl::teal_types!();` at the crate root): `compile_error!` needs
+        // its trailing `;` for the same reason `derive_teal_record` does.
+        Err(msg) => quote! { compile_error!(#msg); }.into(),
+    }
+}
+
+/// What `teal_types!` expands from, computed without proc-macro types so it can be
+/// unit-tested and compared directly with [`htl_core::rsgen::generate`].
+#[derive(Debug)]
+struct TealTypesOut {
+    /// The Rust source text `rsgen::generate` produced, or empty when `[rust] modules` is
+    /// empty.
+    code: String,
+    /// Every `.tl` file checked and every dependency it resolved (`include_str!` inputs),
+    /// canonical and absolute.
+    inputs: Vec<String>,
+    /// `htl.toml`, absolute: a setting the expansion came from.
+    config: Option<String>,
+    /// Notes `rsgen::generate` reported alongside the generated text.
+    notes: Vec<htl_core::Diagnostic>,
+}
+
+fn resolve_teal_types(manifest_dir: &Path) -> Result<TealTypesOut, String> {
+    let ck = checker_for(
+        "teal_types!",
+        manifest_dir,
+        manifest_dir,
+        std::env::var("HTL_LINTS").ok().as_deref(),
+    )?;
+    let Some((root, _, cfg)) = &ck.cfg else {
+        return Err(format!(
+            "teal_types!: no htl.toml at or above {}",
+            manifest_dir.display()
+        ));
+    };
+    let Some(model) = &ck.model else {
+        return Err(format!(
+            "teal_types!: no project at or above {}",
+            manifest_dir.display()
+        ));
+    };
+    let spec = htl_core::rsgen::Spec {
+        modules: cfg.rust.modules.clone(),
+        types: cfg.rust.types.clone(),
+    };
+    let config = config_input(&ck);
+    if spec.modules.is_empty() {
+        return Ok(TealTypesOut {
+            code: String::new(),
+            inputs: Vec::new(),
+            config,
+            notes: Vec::new(),
+        });
+    }
+
+    let checked = htl_core::project::own_sources(&ck.h, root, model)
+        .map_err(|e| format!("teal_types!: {e:#}"))?;
+    let mut errors = Vec::new();
+    for f in checked.iter().filter(|f| f.failed) {
+        for d in &f.info.error_items {
+            errors.push(d.clone().spelled().to_string());
+        }
+        for e in &f.info.dependency_errors {
+            errors.push(format!(
+                "{}\n  (required by {})",
+                e.diagnostic.clone().spelled(),
+                htl_core::diagnostic::display_path(&e.required_by)
+            ));
+        }
+    }
+    if !errors.is_empty() {
+        return Err(format!("Teal type check failed:\n{}", errors.join("\n")));
+    }
+
+    let mut tracked = std::collections::BTreeSet::new();
+    for f in &checked {
+        for p in std::iter::once(&f.file).chain(f.info.deps.iter()) {
+            let abs = if p.is_absolute() {
+                p.clone()
+            } else {
+                manifest_dir.join(p)
+            };
+            let abs = std::fs::canonicalize(&abs).unwrap_or(abs);
+            if abs.is_file() {
+                tracked.insert(abs.to_string_lossy().into_owned());
+            }
+        }
+    }
+    let inputs: Vec<String> = tracked.into_iter().collect();
+
+    let sources: Vec<htl_core::shapes::Source> = checked
+        .iter()
+        .map(|f| htl_core::shapes::Source {
+            module: &f.module,
+            rel_path: &f.rel,
+            info: &f.info,
+        })
+        .collect();
+    let (code, notes) = match htl_core::rsgen::generate(&sources, &spec, |p| {
+        std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+    }) {
+        htl_core::rsgen::Rendered::Text { text, notes } => (text, notes),
+        htl_core::rsgen::Rendered::Refused { problems, notes } => {
+            let lines: Vec<String> = notes
+                .into_iter()
+                .chain(problems)
+                .map(|d| d.spelled().to_string())
+                .collect();
+            return Err(format!("teal_types!: {}", lines.join("\n")));
+        }
+        htl_core::rsgen::Rendered::Nothing => (String::new(), Vec::new()),
+    };
+
+    Ok(TealTypesOut {
+        code,
+        inputs,
+        config,
+        notes,
+    })
+}
+
+fn expand_teal_types_from(out: &TealTypesOut) -> Result<TokenStream2, String> {
+    let items: TokenStream2 = out
+        .code
+        .parse()
+        .map_err(|e| format!("teal_types!: generated Rust did not parse: {e}"))?;
+    let inputs = &out.inputs;
+    let settings = settings_tracked(out.config.as_deref());
+    Ok(quote! {
+        #( const _: &str = include_str!(#inputs); )*
+        #settings
+        #items
+    })
+}
+
+fn expand_teal_types() -> Result<TokenStream, String> {
+    let manifest_dir = manifest_dir()?;
+    regenerate_crate(&manifest_dir);
+    let out = resolve_teal_types(&manifest_dir)?;
+    for n in &out.notes {
+        eprintln!("teal_types! note: {}", n.clone().spelled());
+    }
+    Ok(expand_teal_types_from(&out)?.into())
 }
 
 // ------------------------------------------------------------------ shared
@@ -3110,5 +3273,120 @@ return M
         );
         let err = resolve_include(&root, "scripts/main.tl", false).unwrap_err();
         assert!(err.contains("module not found: 'mathx'"), "{err}");
+    }
+
+    const EV_TL: &str = "local record M
+   record Event
+      kind: Kind
+      at: integer
+      note: string
+   end
+   enum Kind
+      \"open\"
+      \"close\"
+   end
+end
+return M
+";
+
+    /// #539 (Acceptances 1 & 3): `teal_types!` runs `rsgen::generate` on `[rust] modules`
+    /// and `[rust.types]`, produces the exact text and `pub mod` items `rsgen::generate`
+    /// writes, and tracks `htl.toml` and every checked `.tl` file with `include_str!`.
+    #[test]
+    fn teal_types_matches_rsgen_generate_and_tracks_sources_and_config() {
+        let root = tempdir("teal-types-ev");
+        write(&root.join("htl.toml"), "[rust]\nmodules = [\"ev\"]\n");
+        write(&root.join("src/ev/init.tl"), EV_TL);
+
+        let out = resolve_teal_types(&root).expect("teal_types! resolves");
+        let ck = checker_for("teal_types!", &root, &root, None).unwrap();
+        let checked =
+            htl_core::project::own_sources(&ck.h, &ck.root, ck.model.as_ref().unwrap()).unwrap();
+        let sources: Vec<htl_core::shapes::Source> = checked
+            .iter()
+            .map(|f| htl_core::shapes::Source {
+                module: &f.module,
+                rel_path: &f.rel,
+                info: &f.info,
+            })
+            .collect();
+        let spec = htl_core::rsgen::Spec {
+            modules: vec!["ev".to_string()],
+            types: Default::default(),
+        };
+        let htl_core::rsgen::Rendered::Text {
+            text: rsgen_text, ..
+        } = htl_core::rsgen::generate(&sources, &spec, |p| {
+            std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+        })
+        else {
+            panic!("expected Rendered::Text");
+        };
+        assert_eq!(out.code, rsgen_text);
+
+        let expanded = expand_teal_types_from(&out).expect("parses as Rust items");
+        let expanded_str = expanded.to_string();
+        let ev_abs = std::fs::canonicalize(root.join("src/ev/init.tl")).unwrap();
+        let toml_abs = std::fs::canonicalize(root.join("htl.toml")).unwrap();
+        assert_eq!(out.inputs, vec![ev_abs.to_string_lossy().into_owned()]);
+        assert_eq!(
+            out.config.as_deref(),
+            Some(toml_abs.to_str().unwrap()),
+            "htl.toml is tracked"
+        );
+        assert!(expanded_str.contains(ev_abs.to_str().unwrap()));
+        assert!(expanded_str.contains(toml_abs.to_str().unwrap()));
+
+        let expanded_file: syn::File = syn::parse2(expanded).unwrap();
+        let expanded_mods: Vec<&Item> = expanded_file
+            .items
+            .iter()
+            .filter(|i| matches!(i, Item::Mod(_)))
+            .collect();
+        let rsgen_file: syn::File = syn::parse_str(&rsgen_text).unwrap();
+        let rsgen_mods: Vec<&Item> = rsgen_file.items.iter().collect();
+        assert_eq!(expanded_mods, rsgen_mods);
+    }
+
+    /// #539 (Acceptance 2): a type error in `src/ev/init.tl` fails `resolve_teal_types`
+    /// naming the Teal file and line; a shape `rsgen::generate` refuses or a missing
+    /// `htl.toml` is refused as well.
+    #[test]
+    fn teal_types_reports_type_error_with_teal_file_and_line_and_refuses_invalid_shapes() {
+        let root = tempdir("teal-types-err");
+        write(&root.join("htl.toml"), "[rust]\nmodules = [\"ev\"]\n");
+        write(
+            &root.join("src/ev/init.tl"),
+            "local record M\n   record Event\n      at: integer\n   end\nend\nlocal bad: integer = \"not an integer\"\nreturn M\n",
+        );
+        let err = resolve_teal_types(&root).expect_err("type error must fail");
+        assert!(
+            err.contains("Teal type check failed:") && err.contains("init.tl:6:"),
+            "{err}"
+        );
+
+        // Function field refused by rsgen::generate at its line.
+        write(
+            &root.join("src/ev/init.tl"),
+            "local record M\n   record Event\n      f: function(): integer\n   end\nend\nreturn M\n",
+        );
+        let err = resolve_teal_types(&root).expect_err("function field must fail");
+        assert!(
+            err.contains(
+                "src/ev/init.tl:3:7: `M.Event.f`: a function or method field has no Rust type"
+            ),
+            "{err}"
+        );
+
+        // Empty `[rust] modules` produces no module items and still tracks `htl.toml`.
+        write(&root.join("htl.toml"), "[rust]\nmodules = []\n");
+        let empty = resolve_teal_types(&root).expect("empty modules is ok");
+        assert!(empty.code.is_empty());
+        assert!(empty.config.is_some());
+
+        // Missing `htl.toml` is refused.
+        let bare = tempdir("teal-types-bare");
+        let err = resolve_teal_types(&bare).expect_err("no htl.toml must fail");
+        assert!(err.contains("teal_types!: no htl.toml"), "{err}");
     }
 }
