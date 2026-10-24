@@ -388,3 +388,36 @@ fn the_binary_writes_the_committed_file() {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rs/teal_types.rs");
     assert_eq!(read(&root.join("src/teal_types.rs")), read(&fixture));
 }
+
+/// #540: a field typed with an alias from a listed module that declares no record or enum of
+/// its own is lowered through both `htl rs` and `htl shapes`.
+#[test]
+fn an_alias_in_a_listed_module_with_no_record_or_enum_is_lowered() {
+    let root = project_with(
+        "alias-only-module",
+        "[rust]\nmodules = [\"ev\", \"geom\"]\n",
+        "local geom = require(\"geom\")
+local record M
+   record Event
+      pts: geom.Pts
+   end
+end
+return M
+",
+    );
+    write(
+        &root.join("src/geom/init.tl"),
+        "local record M
+   type Pts = {integer}
+end
+return M
+",
+    );
+    let out = htl(&root, &["rs"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let file = read(&root.join("src/teal_types.rs"));
+    assert!(
+        file.contains("        pub pts: ::core::option::Option<::std::vec::Vec<i64>>,\n"),
+        "{file}"
+    );
+}

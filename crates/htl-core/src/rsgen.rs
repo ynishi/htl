@@ -1090,7 +1090,7 @@ impl Lowering<'_, '_> {
             // The alias may be declared in any listed module, not only the one being lowered:
             // `alias_in` matches only a place in the file of the unit it is handed.
             let found = self.units.iter().find_map(|u| {
-                shapes::alias_in(&u.aliases, &u.cands, &refs.table, names, p)
+                shapes::alias_in(&u.aliases, u.src.info.types.file(), &refs.table, names, p)
                     .map(|a| (format!("{}.{}", u.src.module, a.name), a))
             });
             if let Some((qualified, alias)) = found {
@@ -1609,6 +1609,34 @@ return M
             t.contains(
                 "        pub pts: ::core::option::Option<::std::vec::Vec<super::geom::Point>>,\n        pub direct: ::core::option::Option<::std::vec::Vec<super::geom::Point>>,\n"
             ),
+            "{t}"
+        );
+    }
+
+    /// An alias declared in a listed module that declares no record or enum of its own is
+    /// read through all the same (#540).
+    #[test]
+    fn an_alias_of_a_listed_module_with_no_record_or_enum_is_read_through() {
+        let ev = "local geom = require(\"geom\")
+local record M
+   record Event
+      pts: geom.Pts
+   end
+end
+return M
+";
+        let geom = "local record M
+   type Pts = {integer}
+end
+return M
+";
+        let t = text(
+            "alias-only-module",
+            &[("ev/init.tl", ev), ("geom/init.tl", geom)],
+            &["ev", "geom"],
+        );
+        assert!(
+            t.contains("        pub pts: ::core::option::Option<::std::vec::Vec<i64>>,\n"),
             "{t}"
         );
     }

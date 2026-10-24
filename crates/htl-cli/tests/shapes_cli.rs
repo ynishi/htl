@@ -260,6 +260,7 @@ fn the_lowering_table_holds_through_the_command() {
     write(
         &root.join("src/main.tl"),
         "local other = require(\"knl.other\")
+local geom = require(\"geom\")
 
 local record M
    record Request
@@ -280,6 +281,7 @@ local record M
       level: Level
       req: Request
       owner: other.Owner
+      pts: geom.Pts
    end
 end
 return M
@@ -293,6 +295,14 @@ return M
    end
 end
 return other
+",
+    );
+    write(
+        &root.join("src/geom/init.tl"),
+        "local record geom
+   type Pts = {integer}
+end
+return geom
 ",
     );
     let out = htl(&root, &["shapes"]);
@@ -330,6 +340,7 @@ M.Event = T.shape({
    level = M.Level,
    req = M.Request,
    owner = require(\"shapes.knl.other\").Owner,
+   pts = T.array_of(T.integer),
 }, { open = false })
 
 return M

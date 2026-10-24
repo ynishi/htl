@@ -75,7 +75,7 @@
 //! | `enum E` | `T.one_of({ "a", "b" })`, the members sorted bytewise |
 //! | a record or enum of this file | the sibling shape `M.<Name>` |
 //! | a record or enum of another file the run lowers | `require("shapes.<module>").<Name>` |
-//! | an alias of this file | what it names, by this table |
+//! | an alias of a file the run lowers | what it names, by this table |
 //!
 //! A shape is written after the shapes it names (dependency order, ties by position). What
 //! has no shape is a **problem** at the field, and a file with any problem is written in
@@ -445,6 +445,10 @@ pub struct Source<'a> {
 pub struct RefTable {
     canon: fn(&Path) -> PathBuf,
     map: HashMap<(PathBuf, usize, usize), RefEntry>,
+    /// The aliases of each file the run lowers, keyed by its canonical path: `(module,
+    /// aliases)`. Built by [`ref_table`] so an alias declared in another file of the project
+    /// is read through, even when that file declares no record or enum of its own.
+    aliases: HashMap<PathBuf, (String, Vec<Decl>)>,
 }
 
 /// What the table says of a declaration of the project: the shape it lowers to, or why it
@@ -499,11 +503,16 @@ impl RefTable {
         Self {
             canon,
             map: HashMap::new(),
+            aliases: HashMap::new(),
         }
     }
 
     pub(crate) fn key(&self, p: &Place) -> Key {
         ((self.canon)(&p.file), p.line, p.col)
+    }
+
+    pub(crate) fn canon_path(&self, p: &Path) -> PathBuf {
+        (self.canon)(p)
     }
 
     /// Add what is known of the declaration at `place`: its shape, or why it has none.
@@ -855,8 +864,8 @@ pub(crate) fn marker_on(
     ))
 }
 
-/// The alias of the file whose candidates are `cands` that a nominal named `names` resolved
-/// to at `declared`. Shared with [`crate::rsgen`].
+/// The alias of `file` (as the checker named it) that a nominal named `names` resolved to at
+/// `declared`. Shared with [`crate::rsgen`].
 ///
 /// Teal places an alias's declaration at the type it is written as (`type Pts = {Point}`
 /// is declared at `{`), which no field of [`Decl`] records: after the place of the alias or
@@ -864,14 +873,13 @@ pub(crate) fn marker_on(
 /// then, for a bare name, the alias of that name.
 pub(crate) fn alias_in<'a>(
     aliases: &[&'a Decl],
-    cands: &[Cand],
+    file: &Path,
     refs: &RefTable,
     names: &[String],
     declared: &Place,
 ) -> Option<&'a Decl> {
     let key = refs.key(declared);
-    let this_file = cands.first().map(|c| refs.key(c.at).0);
-    if this_file.as_ref() != Some(&key.0) {
+    if refs.canon_path(file) != key.0 {
         return None;
     }
     let find = |hit: &dyn Fn(&Decl) -> bool| aliases.iter().copied().find(|a| hit(a));
@@ -1323,8 +1331,8 @@ impl<'a> Lowering<'a> {
                 }
                 None => {}
             }
-            if let Some(alias) = self.alias_for(names, p) {
-                if aliases.contains(&alias.name) {
+            if let Some((qualified, alias)) = self.alias_for(names, p) {
+                if aliases.contains(&qualified) {
                     let message = format!("`{site}`: the alias `{written}` refers back to itself");
                     self.problem(at.line, at.col, message);
                     return None;
@@ -1332,7 +1340,7 @@ impl<'a> Lowering<'a> {
                 let Some(TypeInfo::Alias { ty }) = &alias.info else {
                     return None;
                 };
-                aliases.push(alias.name.clone());
+                aliases.push(qualified);
                 let out = self.lower_ty(ty, at, site, aliases);
                 aliases.pop();
                 return out;
@@ -1345,9 +1353,23 @@ impl<'a> Lowering<'a> {
         None
     }
 
-    /// The alias of this file a nominal named `names` resolved to at `declared`.
-    fn alias_for(&self, names: &[String], declared: &Place) -> Option<&'a Decl> {
-        alias_in(&self.aliases, &self.cands, self.refs, names, declared)
+    /// The alias of this file, or of another file in `refs`, that a nominal named `names`
+    /// resolved to at `declared`, with its module-qualified name (`<module>.<name>`).
+    fn alias_for(&self, names: &[String], declared: &Place) -> Option<(String, &'a Decl)> {
+        if let Some(a) = alias_in(
+            &self.aliases,
+            self.src.info.types.file(),
+            self.refs,
+            names,
+            declared,
+        ) {
+            return Some((format!("{}.{}", self.src.module, a.name), a));
+        }
+        let file = self.refs.canon_path(&declared.file);
+        let (module, list) = self.refs.aliases.get(&file)?;
+        let refs: Vec<&Decl> = list.iter().collect();
+        alias_in(&refs, &declared.file, self.refs, names, declared)
+            .map(|a| (format!("{module}.{}", a.name), a))
     }
 
     /// The text of both files, and the modules the Lua requires.
@@ -1530,6 +1552,13 @@ pub(crate) fn ref_table(sources: &[Source], canon: fn(&Path) -> PathBuf) -> RefT
     for s in sources {
         if let Some(decls) = s.info.types.declarations() {
             refs.extend(declared_shapes(s.module, decls));
+            let mut aliases = Vec::new();
+            collect_aliases(decls, &mut aliases, &mut None, &refs);
+            if !aliases.is_empty() {
+                let file = refs.canon_path(s.info.types.file());
+                let owned = aliases.into_iter().cloned().collect();
+                refs.aliases.insert(file, (s.module.to_string(), owned));
+            }
         }
     }
     refs
