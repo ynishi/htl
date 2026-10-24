@@ -11,8 +11,8 @@
 use htl::config::AsyncConfig;
 use htl::mlua_isle::runtime::CancelToken;
 use htl::{Htl, host_module};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 /// Set when the future of a host call is dropped: the only way to see the executor let
@@ -25,8 +25,31 @@ impl Drop for DropGuard {
     }
 }
 
+/// Signalled when the host call under test has started, so the cancel thread fires once
+/// the program is in that call rather than after a fixed sleep.
+#[derive(Default)]
+struct Entered {
+    started: Mutex<bool>,
+    cv: Condvar,
+}
+
+impl Entered {
+    fn signal(&self) {
+        *self.started.lock().unwrap() = true;
+        self.cv.notify_all();
+    }
+
+    fn wait(&self) {
+        let mut started = self.started.lock().unwrap();
+        while !*started {
+            started = self.cv.wait(started).unwrap();
+        }
+    }
+}
+
 pub struct Api {
     dropped: Arc<AtomicBool>,
+    entered: Arc<Entered>,
 }
 
 #[host_module(name = "api")]
@@ -39,6 +62,7 @@ impl Api {
 
     /// Never resolves on its own: only a cancel (or a drop) ends it.
     pub async fn forever(&self) -> String {
+        self.entered.signal();
         std::future::pending::<()>().await;
         "never".to_string()
     }
@@ -46,32 +70,35 @@ impl Api {
     /// `get` with a guard on its future, so a test can tell "dropped" from "returned".
     pub async fn watched(&self, ms: u64) -> String {
         let _guard = DropGuard(self.dropped.clone());
+        self.entered.signal();
         tokio::time::sleep(Duration::from_millis(ms)).await;
         "done".to_string()
     }
 }
 
-fn host() -> (Htl, Htl, Arc<AtomicBool>) {
+fn host() -> (Htl, Htl, Arc<AtomicBool>, Arc<Entered>) {
     let checker = Htl::new().unwrap();
     let h = Htl::with_checker(&checker).unwrap();
     let dropped = Arc::new(AtomicBool::new(false));
+    let entered = Arc::new(Entered::default());
     Api {
         dropped: dropped.clone(),
+        entered: entered.clone(),
     }
     .htl_preload(&h)
     .unwrap();
-    (checker, h, dropped)
+    (checker, h, dropped, entered)
 }
 
-/// `run_blocking` on `src`, with `token` cancelled after `cancel_after` on a thread of
-/// its own — the way Ctrl-C reaches `htl run` — or never. Returns the result and how long
-/// the run took.
-fn run(h: &Htl, src: &str, cancel_after: Option<Duration>) -> (anyhow::Result<()>, Duration) {
+/// `run_blocking` on `src`, with `token` cancelled on a thread of its own as soon as
+/// `cancel_on` is signalled — the way Ctrl-C reaches `htl run` — or never. Returns the
+/// result and how long the run took.
+fn run(h: &Htl, src: &str, cancel_on: Option<&Arc<Entered>>) -> (anyhow::Result<()>, Duration) {
     let token = CancelToken::new();
-    if let Some(after) = cancel_after {
+    if let Some(entered) = cancel_on.cloned() {
         let t = token.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(after);
+            entered.wait();
             t.cancel();
         });
     }
@@ -84,7 +111,7 @@ fn run(h: &Htl, src: &str, cancel_after: Option<Duration>) -> (anyhow::Result<()
 /// and resumes it with the value, where `exec` would fail to yield.
 #[test]
 fn an_async_host_method_is_called_sequentially_from_a_chunk() {
-    let (_c, h, _) = host();
+    let (_c, h, _, _) = host();
     let (out, took) = run(
         &h,
         "local api = require('api') \
@@ -101,7 +128,7 @@ fn an_async_host_method_is_called_sequentially_from_a_chunk() {
 /// once, and the run resolves to the cancel.
 #[test]
 fn a_cancel_with_no_grace_drops_the_pending_host_future_at_once() {
-    let (_c, h, dropped) = host();
+    let (_c, h, dropped, entered) = host();
     h.configure_async(&AsyncConfig {
         grace_ms: Some(0),
         preempt: None,
@@ -110,7 +137,7 @@ fn a_cancel_with_no_grace_drops_the_pending_host_future_at_once() {
     let (out, took) = run(
         &h,
         "local api = require('api') api:watched(1000)",
-        Some(Duration::from_millis(100)),
+        Some(&entered),
     );
     let e = out.unwrap_err();
     assert!(htl::is_cancelled(&e), "{e:#}");
@@ -128,7 +155,7 @@ fn a_cancel_with_no_grace_drops_the_pending_host_future_at_once() {
 /// at the await within a few ms, not when the grace runs out.
 #[test]
 fn a_wrapped_host_method_returns_the_cancel_at_once_under_a_grace() {
-    let (_c, h, dropped) = host();
+    let (_c, h, dropped, entered) = host();
     h.configure_async(&AsyncConfig {
         grace_ms: Some(500),
         preempt: None,
@@ -137,7 +164,7 @@ fn a_wrapped_host_method_returns_the_cancel_at_once_under_a_grace() {
     let (out, took) = run(
         &h,
         "local api = require('api') api:watched(1000)",
-        Some(Duration::from_millis(100)),
+        Some(&entered),
     );
     assert!(htl::is_cancelled(&out.unwrap_err()));
     assert!(dropped.load(Ordering::SeqCst));
@@ -151,7 +178,7 @@ fn a_wrapped_host_method_returns_the_cancel_at_once_under_a_grace() {
 /// handler runs, and may itself await a host call.
 #[test]
 fn a_close_handler_runs_on_a_cancel_with_a_grace() {
-    let (_c, h, _) = host();
+    let (_c, h, _, entered) = host();
     h.configure_async(&AsyncConfig {
         grace_ms: Some(500),
         preempt: None,
@@ -165,8 +192,8 @@ fn a_close_handler_runs_on_a_cancel_with_a_grace() {
             local ok, err = pcall(api.get, api, '/cleanup', 1) \
             CLEANUP = ok and 'awaited' or 'cancelled' \
          end }) \
-         api:get('/long', 1000)",
-        Some(Duration::from_millis(50)),
+         api:watched(1000)",
+        Some(&entered),
     );
     assert!(htl::is_cancelled(&out.unwrap_err()));
     let closed: bool = h.lua().globals().get("CLOSED").unwrap();
@@ -185,7 +212,7 @@ fn a_close_handler_runs_on_a_cancel_with_a_grace() {
 #[test]
 #[should_panic(expected = "timers are disabled")]
 fn a_runtime_without_a_time_driver_panics_at_the_first_cancel() {
-    let (_c, h, _) = host();
+    let (_c, h, _, entered) = host();
     h.configure_async(&AsyncConfig {
         grace_ms: Some(500),
         preempt: None,
@@ -194,7 +221,7 @@ fn a_runtime_without_a_time_driver_panics_at_the_first_cancel() {
     let token = CancelToken::new();
     let t = token.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(50));
+        entered.wait();
         t.cancel();
     });
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -216,7 +243,7 @@ fn a_runtime_without_a_time_driver_panics_at_the_first_cancel() {
 /// task pending in a host call has been dropped before `run_blocking` returns.
 #[test]
 fn a_child_task_is_gone_when_a_cancelled_run_resolves() {
-    let (_c, h, dropped) = host();
+    let (_c, h, dropped, entered) = host();
     let task = h.hook_owner().unwrap().task_lib().unwrap();
     h.lua().globals().set("task", task).unwrap();
     let (out, _) = run(
@@ -224,7 +251,7 @@ fn a_child_task_is_gone_when_a_cancelled_run_resolves() {
         "local api = require('api') \
          local child = task.spawn(function() return api:watched(2000) end) \
          api:get('/parent', 2000)",
-        Some(Duration::from_millis(100)),
+        Some(&entered),
     );
     assert!(htl::is_cancelled(&out.unwrap_err()));
     assert!(
@@ -238,7 +265,7 @@ fn a_child_task_is_gone_when_a_cancelled_run_resolves() {
 /// program's.
 #[test]
 fn a_raised_error_reads_as_it_does_from_exec() {
-    let (_c, h, _) = host();
+    let (_c, h, _, _) = host();
     let src =
         "local function inner() error('boom') end\nlocal function outer() inner() end\nouter()";
     let from_exec = htl::developer_message(&h.exec(src, "=test", &[]).unwrap_err());
@@ -271,7 +298,7 @@ fn a_raised_error_reads_as_it_does_from_exec() {
 /// executor; the same program, the same value.
 #[tokio::test]
 async fn a_host_awaits_run_async_on_its_own_runtime() {
-    let (_c, h, _) = host();
+    let (_c, h, _, _) = host();
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
