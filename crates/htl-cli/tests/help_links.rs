@@ -177,3 +177,64 @@ fn the_short_help_stays_a_summary() {
 fn the_command_tree_is_well_formed() {
     htl_cli::command().debug_assert();
 }
+
+/// The first cell of each row in `README.md`'s `## CLI` table.
+fn readme_cli_cells(readme: &str) -> Vec<String> {
+    let section = readme
+        .split_once("\n## CLI\n")
+        .map(|(_, rest)| rest)
+        .unwrap_or_else(|| panic!("README.md has no `## CLI` section"));
+    let section = section
+        .split_once("\n## ")
+        .map(|(body, _)| body)
+        .unwrap_or(section);
+    section
+        .lines()
+        .filter(|l| l.starts_with('|'))
+        .skip(2)
+        .map(|row| {
+            row.trim_start_matches('|')
+                .split('|')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        })
+        .collect()
+}
+
+/// Issue #541: `README.md`'s `## CLI` table has one row per subcommand `htl --help` lists,
+/// and each row's first column names only `htl <subcommand>` — flags and arguments live in
+/// `htl <cmd> --help`, not in a second copy in the README that would drift from `Cmd`.
+#[test]
+fn the_readme_cli_table_has_one_row_per_subcommand() {
+    let cells = readme_cli_cells(&readme());
+    let mut table_cmds = Vec::with_capacity(cells.len());
+    for cell in &cells {
+        let sub = cell
+            .strip_prefix("`htl ")
+            .and_then(|s| s.strip_suffix('`'))
+            .filter(|s| !s.is_empty() && !s.contains(char::is_whitespace))
+            .unwrap_or_else(|| {
+                panic!(
+                    "CLI table cell `{cell}` must be `` `htl <subcommand>` `` with no flags or \
+                     arguments (send the reader to `htl <cmd> --help` instead)"
+                )
+            });
+        table_cmds.push(sub.to_string());
+    }
+
+    let mut clap_cmds: Vec<String> = htl_cli::command()
+        .get_subcommands()
+        .filter(|s| !s.is_hide_set() && s.get_name() != "help")
+        .map(|s| s.get_name().to_string())
+        .collect();
+
+    let mut table_sorted = table_cmds.clone();
+    table_sorted.sort();
+    clap_cmds.sort();
+    assert_eq!(
+        table_sorted, clap_cmds,
+        "README.md's `## CLI` table rows do not match the subcommands of `htl --help`"
+    );
+}
