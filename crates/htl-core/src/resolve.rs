@@ -20,7 +20,9 @@
 //! ([`Resolution::provided_by`]), and its rows are at most the declaration the checker
 //! types it from. So is a name the model has only a declaration for, which the
 //! environment provides ([`Provider::Declared`](crate::model::Provider::Declared)): the
-//! report says which declaration says so, and that declaration is the row read. Both come
+//! report says which declaration says so, that declaration is the row read, and any
+//! implementation `package.path` holds behind it is listed after it with
+//! [`OriginKind::Path`] (`(on package.path)`). Both come
 //! from the resolver's [`provides`](crate::model::Resolver::provides), the answer the
 //! linker leaves a name out of a bundle on. When a file of the model implements the name as well, the model refuses
 //! it: those rows are [`Status::Refused`], the report carries the resolver's message
@@ -126,15 +128,18 @@ pub enum OriginKind {
     /// A `patch_dir` dependency: its source taken into the tree, and the project's from
     /// then on.
     Patched,
+    /// Reached through `package.path` behind a declaration the project model holds.
+    Path,
 }
 
 /// Where a candidate came from, when it came from somewhere.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Origin {
-    /// Which of the four brought it here, which is what decides where an edit to it
-    /// belongs — the crate, the lockfile, or the tree.
+    /// Which of the five brought it here, which is what decides where an edit to it
+    /// belongs — the crate, the lockfile, the tree, or `package.path`.
     pub kind: OriginKind,
-    /// The crate or dependency that ships it.
+    /// The crate or dependency that ships it; empty for [`OriginKind::Path`].
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub name: String,
     /// The version recorded beside a materialised declaration (`.htl-dts`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -142,13 +147,14 @@ pub struct Origin {
 }
 
 impl Origin {
-    /// As a line of the report reads it: `shipped by htl-mq 0.2.0`.
+    /// As a line of the report reads it: `shipped by htl-mq 0.2.0`, `on package.path`.
     pub fn describe(&self) -> String {
         let what = match self.kind {
             OriginKind::Crate => "shipped by",
             OriginKind::Dependency => "installed from",
             OriginKind::Vendored => "vendored copy of",
             OriginKind::Patched => "patched",
+            OriginKind::Path => return "on package.path".to_string(),
         };
         match &self.version {
             Some(v) => format!("{what} {} {v}", self.name),
@@ -272,22 +278,65 @@ pub fn resolve(
 ) -> Result<Resolution> {
     let dirs = h.search_path_dirs()?;
     let resolver = model.map(crate::model::Resolver::new);
-    let (rows, read, error, answered_by) = match resolver
-        .as_ref()
-        .zip(model)
-        .and_then(|(r, m)| model_rows(r, name, root, m))
-    {
-        Some(m) => (m.rows, m.read, m.error, AnsweredBy::Model),
-        None => {
-            let (rows, read) = path_rows(h, name, &dirs, root, model, resolver.as_ref())?;
-            (rows, read, None, AnsweredBy::Path)
-        }
-    };
     let provider = resolver.as_ref().and_then(|r| r.provides(name));
     let provided_by = resolver
         .as_ref()
         .zip(provider)
         .map(|(r, p)| r.provided_by(name, p));
+    let (rows, read, error, answered_by) = match resolver
+        .as_ref()
+        .zip(model)
+        .and_then(|(r, m)| model_rows(r, name, root, m))
+    {
+        Some(mut m) => {
+            // A name the model answers with a declaration only (`Provider::Declared`,
+            // "provided by the environment") is typed from the model and loaded from the
+            // environment: when `package.path` holds an implementation for it, append those
+            // candidates (`OriginKind::Path`) so `htl shapes`, `lshape-version`, and
+            // `htl resolve` see the runtime the program will load (#530).
+            if provider == Some(crate::model::Provider::Declared)
+                && let Some(r) = &resolver
+            {
+                let read_at = m
+                    .rows
+                    .iter()
+                    .find(|c| c.status == Status::Read)
+                    .map(|c| c.order);
+                let mut seen_runtime = false;
+                for c in h.module_candidates(name)? {
+                    if r.owns(&c.path) || c.kind == ModuleKind::Declaration {
+                        continue;
+                    }
+                    let status = if !seen_runtime {
+                        seen_runtime = true;
+                        Status::Runtime
+                    } else {
+                        Status::Shadowed
+                    };
+                    let dir = dir_of(&c, &dirs);
+                    let order = m.rows.len() + 1;
+                    m.rows.push(Candidate {
+                        order,
+                        path: show(&c.path, root),
+                        dir: show(&dir, root),
+                        kind: c.kind,
+                        status,
+                        shadowed_by: (status == Status::Shadowed).then_some(read_at).flatten(),
+                        origin: Some(Origin {
+                            kind: OriginKind::Path,
+                            name: String::new(),
+                            version: None,
+                        }),
+                    });
+                }
+            }
+            (m.rows, m.read, m.error, AnsweredBy::Model)
+        }
+        None => {
+            let (rows, read) = path_rows(h, name, &dirs, root, model, resolver.as_ref())?;
+            (rows, read, None, AnsweredBy::Path)
+        }
+    };
 
     let shadowed = rows.iter().filter(|c| c.status == Status::Shadowed).count();
     // One entry per directory as it is printed: the project root reached through

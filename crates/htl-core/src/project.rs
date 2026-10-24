@@ -1581,13 +1581,12 @@ fn lshape_requirements_in(model: &crate::model::Project) -> bool {
 ///
 /// `lshape` is resolved once, as `htl shapes` resolves it ([`crate::resolve::resolve`]).
 /// The declaration is the file the resolution reads, when that is a declaration; the runtime
-/// is the first candidate that is not one ([`crate::shapes::lshape_runtime`]). Nothing is
-/// found when there is no project (a file in none has no model to resolve in), when the name
-/// resolves to no declaration that states a requirement (a hand-written one, one an older
-/// htl wrote), or when the model holds no runtime. Only the model's files are looked at
-/// ([`lshape_requirements_in`], and the model answers `require("lshape")` once the
-/// declaration is one of them, so the search path behind it is not consulted): an lshape
-/// reached only through `package.path`, or preloaded by a host, is not checked.
+/// is the first candidate that is not one ([`crate::shapes::lshape_runtime`]), whether from
+/// the model (`src/lshape/init.lua`) or from `package.path` (`LUA_PATH`) behind a lone
+/// declaration. Nothing is found when there is no project (a file in none has no model to
+/// resolve in), when the name resolves to no declaration that states a requirement (a
+/// hand-written one, one an older htl wrote), or when no runtime is found on the path. An
+/// lshape preloaded by a host is not checked.
 ///
 /// The Lua state is the expensive part, and a run that replays every module from the cache
 /// built none, so it is not made before there is a requirement to compare: first
