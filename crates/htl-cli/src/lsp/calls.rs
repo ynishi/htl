@@ -17,8 +17,9 @@
 //! that has not.
 
 use super::refs::{FileRefs, Place};
+use super::spelling::Spelling;
 use super::symbols::{self, Entry, Sym, SymbolIndex};
-use super::{lines_of, position_at, read_lossy, uri_of};
+use super::{lines_of, position_at, read_lossy};
 use lsp_types::{
     CallHierarchyIncomingCall, CallHierarchyItem, CallHierarchyOutgoingCall, Position, Range,
     SymbolKind, Uri,
@@ -32,20 +33,15 @@ use std::sync::Arc;
 pub struct Ctx<'a> {
     /// The project's root, canonical: a file's item is named by its path from there.
     pub root: &'a Path,
-    /// The file the request is made in, canonical, and the URI the client called it by: an
-    /// answer names that file the way the client does.
-    pub here: &'a Path,
-    pub uri: &'a Uri,
+    /// What an answer names a file by: a file the client has open by the URI it opened it
+    /// with, so the file of the request is named as the client called it.
+    pub spelling: &'a Spelling<'a>,
 }
 
 impl Ctx<'_> {
-    /// The URI of an indexed file: the client's own for the file of the request.
-    fn uri_for(&self, canonical: &Path, e: &Entry) -> Option<Uri> {
-        if canonical == self.here {
-            Some(self.uri.clone())
-        } else {
-            std::path::absolute(&e.path).ok().and_then(|p| uri_of(&p))
-        }
+    /// The URI of an indexed file, whose key in the index is `canonical`.
+    fn uri_for(&self, canonical: &Path) -> Option<Uri> {
+        self.spelling.client_uri_canonical(canonical)
     }
 }
 
@@ -198,12 +194,7 @@ pub fn incoming(
         if groups.is_empty() {
             continue;
         }
-        let Some(uri) = e
-            .path
-            .is_file()
-            .then(|| ctx.uri_for(canonical, e))
-            .flatten()
-        else {
+        let Some(uri) = e.path.is_file().then(|| ctx.uri_for(canonical)).flatten() else {
             gone = true;
             continue;
         };
@@ -265,7 +256,7 @@ pub fn outgoing(
             gone = true;
             continue;
         };
-        if let Some(uri) = ctx.uri_for(&file, e) {
+        if let Some(uri) = ctx.uri_for(&file) {
             out.push(CallHierarchyOutgoingCall {
                 to: item(uri, sym),
                 from_ranges,
