@@ -1351,3 +1351,101 @@ fn htl_fix_judges_the_same_mismatch_as_htl_check() {
     assert_eq!(out.status.code(), Some(1), "{}", said(&out));
     assert_mismatch(&out, "0.4.0");
 }
+
+/// Issue #530: when `lshape` is reached only through `package.path` (`LUA_PATH`, outside the
+/// project), a second `htl shapes` still finds the runtime behind the `types/lshape.d.tl` the
+/// first run wrote, `htl resolve` says the runtime came from `(on package.path)`, and
+/// `htl check` compares `lshape-version` against that runtime file.
+#[test]
+fn lshape_on_package_path_outside_the_project_survives_a_second_run_and_is_version_checked() {
+    let ext = common::tempdir("htl-cli-shapes", "lua-path-ext");
+    let from = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lshape");
+    for e in std::fs::read_dir(from).unwrap() {
+        let path = e.unwrap().path();
+        if path.extension().is_some_and(|x| x == "lua") {
+            write(
+                &ext.join("lshape").join(path.file_name().unwrap()),
+                &read(&path),
+            );
+        }
+    }
+    let lua_path = format!("{}/?.lua;{}/?/init.lua;;", ext.display(), ext.display());
+    let htl_with_lua_path = |root: &Path, args: &[&str]| -> Output {
+        Command::new(common::htl_bin())
+            .args(args)
+            .env("LUA_PATH", &lua_path)
+            .current_dir(root)
+            .output()
+            .unwrap()
+    };
+
+    let root = common::tempdir("htl-cli-shapes", "lua-path-proj");
+    write(&root.join("htl.toml"), "[check]\n");
+    write(&root.join("src/main.tl"), MAIN);
+
+    // First run writes the generated files and `types/lshape.d.tl`.
+    let first = htl_with_lua_path(&root, &["shapes", "."]);
+    assert_eq!(first.status.code(), Some(0), "{}", stderr(&first));
+    assert_eq!(
+        stderr(&first),
+        "shapes: wrote src/shapes/main.lua
+shapes: wrote types/shapes/main.d.tl
+shapes: wrote types/lshape.d.tl
+"
+    );
+
+    // Acceptance 1 (#530): a second `htl shapes .` exits 0 and reports the generated files
+    // `current` (even though `types/lshape.d.tl` is now in the project model).
+    let second = htl_with_lua_path(&root, &["shapes", "."]);
+    assert_eq!(second.status.code(), Some(0), "{}", stderr(&second));
+    assert_eq!(
+        stderr(&second),
+        "shapes: current src/shapes/main.lua
+shapes: current types/shapes/main.d.tl
+shapes: current types/lshape.d.tl
+"
+    );
+
+    // `htl resolve lshape .` shows the declaration in `types/` as `read` and the runtime on
+    // `package.path` behind it with `(on package.path)`.
+    let resolved = htl_with_lua_path(&root, &["resolve", "lshape", "."]);
+    assert_eq!(resolved.status.code(), Some(0), "{}", said(&resolved));
+    let res_out = String::from_utf8_lossy(&resolved.stdout);
+    let runtime_init = ext.join("lshape/init.lua");
+    assert!(
+        res_out.contains("types/lshape.d.tl") && res_out.contains("declaration  read"),
+        "{res_out}"
+    );
+    assert!(
+        res_out.contains(&runtime_init.display().to_string())
+            && res_out.contains("runtime, typed by 1  (on package.path)"),
+        "{res_out}"
+    );
+
+    // Clean check at 0.3.0.
+    let clean = htl_with_lua_path(&root, &["check", "--strict"]);
+    assert_eq!(clean.status.code(), Some(0), "{}", said(&clean));
+    assert!(version_findings(&clean).is_empty(), "{}", said(&clean));
+
+    // Acceptance 2 (#530): with lshape's `_VERSION` changed to `"0.4.0"`, `htl check` reports
+    // `lshape-version` naming the runtime file on the path.
+    let init_text = read(&runtime_init);
+    write(
+        &runtime_init,
+        &init_text.replace(RUNTIME_VERSION_LINE, "M._VERSION = \"0.4.0\""),
+    );
+    let mismatch = htl_with_lua_path(&root, &["check", "--strict"]);
+    assert_eq!(mismatch.status.code(), Some(1), "{}", said(&mismatch));
+    let found = version_findings(&mismatch);
+    assert_eq!(found.len(), 1, "{}", said(&mismatch));
+    assert!(
+        found[0].starts_with("lint: types/lshape.d.tl:2:1: "),
+        "{}",
+        found[0]
+    );
+    assert!(
+        found[0].contains(&format!("{} is version 0.4.0", runtime_init.display())),
+        "{}",
+        found[0]
+    );
+}
