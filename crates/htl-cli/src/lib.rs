@@ -3842,9 +3842,10 @@ struct ProjectChecker {
 /// - `cmd_fmt` only parses, and resolves no `require`, so it has no search path to set up.
 /// - `htl check` and the language server hold a [`project::Scope`] of their own across
 ///   many files and call [`project::checker`] directly.
-/// - the proc macros in `htl-macros` (`include_tl!`, `include_bundle!`) check inside
-///   `rustc`, which has no `main` that called `register_installer`: see the module doc of
-///   `htl_core::registry`.
+/// - the proc macros in `htl-macros` (`include_tl!`, `include_bundle!`) cannot call
+///   `htl-cli`, so their `checker_for` calls [`project::Scope::new`] and
+///   [`project::checker`] directly (inside `rustc` [`Htl::install_registered`] installs
+///   nothing: see the module doc of `htl_core::registry`).
 fn checker_for(start: &Path, write_dts: bool) -> Result<ProjectChecker> {
     let cfg = load_config(start)?;
     auto_dts_to(start, write_dts)?;
