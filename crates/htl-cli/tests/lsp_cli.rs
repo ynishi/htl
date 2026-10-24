@@ -3299,3 +3299,310 @@ fn call_hierarchy_of_an_item_named_through_a_symlink_is_the_open_file() {
     assert_eq!(calls_of(&mut client, &through, "from"), Value::Null);
     client.finish();
 }
+
+// ------------------------------------------- a workspace opened through a symlink (#543)
+
+/// The text of `project_with_other`'s `src/other.tl`: two functions that each call the
+/// module's `greet`.
+#[cfg(unix)]
+const OTHER_TL: &str = "local sample = require(\"sample\")
+
+local function a(): string
+   local who = \"a\"
+   return sample.greet(who).text
+end
+
+local function b(): string
+   local who = \"b\"
+   return who .. sample.greet(who).text
+end
+
+return { a = a, b = b }
+";
+
+/// The scaffold plus `src/other.tl` in `<tmp>/real/sample`, and `<tmp>/link`, a symlink to
+/// `real`: a client whose workspace is `link` names every file under `link`, and the server
+/// knows each by its path under `real`. Returns the temp directory, `real` and `link`; the
+/// project is `sample` in either.
+#[cfg(unix)]
+fn linked_project(name: &str) -> (common::TempDir, PathBuf, PathBuf) {
+    let tmp = tempdir(name);
+    let real = tmp.join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    let out = Command::new(common::htl_bin())
+        .args(["new", "sample"])
+        .current_dir(&real)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    write(&real.join("sample/src/other.tl"), OTHER_TL);
+    let link = tmp.join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    (tmp, real, link)
+}
+
+/// Acceptance 2 of #543: a definition in a file that is not open is named under the root the
+/// client gave, not under the directory the root links to.
+#[cfg(unix)]
+#[test]
+fn a_definition_in_another_file_is_named_under_the_symlinked_root() {
+    let (tmp, _real, link) = linked_project("link-definition");
+    let p = link.join("sample");
+    let main = p.join("src/main.tl");
+    let (mut client, _) = Client::start(&link, &tmp);
+    client.open(&main);
+    client.publishes(&[&main]);
+    // `greet` of `sample.greet(..)`.
+    let got = definition(&mut client, &main, 2, 19);
+    let module = uri(&p.join("src/sample/init.tl"));
+    assert!(
+        got["uri"].as_str().unwrap().starts_with(&uri(&link)),
+        "{got}"
+    );
+    assert_eq!(got["uri"], module.as_str(), "{got}");
+    // The `require`'s string as well.
+    let got = definition(&mut client, &main, 0, 25);
+    assert_eq!(got["uri"], module.as_str(), "{got}");
+    let (_unread, code) = client.finish();
+    assert_eq!(code, Some(0));
+}
+
+/// Acceptance 2 of #543, for references: the files that use the function are named under the
+/// symlinked root, the open one by the URI it was opened with.
+#[cfg(unix)]
+#[test]
+fn references_are_named_under_the_symlinked_root() {
+    let (tmp, _real, link) = linked_project("link-references");
+    let p = link.join("sample");
+    let init = p.join("src/sample/init.tl");
+    let (mut client, _) = Client::start(&link, &tmp);
+    client.open(&init);
+    client.publishes(&[&init]);
+    let got = references(&mut client, &init, 7, 18, true);
+    for l in got.as_array().unwrap() {
+        assert!(l["uri"].as_str().unwrap().starts_with(&uri(&link)), "{l}");
+    }
+    // `places` strips the root from every URI, so it fails on one that is not under it.
+    let mut want: Vec<&str> = GREET_CALLS.to_vec();
+    want.insert(3, "src/sample/init.tl:7:16-21");
+    assert_eq!(places(&got, &p), want);
+    let (_unread, code) = client.finish();
+    assert_eq!(code, Some(0));
+}
+
+/// Acceptance 2 of #543, for the workspace-symbol request.
+#[cfg(unix)]
+#[test]
+fn workspace_symbols_are_named_under_the_symlinked_root() {
+    let (tmp, _real, link) = linked_project("link-symbols");
+    let p = link.join("sample");
+    let main = p.join("src/main.tl");
+    let (mut client, _) = Client::start(&link, &tmp);
+    client.open(&main);
+    client.publishes(&[&main]);
+    let got = workspace_symbols(&mut client, "greet");
+    for s in got.as_array().unwrap() {
+        let at = s["location"]["uri"].as_str().unwrap();
+        assert!(at.starts_with(&uri(&link)), "{s}");
+    }
+    assert_eq!(
+        found(&got, &p),
+        [
+            "12 sample.greet src/sample/init.tl:7",
+            "23 sample.Greeting src/sample/init.tl:1"
+        ]
+    );
+    // The open file is named by the URI it was opened with.
+    let got = workspace_symbols(&mut client, "g");
+    assert!(
+        found(&got, &p).iter().any(|s| s.ends_with("src/main.tl:2")),
+        "{got}"
+    );
+    let (_unread, code) = client.finish();
+    assert_eq!(code, Some(0));
+}
+
+/// Acceptance 2 of #543, for the call hierarchy: the item the request is made on, the
+/// callers (files that are not open) and what a caller calls are all under the symlinked root.
+#[cfg(unix)]
+#[test]
+fn call_hierarchy_is_named_under_the_symlinked_root() {
+    let (tmp, _real, link) = linked_project("link-calls");
+    let p = link.join("sample");
+    let init = p.join("src/sample/init.tl");
+    let (mut client, _) = Client::start(&link, &tmp);
+    client.open(&init);
+    client.publishes(&[&init]);
+    let items = prepare_calls(&mut client, &init, 7, 18);
+    client.publishes(&[&init]);
+    assert_eq!(
+        item_line(&items[0], &p),
+        "greet 12 src/sample/init.tl:7:16-21"
+    );
+    assert!(items[0]["uri"].as_str().unwrap().starts_with(&uri(&link)));
+
+    let incoming = calls_of(&mut client, &items[0], "from");
+    // `call_lines` strips the root from every item's URI, so it fails on one outside it.
+    let lines = call_lines(&incoming, "from", &p);
+    assert_eq!(lines.len(), 4, "{lines:#?}");
+    assert_eq!(lines[0], "src/main.tl 1 src/main.tl:0:0-0 <- 2:17-22");
+    assert!(lines[1].starts_with("a 12 src/other.tl:"), "{lines:#?}");
+    assert!(lines[2].starts_with("b 12 src/other.tl:"), "{lines:#?}");
+    for c in incoming.as_array().unwrap() {
+        let at = c["from"]["uri"].as_str().unwrap();
+        assert!(at.starts_with(&uri(&link)), "{c}");
+    }
+
+    // `a` calls `greet`: the callee is the item of the first request, spelled the same.
+    let a = incoming[1]["from"].clone();
+    let out = calls_of(&mut client, &a, "to");
+    assert_eq!(
+        call_lines(&out, "to", &p),
+        ["greet 12 src/sample/init.tl:7:16-21 <- 4:17-22"]
+    );
+    assert_eq!(out[0]["to"]["uri"], items[0]["uri"]);
+    let (_unread, code) = client.finish();
+    assert_eq!(code, Some(0));
+}
+
+/// Acceptance 2 of #543, for a diagnostic: the module an error is in is named under the
+/// symlinked root in `relatedInformation`.
+#[cfg(unix)]
+#[test]
+fn a_diagnostics_related_information_is_named_under_the_symlinked_root() {
+    let (tmp, _real, link) = linked_project("link-related");
+    let p = link.join("sample");
+    let main = p.join("src/main.tl");
+    let sample = p.join("src/sample/init.tl");
+    write(
+        &sample,
+        "local record sample\nend\n\nfunction sample.greet(who: string): number\n   return who\nend\n\nreturn sample\n",
+    );
+    let (mut client, _) = Client::start(&link, &tmp);
+    client.open(&main);
+    let got = client.publishes(&[&main]);
+    let in_module = got[&main]
+        .iter()
+        .find(|d| d["relatedInformation"].is_array())
+        .unwrap_or_else(|| panic!("one points at the module: {:?}", got[&main]));
+    let at = &in_module["relatedInformation"][0]["location"]["uri"];
+    assert!(at.as_str().unwrap().starts_with(&uri(&link)), "{at}");
+    assert_eq!(*at, uri(&sample));
+    let (unread, code) = client.finish();
+    assert!(unread.is_empty(), "{unread:?}");
+    assert_eq!(code, Some(0));
+}
+
+/// A file that is open and is itself a symlink (`a.tl` to `b.tl`) is named by the URI it was
+/// opened with, wherever its own locations are: not by its target, and not by its real path.
+#[cfg(unix)]
+#[test]
+fn an_open_file_that_is_a_symlink_is_named_by_the_uri_it_was_opened_with() {
+    let (tmp, _real, link) = linked_project("link-open-symlink");
+    let p = link.join("sample");
+    write(
+        &p.join("src/b.tl"),
+        "local function helper(x: integer): integer
+   return x + 1
+end
+
+local function twice(x: integer): integer
+   return helper(helper(x))
+end
+
+return { twice = twice }
+",
+    );
+    let a = p.join("src/a.tl");
+    std::os::unix::fs::symlink("b.tl", &a).unwrap();
+    let (mut client, _) = Client::start(&link, &tmp);
+    client.open(&a);
+    client.publishes(&[&a]);
+    // The first `helper` of `helper(helper(x))`: declared on line 0 of the same file.
+    let got = definition(&mut client, &a, 5, 11);
+    assert_eq!(got["uri"], uri(&a).as_str(), "{got}");
+    assert_eq!(got["range"]["start"]["line"], 0, "{got}");
+    // `helper` of `local function helper`: its declaration and its two uses.
+    let got = references(&mut client, &a, 0, 17, true);
+    let list = got.as_array().unwrap_or_else(|| panic!("a list: {got}"));
+    assert_eq!(list.len(), 3, "{got}");
+    for l in list {
+        assert_eq!(l["uri"], uri(&a).as_str(), "{l}");
+    }
+    let (_unread, code) = client.finish();
+    assert_eq!(code, Some(0));
+}
+
+/// Acceptance 3 of #543: the same project opened through its real path answers with real
+/// paths, as it did.
+#[cfg(unix)]
+#[test]
+fn a_workspace_opened_through_its_real_path_is_answered_with_real_paths() {
+    let (tmp, real, link) = linked_project("link-real");
+    let p = real.join("sample");
+    let main = p.join("src/main.tl");
+    let (mut client, _) = Client::start(&real, &tmp);
+    client.open(&main);
+    client.publishes(&[&main]);
+    let got = definition(&mut client, &main, 2, 19);
+    assert_eq!(
+        got["uri"],
+        uri(&p.join("src/sample/init.tl")).as_str(),
+        "{got}"
+    );
+    assert!(
+        !got["uri"].as_str().unwrap().starts_with(&uri(&link)),
+        "{got}"
+    );
+    let got = workspace_symbols(&mut client, "greet");
+    assert_eq!(
+        found(&got, &p),
+        [
+            "12 sample.greet src/sample/init.tl:7",
+            "23 sample.Greeting src/sample/init.tl:1"
+        ]
+    );
+    let (_unread, code) = client.finish();
+    assert_eq!(code, Some(0));
+}
+
+/// A manifest that is a symlink (`htl.toml` to `../shared/htl.toml`) is still the manifest of
+/// the directory it sits in: the client says the link changed, and the project of that
+/// directory is built again, not the one the link points into.
+#[cfg(unix)]
+#[test]
+fn a_changed_htl_toml_that_is_a_symlink_rebuilds_the_project_it_sits_in() {
+    let (root, p, g, main) = global_project("watch-link");
+    let shared = root.join("shared");
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::rename(p.join("htl.toml"), shared.join("htl.toml")).unwrap();
+    std::os::unix::fs::symlink("../shared/htl.toml", p.join("htl.toml")).unwrap();
+    let (mut client, _) = Client::start_watching(&p, &root);
+    client.registration();
+    client.open(&g);
+    client.open(&main);
+    let got = client.publishes(&[&g, &main]);
+    assert_eq!(published(&got[&g]), checked(&p, "src/g.tl"));
+    assert_eq!(got[&g][0]["severity"], 2);
+
+    // Written through the link, so the file it points at changes; the event is for the link.
+    set_no_global(&p, "deny");
+    assert!(
+        std::fs::symlink_metadata(p.join("htl.toml"))
+            .unwrap()
+            .is_symlink()
+    );
+    client.watched(&[(&p.join("htl.toml"), 2)]);
+    let got = client.publishes(&[&g, &main]);
+    let after = checked(&p, "src/g.tl");
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(published(&got[&g]), after);
+    assert_eq!(got[&g][0]["severity"], 1, "{}", got[&g][0]);
+    let (unread, code) = client.finish();
+    assert!(unread.is_empty(), "{unread:?}");
+    assert_eq!(code, Some(0));
+}

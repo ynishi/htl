@@ -451,6 +451,15 @@
 //! `self:n()` in a method of the record `R` is a call of `R:n` where the check knows `self`
 //! as an `R`, which it does for a `function R:m` written in the file.
 //!
+//! # How a file is named in an answer
+//!
+//! The server knows a file by its real path, with symlinks resolved, and the client by the
+//! URI it used. A location in an answer (a definition, a reference, a symbol, a call
+//! hierarchy item, the `relatedInformation` of a diagnostic) names its file the way the
+//! client would, not the way the server keys it: a file that is open by the URI it was opened
+//! with, a file under a workspace folder under the folder as the client gave it. The rules
+//! are in the `spelling` module, which is the only place a path becomes a URI.
+//!
 //! # Files that change the answer
 //!
 //! A file's diagnostics depend on more than the file: the project's `htl.toml` (lint levels,
@@ -511,6 +520,7 @@
 
 mod calls;
 mod refs;
+mod spelling;
 mod symbols;
 
 use super::{auto_dts, load_config, warn_cargo_htl_mismatch};
@@ -543,6 +553,7 @@ use lsp_types::{
     TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri,
     WorkspaceEdit, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
+use spelling::{Spelling, normal};
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -903,7 +914,7 @@ struct Done {
 /// A document the client has open.
 struct Doc {
     path: PathBuf,
-    /// Where `path` really is, for comparing it with the files a check reached.
+    /// Where `path` really is ([`normal`]), for comparing it with the files a check reached.
     canonical: PathBuf,
     /// The key of the [`Project`] it belongs to, once the walk up for it has answered. A
     /// walk that failed (an `htl.toml` that does not parse) is asked again at the next
@@ -985,6 +996,9 @@ struct Server<'c> {
     /// The folders the client opened the workspace on, for a symbol search made before any
     /// file is open.
     workspace: Vec<PathBuf>,
+    /// The same folders, each with its real path, for naming a file under one of them the
+    /// way the client does ([`spelling`]).
+    roots: Vec<spelling::Root>,
     /// The symbols of each project a workspace-symbol request has asked about, by project
     /// root. A project dropped because a manifest moved takes its index with it; one dropped
     /// for a declaration or a Rust source keeps it (what a file declares does not depend on
@@ -1018,6 +1032,7 @@ impl<'c> Server<'c> {
             shutting_down: false,
             dynamic_watch,
             watching: false,
+            roots: spelling::roots_of(&workspace),
             workspace,
             indices: HashMap::new(),
         }
@@ -1237,7 +1252,7 @@ impl<'c> Server<'c> {
             self.open.insert(
                 uri.clone(),
                 Doc {
-                    canonical: canonical(&path),
+                    canonical: normal(&path),
                     path,
                     project,
                     deps: HashSet::new(),
@@ -1483,7 +1498,8 @@ impl<'c> Server<'c> {
         });
         let (findings, deps, requires, types) = match outcome {
             Ok((done, levels, policy, fix_error)) => {
-                let mut findings = convert(&path, &text, &done.found, &levels, &policy);
+                let spelling = Spelling::new(&self.open, &self.roots);
+                let mut findings = convert(&path, &text, &done.found, &levels, &policy, &spelling);
                 // A `[fix]` that `htl fix` refuses is a setup error, said like one.
                 if let Some(e) = fix_error {
                     findings.push(Finding {
@@ -1685,16 +1701,17 @@ impl<'c> Server<'c> {
         let lines = lines_of(&checked.text);
         let (line, col) = byte_position(&lines, at)?;
         let here = path_of(uri)?;
+        let spelling = Spelling::new(&self.open, &self.roots).asked_from(uri);
         if let Some(site) = required_at(&lines, &checked.requires, line, col) {
             // The module's first character: a `require` is of the file, not of a line in it.
             let file = site.path.as_ref()?;
-            let target = location_of(&here, uri, file, &checked.text, None)?;
+            let target = location_of(&here, &spelling, file, &checked.text, None)?;
             return Some(GotoDefinitionResponse::Scalar(target));
         }
         let place = checked.types.at(&checked.text, line, col)?.declared?;
         let target = location_of(
             &here,
-            uri,
+            &spelling,
             &place.file,
             &checked.text,
             Some((place.line, place.col)),
@@ -1815,13 +1832,14 @@ impl<'c> Server<'c> {
                 hits.len()
             );
         }
+        let spelling = Spelling::new(&self.open, &self.roots);
         let mut gone: Vec<PathBuf> = Vec::new();
         let mut uri: Option<(&Path, Option<Uri>)> = None;
         let mut out = Vec::with_capacity(hits.len());
         for h in hits {
             if uri.as_ref().is_none_or(|(p, _)| *p != h.path) {
                 let target = if h.path.is_file() {
-                    std::path::absolute(h.path).ok().and_then(|p| uri_of(&p))
+                    spelling.client_uri(h.path)
                 } else {
                     if !gone.iter().any(|g| g == h.path) {
                         gone.push(h.path.to_path_buf());
@@ -1976,11 +1994,11 @@ impl<'c> Server<'c> {
             let target = refs::Place::of(&spelled)?;
             (checked.text.clone(), spelled, target)
         };
-        let here_canonical = canonical(&here);
         let mut round = 0;
         loop {
             self.refresh_refs(&key);
             let index = self.indices.get(&key)?;
+            let spelling = Spelling::new(&self.open, &self.roots).asked_from(uri);
             let class = index.same_as(&target);
             let mut hits: Vec<(&PathBuf, &symbols::Entry, &refs::Ref)> = Vec::new();
             for (canonical, e) in index.iter() {
@@ -2013,7 +2031,7 @@ impl<'c> Server<'c> {
                 && own.is_empty()
                 && let Some(point) = location_of(
                     &here,
-                    uri,
+                    &spelling,
                     &spelled.file,
                     &text,
                     Some((spelled.line, spelled.col)),
@@ -2030,12 +2048,7 @@ impl<'c> Server<'c> {
                     gone = true;
                     continue;
                 }
-                let target_uri = if **canonical == here_canonical {
-                    Some(uri.clone())
-                } else {
-                    std::path::absolute(&e.path).ok().and_then(|p| uri_of(&p))
-                };
-                if let Some(target_uri) = target_uri {
+                if let Some(target_uri) = spelling.client_uri_canonical(canonical) {
                     out.push(Location {
                         uri: target_uri,
                         range: r.range,
@@ -2100,7 +2113,9 @@ impl<'c> Server<'c> {
         if !sym.is_function() || !e.path.is_file() {
             return None;
         }
-        let uri = std::path::absolute(&e.path).ok().and_then(|p| uri_of(&p))?;
+        let uri = Spelling::new(&self.open, &self.roots)
+            .asked_from(uri)
+            .client_uri_canonical(&target.file)?;
         Some(vec![calls::item(uri, sym)])
     }
 
@@ -2118,11 +2133,10 @@ impl<'c> Server<'c> {
         // No `data` is no item of this server's, answered as one whose function is gone.
         let data = item.data.clone().unwrap_or_default();
         let root = canonical(&key);
-        self.calls_answer(&key, &item.uri, |index| {
+        self.calls_answer(&key, &item.uri, |index, spelling| {
             let ctx = calls::Ctx {
                 root: &root,
-                here: &canonical_here,
-                uri: &item.uri,
+                spelling,
             };
             let (_, fr, which) = calls::resolve(index, &canonical_here, &data)?;
             // A file's top level is called by no one.
@@ -2148,11 +2162,10 @@ impl<'c> Server<'c> {
         // No `data` is no item of this server's, answered as one whose function is gone.
         let data = item.data.clone().unwrap_or_default();
         let root = canonical(&key);
-        self.calls_answer(&key, &item.uri, |index| {
+        self.calls_answer(&key, &item.uri, |index, spelling| {
             let ctx = calls::Ctx {
                 root: &root,
-                here: &canonical_here,
-                uri: &item.uri,
+                spelling,
             };
             let (_, fr, which) = calls::resolve(index, &canonical_here, &data)?;
             Some(calls::outgoing(index, &ctx, fr, which))
@@ -2167,7 +2180,7 @@ impl<'c> Server<'c> {
     /// written URI of an open file is that file, with its unsaved edits. The project's key
     /// and the file, canonical.
     fn calls_ready(&mut self, item: &CallHierarchyItem) -> Option<(PathBuf, PathBuf)> {
-        let canonical_here = canonical(&path_of(&item.uri)?);
+        let canonical_here = normal(&path_of(&item.uri)?);
         let open = self
             .open
             .iter()
@@ -2185,17 +2198,22 @@ impl<'c> Server<'c> {
     /// answer that found a use in a file that is gone says so, and the project is walked
     /// again and the answer made once more, as a references request does ("References" in
     /// the module doc: a watcher names files, not the directory a file was in).
+    ///
+    /// `answer` is given the [`Spelling`] to name the files of the answer by. It is made
+    /// here, after the uses are, because a closure of the caller cannot hold `self.open`
+    /// while this method takes `self` mutably.
     fn calls_answer<T>(
         &mut self,
         key: &Path,
         uri: &Uri,
-        answer: impl Fn(&SymbolIndex) -> Option<(T, bool)>,
+        answer: impl Fn(&SymbolIndex, &Spelling) -> Option<(T, bool)>,
     ) -> Option<T> {
         let here = path_of(uri)?;
         let mut round = 0;
         loop {
             self.refresh_refs(key);
-            let (out, gone) = match answer(self.indices.get(key)?) {
+            let spelling = Spelling::new(&self.open, &self.roots).asked_from(uri);
+            let (out, gone) = match answer(self.indices.get(key)?, &spelling) {
                 Some(found) => found,
                 None => {
                     eprintln!(
@@ -2577,12 +2595,13 @@ fn required_at<'a>(
 
 /// A `Location` for `file`, as a report spells it (relative to the working directory, or
 /// absolute, `./` and all), at `place` (1-based line and byte column) or at the start. The
-/// file the request was made in answers with the URI the client used for it. `None` for a
-/// file that is not on disk: the standard library's declarations are named by a file Teal
-/// carries inside itself.
+/// file is named as `spelling` names it (a file the client has open by the URI it opened it
+/// with); `here` is the path of the file the request was made in, whose text is `text`.
+/// `None` for a file that is not on disk: the standard library's declarations are named by a
+/// file Teal carries inside itself.
 fn location_of(
     here: &Path,
-    uri: &Uri,
+    spelling: &Spelling,
     file: &Path,
     text: &str,
     place: Option<(usize, usize)>,
@@ -2597,18 +2616,17 @@ fn location_of(
             path.push(part);
         }
     }
-    let target = if path == here {
-        uri.clone()
-    } else if path.is_file() {
-        uri_of(&path)?
-    } else {
+    // The file of the request however the report spells it: its text is the buffer's.
+    let same = path == here || normal(&path) == normal(here);
+    if !same && !path.is_file() {
         return None;
-    };
+    }
+    let target = spelling.client_uri(&path)?;
     let start = match place {
         None => Position::new(0, 0),
         Some((line, col)) => {
             let theirs;
-            let theirs_text = if path == here {
+            let theirs_text = if same {
                 text
             } else {
                 theirs = read_lossy(&path);
@@ -2672,12 +2690,6 @@ fn path_of(uri: &Uri) -> Option<PathBuf> {
     url::Url::parse(uri.as_str()).ok()?.to_file_path().ok()
 }
 
-/// The `file:` URI of a path, percent-encoded.
-fn uri_of(path: &Path) -> Option<Uri> {
-    let url = url::Url::from_file_path(path).ok()?;
-    Uri::from_str(url.as_str()).ok()
-}
-
 /// Which project `file` belongs to: its root, or the file's directory when it is in none.
 fn project_key(file: &Path) -> Result<PathBuf> {
     Ok(match htl::model::Project::find_root(file)? {
@@ -2712,32 +2724,34 @@ fn failure(e: &anyhow::Error) -> lsp_types::Diagnostic {
     }
 }
 
-/// `htl check`'s findings for `file`, as the client shows them.
+/// `htl check`'s findings for `file`, as the client shows them. A file a finding is about
+/// is named as `spelling` names it.
 fn convert(
     file: &Path,
     text: &str,
     found: &[htl::Diagnostic],
     levels: &htl::lint::Selection,
     policy: &htl::verdict::Policy,
+    spelling: &Spelling,
 ) -> Vec<Finding> {
     // What the positions are read against: the file as the check saw it.
     let lines = lines_of(text);
     let cwd = std::env::current_dir().unwrap_or_default();
-    let file_canonical = canonical(file);
+    let file_canonical = normal(file);
     found
         .iter()
         .map(|d| {
             // A report spells a path relative to the working directory when it is under
             // it ([`htl::Diagnostic::spelled`]); undone to compare it with the file.
             let at = cwd.join(&d.file);
-            let own = d.file.is_empty() || at == file || canonical(&at) == file_canonical;
+            let own = d.file.is_empty() || at == file || normal(&at) == file_canonical;
             let (range, related) = if own {
                 (range_at(&lines, d.line, d.col), None)
             } else {
                 // A module the file requires: its position is in that module, and the
                 // requiring file has nowhere better to show it than its first line. The
                 // column is converted against that module's text, as the file's own are.
-                let related = uri_of(&at).map(|uri| {
+                let related = spelling.client_uri(&at).map(|uri| {
                     let theirs = read_lossy(&at);
                     let start = range_at(&lines_of(&theirs), d.line, d.col).start;
                     vec![DiagnosticRelatedInformation {
@@ -3037,18 +3051,6 @@ mod tests {
         assert_eq!((r.start, r.end), (Position::new(0, 1), Position::new(0, 1)));
     }
 
-    #[test]
-    fn a_path_and_its_uri_name_each_other() {
-        let path = Path::new("/work/my project/é.tl");
-        let uri = uri_of(path).unwrap();
-        assert_eq!(uri.as_str(), "file:///work/my%20project/%C3%A9.tl");
-        assert_eq!(path_of(&uri).as_deref(), Some(path));
-        assert_eq!(
-            path_of(&Uri::from_str("untitled:Untitled-1").unwrap()),
-            None
-        );
-    }
-
     /// `edit` applied to `before`, by the positions it carries.
     fn applied(before: &str, edit: &TextEdit) -> String {
         let at = |p: Position| {
@@ -3146,7 +3148,9 @@ mod tests {
         let dir = super::core_common::tempdir("htl-cli-lsp", "superseded");
         std::fs::write(dir.join("htl.toml"), "[layout]\nsource = \".\"\n").unwrap();
         std::fs::write(dir.join("a.tl"), "local n: number = \"x\"\nreturn n\n").unwrap();
-        let uri = uri_of(&dir.join("a.tl")).unwrap();
+        let uri = Spelling::new(&HashMap::new(), &[])
+            .client_uri(&dir.join("a.tl"))
+            .unwrap();
         let doc = serde_json::json!({ "textDocument": { "uri": uri.as_str() } });
 
         let (server_side, client) = Connection::memory();
