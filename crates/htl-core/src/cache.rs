@@ -969,6 +969,19 @@ struct RunEntry {
     modules: Vec<Module>,
 }
 
+/// One entry holding what `lshape-version` found for the project's declaration and runtime.
+#[derive(Serialize, Deserialize, Debug)]
+struct LshapeEntry {
+    stamp: Stamp,
+    /// The declaration and runtime files this entry read, and which question it answers.
+    /// See `Entry`.
+    subjects: Vec<String>,
+    kind: String,
+    inputs: Vec<Input>,
+    probes: Vec<Probe>,
+    diagnostics: Vec<Recorded>,
+}
+
 /// How much of a run one entry covers.
 ///
 /// The two are a real trade rather than one being a refinement of the other, and which
@@ -1295,6 +1308,30 @@ pub fn run_key(files: &[PathBuf], lint: Option<&str>) -> Key {
 /// One entry covering a whole walk (`Mode::WholeRun`).
 pub const RUN: &str = "run";
 
+/// One entry holding what `lshape-version` reported for the project's declaration and
+/// runtime (#531).
+pub const LSHAPE: &str = "lshape";
+
+/// The key for the project's `lshape-version` verdict.
+///
+/// Carries the working directory (findings spell their paths against it) and `LUA_PATH`
+/// (a declaration with no runtime in the model resolves its runtime on `package.path`,
+/// #530).
+pub fn lshape_key() -> Key {
+    let mut h = blake3::Hasher::new();
+    h.update(LSHAPE.as_bytes());
+    h.update(b"\0");
+    h.update(cwd().as_bytes());
+    h.update(b"\0");
+    if let Some(lp) = std::env::var_os("LUA_PATH") {
+        h.update(lp.as_encoded_bytes());
+    }
+    Key {
+        hash: h.finalize().to_hex().to_string(),
+        kind: LSHAPE,
+    }
+}
+
 /// The working directory, resolved once. This is called for every module in the walk, and
 /// resolving it means a `canonicalize` syscall — doing that per module is a measurable part
 /// of a run that replays everything and does nothing else.
@@ -1310,8 +1347,9 @@ fn cwd() -> &'static str {
 /// One entry, as `htl cache status` describes it.
 #[derive(Serialize, Debug)]
 pub struct EntrySummary {
-    /// `check`, `gen`, `run` — or `unreadable` for a file this build cannot parse, which is
-    /// worth showing rather than hiding, since it is also a permanent miss.
+    /// `check`, `gen`, `module`, `run`, `lshape` — or `unreadable` for a file this build
+    /// cannot parse, which is worth showing rather than hiding, since it is also a permanent
+    /// miss.
     pub kind: String,
     /// The files it is about. One, except for a whole-run entry.
     pub subjects: Vec<String>,
@@ -1815,6 +1853,99 @@ impl Cache {
             Err(e) if self.opts.explain => eprintln!("htl cache: not stored ({e})"),
             Err(_) => {}
         }
+    }
+
+    /// What `lshape-version` reported last time, if the declaration, the runtime, the
+    /// project model's answer for `lshape` and any `package.path` directories it consulted
+    /// still match.
+    ///
+    /// Does not touch [`Stats`]: those count the walk's modules.
+    pub fn lookup_lshape(&self, key: &Key) -> Option<Vec<crate::Diagnostic>> {
+        let raw = std::fs::read_to_string(self.entry_path(key)).ok()?;
+        let entry: LshapeEntry = serde_json::from_str(&raw).ok()?;
+        if entry.kind != LSHAPE || entry.stamp != Stamp::for_kind(LSHAPE)? {
+            return None;
+        }
+        for i in &entry.inputs {
+            if self.hash_of(&i.path).as_deref() != Some(i.hash.as_str()) {
+                return None;
+            }
+        }
+        let questions = vec![(None, "lshape".to_string())];
+        let names = Self::names_of(&questions);
+        for p in &entry.probes {
+            if p.dir == MODEL_PROBE {
+                let answers = self.answers.as_ref()?;
+                if self.model_hash(answers, &questions) != p.names {
+                    return None;
+                }
+            } else if self.probe_hash(&p.dir, &names) != p.names {
+                return None;
+            }
+        }
+        let mut out = Vec::with_capacity(entry.diagnostics.len());
+        for r in &entry.diagnostics {
+            let severity = crate::Severity::parse(&r.severity)?;
+            let fix = r.fix.as_ref().map(FixJson::to_fix);
+            out.push(r.item.to_diagnostic(severity, fix));
+        }
+        self.touch(key);
+        Some(out)
+    }
+
+    /// Record what `lshape-version` reported for `files` (the declaration and, when found,
+    /// the runtime) and `dirs` (the search path directories `package.path` consulted when
+    /// the model held a declaration alone).
+    pub fn store_lshape(
+        &self,
+        key: &Key,
+        files: &[PathBuf],
+        dirs: &[PathBuf],
+        diagnostics: &[crate::Diagnostic],
+    ) {
+        if files.is_empty() {
+            return;
+        }
+        let Some(stamp) = Stamp::for_kind(key.kind) else {
+            return;
+        };
+        let Some(inputs) = self.inputs_for(files.iter().map(|f| normal(f))) else {
+            return;
+        };
+        let questions = vec![(None, "lshape".to_string())];
+        let names = Self::names_of(&questions);
+        let mut probes = Vec::new();
+        if let Some(answers) = &self.answers {
+            probes.push(Probe {
+                dir: MODEL_PROBE.to_string(),
+                names: self.model_hash(answers, &questions),
+            });
+        }
+        let mut norm_dirs: Vec<String> = dirs.iter().map(|d| normal(d)).collect();
+        norm_dirs.sort();
+        norm_dirs.dedup();
+        for d in norm_dirs {
+            let h = self.probe_hash(&d, &names);
+            probes.push(Probe { dir: d, names: h });
+        }
+        let recorded = diagnostics
+            .iter()
+            .map(|d| Recorded {
+                severity: d.severity.as_str().to_string(),
+                item: ItemJson::from_diagnostic(d),
+                fix: d.fix.as_ref().map(FixJson::from_fix),
+                dependency: None,
+            })
+            .collect();
+        let entry = LshapeEntry {
+            stamp,
+            subjects: files.iter().map(|f| normal(f)).collect(),
+            kind: key.kind.to_string(),
+            inputs,
+            probes,
+            diagnostics: recorded,
+        };
+        let _ = self.write(key, &entry);
     }
 
     /// Drop entries this run did not use, once the store has outgrown what the project
