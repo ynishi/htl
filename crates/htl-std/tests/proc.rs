@@ -179,7 +179,9 @@ fn stdin_is_piped_through_to_the_child() {
 #[test]
 fn cwd_is_honoured() {
     let dir = tempdir("cwd");
-    let want = dir.display().to_string();
+    // `pwd` prints the directory with its symlinks resolved, and the system temp dir can be
+    // one (macOS: `/var` is `/private/var`), so the directory is named the way `pwd` names it.
+    let want = std::fs::canonicalize(&*dir).unwrap().display().to_string();
     run(
         &dir,
         &format!(

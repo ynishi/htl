@@ -706,7 +706,9 @@ fn the_summary_is_printed_before_cargo_update_runs() {
     let out = Command::new(common::htl_bin())
         .args(["pin", &format!("path:{checkout}")])
         .current_dir(&dir)
-        .env("CARGO", "/bin/false")
+        // `/usr/bin/false`, not `/bin/false`: macOS has no `/bin/false`, and a cargo that
+        // cannot be spawned is a different failure from one that exits non-zero.
+        .env("CARGO", "/usr/bin/false")
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();

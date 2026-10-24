@@ -317,6 +317,12 @@ mod tests {
     /// here because the only way to construct such a name from a script would be to
     /// write non-UTF-8 bytes into a Teal source file, which is not what this is testing.
     #[test]
+    // APFS refuses to create a file whose name is not UTF-8 (`Illegal byte sequence`), so on
+    // macOS the case this test is about cannot be set up, let alone met.
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "APFS refuses a file name that is not UTF-8, so the fixture cannot be created"
+    )]
     fn a_non_utf8_name_below_path_raises_instead_of_being_changed() {
         use std::os::unix::ffi::OsStrExt;
 
