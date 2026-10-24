@@ -1449,3 +1449,44 @@ shapes: current types/lshape.d.tl
         found[0]
     );
 }
+
+/// Issue #531, Acceptance 2: changing the runtime's `_VERSION` between two cached runs still
+/// reports `lshape-version` on the second. A cached clean verdict must not outlive the
+/// runtime file it was read from.
+#[test]
+fn changing_the_runtime_version_between_two_cached_runs_still_reports_lshape_version() {
+    let root = declared_project("version-cached-invalidation");
+
+    let cold = htl(&root, &["check", "--strict"]);
+    assert!(!stderr(&cold).contains("[cached]"), "{}", said(&cold));
+    assert_eq!(cold.status.code(), Some(0), "{}", said(&cold));
+    assert!(version_findings(&cold).is_empty(), "{}", said(&cold));
+
+    let warm_clean = htl(&root, &["check", "--strict"]);
+    assert!(
+        stderr(&warm_clean).contains("[cached]"),
+        "{}",
+        said(&warm_clean)
+    );
+    assert_eq!(warm_clean.status.code(), Some(0), "{}", said(&warm_clean));
+    assert!(
+        version_findings(&warm_clean).is_empty(),
+        "{}",
+        said(&warm_clean)
+    );
+
+    set_runtime_version(&root, Some("M._VERSION = \"0.4.0\""));
+    let warm_mismatch = htl(&root, &["check", "--strict"]);
+    assert!(
+        stderr(&warm_mismatch).contains("[cached]"),
+        "{}",
+        said(&warm_mismatch)
+    );
+    assert_eq!(
+        warm_mismatch.status.code(),
+        Some(1),
+        "{}",
+        said(&warm_mismatch)
+    );
+    assert_mismatch(&warm_mismatch, "0.4.0");
+}

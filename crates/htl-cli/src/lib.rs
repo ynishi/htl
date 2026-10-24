@@ -3570,6 +3570,7 @@ fn cmd_cache_status(path: Option<&Path>, json: bool, list_entries: bool) -> Resu
             cache::GEN => "checked and generated test files (htl test)",
             cache::MODULE => "generated modules (htl test / build, include_bundle!)",
             cache::RUN => "whole runs",
+            cache::LSHAPE => "lshape-version verdicts",
             _ => "entries this build cannot read",
         };
         println!("  {n:>5} {what} ({})", human_bytes(*bytes));

@@ -873,6 +873,7 @@ impl Scope {
             cargo_root: self.cargo_root.as_deref(),
             publish: true,
             checker: None,
+            store: None,
         }
     }
 }
@@ -1428,15 +1429,17 @@ pub fn check<O: Output>(
     // none, and what needs one builds it ([`Whole::checker`]).
     let mut judged = scope.whole(cfg, model);
     judged.checker = h.as_ref();
+    judged.store = store.as_ref();
     let whole = project_findings(sink, &judged, &infos);
     n_err += whole.errors;
     n_lint += whole.lints;
     // Nothing else removes an entry, and this is the only moment the whole set is in hand.
     if let Some(c) = &store {
-        let keep = match c.mode() {
+        let mut keep = match c.mode() {
             cache::Mode::PerModule => keys.clone(),
             cache::Mode::WholeRun => vec![run_key.clone()],
         };
+        keep.push(cache::lshape_key());
         c.sweep(&keep, files.len());
     }
     explain_cache(store.as_ref(), cache_opts);
@@ -1481,8 +1484,12 @@ pub struct Whole<'a> {
     /// A checker the run already has, set up for this project ([`checker`]): what
     /// `lshape-version` resolves `lshape` with and parses its runtime with. `None` when the
     /// run built none (every module replayed from the cache), and then the rule builds one
-    /// itself, and only if the project has something for it to check.
+    /// itself, and only if the project has something for it to check and the store does not
+    /// already hold its verdict.
     pub checker: Option<&'a Htl>,
+    /// The run's cache, when it opened one: where `lshape-version` keeps and replays its
+    /// verdict so a fully cached run with neither file changed builds no Lua state (#531).
+    pub store: Option<&'a cache::Cache>,
 }
 
 /// How many errors and lints [`project_findings`] said.
@@ -1589,10 +1596,12 @@ fn lshape_requirements_in(model: &crate::model::Project) -> bool {
 /// lshape preloaded by a host is not checked.
 ///
 /// The Lua state is the expensive part, and a run that replays every module from the cache
-/// built none, so it is not made before there is a requirement to compare: first
-/// [`lshape_requirements_in`] (a few `stat`s), then the checker the run already has
-/// ([`Whole::checker`]) or one built here. A project with no lshape pays for the `stat`s
-/// only.
+/// built none, so it is not made before there is a requirement to compare and no cached
+/// verdict holds (#531): first [`lshape_requirements_in`] (a few `stat`s), then the store's
+/// entry for the two files ([`cache::Cache::lookup_lshape`]), and only on a miss the
+/// checker the run already has ([`Whole::checker`]) or one built here. A project with no
+/// lshape pays for the `stat`s only; a cached run with neither file changed pays for two
+/// content hashes and builds no Lua state.
 ///
 /// Paths in the findings are spelled as the other project-level findings spell theirs
 /// ([`display_path`]). `Err` is the check failing to run (a Lua state that will not start,
@@ -1606,6 +1615,12 @@ fn lshape_version_findings(w: &Whole<'_>) -> Result<Vec<Diagnostic>> {
     if !lshape_requirements_in(model) {
         return Ok(Vec::new());
     }
+    let key = cache::lshape_key();
+    if let Some(store) = w.store
+        && let Some(cached) = store.lookup_lshape(&key)
+    {
+        return Ok(cached);
+    }
     let built;
     let h = match w.checker {
         Some(h) => h,
@@ -1615,11 +1630,20 @@ fn lshape_version_findings(w: &Whole<'_>) -> Result<Vec<Diagnostic>> {
         }
     };
     let res = crate::resolve::resolve(h, "lshape", Some(root), Some(model))?;
+    let dirs = if res.provider == Some(crate::model::Provider::Declared) {
+        h.search_path_dirs().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let Some(decl) = res
         .candidates
         .iter()
         .find(|c| c.status == Status::Read && c.kind == ModuleKind::Declaration)
     else {
+        if let Some(store) = w.store {
+            let inputs: Vec<PathBuf> = res.read.iter().map(|p| root.join(p)).collect();
+            store.store_lshape(&key, &inputs, &dirs, &[]);
+        }
         return Ok(Vec::new());
     };
     let decl_path = root.join(&decl.path);
@@ -1627,17 +1651,25 @@ fn lshape_version_findings(w: &Whole<'_>) -> Result<Vec<Diagnostic>> {
         .map_err(|e| anyhow::anyhow!("reading {}: {e}", display_path(&decl_path)))?;
     let decl_shown = PathBuf::from(display_path(&decl_path));
     let (line, req) = match shapes::declared_requirement(&text) {
-        None => return Ok(Vec::new()),
+        None => {
+            if let Some(store) = w.store {
+                store.store_lshape(&key, std::slice::from_ref(&decl_path), &dirs, &[]);
+            }
+            return Ok(Vec::new());
+        }
         Some((line, Ok(req))) => (line, req),
         Some((line, Err(e))) => {
-            return Ok(vec![shapes::lshape_requirement_finding(
-                &decl_shown,
-                line,
-                &e,
-            )]);
+            let found = vec![shapes::lshape_requirement_finding(&decl_shown, line, &e)];
+            if let Some(store) = w.store {
+                store.store_lshape(&key, std::slice::from_ref(&decl_path), &dirs, &found);
+            }
+            return Ok(found);
         }
     };
     let Some(runtime) = shapes::lshape_runtime(&res) else {
+        if let Some(store) = w.store {
+            store.store_lshape(&key, std::slice::from_ref(&decl_path), &dirs, &[]);
+        }
         return Ok(Vec::new());
     };
     let runtime_path = root.join(&runtime.path);
@@ -1647,7 +1679,7 @@ fn lshape_version_findings(w: &Whole<'_>) -> Result<Vec<Diagnostic>> {
         .map_err(|e| anyhow::anyhow!("reading {}: {e}", display_path(&runtime_path)))?;
     let src = String::from_utf8_lossy(&bytes);
     let version = shapes::runtime_version(h, &src, &runtime.path)?;
-    Ok(shapes::lshape_version_finding(
+    let found: Vec<Diagnostic> = shapes::lshape_version_finding(
         &req,
         line,
         &decl_shown,
@@ -1655,7 +1687,11 @@ fn lshape_version_findings(w: &Whole<'_>) -> Result<Vec<Diagnostic>> {
         &version,
     )
     .into_iter()
-    .collect())
+    .collect();
+    if let Some(store) = w.store {
+        store.store_lshape(&key, &[decl_path, runtime_path], &dirs, &found);
+    }
+    Ok(found)
 }
 
 /// Say, to `sink`, what the project says about itself as a whole: cycles in the require
