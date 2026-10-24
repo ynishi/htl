@@ -62,31 +62,32 @@ htl = "0.8"                    # embedding: engine + proc macros in one import
 
 ## CLI
 
+Each command's arguments, flags and examples are in `htl <cmd> --help` (and
+`htl <cmd> <subcmd> --help` for `pkg`, `types`, `cache` and `bundle`).
+
 | command | what it does |
 |---|---|
-| `htl new <name>` / `htl init [dir]` | scaffold: `mlua-pkg.toml`, `htl.toml`, `src/<mod>/init.tl`, `src/main.tl`, `tests/<mod>_test.tl`, `types/README.md`, `.gitignore`, README — and `mise.toml` when the CLI is a published release (`--lib` for no entry script, which leaves `src/main.tl` out; `--target <name>` for what will run the output, `--embed` being the shorthand for `--target bin`; `--htl <req>` for which htl the project depends on; `--no-x` for no `htlx` dependency) |
-| `htl pin <release\|main\|path:<checkout>> [dir] [--no-update]` | move the htl a project `htl new` already wrote depends on: the same four things `--htl` decided at `new` time — `Cargo.toml`'s `htl` / `htl-mq` lines, `mise.toml`, `[toolchain] htl` in `htl.toml` — then `cargo update`; `--no-update` writes the files and prints that command instead of running it |
-| `htl check [paths] [--strict] [--lint rule=level] [--list-lints] [--statistics] [--format json] [--no-cache] [--cache-mode per-module\|whole-run] [--explain-cache]` | type-check; htl lints as `lint:`, advisory at their default level and fatal at `deny` (`--strict` promotes every `warn` to `deny`; `--list-lints` prints every rule with its default level and exits); a module reached through `require` (an installed dep, a `[check] paths` dir) is checked with the file and its type errors are errors too, once per run, with the file that required it; what has not changed is replayed from `.htl/` (see Caching) — or, with `--statistics`, how many findings each rule produced instead of the findings |
-| `htl run <file.tl \| app.hb> [args]` | check then execute, as a root coroutine on the executor (see Async); `require` of a `.tl` with type errors fails; Ctrl-C cancels the program, prints `htl run: interrupted` and exits 130 |
-| `htl test [paths] [--filter s] [--lib mod] [--lint rule=level] [--fail-fast] [--allow-empty] [-v \| -q] [--slow ms] [--update] [--seed n] [--coverage [--coverage-lines]] [--lcov file] [--junit file] [--format json] [--no-cache] [--explain-cache]` | every `.tl` that loads the test library (`htl.test`, or `--lib`), one isolated state per file; checking is replayed from `.htl/`, the run never is (see Caching; the flags are under Tests) |
-| `htl fix [paths] [--rule a,b] [--unsafe] [--dry-run] [--diff] [--allow-dirty] [--allow-no-vcs] [--exit-non-zero-on-fix] [--format json]` | apply the fixes diagnostics carry: the safe ones by default, `--unsafe` for the ones that may change what the program does (see Fixing) |
-| `htl fmt [paths] [--check] [--indent N]` | whitespace formatter (indentation from the syntax tree, blank lines, trailing space) |
-| `htl gen <file.tl> [-o out.lua]` | readable Lua, the escape hatch out of htl |
-| `htl build <entry.tl \| dir> -o app.hb [-m main] [--debug] [--source] [--extra a,b] [--host x,y] [--no-cache] [--explain-cache]` | link the entry's `require` closure into one bundle (see Bundles), replaying from the run cache what still holds (see Caching; the directory form, whose entry module `-m` names, is not cached); a bundle is the `hb` target, so a project whose `[build] target` is anything else — `bin`, `cdylib`, `window` — is refused (see Layout of a project) |
-| `htl bundle info <app.hb> [--format json]` | what a bundle records, without running it: format, the htl that built it, payload kind, the Lua its bytecode is for, entry, modules, host-provided names |
-| `htl unused [paths] [--format json] [--exit-non-zero-on-unused] [--no-cache] [--explain-cache]` | the complement of the same closure: modules no entry reaches, and `[deps]` no reached module requires (see Unused) |
-| `htl adopt [paths] [--format json] [--detail] [--no-cache] [--explain-cache]` | how many declarations carry each of htl's nine markers, and where (`--detail`); a report, not a gate (see Adoption) |
-| `htl resolve <module> [path] [--format json]` | which file `require("<module>")` resolves to: every file of the project that answers to the name, which one is read, and which crate or dependency each came from (see `types/`); for a name the host provides, which source says so; exits 1 when the name resolves to nothing, to two implementations, or to a file under a name the host provides |
-| `htl pkg install` | fetch every dependency `mlua-pkg.toml` declares into `.htl/modules/` and write `mlua-pkg.lock`; the deps' own `types/` are then copied into the project's (see `types/`) |
-| `htl pkg add <name> <git> [--tag t \| --rev r \| --branch b] [--entry dir] [--target-dir dir]` | write the dependency into the manifest (`install` fetches it); a `patch_dir` the entry already declared is kept |
-| `htl pkg update [name] [--dry-run] [--force]` | refresh dependencies and bump the pins that follow releases, then install |
-| `htl pkg clean [--all]` | remove cached packages the lockfile no longer refers to, or the whole cache |
-| `htl pkg patch <dep> [--force]` | take that dependency's source into `patches/<dep>/`, where the project owns it and install resolves it from (see Patched dependencies) |
-| `htl types add <library> [--from dir] [--force]` | the declarations a library never shipped, from [teal-types](https://github.com/teal-language/teal-types), into `types/` with the commit they came from recorded beside each |
-| `htl cache status [path] [--entries] [--format json]` / `htl cache clear [path]` | report what the store holds, or empty it (see Caching) |
-| `htl dts [dir]` | write the `.d.tl` files this project declares: from Rust source, the ones `#[host_module]` / `#[derive(TealRecord)]` ask for, no build needed; from Teal, the module each `---@contract` type is declared in; from the crate graph, the ones a dependency ships (`[package.metadata.htl] dts`) into `types/<crate>/`. Every command that reads the project does this first (`check` / `run` / `test` / `build` / `fix` / `unused` / `adopt` / `resolve` / `gen`); exits non-zero when something it was asked to write could not be — a crate's declaration, or a `---@contract` type that cannot be published — never on a file it only [left in place](https://docs.rs/htl/latest/htl/dep_dts/index.html), and with nothing to write at all (no Cargo package above, no contract type) it is an error |
-| `htl rs [dir] [--check]` | the other direction of `htl dts`, from Teal: write one Rust file (`src/teal_types.rs`, or `[rust] out`) holding a `struct` per record and an `enum` per enum of the modules `[rust] modules` lists, deriving `TealRecord`, so a type designed in Teal is not copied into Rust by hand (a field is `Option<T>` unless its record is `---@struct`; `[rust.types]` sets a field's Rust type). A type the mapping has no row for is a problem at its `file:line:col` and nothing is written; a file it did not write is never touched. `--check` writes nothing and exits 1 when the file is stale (see [`htl::rsgen`](https://docs.rs/htl/latest/htl/rsgen/index.html)) |
-| `htl lsp` | a language server on stdio, whose diagnostics are `htl check`'s (see Editors) |
+| `htl new` | create a new project directory (see Layout of a project) |
+| `htl init` | fill in missing scaffold files in an existing directory (see Layout of a project) |
+| `htl pin` | move the `htl` a scaffolded project depends on between `release`, `main` and `path:<checkout>` (see Running against an unpublished htl) |
+| `htl check` | type-check `.tl` files and directories, replaying unchanged modules from `.htl/` (see Lints, Caching) |
+| `htl run` | check then execute a `.tl` script or `.hb` bundle on the executor (see Async) |
+| `htl test` | run every `.tl` that loads the test library in an isolated state per file (see Tests, Caching) |
+| `htl fix` | apply the mechanical fixes diagnostics carry (see Fixing) |
+| `htl fmt` | format `.tl` files in place (indentation from the syntax tree, blank lines, trailing whitespace) |
+| `htl gen` | emit readable Lua for one `.tl` file, the escape hatch out of htl |
+| `htl build` | link an entry's `require` closure into one stripped-bytecode `.hb` bundle (see Bundles, Caching) |
+| `htl bundle` | inspect what a `.hb` bundle records (`htl bundle info`) without running it (see Bundles) |
+| `htl unused` | report modules and `[deps]` no entry's `require` closure reaches (see Unused) |
+| `htl adopt` | report how many declarations carry each of htl's nine markers, and where (see Adoption) |
+| `htl resolve` | show which file `require("<module>")` resolves to, and what it shadows (see Which file a name resolves to) |
+| `htl pkg` | manage `mlua-pkg.toml` dependencies into `.htl/modules/` (`install`, `add`, `update`, `clean`, `patch`; see Patched dependencies) |
+| `htl types` | bring declarations for a library from [teal-types](https://github.com/teal-language/teal-types) into `types/` (`htl types add`) |
+| `htl cache` | report what the `.htl/cache` store holds, or empty it (`status`, `clear`; see Caching) |
+| `htl dts` | write the `.d.tl` files this project declares from Rust (`#[host_module]`, `#[derive(TealRecord)]`), Teal (`---@contract`) and crate dependencies ([`htl::dep_dts`](https://docs.rs/htl/latest/htl/dep_dts/index.html)) |
+| `htl shapes` | write an `lshape` run-time schema and typed `Schema<T>` `.d.tl` for each record and enum the project declares ([`htl::shapes`](https://docs.rs/htl/latest/htl/shapes/index.html)) |
+| `htl rs` | write one Rust file deriving `TealRecord` for each record and enum the modules in `[rust] modules` declare ([`htl::rsgen`](https://docs.rs/htl/latest/htl/rsgen/index.html)) |
+| `htl lsp` | run the language server on stdio, whose diagnostics are `htl check`'s (see Editors) |
 
 Exit code 1 is a verdict (an error in a file, a finding at `deny`, a failing test, a name
 that resolves to nothing); 2 is a command that could not reach one (a directory in no
