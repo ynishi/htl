@@ -27,14 +27,14 @@
 //!
 //! # What this is not
 //!
-//! The proc-macro checker (`htl-macros`'s `#[host_module]` and `include_tl!`
-//! expansion) builds its own `Htl` to type a file the way `htl check` does —
-//! `h.install_std()` included — but it runs inside `rustc`, expanding one crate's
-//! macros: a process with no `main` that ever called `register_installer`, so nothing
-//! is registered there no matter what a binary that later links the crate does. A
-//! crate's own module still checks clean there, through a different route: `dep_dts`
-//! materialises a dependency's declarations under the project's search path for any
-//! crate that depends on it ([`crate::dep_dts`]), so the checker finds the
+//! The proc-macro checker (`htl-macros`'s `include_tl!` and `include_bundle!`
+//! expansion) goes through [`crate::project::checker`] too, so
+//! [`Htl::install_registered`] runs there as well — and installs nothing, because the
+//! macro runs inside `rustc`, expanding one crate's macros: a process with no `main`
+//! that ever called `register_installer`, no matter what a binary that later links the
+//! crate does. A crate's own module still checks clean there, through a different
+//! route: `dep_dts` materialises a dependency's declarations under the project's search
+//! path for any crate that depends on it ([`crate::dep_dts`]), so the checker finds the
 //! declaration the way it finds any dependency's and never needs the module preloaded
 //! to type it. A binary's own `Htl::new` sites — wherever it builds a state directly
 //! rather than asking this crate to build one for it — call whatever they registered

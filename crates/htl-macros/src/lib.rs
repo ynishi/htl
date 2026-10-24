@@ -207,7 +207,12 @@ fn resolve_bundle(
     if !path.is_file() {
         return Err(format!("include_bundle!: no such file: {}", path.display()));
     }
-    let ck = checker_for("include_bundle!", manifest_dir, &path)?;
+    let ck = checker_for(
+        "include_bundle!",
+        manifest_dir,
+        &path,
+        std::env::var("HTL_LINTS").ok().as_deref(),
+    )?;
     let (h, cfg) = (&ck.h, &ck.cfg);
     let mut opts = opts.clone();
     // The host's names come from the project's model, as for `htl build`: a
@@ -215,7 +220,7 @@ fn resolve_bundle(
     if let Some(m) = &ck.model {
         opts.host.extend(m.provided().map(|(n, _)| n.to_string()));
     }
-    if let Some(c) = cfg {
+    if let Some((_, _, c)) = cfg {
         opts.extra.extend(c.build.extra.iter().cloned());
         opts.host.extend(c.build.host.iter().cloned());
     }
@@ -313,9 +318,9 @@ fn settings_tracked(config: Option<&str>) -> TokenStream2 {
 /// `htl.toml` as the expansion tracks it: absolute, since `include_str!` resolves relative
 /// to the Rust source file.
 fn config_input(ck: &Checker) -> Option<String> {
-    ck.cfg_path
+    ck.cfg
         .as_ref()
-        .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+        .map(|(_, p, _)| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
         .map(|p| p.to_string_lossy().into_owned())
 }
 
@@ -395,22 +400,21 @@ enum Payload {
     Bytes(Vec<u8>),
 }
 
-/// A checker set up for one macro expansion, the way the CLI sets one up for the file:
-/// the project model when the file is in a project (`Htl::apply_model`, after
-/// `reset_search_path`), and the file's own directory when it is not
-/// (`project::file_view`) — never the process cwd, which is cargo's and has nothing to
-/// do with the script. Carries what the run cache needs to key and validate what the
-/// checker produces.
+/// A checker set up for one macro expansion, through the two library functions
+/// `htl check` and the CLI's `checker_for` go through: [`htl_core::project::Scope::new`]
+/// for the lint input, and [`htl_core::project::checker`] for the checker built from it,
+/// then [`htl_core::project::file_view`] for the file's own directory when it is not in a
+/// project — never the process cwd, which is cargo's and has nothing to do with the
+/// script. Carries what the run cache and [`judge`] need.
 struct Checker {
     h: htl_core::Htl,
-    cfg: Option<htl_core::config::HtlConfig>,
-    /// Where `htl.toml` was found, if it was.
-    cfg_path: Option<PathBuf>,
-    /// The project root: beside `htl.toml`, else the crate's manifest directory. Where the
-    /// store lives (`.htl/cache`), the same place the CLI keeps it.
+    cfg: htl_core::project::Config,
+    /// The project root: beside `htl.toml` or `mlua-pkg.toml`, else the crate's manifest
+    /// directory. Where the store lives (`.htl/cache`), the same place the CLI keeps it.
     root: PathBuf,
-    /// The lint selection in force: `[lint]` from `htl.toml`, then `HTL_LINTS`.
-    spec: String,
+    /// The scope the checker was configured from (`scope.lints`, `scope.spec`): what
+    /// [`judge`] and the cache key read, so the spec is parsed once.
+    scope: htl_core::project::Scope,
     /// The project model the expansion was checked against, when the file is in a
     /// project: what the store probes with.
     model: Option<htl_core::model::Project>,
@@ -419,7 +423,7 @@ struct Checker {
 impl Checker {
     /// The lint selection as a cache key takes it.
     fn lint(&self) -> Option<&str> {
-        (!self.spec.is_empty()).then_some(self.spec.as_str())
+        (!self.scope.spec.is_empty()).then_some(self.scope.spec.as_str())
     }
 
     /// The run cache, when there is a project to keep one in: a model was built — an
@@ -458,55 +462,33 @@ impl Checker {
             cache: c,
             lint: self.lint(),
             root: &self.root,
-            config: match (&self.cfg_path, &self.cfg) {
-                (Some(p), Some(c)) => Some((p.as_path(), c)),
-                _ => None,
-            },
+            config: self.cfg.as_ref().map(|(_, p, c)| (p.as_path(), c)),
         })
     }
 }
 
-fn checker_for(tag: &str, manifest_dir: &Path, path: &Path) -> Result<Checker, String> {
-    let h = htl_core::Htl::new().map_err(|e| format!("{tag}: {e:#}"))?;
+fn checker_for(
+    tag: &str,
+    manifest_dir: &Path,
+    path: &Path,
+    htl_lints: Option<&str>,
+) -> Result<Checker, String> {
     // The project the file is in, found the way every command finds it — the one walk up
     // for a manifest, which refuses an `htl.toml` and an `mlua-pkg.toml` naming different
-    // roots. htl.toml `[lint]` first, then HTL_LINTS, so the env var wins.
-    let found = htl_core::model::Project::find_root(path).map_err(|e| format!("{tag}: {e:#}"))?;
-    let cfg_path = found.as_ref().and_then(|r| r.config_file.clone());
-    let cfg = cfg_path
-        .as_ref()
-        .and(found.as_ref().map(|r| r.config.clone()));
-    let file_spec = cfg.as_ref().map(|c| c.lint_spec()).unwrap_or_default();
-    let env_spec = std::env::var("HTL_LINTS").unwrap_or_default();
-    let spec = htl_core::config::join_specs([file_spec.as_str(), env_spec.as_str()]);
-    if !spec.is_empty() {
-        h.configure_lints(&spec)
-            .map_err(|e| format!("{tag}: lint spec {spec:?}: {e:#}"))?;
-    }
-    // `[lang]` too: a file written with `async` / `await` is read by `include_tl!` as
-    // `htl check` reads it.
-    if let Some(c) = cfg.as_ref() {
-        h.set_lang(&c.lang).map_err(|e| format!("{tag}: {e:#}"))?;
-    }
-    // The project's directories and nothing else: Lua's own default path is relative to
-    // wherever cargo happens to run the compiler, which is not a directory the source
-    // names. What the file may read is the project model's, as `htl check` has it; a file
-    // in no project reads its own directory.
-    h.reset_search_path().map_err(|e| format!("{tag}: {e:#}"))?;
-    let model = found
-        .map(|r| htl_core::model::Project::load(&r.root, r.config))
-        .transpose()
+    // roots — then `project::Scope::new` (`htl.toml` `[lint]` first, then `HTL_LINTS`, so
+    // the env var wins) and `project::checker`, the same two functions `htl check` and
+    // the CLI's `checker_for` go through.
+    let cfg = htl_core::project::config_of(path).map_err(|e| format!("{tag}: {e:#}"))?;
+    let model = htl_core::project::model_of(&cfg, path).map_err(|e| format!("{tag}: {e:#}"))?;
+    let scope = htl_core::project::Scope::new(&cfg, model.as_ref(), path, htl_lints)
         .map_err(|e| format!("{tag}: {e:#}"))?;
-    if let Some(m) = &model {
-        h.apply_model(m, htl_core::model::View::Source)
-            .map_err(|e| format!("{tag}: {e:#}"))?;
-    }
+    let h = htl_core::project::checker(
+        model.as_ref(),
+        scope.lints.selection(),
+        &htl_core::project::lang_of(&cfg),
+    )
+    .map_err(|e| format!("{tag}: {e:#}"))?;
     htl_core::project::file_view(&h, model.as_ref(), path).map_err(|e| format!("{tag}: {e:#}"))?;
-    h.install_test_lib().map_err(|e| format!("{tag}: {e:#}"))?;
-    h.install_std().map_err(|e| format!("{tag}: {e:#}"))?;
-    // `htl.task`'s declaration, so a file that spawns tasks checks here as it does under
-    // `htl check`; whether the host's state can load the module is the host's `async`.
-    h.install_task_lib().map_err(|e| format!("{tag}: {e:#}"))?;
     // The project's root, where its store is — as for every command — and the crate's
     // manifest directory for a crate in no project, which keeps no store.
     let root = model
@@ -516,9 +498,8 @@ fn checker_for(tag: &str, manifest_dir: &Path, path: &Path) -> Result<Checker, S
     Ok(Checker {
         h,
         cfg,
-        cfg_path,
         root,
-        spec,
+        scope,
         model,
     })
 }
@@ -539,10 +520,8 @@ fn judge(
     htl_lint: Option<&str>,
 ) -> Result<(), String> {
     use htl_core::verdict::{Findings, Policy, is_denied, verdict};
-    let levels = htl_core::lint::Lints::parse(&ck.spec)
-        .map_err(|e| format!("{tag}: lint spec {:?}: {e:#}", ck.spec))?;
-    let levels = levels.selection();
-    let policy = Policy::resolve(ck.cfg.as_ref(), false)
+    let levels = ck.scope.lints.selection();
+    let policy = Policy::resolve(ck.cfg.as_ref().map(|(_, _, c)| c), false)
         .with_env(htl_lint)
         .map_err(|e| format!("{tag}: {e}"))?;
     if verdict(&Findings::of(warnings, lints, levels), &policy) {
@@ -576,7 +555,12 @@ fn resolve_include(manifest_dir: &Path, rel: &str, bytes: bool) -> Result<Includ
     if !path.is_file() {
         return Err(format!("include_tl!: no such file: {}", path.display()));
     }
-    let ck = checker_for("include_tl!", manifest_dir, &path)?;
+    let ck = checker_for(
+        "include_tl!",
+        manifest_dir,
+        &path,
+        std::env::var("HTL_LINTS").ok().as_deref(),
+    )?;
     let h = &ck.h;
     // One module, through the same store the linker uses: its `gen` entry, if it still
     // holds, is the check and the Lua.
@@ -2796,7 +2780,7 @@ return M
         )];
         let judged = |toml: &str, env: Option<&str>| {
             write(&root.join("htl.toml"), toml);
-            let ck = checker_for("include_tl!", &root, &path).unwrap();
+            let ck = checker_for("include_tl!", &root, &path, None).unwrap();
             judge("include_tl!", &ck, &[], &lints, env)
         };
         let deny = "[lint.rules]\nno-any = \"deny\"\n";
@@ -2807,6 +2791,77 @@ return M
         assert!(judged(warn, Some("deny")).is_err());
         let err = judged(warn, Some("error")).unwrap_err();
         assert!(err.contains("HTL_LINT=\"error\""), "{err}");
+    }
+
+    /// `HTL_LINTS` reaches `Scope::new`, on top of `htl.toml`'s `[lint]`: `no-any=deny`
+    /// (or `+no-any` under `strict = true`) turns the rule on for both the checker
+    /// (`project::checker`) and `judge` (`scope.lints`), `-no-any` turns off what
+    /// `htl.toml` put at `deny`, and an unknown rule is refused when the scope is built.
+    #[test]
+    fn htl_lints_reaches_scope_and_checker() {
+        let root = tempdir("htl-lints-env");
+        let path = root.join("src/main.tl");
+        write(&path, "local x: any = 1\nprint(x)\n");
+        write(&root.join("htl.toml"), "");
+
+        let ck = checker_for("include_tl!", &root, &path, Some("no-any=deny")).unwrap();
+        let ci = ck.h.check(&path).unwrap();
+        assert_eq!(ci.lint_items.len(), 1, "{:?}", ci.lint_items);
+        let err = judge("include_tl!", &ck, &[], &ci.lint_items, None).unwrap_err();
+        assert!(
+            err.contains("a rule at deny") && err.contains("no-any"),
+            "{err}"
+        );
+
+        write(&root.join("htl.toml"), "[lint]\nstrict = true\n");
+        let ck = checker_for("include_tl!", &root, &path, Some("+no-any")).unwrap();
+        let ci = ck.h.check(&path).unwrap();
+        assert_eq!(ci.lint_items.len(), 1, "{:?}", ci.lint_items);
+        let err = judge("include_tl!", &ck, &[], &ci.lint_items, None).unwrap_err();
+        assert!(err.contains("strict") && err.contains("no-any"), "{err}");
+
+        write(&root.join("htl.toml"), "[lint.rules]\nno-any = \"deny\"\n");
+        let ck = checker_for("include_tl!", &root, &path, Some("-no-any")).unwrap();
+        let ci = ck.h.check(&path).unwrap();
+        assert!(ci.lint_items.is_empty(), "{:?}", ci.lint_items);
+        judge("include_tl!", &ck, &[], &ci.lint_items, None).unwrap();
+
+        let err = match checker_for("include_tl!", &root, &path, Some("+no-such-rule")) {
+            Ok(_) => panic!("unknown rule must be refused"),
+            Err(e) => e,
+        };
+        assert!(err.contains("unknown lint rule: +no-such-rule"), "{err}");
+    }
+
+    /// `checker_for` goes through `project::checker`, not a sequence of its own: a
+    /// declaration an installer registers on `htl-core` is visible to `include_tl!`, where
+    /// the macro's hand-assembled `Htl` did not call `project::checker` and could not find
+    /// it. (`provides` is empty so the test's registration does not enter any project
+    /// model's `provided` list in the other tests of this binary.)
+    #[test]
+    fn checker_for_goes_through_project_checker() {
+        let _ = htl_core::registry::register_installer(
+            "htl-macros-test-reg",
+            |h| {
+                h.install_declarations(
+                    "htl-macros-test-reg",
+                    &[(
+                        "htl_macros_reg_probe.d.tl",
+                        "local record P\n   n: integer\nend\nreturn P\n",
+                    )],
+                )
+                .map(|_| ())
+            },
+            &[],
+        );
+        let root = tempdir("through-project-checker");
+        write(&root.join("htl.toml"), "");
+        write(
+            &root.join("src/main.tl"),
+            "local p = require(\"htl_macros_reg_probe\")\nprint(p.n + 1)\n",
+        );
+        resolve_include(&root, "src/main.tl", false)
+            .expect("project::checker runs install_registered");
     }
 
     /// Both macros read the run cache under the project root: the second expansion

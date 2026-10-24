@@ -679,8 +679,8 @@ pub fn checker(
     // `add_path`'s prepend rule picks whichever ran last. Kept in this order only so
     // every site that builds a state this crate uses for itself reads alike: the same
     // order `run_in` in `testing.rs` gives them (test lib, `std`, registered, task
-    // lib, then the model). The commands of `htl-cli` come through here by way of its
-    // `checker_for` and keep no order of their own.
+    // lib, then the model). The commands of `htl-cli` and the proc macros of `htl-macros`
+    // come through here by way of their `checker_for` and keep no order of their own.
     h.install_registered()?;
     // And a program on the executor may require("htl.task"): the same, for its types.
     #[cfg(feature = "async")]
