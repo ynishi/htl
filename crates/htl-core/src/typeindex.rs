@@ -190,7 +190,7 @@ use anyhow::Result;
 use mlua::Table;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A place in a file: `line` counted from 1, `col` the byte column counted from 1 — the
 /// convention of [`Diagnostic`](crate::Diagnostic).
@@ -512,6 +512,11 @@ const OPEN: &str = "@{";
 const CLOSE: &str = "@}";
 
 impl TypeIndex {
+    /// The file the positions are in, as it was named to the checker.
+    pub(crate) fn file(&self) -> &Path {
+        &self.file
+    }
+
     /// Whether there is nothing in it: the check was not asked to keep one, or the file did
     /// not parse.
     pub fn is_empty(&self) -> bool {

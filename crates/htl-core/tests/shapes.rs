@@ -623,14 +623,25 @@ return M
     );
 }
 
-/// An alias is what it names, a chain of them too.
+/// An alias is what it names, a chain of them too, including one declared in another module
+/// of the project that declares no record or enum of its own (#540).
 #[test]
 fn an_alias_lowers_to_what_it_names() {
     let p = Project::new(
         "alias",
-        &[(
-            "main.tl",
-            "local record Item
+        &[
+            (
+                "geom/init.tl",
+                "local record M
+   type Pts = {integer}
+end
+return M
+",
+            ),
+            (
+                "main.tl",
+                "local geom = require(\"geom\")
+local record Item
    id: integer
 end
 local type Items = {Item}
@@ -641,13 +652,18 @@ local record M
       items: Items
       names: Names
       id: Id
+      pts: geom.Pts
    end
 end
 return M
 ",
-        )],
+            ),
+        ],
     );
-    let (out, _) = written(p.check("main").alone());
+    let (main, geom) = (p.check("main"), p.check("geom.init"));
+    let lowered = shapes::lower_project(&[main.source(), geom.source()], canon);
+    let (out, _) = written(lowered.lowered[0].clone());
+    assert_eq!(lowered.lowered[1], Lowered::Nothing);
     assert_eq!(
         out.lua,
         lua_head("main.tl")
@@ -660,6 +676,7 @@ M.Req = T.shape({
    items = T.array_of(M.Item),
    names = T.array_of(T.string),
    id = M.Item,
+   pts = T.array_of(T.integer),
 }, { open = false })
 
 return M
