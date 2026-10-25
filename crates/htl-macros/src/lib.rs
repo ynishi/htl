@@ -679,7 +679,7 @@ fn expand_include(rel: &str, bytes: bool) -> Result<TokenStream, String> {
 // ------------------------------------------------------------------ teal_types!
 
 /// `teal_types!()` -> the `pub mod ... { ... }` items `htl rs` writes, generated at
-/// `cargo build` from `htl.toml` (`[rust] modules` and `[rust.types]`) through
+/// `cargo build` from `htl.toml` (`[rust] modules`, `exports` and `[rust.types]`) through
 /// [`htl_core::rsgen::generate`], for a project that does not commit generated Rust.
 ///
 /// Every `.tl` source file checked (and every `.d.tl` or `.tl` it resolved) and
@@ -703,8 +703,8 @@ pub fn teal_types(input: TokenStream) -> TokenStream {
 /// unit-tested and compared directly with [`htl_core::rsgen::generate`].
 #[derive(Debug)]
 struct TealTypesOut {
-    /// The Rust source text `rsgen::generate` produced, or empty when `[rust] modules` is
-    /// empty.
+    /// The Rust source text `rsgen::generate` produced, or empty when `[rust] modules` and
+    /// `exports` are empty.
     code: String,
     /// Every `.tl` file checked and every dependency it resolved (`include_str!` inputs),
     /// canonical and absolute.
@@ -734,12 +734,9 @@ fn resolve_teal_types(manifest_dir: &Path) -> Result<TealTypesOut, String> {
             manifest_dir.display()
         ));
     };
-    let spec = htl_core::rsgen::Spec {
-        modules: cfg.rust.modules.clone(),
-        types: cfg.rust.types.clone(),
-    };
+    let spec = htl_core::rsgen::Spec::from(&cfg.rust);
     let config = config_input(&ck);
-    if spec.modules.is_empty() {
+    if spec.is_empty() {
         return Ok(TealTypesOut {
             code: String::new(),
             inputs: Vec::new(),
@@ -3312,7 +3309,7 @@ return M
             .collect();
         let spec = htl_core::rsgen::Spec {
             modules: vec!["ev".to_string()],
-            types: Default::default(),
+            ..Default::default()
         };
         let htl_core::rsgen::Rendered::Text {
             text: rsgen_text, ..
@@ -3346,6 +3343,52 @@ return M
         let rsgen_file: syn::File = syn::parse_str(&rsgen_text).unwrap();
         let rsgen_mods: Vec<&Item> = rsgen_file.items.iter().collect();
         assert_eq!(expanded_mods, rsgen_mods);
+    }
+
+    /// `[rust] exports` alone is something to write: the client of the module, as items
+    /// that parse.
+    #[test]
+    fn teal_types_writes_the_client_of_an_exported_module() {
+        let root = tempdir("teal-types-exports");
+        write(&root.join("htl.toml"), "[rust]\nexports = [\"app\"]\n");
+        write(
+            &root.join("src/app.tl"),
+            "local record app\n   add: function(integer, integer): integer\nend\nfunction app.add(a: integer, b: integer): integer\n   return a + b\nend\nreturn app\n",
+        );
+        let out = resolve_teal_types(&root).expect("teal_types! resolves");
+        assert!(out.code.contains("pub struct App {"), "{}", out.code);
+        assert!(
+            out.code.contains("self.inst.call(\"add\", (a1, a2)).await"),
+            "{}",
+            out.code
+        );
+        expand_teal_types_from(&out).expect("parses as Rust items");
+    }
+
+    /// The expansion and `htl rs` write the same text: the project of
+    /// `htl-core/tests/fixtures/client` expands to the golden file there, which the
+    /// `htl-cli` test of `htl rs` compares the command's file with as well.
+    #[test]
+    fn teal_types_expands_to_the_text_htl_rs_writes() {
+        let root = tempdir("teal-types-client");
+        write(
+            &root.join("htl.toml"),
+            include_str!("../../htl-core/tests/fixtures/client/htl.toml"),
+        );
+        write(
+            &root.join("src/shop/types.tl"),
+            include_str!("../../htl-core/tests/fixtures/client/src/shop/types.tl"),
+        );
+        write(
+            &root.join("src/shop/app.tl"),
+            include_str!("../../htl-core/tests/fixtures/client/src/shop/app.tl"),
+        );
+        let out = resolve_teal_types(&root).expect("teal_types! resolves");
+        assert_eq!(
+            out.code,
+            include_str!("../../htl-core/tests/fixtures/client/teal_types.rs")
+        );
+        expand_teal_types_from(&out).expect("parses as Rust items");
     }
 
     /// #539 (Acceptance 2): a type error in `src/ev/init.tl` fails `resolve_teal_types`

@@ -1,0 +1,3 @@
+[rust]
+modules = ["shop.types"]
+exports = ["shop.app"]

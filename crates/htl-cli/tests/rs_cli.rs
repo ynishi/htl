@@ -103,6 +103,56 @@ fn a_record_and_an_enum_are_written_as_a_struct_and_an_enum() {
     );
 }
 
+/// The project of `htl-core/tests/fixtures/client`: `[rust] exports` next to `modules`, and
+/// the file `htl rs` writes for it, which `teal_types!()` expands to as well (the test of
+/// `htl-macros`) and which the `htl` crate compiles against `htl::run`.
+#[test]
+fn an_exported_module_is_written_as_the_client_the_macro_expands_to() {
+    let root = common::tempdir("htl-cli-rs", "client");
+    write(
+        &root.join("htl.toml"),
+        include_str!("../../htl-core/tests/fixtures/client/htl.toml"),
+    );
+    write(
+        &root.join("src/shop/types.tl"),
+        include_str!("../../htl-core/tests/fixtures/client/src/shop/types.tl"),
+    );
+    write(
+        &root.join("src/shop/app.tl"),
+        include_str!("../../htl-core/tests/fixtures/client/src/shop/app.tl"),
+    );
+    let out = htl(&root, &["rs"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stderr(&out), "htl rs: wrote src/teal_types.rs\n");
+    assert_eq!(
+        read(&root.join("src/teal_types.rs")),
+        include_str!("../../htl-core/tests/fixtures/client/teal_types.rs")
+    );
+}
+
+/// `exports` without `modules` is something to write, and a note about a function the
+/// client does not have is said without failing the run.
+#[test]
+fn exports_alone_are_written_and_a_function_outside_the_body_is_a_note() {
+    let app = "local record app\n   add: function(integer, integer): integer\nend\n\
+               function app.add(a: integer, b: integer): integer\n   return a + b\nend\n\
+               function app.helper()\nend\nreturn app\n";
+    let root = project_with("exports-alone", "[rust]\nexports = [\"app\"]\n", EV);
+    write(&root.join("src/app.tl"), app);
+    let out = htl(&root, &["rs"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains(
+            "src/app.tl:7:1: `app.helper` is defined outside the body of the record, so it is not in the client; declare `helper: function(..)` in the body to add it"
+        ),
+        "{}",
+        stderr(&out)
+    );
+    let file = read(&root.join("src/teal_types.rs"));
+    assert!(file.contains("pub struct App {"), "{file}");
+    assert!(!file.contains("helper"), "{file}");
+}
+
 /// Acceptance 2: `---@struct` makes a field required unless it is `---@optional`.
 #[test]
 fn a_struct_record_requires_the_fields_that_are_not_optional() {
@@ -204,7 +254,7 @@ fn an_empty_modules_removes_the_file_it_wrote() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(
         stderr(&out),
-        "htl rs: nothing to write ([rust] modules is empty)\n\
+        "htl rs: nothing to write ([rust] modules and exports are empty)\n\
          htl rs: removed src/teal_types.rs\n"
     );
     assert!(!root.join("src/teal_types.rs").exists());

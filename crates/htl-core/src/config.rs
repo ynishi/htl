@@ -53,8 +53,10 @@
 //! async = true              # async / await are keywords (local async function f, async local
 //!                           # x = e, await x, await f()); off, they are ordinary names
 //!
-//! [rust]                    # htl rs: Rust types written from Teal records and enums
-//! modules = ["ev"]          # the modules written; absent or empty, htl rs writes nothing
+//! [rust]                    # htl rs: Rust types from Teal records and enums, clients of modules
+//! modules = ["ev"]          # the modules whose types are written
+//! # exports = ["app"]       # the modules whose functions get a client (needs htl's `async`);
+//!                           # no module and no export: htl rs writes nothing
 //! # out = "src/teal_types.rs"   # where; default "<source>/teal_types.rs"
 //!
 //! [rust.types]
@@ -119,8 +121,8 @@ pub struct HtlConfig {
     /// `await`, off unless the project says so.
     #[serde(default)]
     pub lang: LangConfig,
-    /// `[rust]` — which modules `htl rs` writes Rust types for, where, and how a field's
-    /// Rust type is overridden.
+    /// `[rust]` — which modules `htl rs` writes Rust types and clients for, where, and how
+    /// a field's Rust type is overridden.
     #[serde(default)]
     pub rust: RustConfig,
     /// Static counterpart of `TealResolver::expect_type` / `require_fields`: files
@@ -547,11 +549,13 @@ impl LangConfig {
     }
 }
 
-/// `[rust]`: the Rust types `htl rs` writes from this project's Teal records and enums.
+/// `[rust]`: the Rust types and clients `htl rs` writes from this project's Teal records,
+/// enums and module functions.
 ///
 /// ```toml
 /// [rust]
 /// modules = ["ev", "geom.types"]     # the modules whose records and enums are written
+/// exports = ["app"]                  # the modules whose functions get a client
 /// out = "src/teal_types.rs"          # where; default "<source>/teal_types.rs"
 ///
 /// [rust.types]
@@ -564,12 +568,20 @@ impl LangConfig {
 #[serde(deny_unknown_fields)]
 pub struct RustConfig {
     /// The modules (`ev`, `geom.types`: the names `require` takes) whose records and enums
-    /// `htl rs` writes. Absent or empty: `htl rs` writes nothing, and removes the file an
-    /// earlier run wrote. The opt-in is per module, because a module of shared types is the
-    /// unit a Rust host imports. A name that is no module of the project's own sources is a
-    /// problem, not a no-op.
+    /// `htl rs` writes. Absent or empty, and `exports` too: `htl rs` writes nothing, and
+    /// removes the file an earlier run wrote. The opt-in is per module, because a module of
+    /// shared types is the unit a Rust host imports. A name that is no module of the
+    /// project's own sources is a problem, not a no-op.
     #[serde(default)]
     pub modules: Vec<String>,
+    /// The modules (`app`: the name `require` takes) whose returned record `htl rs` writes
+    /// as a client: a struct with one async method per function the record's body declares,
+    /// each a call on an `htl::run::Instance`. What a client is made of, and what refuses
+    /// one, is the Exports section of the module doc of [`crate::rsgen`]. The generated
+    /// code names `htl::run`, so the host builds `htl` with its `async` feature. A name that
+    /// is no module of the project's own sources is a problem, as in `modules`.
+    #[serde(default)]
+    pub exports: Vec<String>,
     /// The file `htl rs` writes, relative to `htl.toml`. Absent: `teal_types.rs` in the
     /// source directory (`[layout] source`). A file there that `htl rs` did not write is
     /// never overwritten. Only the command reads this; the lowering does not.
