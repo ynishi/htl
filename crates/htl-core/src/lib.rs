@@ -150,6 +150,8 @@ pub mod resolve;
 #[cfg(feature = "std")]
 pub mod batteries;
 #[cfg(feature = "async")]
+pub mod run;
+#[cfg(feature = "async")]
 pub mod task;
 // The seam a binary adds its own libraries through, wherever this crate builds an `Htl`
 // for itself rather than the binary's own: no feature gate, since the mechanism is not
@@ -2206,6 +2208,18 @@ impl Htl {
     /// string's and comes out as the string wrote it.
     pub fn gen_lua(&self, file: &Path) -> Result<(Option<String>, CheckInfo)> {
         let (code, t): (Option<String>, Table) = self.checker_call("gen", path_str(file))?;
+        Ok((code, read_checkinfo(&t)?))
+    }
+
+    /// [`gen_lua`](Self::gen_lua) without the lint pass: the check and the code the strict
+    /// searcher's `require` asks for (`H.gen(found, { lints = false })`), for a caller that
+    /// reports no lints. The options table is made in the checker's state, where `gen` is.
+    #[cfg(feature = "async")]
+    pub(crate) fn gen_lua_unlinted(&self, file: &Path) -> Result<(Option<String>, CheckInfo)> {
+        let opts = self.checker_lua()?.create_table()?;
+        opts.set("lints", false)?;
+        let (code, t): (Option<String>, Table) =
+            self.checker_call("gen", (path_str(file), opts))?;
         Ok((code, read_checkinfo(&t)?))
     }
 

@@ -59,6 +59,9 @@ anyhow = "1.0.104"
 semver = "1.0.28"
 clap = { version = "4.6.6", features = ["derive"] }
 walkdir = "2.5.0"
+# `htl_core::run::CallError`: a domain error with a source chain, which is what a derive
+# is for. Already in the graph (mlua-isle and others use it).
+thiserror = "2"
 
 # The profile that 'dist' will build with
 [profile.dist]
