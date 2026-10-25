@@ -49,8 +49,8 @@ release asset, and either writes the pin into the project's `mise.toml` and swit
 `cd`:
 
 ```sh
-mise use cargo:htl-cli@0.18.0         # mise.toml: "cargo:htl-cli" = "0.18.0"
-mise use github:ynishi/htl@v0.18.0    # the prebuilt binary from the release
+mise use cargo:htl-cli@0.19.0         # mise.toml: "cargo:htl-cli" = "0.19.0"
+mise use github:ynishi/htl@v0.19.0    # the prebuilt binary from the release
 ```
 
 `htl new` writes that `mise.toml` (the `cargo:` form, at the version that wrote the
@@ -59,7 +59,7 @@ from the start; the file is inert without mise, delete it if that is not in use.
 
 ```toml
 [dependencies]
-htl = "0.18"                   # embedding: engine + proc macros in one import
+htl = "0.19"                   # embedding: engine + proc macros in one import
 ```
 
 | crate | role |
@@ -71,11 +71,9 @@ htl = "0.18"                   # embedding: engine + proc macros in one import
 | `htl-std` | `std.fs` / `std.proc`, the asynchronous slice of `std.*` |
 | `htl-mq` | a window for a Teal program (`htl new --target window`) |
 
-**On `main`, not yet in a release**: `htl rs`, `teal_types!`, the `[rust]` table of
-`htl.toml` (`modules`, `exports`, `[rust.types]`) and `htl::run`. 0.18.0 has none of them
-(`htl rs` is an unknown subcommand there, and an `htl.toml` with a `[rust]` table does not
-parse); until the next release, a project uses them through a checkout (Running against an
-unpublished htl, below).
+`htl rs`, `teal_types!`, the `[rust]` table of `htl.toml` (`modules`, `exports`,
+`[rust.types]`) and `htl::run` are in 0.19.0 and later; on 0.18, `htl rs` is an unknown
+subcommand and an `htl.toml` with a `[rust]` table does not parse.
 
 ## CLI
 
@@ -243,8 +241,6 @@ each one prints and which line of the output is the point.
 This is the boundary Teal owns (the intro's other direction): Teal declares the functions
 and their types, and the Rust that calls them is generated from those declarations.
 
-Everything in this section is on `main` and not yet in a release (Install, above).
-
 A host whose logic is in Teal starts one runner and calls the functions of a module on it.
 With `htl = { features = ["async"] }`, `[rust] exports = ["app"]` in `htl.toml`, and
 `htl::teal_types!();` at the crate root (or `htl rs`, which writes the same code to a file),
@@ -322,7 +318,7 @@ commented one. The keys, with what each is for:
 
 ```toml
 [toolchain]
-htl = "0.18"              # the htl command this project expects; a mismatch is refused
+htl = "0.19"              # the htl command this project expects; a mismatch is refused
 
 [lint]
 strict = true             # every warn counts as deny
@@ -352,7 +348,7 @@ grace_ms = 1000
 [lang]
 async = true              # async / await are keywords and the five rules are on (see Async)
 
-[rust]                    # htl rs / teal_types!: Rust from Teal (not yet released, see Install)
+[rust]                    # htl rs / teal_types!: Rust from this project's Teal (0.19 and later)
 modules = ["ev"]          # records and enums of these modules become Rust types
 exports = ["app"]         # these modules' declared functions get a typed client (feature async)
 
@@ -377,7 +373,7 @@ htl resolve mq: src/mq.d.tl
   order  file                  kind         status
   1      src/mq.d.tl           declaration  read
   2      types/mq.d.tl         declaration  shadowed by 1
-  3      types/htl-mq/mq.d.tl  declaration  shadowed by 1  (shipped by htl-mq 0.18.0)
+  3      types/htl-mq/mq.d.tl  declaration  shadowed by 1  (shipped by htl-mq 0.19.0)
 
   answered by the project model
 ```
