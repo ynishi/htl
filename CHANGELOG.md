@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/ynishi/htl/compare/v0.18.0...v0.19.0) - 2026-10-25
+
+### Added
+
+- generate a typed async client for a Teal module from `[rust] exports` ([#538](https://github.com/ynishi/htl/pull/538))
+- htl rs writes one Rust file of #[derive(TealRecord)] structs and unit enums from the Teal records and enums of the modules listed in htl.toml [rust] modules, htl rs --check says when the committed file is stale, and htl-core gains rsgen, the pure lowering behind it
+- call a Teal module's functions from async Rust with htl::run ([#538](https://github.com/ynishi/htl/pull/538))
+- keep a function's signature in the type index ([#553](https://github.com/ynishi/htl/pull/553))
+- add htl::teal_types!() macro for build-time Rust record generation
+- htl-core gains project::own_sources, which walks the project's own .tl sources and checks each with its type index kept, and verdict::fails_on_errors, so the commands that lower the project's own modules share one walk and one check
+
+### Fixed
+
+- resolve package.path runtime behind a model declaration ([#530](https://github.com/ynishi/htl/pull/530))
+- alias_in matches a module's file through TypeIndex::file instead of its first candidate, and ref_table carries each source's aliases so htl rs and htl shapes read through an alias of a module that declares no record or enum
+- htl lsp names a file in another place by the URI the client knows it by, not by its symlink-resolved path, so definition, references, workspace symbol, call hierarchy and a diagnostic's relatedInformation no longer open a second buffer for a project opened through a symlink
+- keep program-scoped settings per program state, not in the checker's globals ([#538](https://github.com/ynishi/htl/pull/538))
+
+### Other
+
+- describe the Teal-owned boundary in the README and fix stale statements
+- narrow README CLI table to one row per subcommand ([#541](https://github.com/ynishi/htl/pull/541))
+- cache lshape-version verdict in the check store ([#531](https://github.com/ynishi/htl/pull/531))
+- route proc-macro checker through project::Scope::new and project::checker
+- three tests that fail on macOS for reasons in the tests themselves now pass there or are skipped with a reason: pin_cli's cargo-update test uses /usr/bin/false, htl-std's cwd_is_honoured canonicalizes the expected path, and the non-UTF-8 name test is ignored on macOS
+- wait for host call entry before cancelling in executor.rs tests
+
 ## [0.18.0](https://github.com/ynishi/htl/compare/v0.17.0...v0.18.0) - 2026-10-22
 
 ### Added
