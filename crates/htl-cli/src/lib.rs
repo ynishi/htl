@@ -423,7 +423,7 @@ Examples:
         dir: Option<PathBuf>,
     },
     /// Write a Rust struct for each record and a Rust enum for each enum that the modules
-    /// listed in `[rust] modules` declare
+    /// listed in `[rust] modules` declare, and a client for each module in `[rust] exports`
     ///
     /// Reads the project's own `.tl` files, as `htl shapes` does, and writes one file,
     /// `<source>/teal_types.rs` unless `[rust] out` says otherwise: one `pub mod` per module
@@ -432,7 +432,9 @@ Examples:
     /// back. The record is the source: nothing generated is to be edited. A field is
     /// `Option<T>` unless its record is marked `---@struct` and the field is neither
     /// `---@optional` nor `T | nil`; `[rust.types] "ev.Event.at" = "u32"` gives one field
-    /// the Rust type written there. What is lowered, the mapping, and every case that is
+    /// the Rust type written there. A module listed in `[rust] exports` gets a client for
+    /// its functions, called on an `htl::run` instance (the host builds `htl` with its
+    /// `async` feature). What is lowered, the mapping, and every case that is
     /// refused (a function field, a generic, a union, a tuple, `---@extensible`, a type of
     /// a module that is not listed, a name Rust cannot have, ...) is the module doc of
     /// `htl::rsgen`; a run with any such problem names each at `file:line:col` and writes
@@ -441,13 +443,14 @@ Examples:
     /// Reports `htl rs: wrote <path>` or `htl rs: <path> is current` on stderr; a file
     /// whose text would not change is not touched. A target that exists and does not begin
     /// with the line `htl rs` writes is not one of its own and is never overwritten or
-    /// removed: it exits non-zero, saying so. With `[rust] modules` empty (the default) it
-    /// writes nothing, and removes a file an earlier run wrote. A type error in any own
+    /// removed: it exits non-zero, saying so. With `[rust] modules` and `exports` empty (the
+    /// default) it writes nothing, and removes a file an earlier run wrote. A type error in any own
     /// file, listed or not, is reported and nothing is written.
     ///
     /// `--check` writes nothing: it compares what would be written with the file, and
     /// exits non-zero with `htl rs: <path> is stale; run htl rs` when they differ, the file
-    /// is missing, or `[rust] modules` is empty and a file `htl rs` wrote is still there.
+    /// is missing, or `[rust] modules` and `exports` are empty and a file `htl rs` wrote is
+    /// still there.
     /// The file is committed, and this is how CI says it has fallen behind the Teal.
     Rs {
         /// Project root or any path inside it (default: current directory)
@@ -1623,15 +1626,12 @@ fn cmd_rs(dir: Option<&Path>, check: bool) -> Result<ExitCode> {
         None => source.join("teal_types.rs"),
     };
     let shown = out.strip_prefix(&root).unwrap_or(&out).to_path_buf();
-    let spec = htl::rsgen::Spec {
-        modules: cfg.rust.modules.clone(),
-        types: cfg.rust.types.clone(),
-    };
+    let spec = htl::rsgen::Spec::from(&cfg.rust);
 
     // Nothing is asked for: nothing is checked, and a file an earlier run wrote is no longer
     // wanted. One that is somebody's is none of this command's business.
-    if spec.modules.is_empty() {
-        eprintln!("htl rs: nothing to write ([rust] modules is empty)");
+    if spec.is_empty() {
+        eprintln!("htl rs: nothing to write ([rust] modules and exports are empty)");
         if !written_by(&out, Writer::Rs)? {
             return Ok(ExitCode::SUCCESS);
         }
@@ -1683,7 +1683,7 @@ fn cmd_rs(dir: Option<&Path>, check: bool) -> Result<ExitCode> {
             eprintln!("htl rs: {} not written", shown.display());
             return Ok(ExitCode::FAILURE);
         }
-        // `modules` was not empty above.
+        // `modules` and `exports` were not both empty above.
         htl::rsgen::Rendered::Nothing => return Ok(ExitCode::SUCCESS),
     };
 

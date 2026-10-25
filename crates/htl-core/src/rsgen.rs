@@ -14,7 +14,8 @@
 //!
 //! # What is written
 //!
-//! One file. The modules named by `[rust] modules` ([`Spec::modules`]) are merged into one
+//! One file. The modules named by `[rust] modules` ([`Spec::modules`]), and the clients of
+//! `[rust] exports` (Exports, below), are merged into one
 //! tree by their path segments (`geom.a` and `geom.b` both sit in one `pub mod geom`), and
 //! each record becomes a `struct` and each enum a unit-only `enum`, deriving
 //! `::htl::TealRecord` so that the host converts it to and from a Lua table:
@@ -139,6 +140,7 @@
 //! | a type with the name of a child module (`geom.types` is a module and `geom` has a type `types`) | one namespace in Rust |
 //! | `[rust] modules` names a module that is no own source, or one whose check kept no index | the name is wrong or the file did not parse |
 //! | a `[rust.types]` key that matches no field, one that matches two, a value that is not a Rust type | see below |
+//! | the client of an export | see Exports |
 //!
 //! A project whose check fails on *any* own file (a listed module or not) is stopped before
 //! this runs, by the subcommand: an unlisted module with a type error stops `htl rs` too,
@@ -149,16 +151,19 @@
 //!
 //! ```toml
 //! [rust]
-//! modules = ["ev", "geom.types"]   # the module names `require` takes; empty writes nothing
+//! modules = ["ev", "geom.types"]   # the module names `require` takes
+//! exports = ["app"]                # the modules a client is written for (Exports)
 //! out = "src/teal_types.rs"        # the command's: where the file is written
 //!
 //! [rust.types]
 //! "ev.Event.at" = "u32"
 //! ```
 //!
-//! The lowering takes [`Spec`], which is `modules` and `types`; `out` is where the caller
-//! writes. An empty `modules` is [`Rendered::Nothing`]: the opt-in is per module, because a
-//! module of shared types is what a Rust host imports.
+//! The lowering takes [`Spec`], which is `modules`, `exports` and `types` (`Spec::from` a
+//! [`RustConfig`](crate::config::RustConfig), the one construction `htl rs` and
+//! `htl::teal_types!()` share); `out` is where the caller writes. Empty `modules` and
+//! `exports` are [`Rendered::Nothing`]: the opt-in is per module, because a module of shared
+//! types is what a Rust host imports.
 //!
 //! A key of `types` is `<module>.<type>.<field>`, where `<type>` is the declaration's path as
 //! its name is made (`Event`, `Outer.Inner`), dotted. The key is read against every listed
@@ -174,6 +179,74 @@
 //! crosses as the Teal type does, which is where `#[teal(as = "..")]` stands on the Rust
 //! side. A field with an entry is not lowered, so its Teal type is free to be one the mapping
 //! has no row for.
+//!
+//! # Exports
+//!
+//! The types above carry data; a project that keeps its logic in Teal also has Rust *call*
+//! it. `[rust] exports` names the modules whose functions are called from Rust, and each gets
+//! a client in the module's own `pub mod` (after its types, when it is listed in `modules`
+//! too): a struct over an `htl::run::Instance`, with one async method per function **the
+//! record's body declares** (`check: function(string): types.Output`). The struct is named
+//! for the record the module returns, in PascalCase: `local record app` is `App`, and
+//! `local record M` is `M`, so the clients of the `M`-style modules of a project are all `M`
+//! and are told apart by their module path. The generated code names `htl::run`, so the host
+//! builds `htl` with its `async` feature; without it rustc says `run` is not in `htl`.
+//!
+//! ```text
+//! pub mod app {
+//!     /// The functions of the Teal module `app`, called on a runner instance; ..
+//!     #[derive(Debug, Clone)]
+//!     pub struct App {
+//!         inst: ::htl::run::Instance,
+//!     }
+//!
+//!     impl App {
+//!         /// `require("app")` in a fresh instance of `runner`.
+//!         pub async fn load(runner: &::htl::run::Runner, extra_paths: &[::std::path::PathBuf])
+//!             -> ::core::result::Result<Self, ::htl::run::CallError> { .. }
+//!         /// The instance the functions are called on.
+//!         pub fn instance(&self) -> &::htl::run::Instance { .. }
+//!         /// `app.check`, typed `function(string): types.Output` in Teal.
+//!         pub async fn check(&self, a1: ::std::string::String)
+//!             -> ::core::result::Result<super::types::Output, ::htl::run::CallError> {
+//!             self.inst.call("check", (a1,)).await
+//!         }
+//!     }
+//! }
+//! ```
+//!
+//! A method is the function's field name (`r#` before a keyword), called with `.`; its
+//! arguments are `a1`, `a2`, ... (the index keeps no parameter names, #557). Each argument
+//! and result is typed by the mapping above, with the nilability of a `T | nil` and nothing
+//! else: a parameter is `T` unless its Teal type is `T | nil`, then `Option<T>`. An optional
+//! parameter (`title?: string`) is `T` too: the index says how many arguments a call has to
+//! pass ([`FnSig::required`](crate::typeindex::FnSig::required)) and not which ones, so the
+//! host always passes a value. No result is `()`, one is its type, several are a tuple. The
+//! methods are in position order.
+//!
+//! A function the client cannot call is a problem, at the line of the function:
+//!
+//! | | problem |
+//! |---|---|
+//! | a method (`function(self: app)`, called with `:`) | a client calls with `.` |
+//! | a generic function (`function<T>`) | a type variable has no Rust type |
+//! | a variadic argument or result (`...: T`, `: T...`) | no Rust type |
+//! | more than 16 arguments, or more than 16 results | they cross as one tuple each way, and mlua converts at most 16 |
+//! | an overload (two function types for one field) | no one Rust signature |
+//! | an argument or result the mapping has no row for | as for a field |
+//! | `any`, also inside a `{T}`, a `{K : V}` or a `T \| nil`; a record that holds `any` in a field, directly or through other records | a Lua value does not leave the VM thread `htl::run` keeps it on |
+//! | a function named `load` or `instance`, or one whose name is no Rust name | the client writes those two itself |
+//! | a function named `clone` or `clone_from` | the client derives `Clone`, and an inherent method of that name would win over the trait's in `app.clone()` |
+//! | a module that returns no record; a record whose PascalCase name is no Rust name or is the name of a type or module beside it | there is no client to name |
+//!
+//! A field a `[rust.types]` entry types is the author's declaration, not read for `any`: a
+//! `mlua::Value` the entry names is stopped by rustc and not by this module.
+//!
+//! A note, which does not fail the run, is said for a record that declares no function, and
+//! for each function the module defines outside the record's body (`function app.helper()`
+//! with no `helper: function(..)` in the body): the type index keeps no type for it, so it is
+//! not in the client. Declaring `helper: function(..)` in the body adds it. A field that is
+//! not a function is left out without a word.
 //!
 //! # Drift
 //!
@@ -193,6 +266,8 @@ use crate::typeindex::{Decl, Place, Prim, TypeExpr, TypeInfo, Where};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+mod client;
+
 /// What starts the first line of the file `htl rs` writes. A caller that is about to
 /// overwrite a file checks that its first line starts with this, and leaves it alone
 /// otherwise.
@@ -210,6 +285,29 @@ pub struct Spec {
     pub modules: Vec<String>,
     /// `<module>.<type>.<field>` to the Rust type of that field; see the module doc.
     pub types: BTreeMap<String, String>,
+    /// The modules whose returned record is written as a client over `htl::run::Instance`,
+    /// by the name `require` takes; see the module doc's Exports. Empty is no client.
+    pub exports: Vec<String>,
+}
+
+impl Spec {
+    /// Whether there is nothing to write: what [`generate`] answers with
+    /// [`Rendered::Nothing`], before it looks at a source.
+    pub fn is_empty(&self) -> bool {
+        self.modules.is_empty() && self.exports.is_empty()
+    }
+}
+
+impl From<&crate::config::RustConfig> for Spec {
+    /// `[rust]` without `out`: the one construction `htl rs` and `htl::teal_types!()` lower
+    /// from, so that the two cannot ask different things of [`generate`].
+    fn from(cfg: &crate::config::RustConfig) -> Self {
+        Spec {
+            modules: cfg.modules.clone(),
+            types: cfg.types.clone(),
+            exports: cfg.exports.clone(),
+        }
+    }
 }
 
 /// One of three outcomes, so "written with problems" is not a state.
@@ -230,11 +328,12 @@ pub enum Rendered {
         /// What is said and does not fail.
         notes: Vec<Diagnostic>,
     },
-    /// `modules` is empty: there is nothing to write.
+    /// `modules` and `exports` are empty: there is nothing to write.
     Nothing,
 }
 
-/// Lower the records and enums of the listed modules of `sources`.
+/// Lower the records and enums of the listed modules of `sources`, and the clients of the
+/// exported ones.
 ///
 /// `sources` is every own module of the project, listed or not, each checked with the index
 /// kept: a field of a listed module may name a type of an unlisted one, and has to be told
@@ -242,10 +341,11 @@ pub enum Rendered {
 /// a place, as [`RefTable::new`] takes it; this module reads no file, so the caller brings
 /// that.
 pub fn generate(sources: &[Source], spec: &Spec, canon: fn(&Path) -> PathBuf) -> Rendered {
-    if spec.modules.is_empty() {
+    if spec.is_empty() {
         return Rendered::Nothing;
     }
     let listed: BTreeSet<String> = spec.modules.iter().cloned().collect();
+    let exported: BTreeSet<String> = spec.exports.iter().cloned().collect();
     let refs = Refs {
         table: shapes::ref_table(sources, canon),
         listed: &listed,
@@ -254,65 +354,74 @@ pub fn generate(sources: &[Source], spec: &Spec, canon: fn(&Path) -> PathBuf) ->
     let mut problems = Vec::new();
     let mut notes = Vec::new();
 
-    // The modules to lower, in bytewise order of their names.
+    // The modules to lower, and the ones to export, each in bytewise order of their names.
     let mut units: Vec<Unit> = Vec::new();
     for module in &listed {
-        let segs: Vec<&str> = module.split('.').collect();
-        if let Some(bad) = segs.iter().find(|s| !is_module_segment(s)) {
-            config_problems.push(config_problem(format!(
-                "[rust] modules: `{module}`: `{bad}` cannot be the name of a Rust module"
-            )));
-            continue;
-        }
-        let Some(src) = sources.iter().find(|s| s.module == module.as_str()) else {
-            config_problems.push(config_problem(format!(
-                "[rust] modules lists `{module}`, which is no module of this project's own sources"
-            )));
-            continue;
-        };
-        let rel = rel_display(src.rel_path);
-        let Some(decls) = src.info.types.declarations() else {
-            problems.push(Diagnostic::new(
-                Severity::Error,
-                rel,
-                1,
-                1,
-                format!("`{module}` kept no type index (the file did not parse); nothing to lower"),
-                None,
-            ));
-            continue;
-        };
-        let cands = shapes::candidates(decls);
-        let mut aliases = Vec::new();
-        shapes::collect_aliases(decls, &mut aliases, &mut None, &refs.table);
-        units.push(Unit {
-            src,
-            rel,
-            segs,
-            cands,
-            aliases,
-        });
+        units.extend(unit_of(
+            "modules",
+            module,
+            sources,
+            &refs,
+            &mut config_problems,
+            &mut problems,
+        ));
     }
+    let mut exports: Vec<client::Export> = Vec::new();
+    for module in &exported {
+        let Some(unit) = unit_of(
+            "exports",
+            module,
+            sources,
+            &refs,
+            &mut config_problems,
+            &mut problems,
+        ) else {
+            continue;
+        };
+        match client::Export::new(unit) {
+            Ok(export) => exports.push(export),
+            Err(unit) => problems.push(Diagnostic::new(
+                Severity::Error,
+                unit.rel,
+                1,
+                1,
+                format!(
+                    "`{module}` is listed in [rust] exports and returns no record; a client is made of the functions of the record a module returns"
+                ),
+                None,
+            )),
+        }
+    }
+    // Every module that has a `pub mod`: a type may not take the name of one below it.
+    let tree: Vec<&[&str]> = units
+        .iter()
+        .map(|u| u.segs.as_slice())
+        .chain(exports.iter().map(|e| e.unit.segs.as_slice()))
+        .collect();
 
     let overrides = resolve_types(spec, &units, &mut config_problems);
 
     // Lowered one module at a time; what each one says of itself stays with it.
     let mut blocks: Vec<Vec<String>> = Vec::new();
     let mut edges = Vec::new();
+    let mut holds = Vec::new();
     for unit in &units {
         let mut l = Lowering {
             unit,
             units: &units,
             refs: &refs,
             overrides: &overrides,
-            children: children_of(unit, &units),
+            children: children_of(&unit.segs, &tree),
             cur: String::new(),
             problems: Vec::new(),
             edges: Vec::new(),
+            reached: Vec::new(),
+            holds: Vec::new(),
         };
         blocks.push(l.run());
         problems.append(&mut l.problems);
         edges.append(&mut l.edges);
+        holds.append(&mut l.holds);
         if unit.cands.is_empty() {
             notes.push(Diagnostic::new(
                 Severity::Warning,
@@ -327,6 +436,16 @@ pub fn generate(sources: &[Source], spec: &Spec, canon: fn(&Path) -> PathBuf) ->
             ));
         }
     }
+    // The clients come after every type is lowered: what a record holds is what a method may
+    // take or return.
+    let lua = client::holding_lua_values(&holds);
+    let mut clients: Vec<String> = Vec::new();
+    for export in &exports {
+        let made = export.lower(&units, &refs, &overrides, &tree, &lua);
+        clients.push(made.text);
+        problems.extend(made.problems);
+        notes.extend(made.notes);
+    }
     problems.extend(cycles(&edges));
     if !config_problems.is_empty() || !problems.is_empty() {
         problems.sort_by(|a, b| (&a.file, a.line, a.col).cmp(&(&b.file, b.line, b.col)));
@@ -340,21 +459,19 @@ pub fn generate(sources: &[Source], spec: &Spec, canon: fn(&Path) -> PathBuf) ->
     // The tree, and the text.
     let mut root = Node::default();
     for (i, u) in units.iter().enumerate() {
-        let mut node = &mut root;
-        for seg in &u.segs {
-            node = node.children.entry((*seg).to_string()).or_default();
-        }
-        node.unit = Some(i);
+        root.at(&u.segs).unit = Some(i);
     }
-    let mut order = Vec::new();
-    root.sources(&mut order);
-    let sources_line: Vec<&str> = order.iter().map(|&i| units[i].rel.as_str()).collect();
+    for (i, e) in exports.iter().enumerate() {
+        root.at(&e.unit.segs).client = Some(i);
+    }
+    let mut sources_line: Vec<&str> = Vec::new();
+    root.sources(&units, &exports, &mut sources_line);
     let mut text = format!(
         "{HEADER}. Do not edit: rerun `htl rs`.\n// Sources: {}\n",
         sources_line.join(", ")
     );
     for (name, node) in &root.children {
-        if let Some(m) = node.render(name, 0, &blocks) {
+        if let Some(m) = node.render(name, 0, &blocks, &clients) {
             text.push('\n');
             text.push_str(&m);
             text.push('\n');
@@ -408,13 +525,59 @@ struct Unit<'a> {
     aliases: Vec<&'a Decl>,
 }
 
-/// The names of the modules directly below `unit` that are listed.
-fn children_of<'a>(unit: &Unit, units: &[Unit<'a>]) -> BTreeSet<&'a str> {
-    let n = unit.segs.len();
-    units
-        .iter()
-        .filter(|u| u.segs.len() > n && u.segs[..n] == unit.segs[..])
-        .map(|u| u.segs[n])
+/// The module `module` names, as `[rust] <key>` lists it: `None` once a problem has been said
+/// (a segment that is no Rust name, no own module of that name, a file that kept no index).
+fn unit_of<'a>(
+    key: &str,
+    module: &'a str,
+    sources: &'a [Source<'a>],
+    refs: &Refs,
+    config_problems: &mut Vec<Diagnostic>,
+    problems: &mut Vec<Diagnostic>,
+) -> Option<Unit<'a>> {
+    let segs: Vec<&str> = module.split('.').collect();
+    if let Some(bad) = segs.iter().find(|s| !is_module_segment(s)) {
+        config_problems.push(config_problem(format!(
+            "[rust] {key}: `{module}`: `{bad}` cannot be the name of a Rust module"
+        )));
+        return None;
+    }
+    let Some(src) = sources.iter().find(|s| s.module == module) else {
+        config_problems.push(config_problem(format!(
+            "[rust] {key} lists `{module}`, which is no module of this project's own sources"
+        )));
+        return None;
+    };
+    let rel = rel_display(src.rel_path);
+    let Some(decls) = src.info.types.declarations() else {
+        problems.push(Diagnostic::new(
+            Severity::Error,
+            rel,
+            1,
+            1,
+            format!("`{module}` kept no type index (the file did not parse); nothing to lower"),
+            None,
+        ));
+        return None;
+    };
+    let cands = shapes::candidates(decls);
+    let mut aliases = Vec::new();
+    shapes::collect_aliases(decls, &mut aliases, &mut None, &refs.table);
+    Some(Unit {
+        src,
+        rel,
+        segs,
+        cands,
+        aliases,
+    })
+}
+
+/// The names of the modules of `tree` directly below the module `segs`.
+fn children_of<'a>(segs: &[&str], tree: &[&[&'a str]]) -> BTreeSet<&'a str> {
+    let n = segs.len();
+    tree.iter()
+        .filter(|t| t.len() > n && t[..n] == *segs)
+        .map(|t| t[n])
         .collect()
 }
 
@@ -596,28 +759,59 @@ fn cycles(edges: &[Edge]) -> Vec<Diagnostic> {
 struct Node {
     /// The listed module that is this node, an index into the units.
     unit: Option<usize>,
+    /// The exported module that is this node, an index into the exports and their clients.
+    client: Option<usize>,
     children: BTreeMap<String, Node>,
 }
 
 impl Node {
-    /// The listed modules at and below this node, the node's own first, then its children in
-    /// order: the order the second line of the file names their sources in.
-    fn sources(&self, out: &mut Vec<usize>) {
-        out.extend(self.unit);
+    /// The node at the module path `segs` below this one, made on the way.
+    fn at(&mut self, segs: &[&str]) -> &mut Node {
+        let mut node = self;
+        for seg in segs {
+            node = node.children.entry((*seg).to_string()).or_default();
+        }
+        node
+    }
+
+    /// The files of the modules at and below this node, the node's own first (once, when it
+    /// is listed and exported both), then its children in order: the order the second line
+    /// of the file names their sources in.
+    fn sources<'u>(
+        &self,
+        units: &'u [Unit],
+        exports: &'u [client::Export],
+        out: &mut Vec<&'u str>,
+    ) {
+        match (self.unit, self.client) {
+            (Some(u), _) => out.push(&units[u].rel),
+            (None, Some(e)) => out.push(&exports[e].unit.rel),
+            (None, None) => {}
+        }
         for c in self.children.values() {
-            c.sources(out);
+            c.sources(units, exports, out);
         }
     }
 
     /// The `pub mod` of this node at `depth` (four spaces each), or `None` when nothing is
-    /// in it: a listed module that declares nothing has no module of its own.
-    fn render(&self, name: &str, depth: usize, blocks: &[Vec<String>]) -> Option<String> {
+    /// in it: a listed module that declares nothing has no module of its own. A module's
+    /// types come first, then its client, then the modules below it.
+    fn render(
+        &self,
+        name: &str,
+        depth: usize,
+        blocks: &[Vec<String>],
+        clients: &[String],
+    ) -> Option<String> {
         let mut items: Vec<String> = Vec::new();
         if let Some(u) = self.unit {
             items.extend(blocks[u].iter().map(|b| indent(b, depth + 1)));
         }
+        if let Some(e) = self.client {
+            items.push(indent(&clients[e], depth + 1));
+        }
         for (n, c) in &self.children {
-            items.extend(c.render(n, depth + 1, blocks));
+            items.extend(c.render(n, depth + 1, blocks, clients));
         }
         if items.is_empty() {
             return None;
@@ -721,12 +915,37 @@ struct Lowering<'a, 'r> {
     units: &'r [Unit<'a>],
     refs: &'r Refs<'r>,
     overrides: &'r HashMap<(String, String), String>,
-    /// The names of the listed modules directly below this one.
+    /// The names of the modules directly below this one that have a `pub mod` (listed or
+    /// exported).
     children: BTreeSet<&'a str>,
     /// The name of the type being lowered: where an edge starts.
     cur: String,
     problems: Vec<Diagnostic>,
     edges: Vec<Edge>,
+    /// What the types lowered since it was last emptied reached: the caller empties it,
+    /// lowers, and reads it ([`Reached`]).
+    reached: Vec<Reached>,
+    /// What each record of the module reached through its fields.
+    holds: Vec<Hold>,
+}
+
+/// What a lowered type is made of that the client of an export asks about: a Lua value, or
+/// a record (which may hold one).
+enum Reached {
+    Any,
+    Record {
+        /// The module and name of the record, as an [`Edge`] names it.
+        key: (String, String),
+        /// The name as the Teal source wrote it.
+        written: String,
+    },
+}
+
+/// The record `from` and what its fields reach, through a `{T}`, a `{K : V}`, a `T | nil` or
+/// directly. A field a `[rust.types]` entry types is not lowered and reaches nothing.
+struct Hold {
+    from: (String, String),
+    reached: Vec<Reached>,
 }
 
 impl Lowering<'_, '_> {
@@ -785,8 +1004,14 @@ impl Lowering<'_, '_> {
                 by_name.insert(plain.clone(), i);
             }
             if self.children.contains(plain.as_str()) {
+                // A child is a `pub mod` because it is listed, or only because it is exported.
+                let n = unit.segs.len();
+                let listed = self.units.iter().any(|u| {
+                    u.segs.len() == n + 1 && u.segs[..n] == unit.segs[..] && u.segs[n] == plain
+                });
+                let how = if listed { "listed" } else { "exported" };
                 let message = format!(
-                    "`{}` has the name of the module `{}.{plain}`, which is listed; a type and a module share one namespace in Rust",
+                    "`{}` has the name of the module `{}.{plain}`, which is {how}; a type and a module share one namespace in Rust",
                     c.qual, unit.src.module
                 );
                 self.problem(line, col, message);
@@ -809,7 +1034,12 @@ impl Lowering<'_, '_> {
         match c.kind {
             CandKind::Enum { members } => self.enumeration(c, name, teal, members),
             CandKind::Record => {
+                self.reached.clear();
                 let fields = self.record(c);
+                self.holds.push(Hold {
+                    from: (unit.src.module.to_string(), c.name.clone()),
+                    reached: std::mem::take(&mut self.reached),
+                });
                 let mut s =
                     format!("{STRUCT_DERIVE}\n#[teal(name = \"{teal}\")]\npub struct {name} {{");
                 if !fields.is_empty() {
@@ -952,7 +1182,10 @@ impl Lowering<'_, '_> {
                 Prim::Number => prim("f64", Class::Number),
                 Prim::Integer => prim("i64", Class::Integer),
                 Prim::Boolean => prim("bool", Class::Boolean),
-                Prim::Any => prim("::htl::mlua::Value", Class::Any),
+                Prim::Any => {
+                    self.reached.push(Reached::Any);
+                    prim("::htl::mlua::Value", Class::Any)
+                }
                 Prim::Nil => self.no_type(at, site, "a type that is only `nil`"),
                 Prim::Thread => self.no_type(at, site, "`thread`"),
                 Prim::Userdata => self.no_type(at, site, "`userdata`"),
@@ -1050,6 +1283,12 @@ impl Lowering<'_, '_> {
             match refs.entry(p) {
                 Some(Entry::Type(r)) => {
                     let module: Vec<&str> = r.module.split('.').collect();
+                    if r.record {
+                        self.reached.push(Reached::Record {
+                            key: (r.module.clone(), r.name.clone()),
+                            written: written.clone(),
+                        });
+                    }
                     if r.record && !indirect {
                         self.edges.push(Edge {
                             from: (unit.src.module.to_string(), self.cur.clone()),
@@ -1088,9 +1327,10 @@ impl Lowering<'_, '_> {
                 }
                 None => {}
             }
-            // The alias may be declared in any listed module, not only the one being lowered:
-            // `alias_in` matches only a place in the file of the unit it is handed.
-            let found = self.units.iter().find_map(|u| {
+            // The alias may be declared in any listed module, not only the one being lowered
+            // (which, for a client, need not be listed): `alias_in` matches only a place in
+            // the file of the unit it is handed.
+            let found = self.units.iter().chain([unit]).find_map(|u| {
                 shapes::alias_in(&u.aliases, u.src.info.types.file(), &refs.table, names, p)
                     .map(|a| (format!("{}.{}", u.src.module, a.name), a))
             });
@@ -1139,8 +1379,10 @@ mod tests {
         info: CheckInfo,
     }
 
-    /// The module a file answers to: `geom/types.tl` is `geom.types`, `ev/init.tl` is `ev`.
+    /// The module a file answers to: `geom/types.tl` is `geom.types`, `ev/init.tl` is `ev`,
+    /// and `src/shop/app.tl` is `shop.app` (a project laid out as `htl new` does).
     fn module_of(rel: &str) -> String {
+        let rel = rel.strip_prefix("src/").unwrap_or(rel);
         let stem = rel.strip_suffix(".tl").unwrap();
         stem.strip_suffix("/init").unwrap_or(stem).replace('/', ".")
     }
@@ -1155,6 +1397,9 @@ mod tests {
         }
         let h = Htl::new().unwrap();
         h.add_path(&root).unwrap();
+        if root.join("src").is_dir() {
+            h.add_path(&root.join("src")).unwrap();
+        }
         let checked = files
             .iter()
             .map(|(rel, _)| {
@@ -1177,6 +1422,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
+            exports: Vec::new(),
         }
     }
 
@@ -1994,6 +2240,520 @@ return M
                 "ev.tl:2:9: `M.Words`: the member `self` cannot be PascalCased into a Rust variant name",
             ]
         );
+    }
+
+    /// `generate` with `modules`, `exports` and the `[rust.types]` entries.
+    fn exported_with(
+        name: &str,
+        files: &[(&str, &str)],
+        modules: &[&str],
+        exports: &[&str],
+        types: &[(&str, &str)],
+    ) -> Rendered {
+        let (_root, checked) = project(name, files);
+        let spec = Spec {
+            exports: exports.iter().map(|m| m.to_string()).collect(),
+            ..spec(modules, types)
+        };
+        lower(&checked, &spec)
+    }
+
+    fn exported(
+        name: &str,
+        files: &[(&str, &str)],
+        modules: &[&str],
+        exports: &[&str],
+    ) -> Rendered {
+        exported_with(name, files, modules, exports, &[])
+    }
+
+    fn problems_of(r: Rendered) -> Vec<String> {
+        match r {
+            Rendered::Refused { problems, .. } => problems.iter().map(|p| p.to_string()).collect(),
+            other => panic!("not refused: {other:#?}"),
+        }
+    }
+
+    /// The text and the notes of a run that wrote.
+    fn written_of(r: Rendered) -> (String, Vec<String>) {
+        match r {
+            Rendered::Text { text, notes } => (text, notes.iter().map(|n| n.to_string()).collect()),
+            other => panic!("not written: {other:#?}"),
+        }
+    }
+
+    /// The project `tests/fixtures/client` is: the golden file is what `htl rs` writes for
+    /// it, and the same file is compared by the CLI and the macro and compiled against
+    /// `htl::run` by the `htl` crate's tests.
+    const SHOP: [(&str, &str); 2] = [
+        (
+            "src/shop/types.tl",
+            include_str!("../tests/fixtures/client/src/shop/types.tl"),
+        ),
+        (
+            "src/shop/app.tl",
+            include_str!("../tests/fixtures/client/src/shop/app.tl"),
+        ),
+    ];
+    const SHOP_GOLDEN: &str = include_str!("../tests/fixtures/client/teal_types.rs");
+
+    /// An exported module is a client in the `pub mod` of its path, before the types of the
+    /// modules beside it; a type of a listed module is a `super::` path, a field that is no
+    /// function is left out, and a result of two values is a tuple.
+    #[test]
+    fn an_exported_module_is_a_client_of_its_functions() {
+        let (text, notes) = written_of(exported("client", &SHOP, &["shop.types"], &["shop.app"]));
+        assert_eq!(notes, Vec::<String>::new());
+        assert_eq!(text, SHOP_GOLDEN);
+    }
+
+    /// The order `exports` and `modules` are written in, and a module named twice, change
+    /// nothing.
+    #[test]
+    fn the_order_and_repeats_of_exports_do_not_change_the_output() {
+        let a = "local record a\n   one: function(): integer\nend\nreturn a\n";
+        let b = "local record b\n   two: function(): string\nend\nreturn b\n";
+        let files = [("a.tl", a), ("b.tl", b)];
+        let (first, _) = written_of(exported("order-1", &files, &[], &["a", "b"]));
+        assert!(first.contains("pub struct A {"), "{first}");
+        assert!(first.contains("pub struct B {"), "{first}");
+        for (name, exports) in [
+            ("order-2", &["b", "a"][..]),
+            ("order-3", &["a", "b", "a", "b"][..]),
+        ] {
+            let (again, _) = written_of(exported(name, &files, &[], exports));
+            assert_eq!(again, first, "{exports:?}");
+        }
+    }
+
+    /// What a client is refused for, in the file of the exported module. One module per
+    /// problem, so that each is said alone.
+    fn export_problems(name: &str, body: &str) -> Vec<String> {
+        let src = format!("local record app\n{body}end\nreturn app\n");
+        problems_of(exported(name, &[("app.tl", &src)], &[], &["app"]))
+    }
+
+    #[test]
+    fn an_exported_method_is_a_problem() {
+        assert_eq!(
+            export_problems(
+                "export-method",
+                "   m: function(self: app, n: integer): integer\n"
+            ),
+            ["app.tl:2:4: `app.m` is a method, called with `:`; a client calls functions with `.`"]
+        );
+    }
+
+    #[test]
+    fn an_exported_generic_is_a_problem() {
+        assert_eq!(
+            export_problems("export-generic", "   id: function<T>(x: T): T\n"),
+            ["app.tl:2:4: `app.id` is generic (`<T>`); a type variable has no Rust type"]
+        );
+    }
+
+    #[test]
+    fn an_exported_variadic_argument_is_a_problem() {
+        assert_eq!(
+            export_problems("export-rest", "   sum: function(...: integer): integer\n"),
+            ["app.tl:2:4: `app.sum` takes a variadic `...`, which has no Rust type"]
+        );
+    }
+
+    #[test]
+    fn an_exported_variadic_result_is_a_problem() {
+        assert_eq!(
+            export_problems("export-rest-result", "   many: function(): integer...\n"),
+            ["app.tl:2:4: `app.many` returns a variadic `...`, which has no Rust type"]
+        );
+    }
+
+    #[test]
+    fn an_exported_type_with_no_row_is_a_problem() {
+        assert_eq!(
+            export_problems(
+                "export-no-row",
+                "   th: function(t: thread): {string, integer}\n   loose: function(a: any): {any}\n   deep: function(a: {string : any | nil}): integer\n"
+            ),
+            [
+                "app.tl:2:4: `app.th, argument 1`: `thread` has no Rust type",
+                "app.tl:2:4: `app.th, result 1`: a tuple has no Rust type",
+                "app.tl:3:4: `app.loose, argument 1`: `any` is a Lua value, which does not leave the VM thread; give it a type",
+                "app.tl:3:4: `app.loose, result 1`: `any` is a Lua value, which does not leave the VM thread; give it a type",
+                "app.tl:4:4: `app.deep, argument 1`: `any` is a Lua value, which does not leave the VM thread; give it a type",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_exported_overload_is_a_problem() {
+        let problems = export_problems(
+            "export-poly",
+            "   f: function(integer): integer\n   f: function(string): string\n",
+        );
+        assert_eq!(
+            problems,
+            [
+                "app.tl:3:4: `app.f`: `polymorphic function (with types function(integer): integer and function(string): string)` is not one function type (an overload, or an alias of one); it has no Rust signature"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_exported_function_named_like_a_method_of_the_client_is_a_problem() {
+        assert_eq!(
+            export_problems("export-load", "   load: function()\n"),
+            [
+                "app.tl:2:4: `app.load`: `load` is the name of a method the client writes itself (`load`, `instance`); rename the function"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_exported_function_named_like_a_clone_method_is_a_problem() {
+        assert_eq!(
+            export_problems("export-clone", "   clone: function(): integer\n"),
+            [
+                "app.tl:2:4: `app.clone`: `clone` would hide the client's `Clone::clone`; rename the function"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_exported_function_named_like_no_rust_name_is_a_problem() {
+        assert_eq!(
+            export_problems("export-self", "   self: function()\n"),
+            ["app.tl:2:4: `app.self`: `self` cannot be the name of a Rust method"]
+        );
+    }
+
+    #[test]
+    fn an_exported_function_of_more_than_sixteen_values_is_a_problem() {
+        let args = vec!["integer"; 17].join(", ");
+        assert_eq!(
+            export_problems("export-wide", &format!("   wide: function({args})\n")),
+            [
+                "app.tl:2:4: `app.wide` takes 17 values; a call crosses with at most 16 each way, the most a Rust tuple mlua converts holds"
+            ]
+        );
+        let sixteen = vec!["integer"; 16].join(", ");
+        let src =
+            format!("local record app\n   ok: function({sixteen}): {sixteen}\nend\nreturn app\n");
+        let (text, _) = written_of(exported(
+            "export-sixteen",
+            &[("app.tl", &src)],
+            &[],
+            &["app"],
+        ));
+        assert!(text.contains("a16: i64,"), "{text}");
+    }
+
+    /// A body whose functions are all refused is not a body that declares none: the note is
+    /// not said beside the problems.
+    #[test]
+    fn a_refused_function_is_not_reported_as_no_function() {
+        let src = "local record app\n   m: function(self: app)\nend\nreturn app\n";
+        match exported("export-refused-note", &[("app.tl", src)], &[], &["app"]) {
+            Rendered::Refused { problems, notes } => {
+                assert_eq!(problems.len(), 1, "{problems:?}");
+                assert!(notes.is_empty(), "{notes:?}");
+            }
+            other => panic!("not refused: {other:#?}"),
+        }
+    }
+
+    /// A type of a listed module that takes the name of an exported (not listed) module below
+    /// it says which of the two the module is.
+    #[test]
+    fn a_type_named_like_an_exported_child_module_says_exported() {
+        let geom = "local record M\n   record app\n      x: integer\n   end\nend\nreturn M\n";
+        let app = "local record app\n   one: function()\nend\nreturn app\n";
+        assert_eq!(
+            problems_of(exported(
+                "export-child",
+                &[("geom/init.tl", geom), ("geom/app.tl", app)],
+                &["geom"],
+                &["geom.app"],
+            )),
+            [
+                "geom/init.tl:2:11: `M.app` has the name of the module `geom.app`, which is exported; a type and a module share one namespace in Rust"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_exported_module_must_return_a_record() {
+        let src = "local function f(): integer\n   return 1\nend\nreturn { f = f }\n";
+        assert_eq!(
+            problems_of(exported(
+                "export-none",
+                &[("app.tl", src)],
+                &[],
+                &["app", "nope"]
+            )),
+            [
+                "[rust] exports lists `nope`, which is no module of this project's own sources",
+                "app.tl:1:1: `app` is listed in [rust] exports and returns no record; a client is made of the functions of the record a module returns",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_client_may_not_take_the_name_of_a_type_or_a_module_beside_it() {
+        // `App` is the client of `app` and a record `app` declares, once `app` is listed too.
+        let app = "local record app\n   one: function()\n   record App\n   end\nend\nreturn app\n";
+        assert_eq!(
+            problems_of(exported(
+                "export-name-type",
+                &[("app.tl", app)],
+                &["app"],
+                &["app"]
+            )),
+            [
+                "app.tl:1:14: `app` makes the client `App`, which is the name of a type or a module of `app` too; rename one"
+            ]
+        );
+        // And a listed module `app.App` is a `pub mod App` below it.
+        let sub = "local record M\n   record X\n   end\nend\nreturn M\n";
+        let plain = "local record app\n   one: function()\nend\nreturn app\n";
+        assert_eq!(
+            problems_of(exported(
+                "export-name-module",
+                &[("app.tl", plain), ("app/App.tl", sub)],
+                &["app.App"],
+                &["app"],
+            )),
+            [
+                "app.tl:1:14: `app` makes the client `App`, which is the name of a type or a module of `app` too; rename one"
+            ]
+        );
+    }
+
+    /// The client is named for the record the module returns: `M` stays `M`, a snake case
+    /// name is PascalCased.
+    #[test]
+    fn the_client_is_named_for_the_returned_record() {
+        let m = "local record M\n   one: function(): integer\nend\nreturn M\n";
+        let snake = "local record my_app\n   one: function(): integer\nend\nreturn my_app\n";
+        let (text, _) = written_of(exported(
+            "export-names",
+            &[("m.tl", m), ("snake.tl", snake)],
+            &[],
+            &["m", "snake"],
+        ));
+        assert!(text.contains("pub struct M {"), "{text}");
+        assert!(text.contains("impl M {"), "{text}");
+        assert!(text.contains("pub struct MyApp {"), "{text}");
+    }
+
+    /// Only a Teal type of `T | nil` is an `Option`. The number of arguments a call has to
+    /// pass is not read as "the rest are optional": the index does not say which one `?`
+    /// stands for, and `Option` on the wrong one would send a nil where Teal wants a value.
+    #[test]
+    fn only_a_nilable_type_is_an_option_and_an_optional_marker_is_not_read() {
+        let src = "local record app
+   both: function(a?: string, b: integer): integer
+   nilable: function(a: string, b: string | nil, c?: integer): {string : integer | nil}
+   later: function(a: string, b?: string): string | nil
+end
+return app
+";
+        let (text, _) = written_of(exported("export-option", &[("app.tl", src)], &[], &["app"]));
+        let string = "::std::string::String";
+        let opt = |t: &str| format!("::core::option::Option<{t}>");
+        let method = |name: &str| {
+            text.split("pub async fn ")
+                .find(|m| m.starts_with(&format!("{name}(")))
+                .unwrap_or_else(|| panic!("no method {name}:\n{text}"))
+                .to_string()
+        };
+        // `(a?: string, b: integer)`: both are `T`, whichever the `?` stands for.
+        let both = method("both");
+        assert!(both.contains(&format!("a1: {string},")), "{both}");
+        assert!(both.contains("a2: i64,"), "{both}");
+        // Only `string | nil` is an `Option`; a `?` on the third changes nothing.
+        let nilable = method("nilable");
+        assert!(
+            nilable.contains(&format!("a2: {},", opt(string))),
+            "{nilable}"
+        );
+        assert!(nilable.contains("a3: i64,"), "{nilable}");
+        assert!(
+            nilable.contains(&format!(
+                "HashMap<{string}, {}>, ::htl::run::CallError>",
+                opt("i64")
+            )),
+            "{nilable}"
+        );
+        // The last argument may be left out in Teal and is a `String` here; a nilable result
+        // is an `Option`.
+        let later = method("later");
+        assert!(later.contains(&format!("a2: {string},")), "{later}");
+        assert!(
+            later.contains(&format!("Result<{}, ::htl::run::CallError>", opt(string))),
+            "{later}"
+        );
+    }
+
+    const HOLDING_TYPES: &str = "local record types
+   record Inner
+      v: any
+   end
+   record Outer
+      inner: Inner
+   end
+   record Far
+      outers: {string : Outer}
+   end
+   record Safe
+      n: integer
+   end
+end
+return types
+";
+
+    fn holding(name: &str, function: &str, types: &[(&str, &str)]) -> Rendered {
+        let app = format!(
+            "local types = require(\"types\")\nlocal record app\n   {function}\nend\nreturn app\n"
+        );
+        exported_with(
+            name,
+            &[("types.tl", HOLDING_TYPES), ("app.tl", &app)],
+            &["types"],
+            &["app"],
+            types,
+        )
+    }
+
+    /// A record that holds an `any` (a field of its own, or through the records it holds, also
+    /// behind a `{T}` or a `{K : V}`) is no more a type a method crosses with than `any`.
+    #[test]
+    fn a_record_that_reaches_any_is_a_problem_as_an_argument_and_as_a_result() {
+        let said = |site: &str, written: &str| {
+            format!(
+                "app.tl:3:4: `{site}`: `{written}` holds an `any`, directly or through other records, which is a Lua value that does not leave the VM thread; give that field a type, or a Rust one under [rust.types]"
+            )
+        };
+        for (n, (function, expected)) in [
+            (
+                "take: function(i: types.Inner)",
+                said("app.take, argument 1", "types.Inner"),
+            ),
+            (
+                "take: function(o: types.Outer)",
+                said("app.take, argument 1", "types.Outer"),
+            ),
+            (
+                "give: function(): types.Outer",
+                said("app.give, result 1", "types.Outer"),
+            ),
+            (
+                "give: function(): {types.Far}",
+                said("app.give, result 1", "types.Far"),
+            ),
+            (
+                "give: function(): {string : types.Far | nil}",
+                said("app.give, result 1", "types.Far"),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(
+                problems_of(holding(&format!("holding-{n}"), function, &[])),
+                [expected],
+                "{function}"
+            );
+        }
+        // A record that holds no `any` is a type like another.
+        let (text, _) = written_of(holding(
+            "holding-safe",
+            "ok: function(s: types.Safe): types.Safe",
+            &[],
+        ));
+        assert!(text.contains("a1: super::types::Safe,"), "{text}");
+    }
+
+    /// A field a `[rust.types]` entry types is the author's: it is not lowered, so it is not
+    /// read for an `any`, and the record is no longer one that holds a Lua value.
+    #[test]
+    fn a_field_typed_under_rust_types_does_not_make_its_record_hold_any() {
+        let (text, _) = written_of(holding(
+            "holding-override",
+            "take: function(o: types.Outer): types.Far",
+            &[("types.Inner.v", "u32")],
+        ));
+        assert!(text.contains("a1: super::types::Outer,"), "{text}");
+        assert!(text.contains("pub v: u32,"), "{text}");
+    }
+
+    /// A function written below the body of the record has no type in the index and is not in
+    /// the client; the note says where it is and what to write. A function the body declares
+    /// is in it, whether or not the module defines it below.
+    #[test]
+    fn a_function_defined_outside_the_body_is_a_note() {
+        let src = "local record app
+   declared: function(n: integer): integer
+end
+function app.declared(n: integer): integer
+   return n
+end
+function app.helper(n: integer): integer
+   return n + 1
+end
+function app:method(n: integer): integer
+   return n
+end
+return app
+";
+        let (text, notes) = written_of(exported(
+            "export-outside",
+            &[("app.tl", src)],
+            &[],
+            &["app"],
+        ));
+        assert!(text.contains("pub async fn declared("), "{text}");
+        assert!(!text.contains("helper"), "{text}");
+        assert_eq!(
+            notes,
+            [
+                "app.tl:7:1: `app.helper` is defined outside the body of the record, so it is not in the client; declare `helper: function(..)` in the body to add it [htl rust]"
+            ]
+        );
+    }
+
+    /// A record that declares no function has a client with none, and says so.
+    #[test]
+    fn an_export_without_a_function_is_a_note() {
+        let src = "local record app\n   limit: integer\nend\nreturn app\n";
+        let (text, notes) = written_of(exported("export-empty", &[("app.tl", src)], &[], &["app"]));
+        assert!(text.contains("pub struct App {"), "{text}");
+        assert_eq!(
+            notes,
+            [
+                "app.tl:1:14: `app` is listed in [rust] exports and its record declares no function in its body [htl rust]"
+            ]
+        );
+    }
+
+    /// Only `exports`: something to write. Neither: nothing.
+    #[test]
+    fn exports_alone_are_something_to_write_and_none_is_nothing() {
+        let only = Spec {
+            exports: vec!["app".into()],
+            ..Spec::default()
+        };
+        assert!(!only.is_empty());
+        assert!(Spec::default().is_empty());
+        let from = Spec::from(&crate::config::RustConfig {
+            modules: vec!["ev".into()],
+            exports: vec!["app".into()],
+            types: [("ev.Event.at".to_string(), "u32".to_string())].into(),
+            out: Some("ignored.rs".into()),
+        });
+        assert_eq!(from.modules, ["ev"]);
+        assert_eq!(from.exports, ["app"]);
+        assert_eq!(from.types["ev.Event.at"], "u32");
     }
 
     #[test]

@@ -86,7 +86,7 @@ Each command's arguments, flags and examples are in `htl <cmd> --help` (and
 | `htl cache` | report what the `.htl/cache` store holds, or empty it (`status`, `clear`; see Caching) |
 | `htl dts` | write the `.d.tl` files this project declares from Rust (`#[host_module]`, `#[derive(TealRecord)]`), Teal (`---@contract`) and crate dependencies ([`htl::dep_dts`](https://docs.rs/htl/latest/htl/dep_dts/index.html)) |
 | `htl shapes` | write an `lshape` run-time schema and typed `Schema<T>` `.d.tl` for each record and enum the project declares ([`htl::shapes`](https://docs.rs/htl/latest/htl/shapes/index.html)) |
-| `htl rs` | write one Rust file deriving `TealRecord` for each record and enum the modules in `[rust] modules` declare ([`htl::rsgen`](https://docs.rs/htl/latest/htl/rsgen/index.html)) |
+| `htl rs` | write one Rust file: a `TealRecord` type for each record and enum of the modules in `[rust] modules`, a client for each module in `[rust] exports` ([`htl::rsgen`](https://docs.rs/htl/latest/htl/rsgen/index.html)) |
 | `htl lsp` | run the language server on stdio, whose diagnostics are `htl check`'s (see Editors) |
 
 Exit code 1 is a verdict (an error in a file, a finding at `deny`, a failing test, a name
@@ -220,6 +220,51 @@ and the pages behind it are
 `async fn` awaited from Teal), and `resolver`, where
 nothing is embedded and `require` goes through mlua-pkg at run time. Its README says what
 each one prints and which line of the output is the point.
+
+### Calling Teal from async Rust (`htl::run`, `[rust] exports`)
+
+A host whose logic is in Teal starts one runner and calls the functions of a module on it.
+With `htl = { features = ["async"] }`, `[rust] exports = ["app"]` in `htl.toml`, and
+`htl::teal_types!();` at the crate root (or `htl rs`, which writes the same code to a file),
+the record a module returns becomes a typed client; an argument or a result that disagrees
+with the Teal declaration fails `cargo build`:
+
+```teal
+local record app
+   add: function(a: integer, b: integer): integer   -- a function the body declares is a method
+end
+
+function app.add(a: integer, b: integer): integer
+   return a + b
+end
+
+return app
+```
+
+```rust
+htl::teal_types!();                                // at the crate root: reads `[rust]` of htl.toml
+
+async fn run() -> anyhow::Result<()> {
+    let (runner, driver) = htl::run::start(htl::run::RunnerConfig {
+        search_paths: vec!["src".into()],
+        deadline: std::time::Duration::from_secs(5),
+        queue: 64,
+    })
+    .await?;
+    let app = app::App::load(&runner, &[]).await?; // `require("app")`, in a state of its own
+    let n: i64 = app.add(2, 3).await?;             // Result<i64, htl::run::CallError>
+    driver.shutdown().await?;
+    Ok(())
+}
+```
+
+Every call runs under the runner's `deadline` and is cut off past it. Each `load` is an
+instance with its own program state, so two instances of one module share nothing of the
+module's own. A client is named for the record its module returns, so the clients of
+`local record M` modules are all `M`, told apart by their module path (`shop::app::M`).
+What a runner promises is [`htl::run`](https://docs.rs/htl/latest/htl/run/index.html);
+which functions get a method, how each type is written, and what is refused is the
+Exports section of [`htl::rsgen`](https://docs.rs/htl/latest/htl/rsgen/index.html).
 
 ## Lints (`htl check`, `include_tl!`)
 
