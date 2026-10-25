@@ -957,7 +957,7 @@ impl Lowering<'_, '_> {
                 Prim::Thread => self.no_type(at, site, "`thread`"),
                 Prim::Userdata => self.no_type(at, site, "`userdata`"),
             },
-            TypeExpr::Fn => self.no_type(at, site, "a function or method field"),
+            TypeExpr::Fn(_) => self.no_type(at, site, "a function or method field"),
             TypeExpr::Tuple(_) => self.no_type(at, site, "a tuple"),
             TypeExpr::Array(e) => {
                 let e = self.lower_ty(e, at, site, aliases, true)?;

@@ -830,9 +830,9 @@ fn a_field_has_its_type_as_a_value() {
         ty_of(&c, "un"),
         TypeExpr::Union(vec![prim(Prim::String), prim(Prim::Integer)])
     );
-    assert_eq!(ty_of(&c, "cb"), TypeExpr::Fn);
+    assert!(matches!(ty_of(&c, "cb"), TypeExpr::Fn(_)));
     // A generic function is the function under the generic.
-    assert_eq!(ty_of(&c, "poly"), TypeExpr::Fn);
+    assert!(matches!(ty_of(&c, "poly"), TypeExpr::Fn(_)));
     // A name with type arguments is not a plain name: it is the printed form.
     assert_eq!(ty_of(&c, "boxed"), TypeExpr::Other("Box<integer>".into()));
     // The type variable inside a generic record.
@@ -1044,7 +1044,12 @@ return M
     // Declared in the body and defined below: one child, the definition, with the body's type.
     let f = find(decls, "f").unwrap();
     assert!(f.body.is_some());
-    assert_eq!(f.info, Some(TypeInfo::Field { ty: TypeExpr::Fn }));
+    assert!(matches!(
+        &f.info,
+        Some(TypeInfo::Field {
+            ty: TypeExpr::Fn(_)
+        })
+    ));
 }
 
 /// A parse alone has no type objects: nothing carries `info`.
@@ -1285,4 +1290,203 @@ return log, f, g, h, n
         parsed.iter().find(|d| d.name == "log").unwrap().fn_body,
         None
     );
+}
+
+const SIGS: &str = "local record Other
+   n: integer
+end
+
+local record R
+   plain: function(a: string, b: integer): boolean
+   optional: function(a: string, b?: integer)
+   optional_first: function(a?: string, b: integer)
+   variadic: function(a: string, ...: integer)
+   several: function(): string, integer
+   variadic_results: function(): string...
+   nothing: function()
+   method_of_r: function(self: R, n: integer): string
+   method_of_other: function(self: Other, n: integer)
+   generic_method: function<T>(self: R, x: T): T
+   generic: function<T, U>(x: T, y: {U}): T
+   bare: function
+   takes_fn: function(cb: function(integer): string): boolean
+   returns_record: function(): R
+end
+
+function R:defined_below(n: integer): string
+   return tostring(n)
+end
+
+return R
+";
+
+/// The signature of the function field `name` of [`SIGS`].
+fn sig_of(c: &htl_core::CheckInfo, name: &str) -> htl_core::typeindex::FnSig {
+    use htl_core::typeindex::TypeExpr;
+    match ty_of(c, name) {
+        TypeExpr::Fn(sig) => *sig,
+        other => panic!("{name}: not a function: {other:?}"),
+    }
+}
+
+fn check_sigs(name: &str, text: &str) -> (common::TempDir, htl_core::CheckInfo) {
+    let root = common::tempdir("htl-core-typeindex", name);
+    write(&root.join("sigs.tl"), text);
+    let h = Htl::new().unwrap();
+    h.add_path(&root).unwrap();
+    let c = h.check_indexed(&root.join("sigs.tl")).unwrap();
+    assert!(c.errors.is_empty(), "{:?}", c.errors);
+    (root, c)
+}
+
+/// What a function's parameters, results and optional parameters come to, one case per
+/// shape of signature a reader has to tell apart.
+#[test]
+fn a_function_keeps_its_parameters_and_results() {
+    use htl_core::typeindex::{Prim, TypeExpr};
+    let (_root, c) = check_sigs("sigs", SIGS);
+    let prim = TypeExpr::Prim;
+
+    let s = sig_of(&c, "plain");
+    assert_eq!(s.params.items, [prim(Prim::String), prim(Prim::Integer)]);
+    assert_eq!(s.params.rest, None);
+    assert_eq!(s.required, 2);
+    assert_eq!(s.results.items, [prim(Prim::Boolean)]);
+    assert_eq!(s.results.rest, None);
+    assert!(!s.method);
+    assert!(s.type_params.is_empty());
+
+    // Teal keeps how many are required, not which: the trailing optional one is not counted.
+    let s = sig_of(&c, "optional");
+    assert_eq!(s.params.items, [prim(Prim::String), prim(Prim::Integer)]);
+    assert_eq!(s.required, 1);
+    assert!(s.results.items.is_empty());
+    assert_eq!(s.results.rest, None);
+
+    // A count, not a position: an optional parameter may come first in a function type.
+    let s = sig_of(&c, "optional_first");
+    assert_eq!(s.params.items, [prim(Prim::String), prim(Prim::Integer)]);
+    assert_eq!(s.required, 1);
+
+    // The tail is not among the items, and is not required.
+    let s = sig_of(&c, "variadic");
+    assert_eq!(s.params.items, [prim(Prim::String)]);
+    assert_eq!(s.params.rest, Some(prim(Prim::Integer)));
+    assert_eq!(s.required, 1);
+
+    let s = sig_of(&c, "several");
+    assert!(s.params.items.is_empty());
+    assert_eq!(s.results.items, [prim(Prim::String), prim(Prim::Integer)]);
+    assert_eq!(s.results.rest, None);
+
+    let s = sig_of(&c, "variadic_results");
+    assert!(s.results.items.is_empty());
+    assert_eq!(s.results.rest, Some(prim(Prim::String)));
+
+    let s = sig_of(&c, "nothing");
+    assert!(s.params.items.is_empty());
+    assert_eq!(s.params.rest, None);
+    assert_eq!(s.required, 0);
+    assert!(s.results.items.is_empty());
+    assert_eq!(s.results.rest, None);
+
+    // A function written with no parentheses takes and returns any number of anything.
+    let s = sig_of(&c, "bare");
+    assert!(s.params.items.is_empty());
+    assert_eq!(s.params.rest, Some(prim(Prim::Any)));
+    assert_eq!(s.required, 0);
+    assert!(s.results.items.is_empty());
+    assert_eq!(s.results.rest, Some(prim(Prim::Any)));
+    assert!(!s.method);
+}
+
+/// `method` is what the checker resolved: a `self` of the record the field is in makes a
+/// method, a `self` of another type does not.
+#[test]
+fn a_function_is_a_method_when_self_is_its_record() {
+    use htl_core::typeindex::{Prim, TypeExpr};
+    let (_root, c) = check_sigs("sigs-method", SIGS);
+
+    let s = sig_of(&c, "method_of_r");
+    assert!(s.method);
+    assert_eq!(s.params.items.len(), 2);
+    // `self` of a method is the checker's own `self` type, not a nominal of the record.
+    assert_eq!(s.params.items[0], TypeExpr::Other("self".into()));
+    assert_eq!(s.params.items[1], TypeExpr::Prim(Prim::Integer));
+    assert_eq!(s.required, 2);
+
+    let s = sig_of(&c, "method_of_other");
+    assert!(!s.method);
+    assert_eq!(s.params.items.len(), 2);
+    assert!(matches!(
+        &s.params.items[0],
+        TypeExpr::Nominal { names, .. } if names == &["Other"]
+    ));
+
+    // The checker does not resolve a generic field as a method, `self` of the record or not.
+    let s = sig_of(&c, "generic_method");
+    assert!(!s.method);
+    assert_eq!(s.type_params, ["T"]);
+    assert!(matches!(
+        &s.params.items[0],
+        TypeExpr::Nominal { names, .. } if names == &["R"]
+    ));
+
+    // A record function (`function R:defined_below`) is written outside the body, and the
+    // index does not carry it.
+    assert_eq!(
+        find(c.types.declarations().unwrap(), "defined_below")
+            .unwrap()
+            .info,
+        None
+    );
+}
+
+/// A generic function lists its type parameters by name; a function that takes or returns
+/// another type has that type in its signature.
+#[test]
+fn a_signature_nests_the_types_it_mentions() {
+    use htl_core::typeindex::{Prim, TypeExpr};
+    let (_root, c) = check_sigs("sigs-nested", SIGS);
+
+    let s = sig_of(&c, "generic");
+    // The names as written: the checker's `T@<n>` renaming does not leak into the index.
+    assert_eq!(s.type_params, ["T", "U"]);
+    assert_eq!(s.params.items.len(), 2);
+    assert_eq!(s.params.items[0], TypeExpr::Other("T".into()));
+    assert_eq!(s.results.items, [TypeExpr::Other("T".into())]);
+
+    let s = sig_of(&c, "takes_fn");
+    assert_eq!(s.params.items.len(), 1);
+    let TypeExpr::Fn(cb) = &s.params.items[0] else {
+        panic!("{:?}", s.params.items[0])
+    };
+    assert_eq!(cb.params.items, [TypeExpr::Prim(Prim::Integer)]);
+    assert_eq!(cb.required, 1);
+    assert_eq!(cb.results.items, [TypeExpr::Prim(Prim::String)]);
+    assert_eq!(s.results.items, [TypeExpr::Prim(Prim::Boolean)]);
+
+    let s = sig_of(&c, "returns_record");
+    assert_eq!(s.results.items.len(), 1);
+    assert!(matches!(
+        &s.results.items[0],
+        TypeExpr::Nominal { names, declared: Some(_) } if names == &["R"]
+    ));
+}
+
+/// Under `--#pragma arity off` the checker counts no arguments, so nothing is required.
+#[test]
+fn a_function_under_arity_off_requires_nothing() {
+    let (_root, c) = check_sigs(
+        "sigs-arity",
+        "--#pragma arity off
+local record R
+   f: function(a: string, b: integer)
+end
+return R
+",
+    );
+    let s = sig_of(&c, "f");
+    assert_eq!(s.params.items.len(), 2);
+    assert_eq!(s.required, 0);
 }
