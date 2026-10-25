@@ -2974,7 +2974,8 @@ local function decl_index(result, filename, src, report, reporter, sym_type)
    -- What `TypeInfo` / `TypeExpr` (`typeindex.rs`) read: the structure of a type object, where
    -- `detail` is its printed form. `typename` decides which field holds what (vendor/tl.lua,
    -- `show_type_base`): `elements` of an array, `keys` and `values` of a map, `types` of a
-   -- union and a tupletable, `names` of a nominal.
+   -- union and a tupletable, `names` of a nominal, `args` and `rets` of a function (and
+   -- `typeargs` of the `generic` around a generic one).
    local PRIMS = {
       string = true, number = true, integer = true, boolean = true, any = true,
       ["nil"] = true, thread = true, userdata = true,
@@ -2984,6 +2985,7 @@ local function decl_index(result, filename, src, report, reporter, sym_type)
    end
    local type_expr
    type_expr = function(t, depth)
+      local g = t
       t = unwrap(t)
       if type(t) ~= "table" or depth > 16 then
          return { k = "other", text = str_of(t) or "?" }
@@ -3001,7 +3003,29 @@ local function decl_index(result, filename, src, report, reporter, sym_type)
          if tn == "tupletable" then return { k = "tuple", elems = list } end
          return { k = "union", members = list }
       elseif tn == "function" then
-         return { k = "fn" }
+         -- `unwrap` dropped a `generic` (`g`); a generic function keeps the names of its type
+         -- parameters. The checker renames a type argument apart as `T@<n>` with a running
+         -- counter (vendor/tl.lua, `fresh_typevar_ctr`); the name as written is the part before
+         -- the `@`.
+         local tparams = {}
+         if g ~= t then
+            for i, a in ipairs(g.typeargs or {}) do
+               tparams[i] = (tostring(a.typearg or ""):gsub("@.*", ""))
+            end
+         end
+         -- A tuple of tl (`tuple`, `is_va`) as `{ items, rest }`: the last type of a variadic
+         -- one is its tail.
+         local function list_of(tp)
+            local items = {}
+            for i, m in ipairs(tp and tp.tuple or {}) do items[i] = type_expr(m, depth + 1) end
+            local rest
+            if tp and tp.is_va then rest = table.remove(items) end
+            return { items = items, rest = rest }
+         end
+         return {
+            k = "fn", params = list_of(t.args), required = t.min_arity or 0,
+            results = list_of(t.rets), method = t.is_method == true, tparams = tparams,
+         }
       elseif tn == "nominal" and t.names and #t.names == 1 and t.names[1] == "userdata"
          and not (type(t.found) == "table" and t.found.f == filename) then
          -- tl has no primitive `userdata`: the name is a global interface of its standard

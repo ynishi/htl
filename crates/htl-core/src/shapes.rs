@@ -1219,7 +1219,7 @@ impl<'a> Lowering<'a> {
                 Prim::Thread => raw("T.any --[[ thread ]]"),
                 Prim::Userdata => raw("T.any --[[ userdata ]]"),
             },
-            TypeExpr::Fn => raw("T.fn"),
+            TypeExpr::Fn(_) => raw("T.fn"),
             TypeExpr::Array(e) => {
                 let (e, _) = self.lower_ty(e, at, site, aliases)?;
                 Some((Ex::Array(Box::new(e)), false))

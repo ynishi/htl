@@ -419,10 +419,49 @@ pub enum Where {
     Other(String),
 }
 
+/// A list of types with an optional variadic tail: a function's parameters or its
+/// results (Teal's `tuple` with `is_va`; Lua returns several values).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct TypeList {
+    /// The types before any variadic tail, in order.
+    pub items: Vec<TypeExpr>,
+    /// The type of the variadic tail (`...: T`, `: T...`), if there is one.
+    pub rest: Option<TypeExpr>,
+}
+
+/// A function's signature, as the checker resolved it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct FnSig {
+    /// The parameters; for a method, `self` is the first item, and its type is the checker's
+    /// own `self` type, [`Other("self")`](TypeExpr::Other), not the record it stands for.
+    pub params: TypeList,
+    /// The fewest arguments a call has to pass (Teal's `min_arity`): the number of
+    /// `params.items` not marked optional (`x?: T`). Teal keeps a count, not a flag per
+    /// parameter, and a function type does not have to put its optional parameters last:
+    /// `function(a?: string, b: integer)` has 1, and it is not `a` that the 1 stands for.
+    /// Under `--#pragma arity off` the checker does not count arguments and this is 0, which
+    /// a reader cannot tell from "all optional".
+    pub required: usize,
+    /// The results.
+    pub results: TypeList,
+    /// Whether the checker resolved the function as a method, called with `:`: its first
+    /// parameter is `self` of the record it belongs to (`function M:f`, or a record field
+    /// `f: function(self: M)`). A `self` of another type is an ordinary parameter, and so
+    /// is the `self` of a generic function field (`f: function<T>(self: M, x: T)`): the
+    /// checker only resolves a field as a method when its type is not generic, though
+    /// `m:f(x)` is still accepted.
+    pub method: bool,
+    /// The type parameters of a generic function (`function<T>`), by name; empty otherwise.
+    pub type_params: Vec<String>,
+}
+
 /// A type as the checker's type object has it, reduced to what a program tells apart
 /// ([`TypeInfo`]). What is not one of these is [`Other`](TypeExpr::Other), the printed form
 /// Teal gives it, so that a reader can say what it met.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum TypeExpr {
     /// A primitive.
     Prim(Prim),
@@ -434,8 +473,9 @@ pub enum TypeExpr {
     Tuple(Vec<TypeExpr>),
     /// `A | B`.
     Union(Vec<TypeExpr>),
-    /// A function; its parameters and results are not kept.
-    Fn,
+    /// A function, with its signature. An overloaded function (`poly`) is
+    /// [`Other`](TypeExpr::Other).
+    Fn(Box<FnSig>),
     /// A name that stands for a type declared elsewhere (`Inner`, `other.Thing`).
     Nominal {
         /// The name as written, one part per `.`.
@@ -984,12 +1024,12 @@ fn read_where(t: Option<Table>) -> Result<Option<Where>> {
 /// A `{ k = .., .. }` table of `prelude.lua`'s `type_expr` as a [`TypeExpr`].
 fn read_type(t: &Table) -> Result<TypeExpr> {
     let sub = |key: &str| -> Result<TypeExpr> { read_type(&t.get::<Table>(key)?) };
-    let list = |key: &str| -> Result<Vec<TypeExpr>> {
-        t.get::<Table>(key)?
-            .sequence_values::<Table>()
+    let seq = |l: &Table| -> Result<Vec<TypeExpr>> {
+        l.sequence_values::<Table>()
             .map(|e| read_type(&e?))
             .collect()
     };
+    let list = |key: &str| seq(&t.get::<Table>(key)?);
     Ok(match t.get::<String>("k")?.as_str() {
         "prim" => TypeExpr::Prim(match t.get::<String>("name")?.as_str() {
             "string" => Prim::String,
@@ -1006,7 +1046,28 @@ fn read_type(t: &Table) -> Result<TypeExpr> {
         "map" => TypeExpr::Map(Box::new(sub("key")?), Box::new(sub("value")?)),
         "tuple" => TypeExpr::Tuple(list("elems")?),
         "union" => TypeExpr::Union(list("members")?),
-        "fn" => TypeExpr::Fn,
+        "fn" => {
+            let types = |key: &str| -> Result<TypeList> {
+                let l = t.get::<Table>(key)?;
+                Ok(TypeList {
+                    items: seq(&l.get::<Table>("items")?)?,
+                    rest: l
+                        .get::<Option<Table>>("rest")?
+                        .map(|r| read_type(&r))
+                        .transpose()?,
+                })
+            };
+            TypeExpr::Fn(Box::new(FnSig {
+                params: types("params")?,
+                required: t.get::<usize>("required")?,
+                results: types("results")?,
+                method: t.get::<bool>("method")?,
+                type_params: t
+                    .get::<Table>("tparams")?
+                    .sequence_values::<String>()
+                    .collect::<mlua::Result<_>>()?,
+            }))
+        }
         "nominal" => TypeExpr::Nominal {
             names: t
                 .get::<Table>("names")?
