@@ -150,6 +150,8 @@ pub mod resolve;
 #[cfg(feature = "std")]
 pub mod batteries;
 #[cfg(feature = "async")]
+pub mod run;
+#[cfg(feature = "async")]
 pub mod task;
 // The seam a binary adds its own libraries through, wherever this crate builds an `Htl`
 // for itself rather than the binary's own: no feature gate, since the mechanism is not
@@ -702,13 +704,17 @@ impl Htl {
         type_path: &str,
         require_fields: &config::RequireFields,
     ) -> Result<ContractResult> {
-        let f: Function = self.h.get("contract_check")?;
-        // `true` for "everything the type declares", the list itself when it names them.
+        // `true` for "everything the type declares", the list itself when it names them —
+        // as a `Vec`, which the call converts in the checker's state, not as a table made in
+        // `self.lua()`, which a split state's checker could not take.
         let wanted = match require_fields.named() {
-            Some(names) => mlua::Value::Table(self.lua().create_sequence_from(names.to_vec())?),
-            None => mlua::Value::Boolean(require_fields.is_on()),
+            Some(names) => mlua::Either::Right(names.to_vec()),
+            None => mlua::Either::Left(require_fields.is_on()),
         };
-        let t: Table = f.call((path_str(file), modname, type_path, wanted))?;
+        let t: Table = self.checker_call(
+            "contract_check",
+            (path_str(file), modname, type_path, wanted),
+        )?;
         let errors: Table = t.get("errors")?;
         let errors = errors
             .sequence_values::<String>()
@@ -870,7 +876,6 @@ pub fn declaration_conflict_lints(
     info: &CheckInfo,
     host_modules: &[String],
 ) -> Result<Vec<Diagnostic>> {
-    let f: Function = h.h.get("declaration_sites")?;
     let mut out = Vec::new();
     let mut seen: Vec<&str> = Vec::new();
     for site in &info.requires {
@@ -901,8 +906,8 @@ pub fn declaration_conflict_lints(
             }
             continue;
         }
-        let sites: Vec<String> = f
-            .call::<Table>(site.module.as_str())?
+        let sites: Vec<String> = h
+            .checker_call::<Table>("declaration_sites", site.module.as_str())?
             .sequence_values::<String>()
             .collect::<mlua::Result<_>>()?;
         let shadowed: Vec<&str> = sites
@@ -1533,22 +1538,65 @@ impl CheckInfo {
 pub struct Htl {
     /// The program's state: `require`, preloads, `exec`, bundles.
     lua: Lua,
-    /// The prelude table (checker API). Lives in `lua` unless this is a split state
-    /// made by [`with_checker`](Self::with_checker), where it belongs to the checker.
-    h: Table,
-    /// `true` when the checker is another Lua state (`with_checker`).
-    split: bool,
+    /// The prelude (checker API), and this state's program in it. The prelude lives in
+    /// `lua` unless this is a split state made by [`with_checker`](Self::with_checker),
+    /// where it belongs to the checker. Reached through [`checker_call`](Self::checker_call)
+    /// only.
+    h: CheckerHandle,
     /// The state the prelude — and so the checker — lives in: `lua` itself, or the
     /// checker's for a split state. Weak, because the checker is kept alive by whoever
     /// made it, not by the program states that borrow it.
     checker: mlua::WeakLua,
 }
 
-/// Checker prelude of another state, kept in a runtime state's app data so the
-/// mlua-pkg resolvers find their checker (`Htl::with_checker`). The one reader is in
-/// `pkg`; without that feature the handle is stored and never read.
-#[cfg_attr(not(feature = "pkg"), allow(dead_code))]
-pub(crate) struct CheckerHandle(pub(crate) Table);
+/// The checker's prelude as one program state reaches it: the prelude table, and the
+/// program to enter for every call (`H.with_program` in `prelude.lua`, whose comment says
+/// what a program holds and why it exists).
+///
+/// A split state ([`Htl::with_checker_lua`]) has a program of its own, made when the state
+/// is; every call it makes into the prelude goes through [`call`](Self::call), which
+/// enters that program first (a write, such as the project model's view, is a call too:
+/// `H.set_model`). The checker used directly has none: its program is the prelude's
+/// globals, and the call goes straight through, as it did before programs existed.
+///
+/// Also kept in a split state's app data, so the mlua-pkg resolvers there reach the checker
+/// in the state's program (`pkg::TealResolver`).
+#[derive(Clone)]
+pub(crate) struct CheckerHandle {
+    /// The prelude table, in the checker's state.
+    h: Table,
+    /// The program table `H.begin_program` made for a split state, in the checker's state.
+    program: Option<Table>,
+}
+
+impl CheckerHandle {
+    /// A handle on the checker used directly: no program to enter.
+    pub(crate) fn direct(h: Table) -> Self {
+        Self { h, program: None }
+    }
+
+    /// Call the prelude's function `name` with `args`, inside this handle's program.
+    pub(crate) fn call<R: mlua::FromLuaMulti>(
+        &self,
+        name: &str,
+        args: impl mlua::IntoLuaMulti,
+    ) -> mlua::Result<R> {
+        match &self.program {
+            None => self.h.get::<Function>(name)?.call(args),
+            // The name and not the function: `with_program` looks it up once the program is
+            // in place, so a field the program holds (a model's `owns_file`) is its own.
+            Some(program) => self
+                .h
+                .get::<Function>("with_program")?
+                .call((program, name, args)),
+        }
+    }
+
+    /// Whether the prelude has a field `name`, as this handle's program sees it.
+    pub(crate) fn has(&self, name: &str) -> mlua::Result<bool> {
+        self.call("has", name)
+    }
+}
 
 const RUNTIME_REGISTRY_KEY: &str = "htl.runtime";
 
@@ -1690,8 +1738,15 @@ impl Htl {
     /// own: modules `checker` has already type-checked and generated are served from
     /// its store, so a run of many programs (the test runner: one state per file)
     /// checks each module once. The program state itself is as isolated as
-    /// [`new`](Self::new): nothing but the checker is shared. The checker starts a new
-    /// program env for this state (module-name resolution is per program).
+    /// [`new`](Self::new): nothing but the checker is shared.
+    ///
+    /// The state gets a program of its own in the checker: its search path, its project
+    /// model, its `[lang]`, deps and lint selection, and its module-name resolution, copied
+    /// from the checker's own settings now and changed from then on only by this state's
+    /// setters ([`add_path`](Self::add_path), `apply_model`, [`set_lang`](Self::set_lang),
+    /// ...). Two states made from one checker, alive at the
+    /// same time, never resolve or check by each other's settings, and neither changes the
+    /// checker's. `prelude.lua` (`H.with_program`) says what a program holds.
     pub fn with_checker(checker: &Htl) -> Result<Self> {
         // SAFETY: as in `new`.
         let lua = unsafe { Lua::unsafe_new() };
@@ -1775,15 +1830,33 @@ impl Htl {
             .call(s)
             .context("loading htl runtime prelude")?;
         lua.set_named_registry_value(RUNTIME_REGISTRY_KEY, r)?;
-        lua.set_app_data(CheckerHandle(checker.h.clone()));
-        let begin: Function = checker.h.get("begin_program")?;
-        begin.call::<()>(())?;
+        let program: Table = checker.checker_call("begin_program", ())?;
+        let h = CheckerHandle {
+            h: checker.h.h.clone(),
+            program: Some(program),
+        };
+        lua.set_app_data(h.clone());
         Ok(Self {
             lua,
-            h: checker.h.clone(),
-            split: true,
+            h,
             checker: checker.checker.clone(),
         })
+    }
+
+    /// `true` when the checker is another Lua state ([`with_checker`](Self::with_checker)),
+    /// which is when this state has a program of its own.
+    fn split(&self) -> bool {
+        self.h.program.is_some()
+    }
+
+    /// Call the checker prelude's function `name`, in this state's program: the one way
+    /// this crate calls into the prelude ([`CheckerHandle::call`]).
+    pub(crate) fn checker_call<R: mlua::FromLuaMulti>(
+        &self,
+        name: &str,
+        args: impl mlua::IntoLuaMulti,
+    ) -> Result<R> {
+        Ok(self.h.call(name, args)?)
     }
 
     /// The checker's Lua state: where a function the prelude calls has to be made.
@@ -1937,8 +2010,8 @@ impl Htl {
     /// file's named functions, from one parse: a coverage report wants both, and the
     /// second is what lets it say *which function* the missed statements belong to.
     pub fn coverage_spans(&self, file: &Path) -> Result<CoverageSpans> {
-        let f: Function = self.h.get("executable_ranges")?;
-        let (ranges, funcs): (Option<Table>, Option<Table>) = f.call(path_str(file))?;
+        let (ranges, funcs): (Option<Table>, Option<Table>) =
+            self.checker_call("executable_ranges", path_str(file))?;
         let Some(ranges) = ranges else {
             return Ok((Vec::new(), Vec::new()));
         };
@@ -1961,17 +2034,16 @@ impl Htl {
         Ok((out, fns))
     }
 
-    /// The checker's `package.path` (what `require` inside `.tl` resolves through).
+    /// The checker's `package.path` (what `require` inside `.tl` resolves through), as this
+    /// state's program has it.
     pub fn search_path(&self) -> Result<String> {
-        let f: Function = self.h.get("get_path")?;
-        Ok(f.call(())?)
+        self.checker_call("get_path", ())
     }
 
-    /// Restore a checker `package.path` taken with [`search_path`](Self::search_path).
+    /// Restore a checker `package.path` taken with [`search_path`](Self::search_path), in
+    /// this state's program.
     pub fn set_search_path(&self, path: &str) -> Result<()> {
-        let f: Function = self.h.get("set_path")?;
-        f.call::<()>(path)?;
-        Ok(())
+        self.checker_call("set_path", path)
     }
 
     /// Attach the Teal compiler to an existing Lua state (the host's own `Lua`): the
@@ -2028,8 +2100,7 @@ impl Htl {
         let checker = lua.weak();
         let this = Self {
             lua,
-            h,
-            split: false,
+            h: CheckerHandle::direct(h),
             checker,
         };
         // The defaults come from the registry, and this is where a state gets them: the
@@ -2051,8 +2122,7 @@ impl Htl {
 
     /// Type-check one file.
     pub fn check(&self, file: &Path) -> Result<CheckInfo> {
-        let f: Function = self.h.get("check")?;
-        let t: Table = f.call(path_str(file))?;
+        let t: Table = self.checker_call("check", path_str(file))?;
         read_checkinfo(&t)
     }
 
@@ -2074,8 +2144,7 @@ impl Htl {
     /// table built here, for the reason [`set_deps`](Self::set_deps) gives: `h` is not
     /// always in `self.lua`, and a table that crossed that line would raise.
     pub fn check_written(&self, file: &Path) -> Result<CheckInfo> {
-        let f: Function = self.h.get("check_written")?;
-        let t: Table = f.call(path_str(file))?;
+        let t: Table = self.checker_call("check_written", path_str(file))?;
         read_checkinfo(&t)
     }
 
@@ -2090,8 +2159,7 @@ impl Htl {
     /// shows it as `type_index`), so a caller that asks no such question has
     /// `check_written`.
     pub fn check_indexed(&self, file: &Path) -> Result<CheckInfo> {
-        let f: Function = self.h.get("check_indexed")?;
-        let t: Table = f.call(path_str(file))?;
+        let t: Table = self.checker_call("check_indexed", path_str(file))?;
         read_checkinfo(&t)
     }
 
@@ -2114,8 +2182,7 @@ impl Htl {
     /// matter, since nothing is type-checked. `[lang] async` is honoured: the file is read
     /// as the checker would read it.
     pub fn declarations_of(&self, file: &Path) -> Result<Option<Vec<typeindex::Decl>>> {
-        let f: Function = self.h.get("declarations_of")?;
-        let rows: Option<Table> = f.call(path_str(file))?;
+        let rows: Option<Table> = self.checker_call("declarations_of", path_str(file))?;
         rows.map(|rows| typeindex::read_decls(&rows)).transpose()
     }
 
@@ -2140,8 +2207,19 @@ impl Htl {
     /// a `--` line inside it included; a `--` line inside a multi-line long string is the
     /// string's and comes out as the string wrote it.
     pub fn gen_lua(&self, file: &Path) -> Result<(Option<String>, CheckInfo)> {
-        let f: Function = self.h.get("gen")?;
-        let (code, t): (Option<String>, Table) = f.call(path_str(file))?;
+        let (code, t): (Option<String>, Table) = self.checker_call("gen", path_str(file))?;
+        Ok((code, read_checkinfo(&t)?))
+    }
+
+    /// [`gen_lua`](Self::gen_lua) without the lint pass: the check and the code the strict
+    /// searcher's `require` asks for (`H.gen(found, { lints = false })`), for a caller that
+    /// reports no lints. The options table is made in the checker's state, where `gen` is.
+    #[cfg(feature = "async")]
+    pub(crate) fn gen_lua_unlinted(&self, file: &Path) -> Result<(Option<String>, CheckInfo)> {
+        let opts = self.checker_lua()?.create_table()?;
+        opts.set("lints", false)?;
+        let (code, t): (Option<String>, Table) =
+            self.checker_call("gen", (path_str(file), opts))?;
         Ok((code, read_checkinfo(&t)?))
     }
 
@@ -2151,9 +2229,7 @@ impl Htl {
     /// fmt` and the lints parse — is read under the setting, so it is set once per
     /// project, where the lint selection is. A checker nobody calls it on reads plain Teal.
     pub fn set_lang(&self, lang: &config::LangConfig) -> Result<()> {
-        let f: Function = self.h.get("set_lang")?;
-        f.call::<()>(lang.async_on())?;
-        Ok(())
+        self.checker_call("set_lang", lang.async_on())
     }
 
     /// Configure lint rules: `"+no-any,-shadow-local"` on top of the defaults.
@@ -2190,9 +2266,7 @@ impl Htl {
         };
         let (lua_on, lua_off) = split(lint::Side::Lua);
         let (tl_on, tl_off) = split(lint::Side::Tl);
-        let f: Function = self.h.get("set_lints")?;
-        f.call::<()>((lua_on, lua_off, tl_on, tl_off))?;
-        Ok(())
+        self.checker_call("set_lints", (lua_on, lua_off, tl_on, tl_off))
     }
 
     /// Tell the checker which dependencies the project installed, by name.
@@ -2209,9 +2283,7 @@ impl Htl {
     /// `Lua instance passed Value created from a different main Lua state`. A `Vec` is
     /// converted by the call itself, in the state the function belongs to.
     pub fn set_deps(&self, names: &[String]) -> Result<()> {
-        let f: Function = self.h.get("set_deps")?;
-        f.call::<()>(names.to_vec())?;
-        Ok(())
+        self.checker_call("set_deps", names.to_vec())
     }
 
     /// Names of all lint rules (enabled or not), the project layer's among them.
@@ -2222,15 +2294,14 @@ impl Htl {
     /// The rules `lint.lua` implements, as it knows them. The registry is
     /// [`lint::RULES`]; this is the list to hold it to (`tests/lint_registry.rs`).
     pub fn lua_lint_rules(&self) -> Result<Vec<String>> {
-        let f: Function = self.h.get("lint_rules")?;
-        let t: Table = f.call(())?;
+        let t: Table = self.checker_call("lint_rules", ())?;
         Ok(t.sequence_values::<String>().collect::<mlua::Result<_>>()?)
     }
 
     /// Format a `.tl` file (whitespace-only formatter). Returns the formatted text.
     pub fn format_file(&self, file: &Path, indent: usize) -> Result<String> {
-        let f: Function = self.h.get("format")?;
-        let (out, err): (Option<String>, Option<String>) = f.call((path_str(file), indent))?;
+        let (out, err): (Option<String>, Option<String>) =
+            self.checker_call("format", (path_str(file), indent))?;
         out.ok_or_else(|| anyhow!("{}", err.unwrap_or_else(|| "format failed".into())))
     }
 
@@ -2238,9 +2309,8 @@ impl Htl {
     /// formatted as the file `file` would be if it held it, and `file` only names it in an
     /// error. For a caller that holds a buffer the file on disk does not match (`htl lsp`).
     pub fn format_text(&self, text: &str, file: &Path, indent: usize) -> Result<String> {
-        let f: Function = self.h.get("format_text")?;
         let (out, err): (Option<String>, Option<String>) =
-            f.call((text, path_str(file), indent))?;
+            self.checker_call("format_text", (text, path_str(file), indent))?;
         out.ok_or_else(|| anyhow!("{}", err.unwrap_or_else(|| "format failed".into())))
     }
 
@@ -2250,16 +2320,14 @@ impl Htl {
     /// whether it is read as Teal (`.tl`) or Lua. [`shapes::runtime_version`] is the typed
     /// reader of this and the one to call.
     pub(crate) fn version_field(&self, src: &str, chunk: &str) -> Result<(String, Option<String>)> {
-        let f: Function = self.h.get("runtime_version")?;
-        Ok(f.call((src, chunk))?)
+        self.checker_call("runtime_version", (src, chunk))
     }
 
     /// Drop Lua's default search path (cwd-relative `./?.lua` etc.) so only directories
     /// passed to [`add_path`](Self::add_path) are consulted by the checker and `require`.
     pub fn reset_search_path(&self) -> Result<()> {
-        let f: Function = self.h.get("reset_path")?;
-        f.call::<()>(())?;
-        if self.split {
+        self.checker_call::<()>("reset_path", ())?;
+        if self.split() {
             let f: Function = self.runtime()?.get("reset_path")?;
             f.call::<()>(())?;
         }
@@ -2276,9 +2344,8 @@ impl Htl {
     /// library installed for the machine is found at run time. A host that builds its own
     /// path from nothing calls [`reset_search_path`](Self::reset_search_path) instead.
     pub fn drop_cwd_search_path(&self) -> Result<()> {
-        let f: Function = self.h.get("drop_cwd_path")?;
-        f.call::<()>(())?;
-        if self.split {
+        self.checker_call::<()>("drop_cwd_path", ())?;
+        if self.split() {
             let f: Function = self.runtime()?.get("drop_cwd_path")?;
             f.call::<()>(())?;
         }
@@ -2317,9 +2384,8 @@ impl Htl {
     }
 
     fn add_path_as(&self, dir: &Path, packages: bool) -> Result<()> {
-        let f: Function = self.h.get("add_path")?;
-        f.call::<()>((path_str(dir), packages))?;
-        if self.split {
+        self.checker_call::<()>("add_path", (path_str(dir), packages))?;
+        if self.split() {
             // The program state resolves plain `.lua` (and `.d.tl` siblings) itself.
             let f: Function = self.runtime()?.get("add_path")?;
             f.call::<()>((path_str(dir), packages))?;
@@ -2344,26 +2410,26 @@ impl Htl {
             .create_function(|_, (module, decl): (String, String)| {
                 Ok(declaration_only_message(&module, &decl))
             })?;
-        if self.split {
-            // The searcher runs in the program state and asks the checker for code.
+        if self.split() {
+            // The searcher runs in the program state and asks the checker for code, in this
+            // state's program.
             //
             // Both states are in hand here and nothing crosses: `bridge` is built in
             // `self.lua` and handed to `runtime()`, which is a table out of `self.lua`'s
-            // own registry. The checker's `gen_fn` is only ever *called* — its arguments
-            // and results are Rust values on the way through, which is what a value has to
-            // be to pass between two states.
-            let gen_fn: Function = self.h.get("gen_for_require")?;
+            // own registry. The checker's `gen_for_require` is only ever *called* — its
+            // arguments and results are Rust values on the way through, which is what a
+            // value has to be to pass between two states.
+            let checker = self.h.clone();
             let bridge = self.lua.create_function(move |_, name: String| {
-                let (kind, a, b): (String, Option<String>, Option<String>) = gen_fn.call(name)?;
+                let (kind, a, b): (String, Option<String>, Option<String>) =
+                    checker.call("gen_for_require", name)?;
                 Ok((kind, a, b))
             })?;
             let f: Function = self.runtime()?.get("install_searcher")?;
             f.call::<()>((bridge, decline))?;
             return Ok(());
         }
-        let f: Function = self.h.get("install_searcher")?;
-        f.call::<()>(decline)?;
-        Ok(())
+        self.checker_call("install_searcher", decline)
     }
 
     /// Register generated Lua source under a module name (`package.preload`).
@@ -2664,8 +2730,7 @@ end
     /// `None` when the source does not parse: which names it requires is then not known,
     /// which is a different answer from requiring none.
     pub fn tl_require_names(&self, src: &str, file: &Path) -> Result<Option<Vec<String>>> {
-        let f: Function = self.h.get("tl_require_names")?;
-        let t: Option<Table> = f.call((src, path_str(file)))?;
+        let t: Option<Table> = self.checker_call("tl_require_names", (src, path_str(file)))?;
         t.map(|t| {
             t.sequence_values::<String>()
                 .collect::<mlua::Result<Vec<_>>>()
@@ -2676,8 +2741,7 @@ end
 
     /// Literal `require`s of a plain Lua source, resolved through the checker's path.
     pub fn lua_requires(&self, src: &str, file: &Path) -> Result<Vec<RequireSite>> {
-        let f: Function = self.h.get("lua_requires")?;
-        let t: Table = f.call((src, path_str(file)))?;
+        let t: Table = self.checker_call("lua_requires", (src, path_str(file)))?;
         read_requires(&t)
     }
 
@@ -2685,8 +2749,8 @@ end
     /// where a plain `.lua` implementation sits on the path (a `.d.tl` may only be
     /// typing it). Either may be `None`.
     pub fn resolve_module(&self, name: &str) -> Result<(Option<PathBuf>, Option<PathBuf>)> {
-        let f: Function = self.h.get("resolve_module")?;
-        let (found, lua): (Option<String>, Option<String>) = f.call(name)?;
+        let (found, lua): (Option<String>, Option<String>) =
+            self.checker_call("resolve_module", name)?;
         Ok((found.map(PathBuf::from), lua.map(PathBuf::from)))
     }
 
@@ -2694,8 +2758,7 @@ end
     /// message when more than one of them implements it. `None` when it does not, or when
     /// no model is installed (`Htl::apply_model`).
     pub fn ambiguity(&self, name: &str) -> Result<Option<String>> {
-        let f: Function = self.h.get("ambiguity")?;
-        Ok(f.call(name)?)
+        self.checker_call("ambiguity", name)
     }
 
     /// Why `name` is refused although the host provides it: the project model's message
@@ -2709,8 +2772,7 @@ end
     /// as a missing one. This is what says it is neither: an error wherever the name is
     /// required, the way [`ambiguity`](Self::ambiguity) says it for two implementations.
     pub fn host_shadowing(&self, name: &str) -> Result<Option<String>> {
-        let f: Function = self.h.get("host_shadowing")?;
-        Ok(f.call(name)?)
+        self.checker_call("host_shadowing", name)
     }
 
     /// Whether `name` runs from no file of the project, as the project model says it: the
@@ -2723,10 +2785,10 @@ end
     /// What the linker asks before it leaves a declared name out of a bundle, rather than
     /// deciding that from a lookup of its own ([`link`]).
     pub fn model_provides(&self, name: &str) -> Result<Provision> {
-        let Some(f) = self.h.get::<Option<Function>>("provides_name")? else {
+        if !self.h.has("provides_name")? {
             return Ok(Provision::Unknown);
-        };
-        let tag: Option<String> = f.call(name)?;
+        }
+        let tag: Option<String> = self.checker_call("provides_name", name)?;
         Ok(match tag.as_deref() {
             None => Provision::Unknown,
             Some("none") => Provision::Files,
@@ -2743,8 +2805,7 @@ end
     /// hit and says nothing about the others, and which of two files is read is decided by
     /// a position nobody wrote down. [`contract::resolve`] is what turns this into a report.
     pub fn module_candidates(&self, name: &str) -> Result<Vec<ModuleCandidate>> {
-        let f: Function = self.h.get("module_candidates")?;
-        let t: Table = f.call(name)?;
+        let t: Table = self.checker_call("module_candidates", name)?;
         let mut out = Vec::new();
         for c in t.sequence_values::<Table>() {
             let c = c?;
@@ -2760,8 +2821,7 @@ end
     /// The directories the search path consults, in order. One entry per directory,
     /// however many `package.path` templates it contributes.
     pub fn search_path_dirs(&self) -> Result<Vec<PathBuf>> {
-        let f: Function = self.h.get("search_dirs")?;
-        let t: Table = f.call(())?;
+        let t: Table = self.checker_call("search_dirs", ())?;
         Ok(t.sequence_values::<String>()
             .collect::<mlua::Result<Vec<_>>>()?
             .into_iter()
@@ -3773,5 +3833,99 @@ mod tests {
             text == "aaaa\n" || text == "bbbbbb\n",
             "never a mix of the two: {text:?}"
         );
+    }
+
+    /// A setter that raises halfway leaves its state's program as it was. `set_lints`
+    /// writes the Lua side's selection, then raises on the Teal side's (`5` is no list):
+    /// the Lua side's is not kept, in the program or in the checker.
+    #[test]
+    fn a_setter_that_fails_halfway_leaves_its_program_as_it_was() {
+        let dir = core_common::tempdir("htl-core-program", "partial");
+        let file = dir.join("m.tl");
+        // `d[1]` — a `nil-index` lint, on by default.
+        std::fs::write(
+            &file,
+            "local t: {{string:{string}}} = {}\nlocal d = t[\"a\"][1]\nreturn d\n",
+        )
+        .unwrap();
+        let has = |h: &Htl| {
+            h.check(&file)
+                .unwrap()
+                .lints
+                .iter()
+                .any(|l| l.contains("nil-index"))
+        };
+        let checker = Htl::new().unwrap();
+        let program = Htl::with_checker(&checker).unwrap();
+        let none: Vec<String> = Vec::new();
+        let failed = program.checker_call::<()>(
+            "set_lints",
+            (none.clone(), vec!["nil-index".to_string()], 5, none),
+        );
+        assert!(failed.is_err());
+        assert!(
+            has(&program),
+            "the half-written selection is not the program's"
+        );
+        assert!(has(&checker), "nor the checker's");
+    }
+
+    /// The model's view goes in as one, under the names `H.set_model` keeps: a name it does
+    /// not know is refused, and nothing of that model is installed.
+    #[test]
+    fn set_model_refuses_a_name_it_does_not_keep() {
+        let checker = Htl::new().unwrap();
+        let program = Htl::with_checker(&checker).unwrap();
+        let lua = program.checker_lua().unwrap();
+        let model = lua.create_table().unwrap();
+        model
+            .set("resolve_name", lua.create_function(|_, ()| Ok(())).unwrap())
+            .unwrap();
+        model.set("resolve_nmae", true).unwrap();
+        let err = program
+            .checker_call::<()>("set_model", model)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown field resolve_nmae"), "{err}");
+        assert!(!program.checker_call::<bool>("has", "resolve_name").unwrap());
+    }
+
+    /// Entering the program already entered counts depth: the inner call sees the program,
+    /// the outer leave writes the inner call's change back and restores the checker's own.
+    /// Entering another program while one is entered is refused, and leaves the checker's
+    /// own in place too.
+    #[test]
+    fn a_program_is_entered_once_at_a_time() {
+        let checker = Htl::new().unwrap();
+        let a = Htl::with_checker(&checker).unwrap();
+        let b = Htl::with_checker(&checker).unwrap();
+        let ok: bool = checker
+            .lua()
+            .load(
+                r#"
+                local H, pa, pb = ...
+                local before = package.path
+                H.with_program(pa, function()
+                   H.with_program(pa, "add_path", "/nested")
+                   assert(package.path:find("/nested", 1, true), "the inner call sees the program")
+                end)
+                assert(package.path == before, "the outer leave restored the checker's own")
+                assert(pa.path:find("/nested", 1, true), "and wrote the inner call's change back")
+                local ok, err = pcall(H.with_program, pa, function()
+                   return H.with_program(pb, "get_path")
+                end)
+                assert(not ok and tostring(err):find("another one", 1, true), tostring(err))
+                assert(package.path == before, "a refused enter restores too")
+                assert(not pb.path:find("/nested", 1, true), "and b never had a's path")
+                return true
+                "#,
+            )
+            .call((
+                checker.h.h.clone(),
+                a.h.program.clone().unwrap(),
+                b.h.program.clone().unwrap(),
+            ))
+            .unwrap();
+        assert!(ok);
     }
 }

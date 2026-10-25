@@ -32,7 +32,7 @@ ffi = []
 # runs a program calling one (`Htl::run_async`, `htl run`, `htl test`): mlua-isle's
 # `tokio` feature, which is `Vm::run`, the `task` library and `cancellable`. Off by
 # default: it changes how mlua is built, and a host with no async method needs none of it.
-async = ["mlua/async", "mlua-isle/tokio", "dep:tokio"]
+async = ["mlua/async", "mlua-isle/tokio", "dep:tokio", "dep:thiserror"]
 # `Htl::install_std`: mlua-batteries' default set (synchronous, costing only serde_json)
 # as `require("std.json")`, `std.string` and so on. htl-std's async I/O modules are not
 # this feature: a host calls `htl_std::install`, a binary also registers it through
@@ -57,7 +57,10 @@ mlua-isle = { version = "0.10", default-features = false }
 # `Htl::run_blocking`: the current-thread runtime and `LocalSet` a `Vm::run` root is
 # driven on when the caller has none of its own (`htl run`, `htl test`). The same crate
 # mlua-isle's `tokio` feature already brings in, so it adds nothing to the graph.
-tokio = { version = "1", features = ["rt", "time"], optional = true }
+tokio = { version = "1", features = ["rt", "time", "sync"], optional = true }
+# `run::CallError`: the runner's domain error, with the source chain a derive writes.
+# Already in the graph through mlua-isle.
+thiserror = { workspace = true, optional = true }
 mlua-pkg = { workspace = true, optional = true }
 mlua-batteries = { version = "0.7.3", optional = true }
 anyhow = { workspace = true }

@@ -1371,14 +1371,17 @@ impl crate::Htl {
             live.store(true, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         })?;
-        self.h.set("claims_name", claims)?;
-        self.h.set("resolve_name", resolve)?;
-        self.h.set("rewrite_name", rewrite)?;
-        self.h.set("owns_file", owns)?;
-        self.h.set("provides_name", provides)?;
-        self.h.set("refresh_model", refresh)?;
-        self.h.set("watch_model", watch)?;
-        Ok(())
+        // Into this state's program as one (`H.set_model`): a split state's model is its own
+        // (`H.with_program`), and the program never holds half of it.
+        let model = lua.create_table()?;
+        model.set("claims_name", claims)?;
+        model.set("resolve_name", resolve)?;
+        model.set("rewrite_name", rewrite)?;
+        model.set("owns_file", owns)?;
+        model.set("provides_name", provides)?;
+        model.set("refresh_model", refresh)?;
+        model.set("watch_model", watch)?;
+        self.checker_call::<()>("set_model", model)
     }
 }
 

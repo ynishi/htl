@@ -4599,10 +4599,144 @@ function H.set_path(p)
    package.path = p
 end
 
--- Start serving a new program (one per test file when the checker is shared): fresh
--- module-name resolution for it, seeded from the store so nothing is checked twice.
+---------------------------------------------------------------- programs
+
+-- A program is what one program state asks of this checker: the settings its checks and
+-- its `require`s resolve under. One checker serves many program states at once
+-- (`Htl::with_checker_lua`: the test runner's one per file, a host's instances), and
+-- each has its own search path, its own project model and its own `[lang]`, deps and
+-- lint selection; a value one of them sets must never answer for another.
+--
+-- Teal reads `package.path` itself (`tl.search_module`), and the prelude reads its
+-- settings off `H` everywhere, so a program cannot be a table the readers are pointed at.
+-- It is a table of the values instead, and entering it (`H.with_program`) puts them where
+-- the readers look, for the length of one call. The checker's own globals are a program
+-- too, the default one: what a checker used directly (`htl check`, no program state)
+-- reads, and what `H.begin_program` copies a new program from.
+--
+-- What a program holds — every value a setter writes, and the env the checks of the
+-- program resolve names into:
+--
+--   path           `package.path`: `add_path`, `set_path`, `reset_path`, `drop_cwd_path`,
+--                  `push_path_front`
+--   env            the module-name table (`new_env`), seeded from the store on its first
+--                  check
+--   lint_cfg,      the lint selection (`set_lints`)
+--   tl_cfg
+--   deps           the installed dependencies (`set_deps`)
+--   lang_async     `[lang] async` (`set_lang`)
+--   MODEL_FIELDS   the project model's view, installed as one by `H.set_model`
+--                  (`Htl::install_resolver`)
+--
+-- Left out, each for its reason:
+--
+--   the store       (`store`, `by_file`) shared on purpose: what checking a file found
+--                   does not depend on who required it, and `seed_env` hands an env only
+--                   the entries whose name resolves to the same file under that env's
+--                   program — which is entered whenever its env is checked
+--   H.requirers,    the innermost check's file and env, and the file htl's own walk is
+--   H.envs,         asking for: pushed and popped inside one call, so empty (or back to
+--   H.asking        what they were) at every call's boundary
+--   view_errors     filled by the parse of a file and drained by the check of the same
+--                   file, inside one call
+--   H.GEN_TARGET    a constant
+--   package.loaded, the checker state's own module loading (tl, lint, fmt): a program
+--   preload,        state has its own, and `H.install_searcher` is never called for one
+--   searchers
+-- The project model's view: what `H.set_model` installs, all of it at once.
+-- `refresh_model` and `watch_model` are closures over the same resolver as the rest, so
+-- they go with it.
+local MODEL_FIELDS = {
+   "claims_name", "resolve_name", "rewrite_name", "owns_file", "provides_name",
+   "refresh_model", "watch_model",
+}
+local PROGRAM_FIELDS = { "env", "lint_cfg", "tl_cfg", "deps", "lang_async" }
+for _, k in ipairs(MODEL_FIELDS) do PROGRAM_FIELDS[#PROGRAM_FIELDS + 1] = k end
+
+-- The program the globals hold now, as a new table.
+local function program_of_globals()
+   local p = { path = package.path }
+   for _, k in ipairs(PROGRAM_FIELDS) do p[k] = H[k] end
+   return p
+end
+
+-- Put `p`'s values into the globals, an absent one as nil.
+local function install_program(p)
+   package.path = p.path
+   for _, k in ipairs(PROGRAM_FIELDS) do H[k] = p[k] end
+end
+
+-- The program entered (nil when the globals are the default one's), how deep, and the
+-- default program's values, kept while another is in the globals.
+local entered, entered_depth, default_program = nil, 0, nil
+
+-- Start a new program (one per program state): the default program's settings, and a
+-- fresh env of its own, seeded from the store on its first check so nothing is checked
+-- twice. The globals are not touched.
 function H.begin_program()
-   H.env = new_env() -- seeded on its first check, once the program's paths are set
+   local p = entered and default_program or program_of_globals()
+   local copy = {}
+   for k, v in pairs(p) do copy[k] = v end
+   copy.env = new_env()
+   return copy
+end
+
+-- Call `fn(...)` with `program` entered, and return what it returns. `fn` is a function,
+-- or the name of a field of `H`, looked up once the program is in place (a model's
+-- `owns_file` is the program's, not the default's).
+--
+-- Enter keeps the globals and puts the program's values in. Leave, when `fn` returned,
+-- writes the globals back into the program — a setter called inside is what changes the
+-- program — and then puts the kept values back. When `fn` raised, nothing is written
+-- back, so a setter that failed halfway leaves the program as it was; the kept values go
+-- back, and the error is raised again.
+--
+-- Entering the program already entered (a call that makes another call) counts depth,
+-- and only the outermost leave writes back and restores. Entering another program while
+-- one is entered is an error: a thread asks for one program at a time, and two in the
+-- globals at once would be the mixing this exists to prevent.
+function H.with_program(program, fn, ...)
+   if entered == nil then
+      default_program = program_of_globals()
+      install_program(program)
+      entered, entered_depth = program, 1
+   else
+      assert(entered == program, "htl: a program was entered while another one is")
+      entered_depth = entered_depth + 1
+   end
+   local f = fn
+   if type(fn) == "string" then f = H[fn] end
+   local res = table.pack(pcall(f, ...))
+   entered_depth = entered_depth - 1
+   if entered_depth == 0 then
+      if res[1] then
+         program.path = package.path
+         for _, k in ipairs(PROGRAM_FIELDS) do program[k] = H[k] end
+      end
+      install_program(default_program)
+      entered, default_program = nil, nil
+   end
+   if not res[1] then error(res[2], 0) end
+   return table.unpack(res, 2, res.n)
+end
+
+-- Whether `H` has a field `name`, as the program entered sees it: a checker with no model
+-- has no `owns_file`.
+function H.has(name)
+   return H[name] ~= nil
+end
+
+-- Install the project model's view (`Htl::install_resolver`): every field of
+-- MODEL_FIELDS from `model`, an absent one as nil, in one call, so that a program never
+-- holds half of one model and half of another. A key that is not one of them is refused:
+-- the list here is the one place the names are kept.
+function H.set_model(model)
+   local known = {}
+   for _, k in ipairs(MODEL_FIELDS) do known[k] = true end
+   for k in pairs(model) do
+      if not known[k] then error("htl: set_model: unknown field " .. tostring(k), 2) end
+   end
+   for _, k in ipairs(MODEL_FIELDS) do H[k] = model[k] end
 end
 
 -- The templates of a directory, and prepending one to the path: the search chunk's

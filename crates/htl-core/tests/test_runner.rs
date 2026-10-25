@@ -221,6 +221,53 @@ fn session_shares_the_checker_but_not_program_state() {
     );
 }
 
+/// What one file of a session resolves by — its project's model, or its own directory —
+/// is that file's: a project's test file, then a loose file with no project above it, each
+/// requiring a `helper` of its own, then the project's again. Each file's state has its
+/// own program in the session's checker; the runner used to put the checker's path back
+/// after every file instead, and this holds the same answer without it.
+#[test]
+fn a_session_file_resolves_by_its_own_settings_not_the_last_files() {
+    use htl_core::testing::TestSession;
+    let project = tempdir("leak-project");
+    write(&project.join("htl.toml"), "");
+    write(
+        &project.join("src/helper.tl"),
+        "local m = { who = \"project\" }\nreturn m\n",
+    );
+    write(
+        &project.join("tests/p_test.tl"),
+        "local t = require(\"htl.test\")\nlocal helper = require(\"helper\")\n\
+         t.it(\"the project's helper\", function()\n   t.expect(helper.who):to_equal(\"project\")\nend)\n",
+    );
+    let loose = tempdir("leak-loose");
+    write(
+        &loose.join("helper.tl"),
+        "local m = { who = \"loose\" }\nreturn m\n",
+    );
+    write(
+        &loose.join("l_test.tl"),
+        "local t = require(\"htl.test\")\nlocal helper = require(\"helper\")\n\
+         t.it(\"its own helper\", function()\n   t.expect(helper.who):to_equal(\"loose\")\nend)\n",
+    );
+    let session = TestSession::new(None, "htl.test", None, RunOptions::default()).unwrap();
+    for file in [
+        project.join("tests/p_test.tl"),
+        loose.join("l_test.tl"),
+        project.join("tests/p_test.tl"),
+    ] {
+        let rep = session.run_file(&file).unwrap();
+        assert!(
+            rep.check.ok() && rep.error.is_none() && (rep.passed, rep.failed) == (1, 0),
+            "{}: {:?} {:?} {:?}",
+            file.display(),
+            rep.check.errors,
+            rep.error,
+            rep.failures
+        );
+    }
+}
+
 #[test]
 fn snapshots_write_compare_diff_and_update() {
     use htl_core::testing::{TestSession, snapshot_dir};
