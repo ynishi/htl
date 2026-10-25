@@ -2,7 +2,7 @@
 //!
 //! ```toml
 //! [toolchain]
-//! htl = "0.8"               # the htl command this project expects; a mismatch is refused
+//! htl = "0.18"              # the htl command this project expects; a mismatch is refused
 //!
 //! [lint]
 //! strict = true             # every warn counts as deny: fails htl check, htl fix,

@@ -2,10 +2,11 @@
 
 [Teal](https://github.com/teal-language/tl) (typed Lua) with the toolchain hidden
 behind `cargo`. One binary type-checks, lints, formats, tests, bundles and runs
-`.tl`; one proc macro makes Teal type errors fail `cargo build`; one resolver puts
-`.tl` modules into [mlua-pkg](https://github.com/ynishi/mlua-pkg)'s `require`
-chain. The Teal compiler (`tl.lua`) is embedded in the mlua state — there is no
-`luarocks`, no `tl` CLI, no generated `.lua` in your tree.
+`.tl`; proc macros make Teal type errors fail `cargo build` and turn Teal's records and
+functions into Rust; one resolver puts `.tl` modules into
+[mlua-pkg](https://github.com/ynishi/mlua-pkg)'s `require` chain. The Teal compiler
+(`tl.lua`) is embedded in the mlua state — there is no `luarocks`, no `tl` CLI, no
+generated `.lua` in your tree.
 
 ```text
 scripts/foo.tl ──include_tl!──▶ cargo build   (Teal type error = rustc error, with span)
@@ -13,7 +14,14 @@ scripts/foo.tl ──include_tl!──▶ cargo build   (Teal type error = rustc
                ──htl build────▶ stripped Lua 5.4 bytecode bundle (.hb), no source shipped
 Rust impl Host ──#[host_module]▶ UserData impl + host.d.tl   (Rust signature change breaks .tl at build)
                ──#[c_export]──▶ extern "C" wrappers + host.h   (feature `ffi`: a caller that is not Rust)
+src/app.tl     ──teal_types!──▶ Rust types + a typed async client on htl::run
+                                (Teal signature change breaks the Rust call at build)
 ```
+
+The boundary is declared on one side and checked on the other, in both directions:
+`#[host_module]` when Rust owns it (functions Teal calls), `[rust] exports` when Teal owns
+it (functions Rust calls) — so a host can keep its logic in Teal and its Rust to `main` and
+the infrastructure (Calling Teal from async Rust, below).
 
 ## Install
 
@@ -22,8 +30,9 @@ cargo install htl-cli          # binaries: htl, cargo-htl  (so `cargo htl <verb>
 ```
 
 Or a prebuilt binary from the [latest release](https://github.com/ynishi/htl/releases/latest)
-— macOS (Apple Silicon, Intel), Linux (aarch64, x86_64) and Windows (x86_64). The
-installers put `htl` and `cargo-htl` in `$CARGO_HOME/bin`, where `cargo install` would:
+— macOS (Apple Silicon, Intel), Linux (aarch64, x86_64) and Windows (x86_64). The shell
+and PowerShell installers put `htl` and `cargo-htl` in `$CARGO_HOME/bin`, where
+`cargo install` would; Homebrew puts them in its own prefix:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/ynishi/htl/releases/latest/download/htl-cli-installer.sh | sh
@@ -40,8 +49,8 @@ release asset, and either writes the pin into the project's `mise.toml` and swit
 `cd`:
 
 ```sh
-mise use cargo:htl-cli@0.8.0          # mise.toml: "cargo:htl-cli" = "0.8.0"
-mise use github:ynishi/htl@v0.8.0     # the prebuilt binary from the release
+mise use cargo:htl-cli@0.18.0         # mise.toml: "cargo:htl-cli" = "0.18.0"
+mise use github:ynishi/htl@v0.18.0    # the prebuilt binary from the release
 ```
 
 `htl new` writes that `mise.toml` (the `cargo:` form, at the version that wrote the
@@ -50,15 +59,23 @@ from the start; the file is inert without mise, delete it if that is not in use.
 
 ```toml
 [dependencies]
-htl = "0.8"                    # embedding: engine + proc macros in one import
+htl = "0.18"                   # embedding: engine + proc macros in one import
 ```
 
 | crate | role |
 |---|---|
 | `htl` | umbrella: re-exports `htl-core` and (feature `macros`, default on) the proc macros. Depend on this one. |
-| `htl-core` | engine: `Htl`, lints, fmt, bundle, test runner, mlua-pkg resolver |
-| `htl-macros` | `include_tl!` / `include_tl_bytes!` / `TealRecord` / `host_module` / `c_export`; generated code targets `::htl::` |
+| `htl-core` | engine: `Htl`, lints, fmt, bundle, test runner, mlua-pkg resolver, the generators behind `htl rs` / `htl shapes`, and (feature `async`) the runner `htl::run` |
+| `htl-macros` | `include_tl!` / `include_tl_bytes!` / `include_bundle!` / `teal_types!` / `TealRecord` / `host_module` / `c_export`; generated code targets `::htl::` |
 | `htl-cli` | the `htl` / `cargo-htl` binaries |
+| `htl-std` | `std.fs` / `std.proc`, the asynchronous slice of `std.*` |
+| `htl-mq` | a window for a Teal program (`htl new --target window`) |
+
+**On `main`, not yet in a release**: `htl rs`, `teal_types!`, the `[rust]` table of
+`htl.toml` (`modules`, `exports`, `[rust.types]`) and `htl::run`. 0.18.0 has none of them
+(`htl rs` is an unknown subcommand there, and an `htl.toml` with a `[rust]` table does not
+parse); until the next release, a project uses them through a checkout (Running against an
+unpublished htl, below).
 
 ## CLI
 
@@ -223,6 +240,11 @@ each one prints and which line of the output is the point.
 
 ### Calling Teal from async Rust (`htl::run`, `[rust] exports`)
 
+This is the boundary Teal owns (the intro's other direction): Teal declares the functions
+and their types, and the Rust that calls them is generated from those declarations.
+
+Everything in this section is on `main` and not yet in a release (Install, above).
+
 A host whose logic is in Teal starts one runner and calls the functions of a module on it.
 With `htl = { features = ["async"] }`, `[rust] exports = ["app"]` in `htl.toml`, and
 `htl::teal_types!();` at the crate root (or `htl rs`, which writes the same code to a file),
@@ -258,9 +280,10 @@ async fn run() -> anyhow::Result<()> {
 }
 ```
 
-Every call runs under the runner's `deadline` and is cut off past it. Each `load` is an
-instance with its own program state, so two instances of one module share nothing of the
-module's own. A client is named for the record its module returns, so the clients of
+Every call runs under the runner's `deadline` and is cut off past it, within the limits
+[`htl::run`](https://docs.rs/htl/latest/htl/run/index.html#known-limitations) states. Each
+`load` is an instance with its own program state, so two instances of one module share
+nothing of the module's own. A client is named for the record its module returns, so the clients of
 `local record M` modules are all `M`, told apart by their module path (`shop::app::M`).
 What a runner promises is [`htl::run`](https://docs.rs/htl/latest/htl/run/index.html);
 which functions get a method, how each type is written, and what is refused is the
@@ -299,7 +322,7 @@ commented one. The keys, with what each is for:
 
 ```toml
 [toolchain]
-htl = "0.8"               # the htl command this project expects; a mismatch is refused
+htl = "0.18"              # the htl command this project expects; a mismatch is refused
 
 [lint]
 strict = true             # every warn counts as deny
@@ -328,10 +351,18 @@ grace_ms = 1000
 
 [lang]
 async = true              # async / await are keywords and the five rules are on (see Async)
+
+[rust]                    # htl rs / teal_types!: Rust from Teal (not yet released, see Install)
+modules = ["ev"]          # records and enums of these modules become Rust types
+exports = ["app"]         # these modules' declared functions get a typed client (feature async)
+
+[rust.types]
+"ev.Event.at" = "u32"     # a field's Rust type, in place of the lowered one
 ```
 
 [`htl::config`](https://docs.rs/htl/latest/htl/config/index.html) has the full sample
-and every key; [`htl::model`](https://docs.rs/htl/latest/htl/model/index.html) is how a
+and every key (`[fmt]`, `[fix]` and `[cache]` among the ones not shown here);
+[`htl::model`](https://docs.rs/htl/latest/htl/model/index.html) is how a
 file gets its name, which module owns it, and what a dependency may see;
 [`htl::contract`](https://docs.rs/htl/latest/htl/contract/index.html) is `---@contract`
 / `---@required`, the shape a directory of modules from outside the program must have,
@@ -346,7 +377,7 @@ htl resolve mq: src/mq.d.tl
   order  file                  kind         status
   1      src/mq.d.tl           declaration  read
   2      types/mq.d.tl         declaration  shadowed by 1
-  3      types/htl-mq/mq.d.tl  declaration  shadowed by 1  (shipped by htl-mq 0.8.0)
+  3      types/htl-mq/mq.d.tl  declaration  shadowed by 1  (shipped by htl-mq 0.18.0)
 
   answered by the project model
 ```
@@ -457,6 +488,12 @@ a plain `Htl::exec` has nothing to suspend to, and such a call raises there. Ctr
 (`cargo run -p embed -- --async`) is a host with such a method. Besides a host's
 `async fn`, a task, a channel or a timer, what a program awaits includes `std.fs` and
 `std.proc` (`std.*`, above).
+
+A host that calls the functions of a Teal module from its own async code uses
+[`htl::run`](https://docs.rs/htl/latest/htl/run/index.html) instead (Calling Teal from async
+Rust, above). That is not this executor's setup: the module lives on a VM thread of the
+runner's, in a bare safe state (no `debug`, no C modules, no host or `std.*` modules), and a
+call cut at the runner's deadline gets no grace, whatever `[async] grace_ms` says.
 
 ### async / await
 
@@ -604,14 +641,15 @@ flags: [`htl::fix`](https://docs.rs/htl/latest/htl/fix/index.html).
 
 ## Machine-readable output
 
-`--format json` on `check`, `test`, `unused`, `adopt` and `resolve` prints one JSON
-document on stdout, with the same exit code as the text form. `check --statistics` adds
-a `statistics` array to that document (and `diagnostics` is then empty) — the same table
-`--statistics` prints to stderr otherwise. The shapes:
+`--format json` on `check`, `test`, `fix`, `unused`, `adopt`, `resolve`, `cache status`
+and `bundle info` prints one JSON document on stdout, with the same exit code as the text
+form. `check --statistics` adds a `statistics` array to that document (and `diagnostics`
+is then empty) — the same table `--statistics` prints to stderr otherwise. The shapes:
 [`htl_cli::report`](https://docs.rs/htl-cli/latest/htl_cli/report/index.html),
 [`htl::unused`](https://docs.rs/htl/latest/htl/unused/index.html),
 [`htl::adopt`](https://docs.rs/htl/latest/htl/adopt/index.html),
-[`htl::resolve`](https://docs.rs/htl/latest/htl/resolve/index.html).
+[`htl::resolve`](https://docs.rs/htl/latest/htl/resolve/index.html). The shapes of
+`fix`, `cache status` and `bundle info` are not documented yet.
 
 ## Bundles (`htl build`)
 
@@ -646,7 +684,8 @@ a gate: the exit code is always 0.
 ```text
 <name>/
 ├── mlua-pkg.toml          [package] entry = "src/<mod>"  → consumers require("<name>")
-├── htl.toml               [fmt], and commented [lint] / [check] / [[contract]] to fill in;
+├── htl.toml               [fmt], and commented [lint] / [check] / [[contract]] / [async] /
+│                          [lang] to fill in;
 │                          [build] target with --target. Read by CLI and macro
 ├── mise.toml              "cargo:htl-cli" = "<this CLI>": the command, for mise
 │                          (written by a released CLI, not by a checkout build)
@@ -725,12 +764,14 @@ same command again with the block deleted to go back.
 
 - No Teal fork: `tl.lua` is vendored verbatim (0.24.8, MIT).
 - No token-level formatting: `htl fmt` recomputes indentation and whitespace only.
-- No Luau: PUC Lua 5.4 / LuaJIT via mlua features, and no dual bytecode-plus-source
-  payload (see Bundles, Portability).
+- No Luau: PUC Lua 5.4 through mlua, and no dual bytecode-plus-source payload (the
+  Portability section of [`htl::bundle`](https://docs.rs/htl/latest/htl/bundle/index.html)).
 - `.d.tl` files are written syntactically, from Rust source and from Teal (the module a
   `---@contract` type is declared in), not by reflection on the types. What does read the
-  checker's types is the other generation: `htl shapes` and `htl rs` lower Teal records
-  and enums to an lshape shape and to a Rust struct, from what a check knows of the file.
+  checker's types is the other generation: `htl shapes` lowers Teal records and enums to
+  an lshape shape, and `htl rs` (and `teal_types!`) to Rust types and, for a module in
+  `[rust] exports`, its declared functions to a typed client — from what a check knows of
+  the file.
 
 ## License
 

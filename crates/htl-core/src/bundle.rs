@@ -29,8 +29,8 @@
 //! `LUA_FLOAT_TYPE`. Source modules (`--source`) load anywhere and are the answer for
 //! those cases, and for a bundle that has to outlive a Lua upgrade. There is no dual
 //! bytecode-plus-source payload: shipping the source is what the bytecode form exists to
-//! avoid. Nor is there Luau — PUC Lua 5.4 and LuaJIT, through mlua's features, are the
-//! Luas a bundle is for.
+//! avoid. Nor is there Luau — PUC Lua 5.4, the one Lua htl builds mlua with, is the Lua a
+//! bundle is for.
 //!
 //! The header cannot tell one 5.4.x from another, and htl pins the vendored Lua through
 //! mlua, so `htl version` is the only record of which Lua produced the bytes. It is
