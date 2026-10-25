@@ -1048,8 +1048,8 @@ pub fn resolved_requires(requires: &[cache::RequireJson]) -> Vec<(String, PathBu
 pub struct Harvest<'a> {
     /// Where the generated modules are written.
     pub store: &'a cache::Cache,
-    /// The state the test file was checked in, which is what knows the modules it reached
-    /// and can generate each of them without resolving the graph a second time.
+    /// The session the test file was checked in, whose checker's store holds the modules it
+    /// reached and can generate each of them without resolving the graph a second time.
     pub session: &'a crate::testing::TestSession,
     /// `htl.toml`'s own path, recorded as an input of every entry: a config change invalidates
     /// what was generated under it.
@@ -1088,15 +1088,18 @@ pub fn harvest_modules(h: &Harvest<'_>, check: &CheckInfo, test_file: &Path) {
     } = h;
     let (lint, opts) = (*lint, *opts);
     let done = &mut *done.borrow_mut();
-    // The run put the search path back before returning, so the project's directories are
-    // no longer on it and every `require` would resolve to nothing — which is silent: the
-    // names come back with no path, `resolved_requires` drops them, and the closure stops
-    // one level in. Put the test file's view back for the duration: the model's
-    // directories as a test sees them, or, outside a project, its own directory.
-    let saved = session.checker().search_path().ok();
+    // The test file's program went with its state, and the checker's own has none of the
+    // project's directories, so every `require` would resolve to nothing — which is silent:
+    // the names come back with no path, `resolved_requires` drops them, and the closure
+    // stops one level in. A program of the file's view instead: the model's directories as
+    // a test sees them, or, outside a project, its own directory. Its env is seeded from
+    // the store on its first check, and the store holds everything the file's check walked.
+    let Ok(h) = Htl::with_checker(session.checker()) else {
+        return;
+    };
     let _ = match model {
-        Some(m) => session.checker().apply_model(m, crate::model::View::Test),
-        None => file_view(session.checker(), None, test_file),
+        Some(m) => h.apply_model(m, crate::model::View::Test),
+        None => file_view(&h, None, test_file),
     };
 
     let mut queue = resolved_requires(&cache::requires_json(check));
@@ -1126,7 +1129,7 @@ pub fn harvest_modules(h: &Harvest<'_>, check: &CheckInfo, test_file: &Path) {
             queue.extend(resolved_requires(&m.requires));
             continue;
         }
-        let Ok((Some(code), c)) = session.checker().gen_lua(&path) else {
+        let Ok((Some(code), c)) = h.gen_lua(&path) else {
             skipped += 1;
             continue;
         };
@@ -1137,7 +1140,7 @@ pub fn harvest_modules(h: &Harvest<'_>, check: &CheckInfo, test_file: &Path) {
         // Only when the file could have any (`crate::link::mentions_require`): a check
         // per leaf module is the wrong price for an empty list that is right already.
         let c = if c.requires.is_empty() && crate::link::mentions_require(&path) {
-            session.checker().check(&path).unwrap_or(c)
+            h.check(&path).unwrap_or(c)
         } else {
             c
         };
@@ -1151,9 +1154,6 @@ pub fn harvest_modules(h: &Harvest<'_>, check: &CheckInfo, test_file: &Path) {
             &search_dirs(&path),
             &m,
         );
-    }
-    if let Some(s) = saved {
-        let _ = session.checker().set_search_path(&s);
     }
     if opts.explain {
         eprintln!("htl cache: harvested {stored} modules, {skipped} could not be generated");

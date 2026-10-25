@@ -500,9 +500,10 @@ impl TestSession {
         &self.checker
     }
 
-    /// Run one file in a fresh program state borrowing the session's checker. The
-    /// checker's search path is restored afterwards so files do not see each other's
-    /// directories.
+    /// Run one file in a fresh program state borrowing the session's checker. The state's
+    /// program in the checker ([`Htl::with_checker`]) holds the file's search path, model
+    /// and settings, so files do not see each other's directories, and the checker's own
+    /// settings are what every file starts from.
     pub fn run_file(&self, path: &Path) -> Result<FileReport> {
         self.run_file_with(path, None, &[]).map(|(rep, _)| rep)
     }
@@ -530,7 +531,6 @@ impl TestSession {
         preload: &[(String, String, PathBuf)],
     ) -> Result<(FileReport, Option<String>)> {
         let started = std::time::Instant::now();
-        let saved = self.checker.search_path()?;
         let h = Htl::with_checker(&self.checker)?;
         #[cfg(all(feature = "pkg", feature = "dts"))]
         let found;
@@ -557,7 +557,6 @@ impl TestSession {
             },
             &mut code,
         );
-        self.checker.set_search_path(&saved)?;
         let mut rep = out?;
         rep.duration_ms = started.elapsed().as_secs_f64() * 1000.0;
         Ok((rep, code))

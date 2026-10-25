@@ -67,9 +67,9 @@
 //! stand-in is stored as `require` stores anything, and the first caller's answer is every
 //! later caller's: after a Teal `require`, `pcall(require, name)` from a `.lua` is `true`.
 
-use crate::PRELUDE_REGISTRY_KEY;
+use crate::{CheckerHandle, PRELUDE_REGISTRY_KEY};
 use anyhow::Context;
-use mlua::{Function, Lua, Table, Value};
+use mlua::{Lua, Table, Value};
 use mlua_pkg::Resolver;
 use mlua_pkg::sandbox::{FsSandbox, InitError, ReadError, SandboxedFs, SymlinkAwareSandbox};
 use std::path::{Path, PathBuf};
@@ -392,16 +392,15 @@ impl TealResolver {
     }
 
     /// Required fields of the expected record that are nil in `value`.
-    fn missing_fields(&self, h: &Table, value: &Value) -> mlua::Result<Vec<String>> {
+    fn missing_fields(&self, h: &CheckerHandle, value: &Value) -> mlua::Result<Vec<String>> {
         let Some(tp) = &self.expect_type else {
             return Ok(Vec::new());
         };
         if !self.require_fields.is_on() {
             return Ok(Vec::new());
         }
-        let f: Function = h.get("record_fields")?;
-        let declared: Option<Vec<String>> = f
-            .call::<Option<Table>>(tp.as_str())?
+        let declared: Option<Vec<String>> = h
+            .call::<Option<Table>>("record_fields", tp.as_str())?
             .map(|t| t.sequence_values::<String>().collect::<mlua::Result<_>>())
             .transpose()?;
         let Some(declared) = declared else {
@@ -441,7 +440,11 @@ impl TealResolver {
     }
 
     /// Check `local m: <T> = require("<name>")` against the checker; `None` when it holds.
-    fn expectation_errors(&self, h: &Table, name: &str) -> mlua::Result<Option<Vec<String>>> {
+    fn expectation_errors(
+        &self,
+        h: &CheckerHandle,
+        name: &str,
+    ) -> mlua::Result<Option<Vec<String>>> {
         let Some(tp) = &self.expect_type else {
             return Ok(None);
         };
@@ -467,19 +470,19 @@ impl TealResolver {
         // dirs are on the path and the one in front would decide, whichever of the two is
         // serving. The path is put back afterwards, so this states nothing about the
         // search order the host chose.
-        let check: Function = h.get("check_stub")?;
         let saved: Option<String> = match &self.root {
-            Some(root) => {
-                let f: Function = h.get("push_path_front")?;
-                Some(f.call::<String>((root.to_string_lossy().as_ref(), self.packages))?)
-            }
+            Some(root) => Some(h.call::<String>(
+                "push_path_front",
+                (root.to_string_lossy().as_ref(), self.packages),
+            )?),
             None => None,
         };
-        let errors =
-            check.call::<Table>((stub.as_str(), format!("<expect {tp} for module '{name}'>")));
+        let errors = h.call::<Table>(
+            "check_stub",
+            (stub.as_str(), format!("<expect {tp} for module '{name}'>")),
+        );
         if let Some(saved) = saved {
-            let f: Function = h.get("set_path")?;
-            f.call::<()>(saved)?;
+            h.call::<()>("set_path", saved)?;
         }
         let msgs: Vec<String> = errors?
             .sequence_values::<String>()
@@ -487,13 +490,16 @@ impl TealResolver {
         Ok(if msgs.is_empty() { None } else { Some(msgs) })
     }
 
-    fn prelude(lua: &Lua) -> mlua::Result<Table> {
+    /// The checker this state's `require`s are checked by: its own prelude, or — in a
+    /// runtime state whose checker lives in another Lua (`Htl::with_checker`) — that one,
+    /// entered at the state's program, so what this resolver adds to the search path and
+    /// what it checks are the state's and no other's.
+    fn prelude(lua: &Lua) -> mlua::Result<CheckerHandle> {
         if let Ok(t) = lua.named_registry_value::<Table>(PRELUDE_REGISTRY_KEY) {
-            return Ok(t);
+            return Ok(CheckerHandle::direct(t));
         }
-        // A runtime state whose checker lives in another Lua (`Htl::with_checker`).
-        if let Some(c) = lua.app_data_ref::<crate::CheckerHandle>() {
-            return Ok(c.0.clone());
+        if let Some(c) = lua.app_data_ref::<CheckerHandle>() {
+            return Ok(c.clone());
         }
         Err(mlua::Error::external(
             "htl::pkg::TealResolver: this Lua has no htl prelude (create it with Htl::new / Htl::from_lua)",
@@ -502,11 +508,10 @@ impl TealResolver {
 
     /// The checker resolves `require`s inside `.tl` via `package.path`; make sure the
     /// root is visible there (once).
-    fn ensure_checker_path(&self, lua: &Lua, h: &Table) -> mlua::Result<()> {
+    fn ensure_checker_path(&self, lua: &Lua, h: &CheckerHandle) -> mlua::Result<()> {
         if self.path_added.swap(true, Ordering::Relaxed) {
             return Ok(());
         }
-        let f: Function = h.get("add_path")?;
         // Back to front: `add_path` prepends, so this leaves the sandbox root consulted
         // first (a module resolving its siblings) and the project's paths behind it, in
         // the order `search_paths` states. Adding them front to back reversed both.
@@ -517,11 +522,11 @@ impl TealResolver {
         // put it, which is the single-resolver case the paragraph above describes.
         for p in self.checker_paths.iter().rev() {
             if p.is_dir() {
-                f.call::<()>(p.to_string_lossy().as_ref())?;
+                h.call::<()>("add_path", p.to_string_lossy().as_ref())?;
             }
         }
         if let Some(root) = &self.root {
-            f.call::<()>((root.to_string_lossy().as_ref(), self.packages))?;
+            h.call::<()>("add_path", (root.to_string_lossy().as_ref(), self.packages))?;
         }
         let _ = lua;
         Ok(())
@@ -530,14 +535,13 @@ impl TealResolver {
     fn load_teal(
         &self,
         lua: &Lua,
-        h: &Table,
+        h: &CheckerHandle,
         src: &str,
         resolved: &Path,
         name: &str,
     ) -> mlua::Result<Value> {
-        let gen_fn: Function = h.get("gen_string")?;
         let (code, info): (Option<String>, Table) =
-            gen_fn.call((src, resolved.to_string_lossy().as_ref()))?;
+            h.call("gen_string", (src, resolved.to_string_lossy().as_ref()))?;
         let Some(code) = code else {
             // Through the one formatter, the path spelled as `htl check` spells it: the
             // checker names the file by where the resolver found it, which is absolute.
@@ -2458,18 +2462,15 @@ impl Resolver for TealResolver {
 /// that its table is a running host's (`watch_model`), so that a name `file` requires that
 /// was dropped in since is read again too. A checker with no model installed has none of
 /// these functions, and nothing to refresh.
-fn refresh_if_unknown(h: &Table, file: &Path) -> mlua::Result<()> {
-    let (Ok(owns), Ok(refresh)) = (
-        h.get::<Function>("owns_file"),
-        h.get::<Function>("refresh_model"),
-    ) else {
+fn refresh_if_unknown(h: &CheckerHandle, file: &Path) -> mlua::Result<()> {
+    if !(h.has("owns_file")? && h.has("refresh_model")?) {
         return Ok(());
-    };
-    if let Ok(watch) = h.get::<Function>("watch_model") {
-        watch.call::<()>(())?;
     }
-    if !owns.call::<bool>(file.to_string_lossy().as_ref())? {
-        refresh.call::<()>(())?;
+    if h.has("watch_model")? {
+        h.call::<()>("watch_model", ())?;
+    }
+    if !h.call::<bool>("owns_file", file.to_string_lossy().as_ref())? {
+        h.call::<()>("refresh_model", ())?;
     }
     Ok(())
 }
