@@ -242,7 +242,8 @@ pub struct Resolution {
     /// the resolver's messages use ([`Resolver::provided_by`](crate::model::Resolver::provided_by)):
     /// `#[host_module] in Cargo.toml's crate`, `[build] host in htl.toml`, `htl's std` for
     /// the host, `declared by types/socket/http.d.tl` for a name the model has only a
-    /// declaration for, which the environment provides. Such a name is answered at run
+    /// declaration for, which the environment provides, `htl's own library, bundled by
+    /// htl build` for a module that ships in the binary. Such a name is answered at run
     /// time by the host or the environment, not by any row: a row read for it is the
     /// declaration it is typed from.
     #[serde(skip_serializing_if = "Option::is_none")]

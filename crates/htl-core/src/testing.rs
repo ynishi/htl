@@ -45,8 +45,8 @@
 //! `--coverage-lines` adds the unexecuted line ranges; `--lcov` writes the same run as an
 //! lcov tracefile ([`crate::project::CoverageReport::lcov`]) and `--junit` as a JUnit XML
 //! report; `HTL_PROFILE=1` prints per-phase and per-file timings to stderr.
-use crate::{CheckInfo, Htl, parent_dir, write_if_changed};
-use anyhow::{Context, Result};
+use crate::{CheckInfo, Htl, parent_dir};
+use anyhow::Result;
 use mlua::{Function, Table, Value};
 use std::path::{Path, PathBuf};
 
@@ -67,12 +67,7 @@ pub(crate) fn declarations() -> Vec<(String, String)> {
 /// [`crate::lib_dir`] with this library's declaration in it: `htl/test.d.tl`, written on
 /// demand, only when its content changes.
 pub fn lib_dir() -> Result<PathBuf> {
-    let dir = crate::lib_dir();
-    for (path, source) in declarations() {
-        write_if_changed(&dir.join(path), &source)
-            .with_context(|| format!("writing bundled declarations under {}", dir.display()))?;
-    }
-    Ok(dir)
+    crate::write_bundled_declarations(declarations())
 }
 
 impl Htl {
@@ -606,6 +601,9 @@ fn run_in(h: &Htl, path: &Path, r: RunIn<'_>, out_code: &mut Option<String>) -> 
     phase("state", &mut t0);
     h.configure_async(&opts.async_)?;
     h.install_test_lib()?;
+    // A test file may require("htl.trait"): the program state has the module already
+    // (`Htl::with_checker`), and this is the declaration the file is checked against.
+    h.install_trait_lib()?;
     #[cfg(feature = "std")]
     h.install_std()?;
     // Whatever a registered installer (`crate::registry::register_installer`) adds
