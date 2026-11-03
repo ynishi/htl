@@ -244,10 +244,11 @@ pub struct Contract {
 /// name and which of these said so.
 ///
 /// The first three are read from the configuration and the crate around the project when
-/// the model is loaded, and [`Project::provides`] answers them. The fourth,
-/// [`Declared`](Provider::Declared), is read from the files: only the [`Resolver`], which
-/// walks the model's roots, knows that a name has a declaration and nothing else, so
-/// [`Resolver::provides`] is the one that answers all four.
+/// the model is loaded, and [`Project::provides`] answers them. The last two,
+/// [`Declared`](Provider::Declared) and [`Builtin`](Provider::Builtin), are read from the
+/// files: only the [`Resolver`], which walks the model's roots, knows that a name has a
+/// declaration and nothing else, and whose declaration it is, so [`Resolver::provides`] is
+/// the one that answers all five.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
     /// Registered by a `#[host_module]` in the host crate's Rust sources
@@ -289,6 +290,23 @@ pub enum Provider {
     /// [`Resolution::HostShadowed`]: a name with an implementation is not `Declared` by
     /// definition.
     Declared,
+    /// A name htl's own library declares ([`Owner::Lib`], the `.d.tl` under
+    /// [`lib_dir`](crate::lib_dir)) and whose Lua source ships inside the binary
+    /// (`htl.trait`, [`crate::trait_lib`]): the declaration is how the checker types it,
+    /// and no file of the project's, and nothing of the host's, runs for it.
+    ///
+    /// It is not [`Declared`](Provider::Declared), because that says the environment
+    /// provides the name, and here the environment does not have to: `htl build` puts the
+    /// binary's copy of the source into the bundle as a module, and every state htl makes
+    /// has it preloaded. A host that lists the name (`#[host_module]`, `[build] host`) or
+    /// registers it still provides it, and a `.d.tl` of the project's own under the same
+    /// name is [`Declared`](Provider::Declared), not this: the variant is decided by whose
+    /// declaration the name resolves to, so a project that types a module its host provides
+    /// does not get htl's source bundled in its place.
+    ///
+    /// Only [`Resolver::provides`] answers it, from the files, and never from a configured
+    /// source ([`Project::provides`]).
+    Builtin,
 }
 
 impl Provider {
@@ -302,19 +320,20 @@ impl Provider {
     /// `std.*` name of its own is the one that answers to it. A declaration alone says
     /// least — that something provides the name, not what — so
     /// [`Declared`](Provider::Declared) is the lowest, and any of the others that names
-    /// the name is the answer instead.
+    /// the name is the answer instead. [`Builtin`](Provider::Builtin) is a declaration
+    /// found in the files too, so it ranks with it, and no configured source holds it.
     fn rank(self) -> u8 {
         match self {
             Provider::HostModule => 3,
             Provider::Build => 2,
             Provider::Std => 1,
-            Provider::Declared => 0,
+            Provider::Declared | Provider::Builtin => 0,
         }
     }
 
     /// The word the checker's Lua state carries a provider as, and
     /// [`Provision::Provided`](crate::Provision::Provided) hands on: `host_module`,
-    /// `build`, `std`, `declared`. A word rather than this type because the linker, which
+    /// `build`, `std`, `declared`, `builtin`. A word rather than this type because the linker, which
     /// reads it, is compiled without the model.
     pub fn tag(self) -> &'static str {
         match self {
@@ -322,6 +341,7 @@ impl Provider {
             Provider::Build => "build",
             Provider::Std => "std",
             Provider::Declared => "declared",
+            Provider::Builtin => "builtin",
         }
     }
 }
@@ -881,8 +901,9 @@ impl Project {
     /// A name two sources declare is answered once, by the more specific
     /// ([`Provider::HostModule`] over [`Provider::Build`] over [`Provider::Std`]).
     ///
-    /// Never [`Provider::Declared`]: that is a fact about the files under the name, and
-    /// the model does not walk its roots when it is loaded — its [`Resolver`] does. A
+    /// Never [`Provider::Declared`] or [`Provider::Builtin`]: those are facts about the
+    /// files under the name, and the model does not walk its roots when it is loaded — its
+    /// [`Resolver`] does. A
     /// caller that has one asks [`Resolver::provides`], which answers this and that.
     pub fn provides(&self, name: &str) -> Option<Provider> {
         self.providers

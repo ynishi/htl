@@ -665,6 +665,9 @@ pub fn checker(
     h.set_lang(lang)?;
     // `*_test.tl` under the checked tree require("htl.test"): make its types visible.
     h.install_test_lib()?;
+    // Any file may require("htl.trait"): its types, for every project. The runtime half is
+    // already in the state `Htl::new` made.
+    h.install_trait_lib()?;
     // And any file may require("std.json"): the same, for the modules the binary carries.
     #[cfg(feature = "std")]
     h.install_std()?;

@@ -23,6 +23,13 @@
 //! mlua-isle's task library under a declaration; the `task` module says what it promises).
 //! The methods that install the last two are named and linked below when the feature that
 //! compiles them is on; a link to an item that is not compiled is a broken one.
+//!
+//! A fourth, `htl.trait` ([`trait_lib`]), is pure Lua and needs no feature: default methods
+//! for a record that implements an interface, `trait.impl(defaults, Record)`. It differs in
+//! how it is installed. Every state [`Htl::new`], [`Htl::with_checker`] and
+//! [`Htl::with_checker_lua`] makes already has it in `package.preload`, the checker reads its
+//! declaration after [`Htl::install_trait_lib`], and `htl build` bundles its source rather
+//! than listing it as a host module.
 #![cfg_attr(
     feature = "std",
     doc = "
@@ -167,6 +174,9 @@ pub mod shapes;
 pub mod rsgen;
 pub mod teal;
 pub mod testing;
+// `htl.trait`: default methods for a record that implements an interface. Pure Lua, so no
+// feature gate: every state has it.
+pub mod trait_lib;
 // What the checker knows of each position of a file, kept for an editor's hover and
 // go-to-definition.
 pub mod typeindex;
@@ -1603,6 +1613,9 @@ const RUNTIME_REGISTRY_KEY: &str = "htl.runtime";
 /// Registry key under which a state remembers, per bundle entry, which `package.preload`
 /// names that bundle wrote (`Htl::bundle_record`).
 const BUNDLE_REGISTRY_KEY: &str = "htl.bundles";
+/// Registry key of the modules htl preloads in every state, name to loader
+/// ([`Htl::preload_builtin`]).
+const BUILTIN_PRELOAD_REGISTRY_KEY: &str = "htl.builtin_preloads";
 
 /// What [`Htl::replace_bundle`] did, so a host can say it rather than guess.
 ///
@@ -1836,11 +1849,15 @@ impl Htl {
             program: Some(program),
         };
         lua.set_app_data(h.clone());
-        Ok(Self {
+        let this = Self {
             lua,
             h,
             checker: checker.checker.clone(),
-        })
+        };
+        // As in `from_lua`: the program state of `htl test`, of `Htl::with_checker`, and a
+        // host's own state are made here, and have `htl.trait` without an install call.
+        this.preload_trait_lib()?;
+        Ok(this)
     }
 
     /// `true` when the checker is another Lua state ([`with_checker`](Self::with_checker)),
@@ -2107,6 +2124,10 @@ impl Htl {
         // Lua side holds no rule list of its own, so a state nobody configures would
         // otherwise run no lints at all.
         this.select_lints(&lint::Selection::default())?;
+        // `htl.trait` is pure Lua with no host behind it, so a state has it from the start
+        // rather than from an install call: `htl run`, `htl test` and a host that embeds
+        // htl all get a state from here or from `with_checker_lua`.
+        this.preload_trait_lib()?;
         Ok(this)
     }
 
@@ -2498,6 +2519,63 @@ impl Htl {
         let loader = self.lua.create_function(move |_, ()| Ok(value.clone()))?;
         self.preload_table()?.set(name, loader)?;
         Ok(())
+    }
+
+    /// [`preload_at`](Self::preload_at) for a module htl itself puts in every state
+    /// (`htl.trait`), recorded as htl's: [`install_bundle`](Self::install_bundle) treats
+    /// the entry as its own to replace, where it leaves a name the host preloaded alone.
+    ///
+    /// The record is the loader function kept in the registry, and an entry still counts as
+    /// htl's while the function in `package.preload` is that same function. A host that
+    /// preloads the name itself afterwards replaces the function, and so is a host's.
+    ///
+    /// A name that already has an entry is left as it is, unrecorded: a host that handed
+    /// [`from_lua`](Self::from_lua) or [`with_checker_lua`](Self::with_checker_lua) a state
+    /// with its own module under the name keeps it, and a second constructor on the same
+    /// state does not take a bundle's copy back to htl's.
+    pub(crate) fn preload_builtin(
+        &self,
+        name: &str,
+        chunk_name: &str,
+        lua_src: &str,
+    ) -> Result<()> {
+        let preload = self.preload_table()?;
+        if !matches!(preload.get::<Value>(name)?, Value::Nil) {
+            return Ok(());
+        }
+        let loader = self
+            .lua
+            .load(lua_src)
+            .set_name(chunk_name)
+            .into_function()
+            .with_context(|| format!("compiling preloaded module {name}"))?;
+        preload.set(name, loader.clone())?;
+        let builtins = match self
+            .lua
+            .named_registry_value::<Value>(BUILTIN_PRELOAD_REGISTRY_KEY)?
+        {
+            Value::Table(t) => t,
+            _ => {
+                let t = self.lua.create_table()?;
+                self.lua
+                    .set_named_registry_value(BUILTIN_PRELOAD_REGISTRY_KEY, t.clone())?;
+                t
+            }
+        };
+        builtins.set(name, loader)?;
+        Ok(())
+    }
+
+    /// The loader [`preload_builtin`](Self::preload_builtin) put under `name`, if the name
+    /// is one of htl's own.
+    fn builtin_preload(&self, name: &str) -> Result<Value> {
+        match self
+            .lua
+            .named_registry_value::<Value>(BUILTIN_PRELOAD_REGISTRY_KEY)?
+        {
+            Value::Table(t) => Ok(t.get(name)?),
+            _ => Ok(Value::Nil),
+        }
     }
 
     fn preload_table(&self) -> Result<Table> {
@@ -2913,7 +2991,9 @@ end
     /// own modules, so everything that already defers to preload — a `.d.tl` stepping
     /// aside for the implementation, an mlua-pkg resolver over a mods directory — sees
     /// them too, and files on disk do not override the bundle. A name the host preloaded
-    /// first is left alone: the host wins.
+    /// first is left alone: the host wins. The one exception is a module htl preloads in
+    /// every state itself (`htl.trait`, [`trait_lib`]): a bundle that carries it replaces
+    /// htl's copy, so that it runs the module it was linked and checked with.
     ///
     /// Idempotent, and deliberately so: a second call installs nothing, because every
     /// name is taken by the first. Putting a *newer* bundle into a state that is already
@@ -2922,6 +3002,7 @@ end
         self.check_installable(b)?;
         let package: Table = self.lua.globals().get("package")?;
         let preload: Table = package.get("preload")?;
+        let loaded: Table = package.get("loaded")?;
         // Bundled modules become `package.preload` entries: the same place a host puts
         // its own modules, so everything that already defers to preload (a `.d.tl`
         // stepping aside for the implementation, mlua-pkg resolvers ahead of Lua's
@@ -2930,8 +3011,22 @@ end
         // Lua's preload searcher passes them.
         let mut written: Vec<String> = Vec::new();
         for m in &b.modules {
-            if !matches!(preload.get::<Value>(m.name.as_str())?, Value::Nil) {
-                continue;
+            // The exception to "the host wins" is a module htl preloaded itself
+            // (`htl.trait`, in every state): the bundle was linked and checked with its
+            // own copy, and that is the copy it runs. The test is that the entry is still
+            // htl's loader, so a host that preloaded the name on purpose keeps it.
+            let existing = preload.get::<Value>(m.name.as_str())?;
+            if !matches!(existing, Value::Nil) {
+                let builtin = match (&existing, self.builtin_preload(&m.name)?) {
+                    (Value::Function(now), Value::Function(htl)) => *now == htl,
+                    _ => false,
+                };
+                if !builtin {
+                    continue;
+                }
+                // htl's copy may have been required already; drop its cached value so the
+                // next `require` runs the bundle's, as the doc above promises.
+                loaded.set(m.name.as_str(), Value::Nil)?;
             }
             let payload = m.payload.clone();
             let kind = m.kind;
@@ -3013,7 +3108,9 @@ end
             // new bundle's belongs there. A kept name never reaches it — `package.loaded`
             // answers first — but if anything ever clears that, the next require should
             // find the module this state actually holds.
-            preload.set(name.as_str(), Value::Nil)?;
+            // (For a module htl preloads itself, what goes back is htl's loader, so a
+            // bundle that stops carrying it leaves the state as `Htl::new` made it.)
+            preload.set(name.as_str(), self.builtin_preload(name)?)?;
             if keep.contains(&name.as_str()) {
                 kept.push(name.clone());
             } else {
@@ -3294,6 +3391,7 @@ pub fn write_if_changed_when(path: &Path, text: &str, write: bool) -> std::io::R
 /// so the name and the contents cannot drift apart.
 fn bundled_declarations() -> Vec<(String, String)> {
     let mut out = testing::declarations();
+    out.extend(trait_lib::declarations());
     #[cfg(feature = "std")]
     out.extend(batteries::declarations());
     #[cfg(feature = "async")]
@@ -3349,6 +3447,18 @@ pub fn lib_dir() -> PathBuf {
         std::env::temp_dir().join(format!("htl-lib-{}-{key}", env!("CARGO_PKG_VERSION")))
     })
     .clone()
+}
+
+/// Write `decls` under [`lib_dir`], each file only when its content changes, and return the
+/// directory: what each library that ships inside the binary does with its own half of
+/// [`bundled_declarations`] (`testing::lib_dir`, `trait_lib::lib_dir`).
+pub(crate) fn write_bundled_declarations(decls: Vec<(String, String)>) -> Result<PathBuf> {
+    let dir = lib_dir();
+    for (path, source) in decls {
+        write_if_changed(&dir.join(path), &source)
+            .with_context(|| format!("writing bundled declarations under {}", dir.display()))?;
+    }
+    Ok(dir)
 }
 
 /// Parent directory of a file, `.` when the path has none.

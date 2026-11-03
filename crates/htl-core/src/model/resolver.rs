@@ -428,8 +428,9 @@ impl Resolver {
     /// Whether `name` runs from no file of the project, and who provides it: the host, by
     /// one of the three sources [`Project::provides`] answers, or else the environment,
     /// when the model has a declaration of the name and nothing else
-    /// ([`Provider::Declared`]). `None` for a name a file of the model implements, and for
-    /// a name the model has nothing under.
+    /// ([`Provider::Declared`]), or htl's own library's declaration of a module that ships
+    /// in the binary ([`Provider::Builtin`]). `None` for a name a file of the model
+    /// implements, and for a name the model has nothing under.
     ///
     /// Asked as a run-time `require` asks, with no requiring file — the question is what
     /// runs, and a run carries only the name. So `@<dependency>/<name>` and `@/<name>`,
@@ -437,14 +438,29 @@ impl Resolver {
     /// answered as well: `@mathx/mathx.raw` with only `raw.d.tl` behind it is declared.
     /// The configured sources name no `@`-spelled name, so for those only the files speak.
     pub fn provides(&self, name: &str) -> Option<Provider> {
-        self.project
-            .provides(name)
-            .or_else(|| self.declaration_only(name).map(|_| Provider::Declared))
+        self.project.provides(name).or_else(|| {
+            self.declaration_only(name)
+                .map(|decl| Self::declared_as(name, &decl))
+        })
+    }
+
+    /// Which of the two declaration-only answers `decl` is for `name`: [`Provider::Builtin`]
+    /// when it is htl's own library's ([`Owner::Lib`](crate::model::Owner::Lib), under
+    /// [`crate::lib_dir`]) and the name's source ships in the binary, otherwise
+    /// [`Provider::Declared`]. Decided on the declaration the name resolved to, so a
+    /// project's own `.d.tl` of the same name is `Declared`. Canonical paths, because the
+    /// temp directory the library sits in may be spelled through a symlink.
+    fn declared_as(name: &str, decl: &Path) -> Provider {
+        if crate::trait_lib::declares(name, decl) {
+            Provider::Builtin
+        } else {
+            Provider::Declared
+        }
     }
 
     /// Every name that runs from no file of the project, with who provides it, in name
     /// order: [`Project::provided`] and every name of the table [`provides`](Self::provides)
-    /// answers [`Provider::Declared`] for. One entry per name, the configured source first
+    /// answers [`Provider::Declared`] or [`Provider::Builtin`] for. One entry per name, the configured source first
     /// where a name has both (a `#[host_module]` with its generated `.d.tl` is the host's).
     pub fn provided(&self) -> Vec<(String, Provider)> {
         let mut out: BTreeMap<String, Provider> = self
@@ -453,8 +469,10 @@ impl Resolver {
             .map(|(n, p)| (n.to_string(), p))
             .collect();
         for name in self.table.keys() {
-            if !out.contains_key(name) && self.declaration_only(name).is_some() {
-                out.insert(name.clone(), Provider::Declared);
+            if !out.contains_key(name)
+                && let Some(decl) = self.declaration_only(name)
+            {
+                out.insert(name.clone(), Self::declared_as(name, &decl));
             }
         }
         out.into_iter().collect()
@@ -502,6 +520,7 @@ impl Resolver {
                 // variant means rather than name a file that is not the reason.
                 None => "a declaration".into(),
             },
+            Provider::Builtin => "htl's own library, bundled by htl build".into(),
         }
     }
 
@@ -920,6 +939,35 @@ mod tests {
         // The same file under a name the host does not provide is only a module.
         let r = Resolver::new(&Project::load(&root, HtlConfig::default()).unwrap());
         assert!(matches!(r.resolve(None, "game"), Resolution::Found(_)));
+    }
+
+    /// `htl.trait` is declared under htl's own library and its source ships in the binary:
+    /// `Builtin`, from the library's declaration. A project's own `.d.tl` of the name is
+    /// `Declared`, and `[build] host` over either is the host's.
+    #[test]
+    fn a_name_htls_library_declares_and_ships_is_builtin() {
+        let (_dir, root) = tempdir("builtin");
+        // The library's declaration is on disk before the resolver walks its roots.
+        crate::trait_lib::lib_dir().unwrap();
+        let r = Resolver::new(&Project::load(&root, HtlConfig::default()).unwrap());
+        assert_eq!(r.provides("htl.trait"), Some(Provider::Builtin));
+        assert_eq!(Provider::Builtin.tag(), "builtin");
+        assert_eq!(
+            r.provided_by("htl.trait", Provider::Builtin),
+            "htl's own library, bundled by htl build"
+        );
+        assert!(
+            r.provided()
+                .contains(&("htl.trait".to_string(), Provider::Builtin))
+        );
+
+        write(&root.join("types/htl/trait.d.tl"), "");
+        let r = Resolver::new(&Project::load(&root, HtlConfig::default()).unwrap());
+        assert_eq!(r.provides("htl.trait"), Some(Provider::Declared));
+
+        let cfg = HtlConfig::parse("[build]\nhost = [\"htl.trait\"]\n").unwrap();
+        let r = Resolver::new(&Project::load(&root, cfg).unwrap());
+        assert_eq!(r.provides("htl.trait"), Some(Provider::Build));
     }
 
     #[test]

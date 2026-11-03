@@ -3431,6 +3431,11 @@ fn print_resolution(r: &htl::resolve::Resolution) {
                 r.module
             )
         }
+        // A module that ships in htl's binary: nobody's environment has to provide it, and
+        // `htl build` puts it in the bundle. The declaration is the file read.
+        (Some(read), None, Some(by)) if r.provider == Some(htl::model::Provider::Builtin) => {
+            println!("htl resolve {}: {read}, provided by {by}", r.module)
+        }
         (_, None, Some(by)) => {
             println!(
                 "htl resolve {}: provided by the host ({by}){typed_by}",
@@ -4142,10 +4147,18 @@ fn cmd_build(
     } else {
         String::new()
     };
+    // A module that ships in the binary is neither: counted apart, and named only when the
+    // bundle has one, so a build without it reads as it always has.
+    let builtin = linked.modules.iter().filter(|m| m.builtin).count();
+    let builtin_note = if builtin > 0 {
+        format!(", {builtin} built-in")
+    } else {
+        String::new()
+    };
     eprintln!(
-        "htl build: {} module(s) ({typed} typed, {} lua) -> {} ({} bytes{}{}){cached}",
+        "htl build: {} module(s) ({typed} typed, {} lua{builtin_note}) -> {} ({} bytes{}{}){cached}",
         linked.modules.len(),
-        linked.modules.len() - typed,
+        linked.modules.len() - typed - builtin,
         out.display(),
         buf.len(),
         if opts.source {

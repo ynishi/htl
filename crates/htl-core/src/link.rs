@@ -42,6 +42,16 @@
 //! record of types from a `.d.tl` asks the host for nothing. The same alias read as a
 //! value keeps its `require`, and is counted like any other; so is a `global type`.
 //!
+//! One declared name is the exception: `htl.trait` ([`crate::trait_lib`]) is declared by a
+//! `.d.tl` under [`crate::lib_dir`] and has no file behind it, but it is pure Lua whose
+//! source ships in the binary, so the linker puts that source in the bundle as a module and
+//! the host is not asked for it. The model says so (`Provider::Builtin`, the tag
+//! `builtin`); with no model to ask, the linker reaches the same answer from a declaration
+//! under `lib_dir` and nothing else, so a project's own `.d.tl` of the name is the host's
+//! like any other. A project's own `.lua` for the name, or a host that lists it, is
+//! answered first. Installing the bundle on a state `Htl::new` made replaces that state's
+//! copy ([`Htl::install_bundle`]).
+//!
 //! # The store
 //!
 //! Generating a module is the expensive part of linking — the Teal check behind it costs
@@ -179,9 +189,15 @@ pub struct LinkedModule {
     /// The file it was read from, for a report that wants to name something openable.
     pub path: PathBuf,
     /// `true` for a `.tl` that was checked and generated, `false` for a `.lua` taken as
-    /// it was. Only the typed ones have a store entry, so this is what
-    /// [`Linked::cached`] counts against.
+    /// it was or a module that ships in the binary. Only the typed ones have a store
+    /// entry, so this is what [`Linked::cached`] counts against.
     pub typed: bool,
+    /// `true` for a module that ships inside the binary ([`crate::trait_lib`]'s
+    /// `htl.trait`): bundled from the binary's copy, so no file of the project's was read
+    /// ([`path`](Self::path) is the declaration it was found through). Neither typed nor a
+    /// `.lua` of the project's, which is what a report counting modules by kind needs to
+    /// tell apart.
+    pub builtin: bool,
 }
 
 /// The result of a link: the bundle, and everything a reporter wants to say about how it
@@ -350,6 +366,11 @@ pub fn link_with(
             Target::Host => {
                 host.insert(name.clone());
             }
+            Target::Builtin(src, decl) => {
+                if queued.insert(name.clone()) {
+                    push_builtin(&mut out, h, opts, name, src, decl)?;
+                }
+            }
             Target::Missing => out.link_error(positionless(format!(
                 "extra module '{name}' not found on the search path"
             ))),
@@ -432,6 +453,10 @@ pub fn link_with(
                 Target::Host => {
                     host.insert(r.module.clone());
                 }
+                Target::Builtin(src, decl) => {
+                    queued.insert(r.module.clone());
+                    push_builtin(&mut out, h, opts, &r.module, src, decl)?;
+                }
                 Target::Missing => {
                     let d = unresolved(&path, r);
                     // The checker's own error at this `require`, when it has one, is
@@ -465,22 +490,13 @@ pub fn link_with(
             }
         }
         let Some(code) = code else { continue };
-        let payload = if opts.source {
-            Module {
-                name: name.clone(),
-                kind: Kind::Source,
-                payload: code.into_bytes(),
-            }
-        } else {
-            let bc = h.compile_with(&name, &code, !opts.debug)?;
-            Module {
-                name: name.clone(),
-                kind: Kind::Bytecode,
-                payload: bc,
-            }
-        };
-        out.bundle.modules.push(payload);
-        out.modules.push(LinkedModule { name, path, typed });
+        out.bundle.modules.push(module_of(h, opts, &name, code)?);
+        out.modules.push(LinkedModule {
+            name,
+            path,
+            typed,
+            builtin: false,
+        });
     }
 
     out.host_modules = host.iter().cloned().collect();
@@ -491,6 +507,47 @@ pub fn link_with(
         out.bundle.fingerprint = h.fingerprint()?;
     }
     Ok(out)
+}
+
+/// The bundle's module for `code`: source with `--source`, otherwise bytecode, stripped
+/// unless `--debug`.
+fn module_of(h: &Htl, opts: &LinkOptions, name: &str, code: String) -> Result<Module> {
+    Ok(if opts.source {
+        Module {
+            name: name.to_string(),
+            kind: Kind::Source,
+            payload: code.into_bytes(),
+        }
+    } else {
+        Module {
+            name: name.to_string(),
+            kind: Kind::Bytecode,
+            payload: h.compile_with(name, &code, !opts.debug)?,
+        }
+    })
+}
+
+/// A module that ships inside the binary, added to the bundle: nothing is read and
+/// nothing is walked, because [`crate::trait_lib::bundled_source`] is pure Lua that
+/// requires nothing.
+fn push_builtin(
+    out: &mut Linked,
+    h: &Htl,
+    opts: &LinkOptions,
+    name: &str,
+    src: &'static str,
+    decl: PathBuf,
+) -> Result<()> {
+    out.bundle
+        .modules
+        .push(module_of(h, opts, name, src.to_string())?);
+    out.modules.push(LinkedModule {
+        name: name.to_string(),
+        path: decl,
+        typed: false,
+        builtin: true,
+    });
+    Ok(())
 }
 
 /// One typed module, generated or replayed: see [`generate`].
@@ -591,6 +648,10 @@ enum Target {
     /// one of the host's sources — or, with no model to ask, it resolves to a `.d.tl` and
     /// the search path has no `.lua` behind it.
     Host,
+    /// A module whose source ships inside the binary ([`crate::trait_lib::bundled_source`]),
+    /// found through its declaration: the source and the declaration's path carried,
+    /// bundled from the binary's copy and not walked, since it requires nothing.
+    Builtin(&'static str, PathBuf),
     Missing,
     /// More than one file implements the name: the model's message saying which. Nothing
     /// is bundled for it, since no order picks one.
@@ -674,7 +735,16 @@ fn classify(h: &Htl, name: &str, found: Option<&Path>) -> Result<Target> {
     // say: a name it has only this declaration for is the environment's, one the host
     // provides is the host's, and neither is bundled.
     let model = h.model_provides(name)?;
-    if let crate::Provision::Provided(_) = model {
+    if let crate::Provision::Provided(tag) = &model {
+        // The model says `htl.trait` is htl's own (`Provider::Builtin`): its declaration is
+        // `lib_dir`'s and its source ships inside the binary, so it is bundled. Every other
+        // answer is the host's or the environment's, a project's own `.d.tl` of the same
+        // name included.
+        if tag == "builtin"
+            && let Some(src) = crate::trait_lib::bundled_source(name)
+        {
+            return Ok(Target::Builtin(src, p));
+        }
         return Ok(Target::Host);
     }
     // Otherwise a `.lua` behind the declaration (a vendored dependency typed by a `.d.tl`)
@@ -687,8 +757,14 @@ fn classify(h: &Htl, name: &str, found: Option<&Path>) -> Result<Target> {
         (Some(l), _) => Target::File(l),
         // No model to ask, or a name it has nothing under (a `.d.tl` found on the search
         // path, outside every root of the project): a declaration with nothing behind it
-        // on the path is taken to be the host's, as it was before the model answered.
-        (None, crate::Provision::Unknown) => Target::Host,
+        // on the path is taken to be the host's, as it was before the model answered. The
+        // one exception is htl's own library's declaration of a module that ships in the
+        // binary (`htl.trait`), the answer the model gives as `Provider::Builtin`; a
+        // declaration anywhere else under that name is the host's.
+        (None, crate::Provision::Unknown) => match crate::trait_lib::bundled_source(name) {
+            Some(src) if crate::trait_lib::declares(name, &p) => Target::Builtin(src, p),
+            _ => Target::Host,
+        },
         // The model has the name and says a file of the project runs for it, and the
         // lookup found none: the two disagree, which a declared name never makes them
         // do. Filed with the host's as before rather than failing a build over it.
