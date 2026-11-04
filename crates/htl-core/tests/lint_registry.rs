@@ -2,7 +2,7 @@
 //!
 //! `lint::RULES` is the one list of rule names: what `--lint` and `[lint]` accept, what
 //! `--list-lints` prints, and what both halves of htl report under. `lint.lua` still owns
-//! the *implementations* of its twenty-one, and that is a second list of names — the one
+//! the *implementations* of its twenty-two, and that is a second list of names — the one
 //! place left where a rename could go half done, leaving a rule that nothing runs and
 //! nothing says so. This holds the two together, so that goes wrong as a failing test
 //! rather than as a lint that quietly stops firing.
