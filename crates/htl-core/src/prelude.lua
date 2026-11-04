@@ -976,6 +976,307 @@ local function type_name_resolver(result, filename)
    end
 end
 
+-- `---@trait` and `---@defaults`: which interfaces are traits, which methods of one have a
+-- default body, and which table holds the bodies -- the type side of the `trait-impl` lint.
+-- Read from the file that *declares* the interface, as every marker above is: the checker
+-- discards comments, and a record that `is` the interface is rarely in that file. What the
+-- lint adds is the site: the record, the definitions of its methods, the `trait.impl` calls.
+--
+-- Three questions are answered from the position report instead of from names, so that a
+-- renamed local, an aliased `require` or a module-qualified type does not change the answer:
+--
+--   * Which interface does an `is` clause name? The nominal type the report stores at the
+--     name's position, followed to the interface (`iface_at`).
+--   * Is this callee `htl.trait`'s `impl`? The function type at the callee's position says
+--     which declaration it comes from, and the line it is on (`impl_at`).
+--   * Which table is the first argument? A local declared `local D: Shape = { .. }` has, as
+--     its type, the nominal `Shape` *as written in that declaration* -- a type object of its
+--     own, with the file, line and column of the annotation -- and every use of `D` reports
+--     that same object. So the annotation's position names the table: the one the
+--     `---@defaults` marker sits on is the defaults table, any other table typed `Shape` is a
+--     different position (`ann_at`). A module that exports the table as a field of its
+--     record (`shapes.Shape_default = Shape_default`) is the one place a use reports a
+--     different position, the field's own annotation, so the field is recorded as another
+--     name for the table (`alias`).
+--
+-- What is *not* asked of the report is where a method is declared. The report gives a copied
+-- field the position of the line it was written on, in the interface that wrote it, and the
+-- interface that line sits in is the nearest enclosing `interface` by indentation -- the same
+-- scan `field_lines` makes -- so a method inherited through `interface Named is Shape` is
+-- attributed to `Shape`, and takes its default from `Shape`'s table.
+--
+-- The keys of a defaults table are read from the checker's syntax tree of the declaring
+-- file, not from the source text: a constructor spans lines, holds nested tables and
+-- strings with braces.
+--
+-- An interface is declared `interface I`, with `local` / `global` or nested in a record, or
+-- as a type alias, `local type I = interface`.
+local function declaring_interface(lines, y)
+   local base = indent_of(lines[y] or "")
+   for i = y - 1, 1, -1 do
+      local l = lines[i]
+      if l and l:match("%S") and not l:match("^%s*%-%-") and indent_of(l) < base then
+         local name = l:match("^%s*local%s+interface%s+([%w_]+)")
+            or l:match("^%s*global%s+interface%s+([%w_]+)")
+            or l:match("^%s*interface%s+([%w_]+)")
+            or l:match("^%s*local%s+type%s+([%w_]+)[^=]*=%s*interface%f[%W]")
+            or l:match("^%s*global%s+type%s+([%w_]+)[^=]*=%s*interface%f[%W]")
+            or l:match("^%s*type%s+([%w_]+)[^=]*=%s*interface%f[%W]")
+         if name then return i, name end
+         return nil
+      end
+   end
+   return nil
+end
+
+-- `lines` is the text of `filename` the check already read, so the file being checked is
+-- not read a second time; the declaring files of other modules are read as needed.
+local function trait_resolver(result, filename, lines)
+   if tostring(filename):match("%.d%.tl$") then return nil end
+   local ok, report = pcall(tl.get_types, result)
+   if not ok or type(report) ~= "table" or type(report.by_pos) ~= "table" then return nil end
+   local function deref_in(rep, id, depth)
+      local t = rep.types[id]
+      if t and t.ref and depth < 8 then return deref_in(rep, t.ref, depth + 1) end
+      return t
+   end
+   local function deref(id, depth) return deref_in(report, id, depth) end
+   -- The report keys positions by the name the checker knew the file under, which for a
+   -- dependency need not be the spelling a type's `file` carries.
+   local function positions_in(rep, file)
+      if not file or type(rep) ~= "table" or type(rep.by_pos) ~= "table" then return nil end
+      if rep.by_pos[file] then return rep.by_pos[file] end
+      for name, positions in pairs(rep.by_pos) do
+         if same_file(name, file) then return positions end
+      end
+      return nil
+   end
+   local own = positions_in(report, filename)
+   if not own then return nil end
+   local sources, viewed, scanned, specs = {}, {}, {}, {}
+   if lines then sources[filename] = lines end
+   local function key_of(t)
+      if type(t) ~= "table" or not t.file or not t.y then return nil end
+      return clean_path(t.file) .. ":" .. t.y .. ":" .. (t.x or 0)
+   end
+   -- The report, positions and syntax tree of a file the defaults are read from. A file
+   -- this check checked has its positions in this check's report. A dependency this env
+   -- was seeded with from the store was not checked here, and this report has no
+   -- positions for it: those are in the report of the check that did, which its stored
+   -- result still carries (`result.env`). A position is compared as file:line:column
+   -- (`key_of`), never as a type id, so a key read from either report names the same place.
+   -- The tree is the checker's own, not a fresh parse: `tl.parse` is the wrapper that
+   -- records require errors for the check that comes next, and a second parse here would
+   -- hand that check a copy it never made.
+   local function view_of(file)
+      local key = clean_path(file)
+      if viewed[key] ~= nil then return viewed[key] end
+      local res
+      if same_file(file, filename) then
+         res = result
+      else
+         for name, r in pairs((result.env and result.env.loaded) or {}) do
+            if type(r) == "table" and same_file(name, file) then res = r break end
+         end
+      end
+      local view = false
+      if res then
+         local rok, rep = pcall(tl.get_types, res)
+         local positions = rok and positions_in(rep, file)
+         if positions then
+            local ast = res.ast and #(res.syntax_errors or {}) == 0 and res.ast or false
+            view = { rep = rep, positions = positions, ast = ast }
+         end
+      end
+      viewed[key] = view
+      return view
+   end
+
+   -- The `---@defaults` tables of one file, in the order they are written. Each:
+   -- { name, y, x, ann, alias, iface_file, iface_y, iface_name, literal, keys }, where
+   -- (y, x) is the local's name, `ann` the position of its annotation and `iface_*` the
+   -- interface that annotation names. A table whose annotation is not an interface, or that
+   -- is not a `local` with one, is not a defaults table and is not listed.
+   local function scan_defaults(file)
+      if scanned[file] then return scanned[file] end
+      local out = {}
+      scanned[file] = out
+      local lines = source_lines(sources, file)
+      local view = view_of(file)
+      if not lines or not view then return out end
+      local rep, positions = view.rep, view.positions
+      local seen = {}
+      for i, line in ipairs(lines) do
+         if line:find("%-%-%-@defaults%f[%W]") then
+            local d = line:match("^%s*%-%-%-@") and i + 1 or i
+            local pre, name = (lines[d] or ""):match("^(%s*local%s+)([%w_]+)%s*:")
+            local x = pre and #pre + 1
+            local id = name and positions[d] and positions[d][x]
+            local raw = id and rep.types[id]
+            local iface = id and deref_in(rep, id, 0)
+            if raw and raw.ref and iface and iface.fields and iface.file and iface.y and not seen[d] then
+               seen[d] = true
+               local spec = {
+                  name = name, y = d, x = x, ann = key_of(raw), alias = {},
+                  iface_file = iface.file, iface_y = iface.y, iface_name = iface.str,
+               }
+               out[#out + 1] = spec
+               local ast = view.ast
+               if ast then
+                  spec.literal = false
+                  for _, st in ipairs(ast) do
+                     local v = st.kind == "local_declaration" and st.vars and st.vars[1]
+                     if v and v.y == d and v.x == x then
+                        local e = st.exps and st.exps[1]
+                        if e and e.kind == "literal_table" then
+                           spec.literal = true
+                           spec.keys = {}
+                           for _, item in ipairs(e) do
+                              local k = item.key
+                              if item.key_parsed ~= "implicit" and k and k.kind == "string" and k.conststr then
+                                 spec.keys[k.conststr] = true
+                              end
+                           end
+                        end
+                     end
+                  end
+               end
+            end
+         end
+      end
+      -- `shapes.Shape_default = Shape_default` at the top level: a use of the table through
+      -- the module reports the field's annotation, so the field is another name for it.
+      local ast = #out > 0 and view.ast
+      if ast then
+         for _, st in ipairs(ast) do
+            local lhs = st.kind == "assignment" and #st.vars == 1 and #st.exps == 1 and st.vars[1]
+            local rhs = lhs and st.exps[1]
+            if lhs and lhs.kind == "op" and lhs.op and lhs.op.op == "." and lhs.e1 and lhs.e1.kind == "variable"
+               and lhs.e2 and lhs.e2.tk and rhs.kind == "variable" then
+               local rid = positions[rhs.y] and positions[rhs.y][rhs.x]
+               local mid = positions[lhs.e1.y] and positions[lhs.e1.y][lhs.e1.x]
+               local module = mid and deref_in(rep, mid, 0)
+               local field = module and module.fields and rep.types[module.fields[lhs.e2.tk]]
+               for _, spec in ipairs(out) do
+                  if rid and field and rhs.tk == spec.name and key_of(rep.types[rid]) == spec.ann then
+                     spec.alias[key_of(field)] = true
+                  end
+               end
+            end
+         end
+      end
+      for _, spec in ipairs(out) do
+         spec.match = { [spec.ann] = true }
+         for k in pairs(spec.alias) do spec.match[k] = true end
+      end
+      return out
+   end
+
+   local R = {}
+
+   -- The trait the interface at the position of an `is` clause's name is, or nil when it is
+   -- not marked `---@trait`:
+   -- { name, methods = { { name, owner, default = { name, match } | nil } } }, the methods in
+   -- the order they are declared. A method is every function-typed field of the interface,
+   -- inherited ones included (`t.fields` holds the ones `is` copied in); `default` is set
+   -- when the `---@defaults` table of the interface that declares it has the key.
+   function R.iface_at(y, x)
+      local id = own[y] and own[y][x]
+      local t = id and deref(id, 0)
+      if not t or not t.fields or not t.file or not t.y then return nil end
+      local key = key_of(t)
+      if specs[key] ~= nil then return specs[key] or nil end
+      specs[key] = false
+      local lines = source_lines(sources, t.file)
+      if not lines or not has_marker(lines, t.y, "trait") then return nil end
+      local names = {}
+      for name, fid in pairs(t.fields) do
+         local f = deref(fid, 0)
+         if f and f.args ~= nil then names[#names + 1] = name end
+      end
+      table.sort(names, function(a, b)
+         local ya, yb = report.types[t.fields[a]].y or 0, report.types[t.fields[b]].y or 0
+         if ya ~= yb then return ya < yb end
+         return a < b
+      end)
+      local methods = {}
+      for _, name in ipairs(names) do
+         local raw = report.types[t.fields[name]]
+         local file = raw.file or t.file
+         local flines = source_lines(sources, file) or lines
+         local oy, oname = declaring_interface(flines, raw.y or t.y)
+         if not oy then oy, oname, file, flines = t.y, t.str, t.file, lines end
+         local method = { name = name, owner = qualified_name(flines, oy, oname) }
+         for _, spec in ipairs(scan_defaults(file)) do
+            if spec.iface_y == oy and same_file(spec.iface_file, file) then
+               -- A file that would not parse leaves the keys unknown, and a rule that
+               -- cannot tell a default from a missing method says nothing. A table that
+               -- parsed but is not a constructor has no keys the rule can read: no
+               -- defaults, and the table itself is reported where it is declared.
+               if spec.literal == nil then return nil end
+               if spec.keys and spec.keys[name] then
+                  method.default = { name = spec.name, match = spec.match }
+               end
+               break
+            end
+         end
+         methods[#methods + 1] = method
+      end
+      specs[key] = { name = qualified_name(lines, t.y, t.str or "interface"), methods = methods }
+      return specs[key]
+   end
+
+   -- The `---@defaults` tables of the file being checked whose type is a `---@trait`
+   -- interface: { name, y, x, iface, file, literal, match, first, foreign }. `first` is the
+   -- earlier table of the same interface in this file; `foreign` that the interface is
+   -- declared in another file, where the marker is read.
+   function R.here()
+      local out, first = {}, {}
+      for _, spec in ipairs(scan_defaults(filename)) do
+         local ilines = source_lines(sources, spec.iface_file)
+         if ilines and has_marker(ilines, spec.iface_y, "trait") then
+            local entry = {
+               name = spec.name, y = spec.y, x = spec.x, literal = spec.literal, match = spec.match,
+               iface = qualified_name(ilines, spec.iface_y, spec.iface_name or "interface"),
+               file = tostring(spec.iface_file):match("([^/\\]+)$") or tostring(spec.iface_file),
+               foreign = not same_file(spec.iface_file, filename),
+            }
+            local ik = clean_path(spec.iface_file) .. ":" .. spec.iface_y
+            if first[ik] then entry.first = first[ik] else first[ik] = entry end
+            out[#out + 1] = entry
+         end
+      end
+      return out
+   end
+
+   -- The type at a position, as a key that is equal for equal types: followed to the
+   -- declaration (`key_at`, a record's own position), or not followed (`ann_at`, the
+   -- annotation a local was declared with, set only when the type is a name for another).
+   function R.key_at(y, x)
+      local id = own[y] and own[y][x]
+      return id and key_of(deref(id, 0)) or nil
+   end
+
+   function R.ann_at(y, x)
+      local id = own[y] and own[y][x]
+      local raw = id and report.types[id]
+      return raw and raw.ref and key_of(raw) or nil
+   end
+
+   -- Whether the callee at the position is `htl.trait`'s `impl`: the function type there is
+   -- declared on an `impl:` line of a file named `htl/trait.d.tl`.
+   function R.impl_at(y, x)
+      local id = own[y] and own[y][x]
+      local t = id and deref(id, 0)
+      if not t or t.fields or not t.file or not t.y then return false end
+      if not tostring(t.file):gsub("\\", "/"):match("htl/trait%.d%.tl$") then return false end
+      local lines = source_lines(sources, t.file)
+      return lines and lines[t.y] and lines[t.y]:match("^%s*impl%s*:") ~= nil or false
+   end
+
+   return R
+end
+
 -- The modules this check reached through `require`, with the AST each was parsed into:
 -- what `await-outside-async` reads for an `await` at a module's top level. The file being
 -- checked is the entry of `htl run` / `htl test` and its top level is async; a module is
@@ -3453,6 +3754,7 @@ function H.check(filename, env, opts)
             subject_enum = subject,
             struct_at = struct_resolver(result, filename),
             sealed_at = sealed_resolver(result, filename),
+            trait = trait_resolver(result, filename, lines),
             nilable_at = nilable_resolver(result, filename),
             type_at = type_name_resolver(result, filename),
             async_at = H.lang_async and async_resolver(result, filename) or nil,

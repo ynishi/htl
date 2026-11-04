@@ -6,11 +6,13 @@
 --
 --    local trait = require("htl.trait")
 --
+--    ---@trait
 --    local interface Shape
 --       area: function(self): number
 --       describe: function(self): string
 --    end
 --
+--    ---@defaults
 --    local Shape_default: Shape = {
 --       describe = function(self: Shape): string
 --          return ("area=%.2f"):format(self:area())
@@ -22,6 +24,11 @@
 --    end
 --    function Circle:area(): number return math.pi * self.r ^ 2 end
 --    trait.impl(Shape_default, Circle)
+--
+-- The two markers are what the `trait-impl` lint reads (`htl check --explain trait-impl`):
+-- `---@trait` makes the interface a trait, so a record that `is` it has to define every
+-- method or have `impl` apply the default; `---@defaults` marks the table whose
+-- constructor keys are those defaults. Both are comments, so this file stays plain Teal.
 local record trait
    --- Copy into `target` every key of `defaults` that `target` does not already hold.
    ---

@@ -247,8 +247,8 @@ fn an_allow_comment_cannot_be_written_on_a_marker_line() {
 /// rules of the `async` / `await` syntax (`await-missing`, `await-outside-async`,
 /// `await-non-async`, `task-escape`), thirty-three with the fifth,
 /// `async-as-sync-callback`, thirty-four with `type-guard`, thirty-five with
-/// `unmarked-struct`, thirty-six with `unmarked-sealed`, and thirty-seven with
-/// `lshape-version`.
+/// `unmarked-struct`, thirty-six with `unmarked-sealed`, thirty-seven with
+/// `lshape-version`, and thirty-eight with `trait-impl`.
 ///
 /// Each line is the name and the level a project that says nothing gets, so the listing
 /// also answers which rules are `allow` — which a reader used to have to turn a rule on to
@@ -297,9 +297,11 @@ fn the_listing_accounts_for_every_rule() {
             "await-missing",
             "await-outside-async",
             "task-escape",
-            "async-as-sync-callback"
+            "async-as-sync-callback",
+            "trait-impl"
         ],
-        "the four async rules whose finding fails at run time are the only deny defaults"
+        "the four async rules whose finding fails at run time, and `trait-impl`, whose \
+         finding is a nil call there, are the only deny defaults"
     );
     assert!(
         lines
@@ -324,7 +326,7 @@ fn the_listing_accounts_for_every_rule() {
     ] {
         assert!(listed.iter().any(|l| l == rule), "{rule} not in {listed:?}");
     }
-    assert_eq!(listed.len(), 37, "{listed:?}");
+    assert_eq!(listed.len(), 38, "{listed:?}");
 }
 
 /// The listing and a spec take the same names, and neither takes the two that `htl fix`

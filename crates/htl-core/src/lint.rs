@@ -5,7 +5,7 @@
 //! printed with that suffix is a finding about the project's code. `htl dts`'s `not
 //! written` and `left in place` lines are not: they are the command reporting on the
 //! declarations it was asked to write, carry no rule name, and are in no listing here.
-//! Twenty-one of them are
+//! Twenty-two of them are
 //! implemented in `lint.lua`, nine in the project layer and seven by the vendored Teal
 //! compiler, and that difference used to decide what a project could say about them: the
 //! registry was `L.DEFAULT` in `lint.lua`, so `--lint` and `[lint]` knew the thirteen and
@@ -15,7 +15,7 @@
 //! could read it there. The Lua side keeps no defaults of its own any more: it is handed
 //! the resolved selection ([`Htl::select_lints`](crate::Htl::select_lints)), so the names a
 //! project may write and the names that run cannot drift apart. What `lint.lua` still owns
-//! is the *implementation* of its twenty-one — `tests/lint_registry.rs` holds that list to
+//! is the *implementation* of its twenty-two — `tests/lint_registry.rs` holds that list to
 //! this one, so a rule renamed on one side fails a test rather than going quietly silent.
 //!
 //! Whether a rule is on and how much it matters are one question here, answered by a
@@ -46,7 +46,9 @@
 //! # The rules
 //!
 //! Every rule has a level; the default column is each rule's level for a project that
-//! says nothing, and nothing defaults to `deny`.
+//! says nothing. `deny` is the default of the rules whose finding is a failure at run
+//! time, at a line other than the one that caused it: four of the five `async` rules, and
+//! `trait-impl`.
 //!
 //! | rule | default | catches |
 //! |---|---|---|
@@ -71,6 +73,7 @@
 //! | `await-non-async` | warn | under `[lang] async`: `await` on a call of a function that is not async. Nothing suspends, so the marker says something false |
 //! | `task-escape` | deny | under `[lang] async`: an `async local` name captured by a nested function, or returned. The task is cancelled when the scope that declared it ends, so what the capture or the caller reads is a cancelled task; await it in the scope and hand over the value |
 //! | `async-as-sync-callback` | deny | under `[lang] async`: an async function — a Teal `async function`, inline or named, or a host method declared `---@async` — handed to a callee that calls it from C: `table.sort`'s comparator, `string.gsub`'s replacement, `xpcall`'s message handler, or a `__tostring` in a table constructor. A host declares its own on its `.d.tl`, hand-written or generated (`#[host_module]` and `htl dts` write it for a sync fn's `Function` parameters; the macro's doc says when and how a parameter overrides it): `---@noyield(f, g)` at the end of a function's declaration line names the parameters its implementation calls from C, matched by name against that line's parameter list so `a:each(cb)` and `a.each(a, cb)` report the same argument, and a name the declaration does not have is ignored like no marker; a bare `---@noyield` on a record field says the host calls that field of a table it is handed (`#[derive(TealRecord)]` writes it for a field marked `#[teal(noyield)]`), and a constructor the checker types as the record (a typed local, an assignment, a return, an argument, a nested constructor) is reported at the field's value, while `{ ... } as R` is not seen (the cast sits on the `as` node). A suspension there fails with `attempt to yield across a C-call boundary` (in `xpcall`'s handler it is lost instead). Reported at the argument. A Teal function calling its callback is not a boundary, so an async value handed to one is not reported, nor is one handed to a callee whose declaration carries no marker
+//! | `trait-impl` | deny | a record declared `is I`, where `I` is an interface marked `---@trait`, that neither defines one of the methods of `I` (those it inherits through `interface I is B` included) nor has a top-level `trait.impl(D, R)` apply the default of it, where `D` is the `---@defaults` table of the interface that declares the method. A call or a definition that does not count — not a top-level statement, or a `D` that is not that table — is named in the finding with the reason. In the file that declares the trait it also reports a second `---@defaults` table of one interface, one that is not a constructor, and a `D.m = ...` written after the constructor, which is not a default; a `---@defaults` table in another file than the trait's is reported where it is declared. Silent until an interface carries `---@trait`; defaults applied from another file are not followed, and `-- htl: allow(trait-impl)` on the record is the escape |
 //! | `duplicate-declaration` | warn | two `.d.tl` for one module: an order decides which is read ([`crate::config::HtlConfig::search_paths`]) and nothing in either file says so. Names the one read and the one that was not |
 //! | `host-module-shadowed` | warn | for a file in no project: a `require` of a name a `#[host_module]` in the surrounding crate registers that resolved to a Teal file of that name — `package.preload` beats the path searcher at run time, so the file is what is checked and the host is what runs. In a project the same state is an error ([`crate::model`]) |
 //! | `contract` | warn | a module under a `[[contract]]` directory that does not satisfy the contract's type or its `---@required` fields, and a `---@contract` marker that cannot be turned into a contract or published ([`crate::contract`]) |
@@ -122,7 +125,7 @@
 //!
 //! # The markers
 //!
-//! Four rules are silent until a record or a function carries a marker. A marker is a
+//! Five rules are silent until a record, an interface or a function carries a marker. A marker is a
 //! comment, read from the file that *declares* the record or function — on the line
 //! itself, or on a line of its own above it — so the file stays valid Teal and other
 //! tooling ignores it; the report lands where the thing is *built* or *called*. The
@@ -171,6 +174,45 @@
 //! gate.open or gate.reopen` when functions are named); `-- htl: allow(sealed-record)`
 //! keeps one site the project stands behind, a test that compares a whole sealed value
 //! among them.
+//!
+//! **`---@trait` and `---@defaults`** (`trait-impl`): the interface is a trait, and a record
+//! that `is` it must be complete. The defaults are the keys of the constructor of a table
+//! declared with the trait's type, in the file that declares the trait, and a record gets
+//! them from `htl.trait`'s `impl`:
+//!
+//! ```text
+//! local trait = require("htl.trait")
+//!
+//! ---@trait
+//! local interface Shape
+//!    area: function(self): number
+//!    describe: function(self): string
+//! end
+//!
+//! ---@defaults
+//! local Shape_default: Shape = {
+//!    describe = function(self: Shape): string
+//!       return ("area=%.2f"):format(self:area())
+//!    end,
+//! }
+//!
+//! local record Circle is Shape
+//!    r: number
+//! end
+//! function Circle:area(): number return math.pi * self.r ^ 2 end
+//! trait.impl(Shape_default, Circle)
+//! ```
+//!
+//! Which methods have a default is read from that table and written nowhere else, and a
+//! trait has at most one. A method counts as defined by `function R:m`, `function R.m` or
+//! `R.m = ...`, and its default as applied by `trait.impl(D, R)`, only as a statement of
+//! the chunk itself: inside a function or an `if` it runs when that runs, or never. The
+//! callee is `htl/trait.d.tl`'s `impl` by its type, so `local t = require("htl.trait")`
+//! counts, and `D` is the defaults table by the position it was declared at, so a table
+//! that is merely typed `Shape` does not. The interface may be declared in another module;
+//! a `trait.impl` written in another file is not followed, and `-- htl: allow(trait-impl)`
+//! on the record is the escape for it. Only records declared at the top level of a file are
+//! checked.
 //!
 //! **`---@extensible`**: a table built as the record may carry keys it does not declare —
 //! the key a newer SDK or a later save file adds. On a contract record it travels with the
@@ -242,11 +284,13 @@ pub enum Side {
 /// on it.
 ///
 /// The three words are selene's `[lints]` and Cargo's, in that spelling, because a reader
-/// arriving from either already knows them. Nothing defaults to [`Deny`](Self::Deny) — the
-/// levels a project gets without writing anything are `warn` for every rule htl reports
-/// and `allow` for the three that are opinions, the one that is a flow question and the
-/// one about code that is already right — so `deny` is the thing a project asks
-/// for, and `strict` is asking for it run-wide.
+/// arriving from either already knows them. [`Deny`](Self::Deny) is the default of the
+/// rules whose finding is a failure at run time, at a line other than the one that caused
+/// it (the `async` rules that are `deny`, `trait-impl`); for every other rule the levels a
+/// project gets without writing anything are `warn` for what htl reports and `allow` for
+/// the three that are opinions, the one that is a flow question and the one about code
+/// that is already right — so `deny` is otherwise the thing a project asks for, and
+/// `strict` is asking for it run-wide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Level {
@@ -398,7 +442,7 @@ impl Rule {
     }
 }
 
-/// Every rule there is. The first thirty-seven are the lint surface, in the order
+/// Every rule there is. The first thirty-eight are the lint surface, in the order
 /// `htl check --list-lints` prints them: the file-level rules first, in the order
 /// `lint.lua` runs them, then the ones the project layer asks once the files have been
 /// checked, then the warning kinds the vendored Teal compiler reports for itself. The last
@@ -455,6 +499,12 @@ pub const RULES: &[Rule] = &[
         Side::Lua,
         explain::ASYNC_AS_SYNC_CALLBACK,
     ),
+    // `deny`, for the reason the async rules above are: a method a record does not have
+    // is a nil call at run time, at the line that calls it and not at the record that is
+    // missing it. It is silent until someone writes `---@trait`, so a project that never
+    // does is not asked anything, and `-- htl: allow(trait-impl)` is the escape for the
+    // one case the rule cannot see (defaults applied from another file).
+    Rule::deny("trait-impl", Side::Lua, explain::TRAIT_IMPL),
     // The project layer. The first six are `warn`: each describes a state a project is
     // in by accident rather than on purpose, so it is worth saying, and none of them is
     // worth failing a run over unless the project says so — which is what a level is for.
@@ -699,7 +749,7 @@ impl Selection {
     }
 
     /// The rules of one side and whether each is on, for a consumer that has to be handed
-    /// the selection rather than ask about it — `lint.lua`, which runs its twenty-one from a
+    /// the selection rather than ask about it — `lint.lua`, which runs its twenty-two from a
     /// table. Fix classes are not among them: no producer produces one, so there is
     /// nothing to tell a producer about them.
     ///
@@ -1181,6 +1231,58 @@ calling its callback lets it yield. So an async value handed to a Teal function 
 reported, nor is one handed to a callee whose declaration carries no marker: a callee
 nobody has described is unknown, and says nothing. `deny` by default."#;
 
+    /// `trait-impl`.
+    pub const TRAIT_IMPL: &str = r#"A record declared `is I`, where `I` is an interface marked `---@trait`, that neither defines
+one of the methods of `I` nor has a default of it copied in by `trait.impl`. Reported at
+the record's declaration, naming the record and the method. Silent until an interface
+carries `---@trait`.
+
+Teal has `interface` and `record R is I`, and nothing checks that `R` is complete: a method
+the record never defines is a nil call at run time, at the line that calls it. It has no
+default bodies either. `htl.trait` fills the second gap and this rule closes the first.
+
+The two markers are comments, read from the file that declares the interface:
+
+  ---@trait                        on the interface declaration, on its line or on a line
+                                   of its own above it: records that `is` it are checked.
+  ---@defaults                     on a table declared with the trait's type, in the file
+                                   that declares the trait (`local D: Shape = { ... }`):
+                                   the keys of its table constructor are the default
+                                   methods of that interface. Which methods have a default
+                                   is written there and nowhere else, and a trait with no
+                                   such table has none.
+
+A default reaches a record through `trait.impl(D, R)` (`require("htl.trait")`), which
+copies into `R` every key of `D` that `R` does not already hold and never overwrites.
+
+The methods required are every function-typed field of `I`, including those it inherits
+through `interface I is B`, whether or not `B` is marked; a method's default is the one in
+the `---@defaults` table of the interface that declares it, so `trait.impl(Shape_default,
+R)` applies `Shape`'s defaults and not `Named`'s, and each interface's defaults are applied
+by their own call. A method counts as defined when the record's file has `function R:m`,
+`function R.m` or `R.m = ...`, and a default as applied when it has `trait.impl(D, R)`, as
+a statement of the chunk itself: a definition or a call inside a function, an `if` or a
+loop runs when that does, or never, so it does not count. The callee is `htl.trait`'s
+`impl` by its type, so `local t = require("htl.trait")` and `local impl =
+require("htl.trait").impl` are both recognised, and `D` is the defaults table by the
+position it was declared at, so a table that is only typed `Shape` is not. A call or a
+definition that does not count is named in the finding it would have prevented, with the
+reason: it is not a top-level statement, or `D` is not the `---@defaults` table of the
+interface.
+
+Reported in the file that declares the trait, on its markers: a second `---@defaults` table
+of one interface (a trait has at most one), a table that is not a constructor at the top
+level of the file, and `D.m = ...` after the constructor, which is not a default because
+the keys of the constructor are, and the rule reads them there. A `---@defaults` table in a
+file other than the one that declares its interface is not read, and is reported where it
+is declared.
+
+What the rule does not follow: `trait.impl` called from another file than the record's, and
+records declared inside a function or a nested record. A project that applies defaults
+from elsewhere says so with `-- htl: allow(trait-impl)` on the record's line. `deny` by
+default: a missing method fails at run time, on a line other than the one that caused it,
+whatever the project thinks of it."#;
+
     /// `duplicate-declaration`.
     pub const DUPLICATE_DECLARATION: &str = r#"Two `.d.tl` for one module name on the search path.
 
@@ -1416,8 +1518,9 @@ mod tests {
 
     /// The defaults are the levels a project that writes nothing gets, and they are what
     /// the run before levels behaved as: everything htl reported was advisory, and the
-    /// three opinions were not reported. Nothing is `deny`, so no project's verdict
-    /// changed when levels arrived.
+    /// three opinions were not reported. Nothing was `deny` then, so no project's verdict
+    /// changed when levels arrived; the rules that are now (the async rules, `trait-impl`)
+    /// came after, each for the reason in its entry of [`RULES`].
     ///
     /// `nil-return-unchecked` joined them later and is `allow` for a different reason: not
     /// an opinion, but a flow rule whose false positives are the cases where something did
@@ -1436,12 +1539,14 @@ mod tests {
                 | "htlx-available"
                 | "unmarked-struct"
                 | "unmarked-sealed" => Level::Allow,
-                // The four async rules: what each catches fails at run time at a line
-                // other than the one that caused it, whatever the project's opinion.
+                // The four async rules and `trait-impl`: what each catches fails at run
+                // time at a line other than the one that caused it, whatever the
+                // project's opinion.
                 "await-missing"
                 | "await-outside-async"
                 | "task-escape"
-                | "async-as-sync-callback" => Level::Deny,
+                | "async-as-sync-callback"
+                | "trait-impl" => Level::Deny,
                 _ => Level::Warn,
             };
             assert_eq!(level, want, "{name}");

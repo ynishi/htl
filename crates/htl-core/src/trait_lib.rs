@@ -10,6 +10,7 @@
 //!
 //! ```teal
 //! local trait = require("htl.trait")
+//! ---@defaults
 //! local Shape_default: Shape = { describe = function(self: Shape): string ... end }
 //! trait.impl(Shape_default, Circle)
 //! ```
@@ -42,12 +43,26 @@
 //!   one that runs, so a bundle keeps the module it was built and checked with: see
 //!   [`Htl::install_bundle`].
 //!
-//! # What comes later
+//! # The markers and the lint
 //!
-//! This is the module and where it is available. The markers (`---@trait` on an interface,
-//! `---@defaults` on its defaults table) and the lint that reads them (`trait-impl`: every
-//! method of the trait is defined by the record or supplied by a `trait.impl` call) are a
-//! later change; until then `impl` is a helper and nothing checks that a record is complete.
+//! `impl` alone is a helper: nothing in it checks that a record is complete. Two markers
+//! say which interface is a trait and where its defaults are, and the `trait-impl` lint
+//! (`deny`) holds a record to them:
+//!
+//! - `---@trait` on an interface declaration: records that `is` it are checked.
+//! - `---@defaults` on a table declared with the trait's type (`local D: Shape = { ... }`),
+//!   in the file that declares the trait: the keys of its table constructor are the trait's
+//!   default methods. Which methods have a default is read from that table and written
+//!   nowhere else.
+//!
+//! A record is complete when each method of the trait, those inherited through
+//! `interface I is B` included, is defined by the record (`function R:m`, `function R.m` or
+//! `R.m = ...`) or has its default applied by `trait.impl(D, R)`, both as statements of the
+//! chunk itself. The callee is recognised by its type, `htl/trait.d.tl`'s `impl`, so an
+//! aliased `require` counts. `htl check --explain trait-impl` and the `lint` module's docs
+//! have the rest: what is reported, the reasons a call or a definition is not counted, and
+//! the one case the rule does not follow (defaults applied from another file), which
+//! `-- htl: allow(trait-impl)` is for.
 use crate::Htl;
 use anyhow::Result;
 use std::path::{Path, PathBuf};

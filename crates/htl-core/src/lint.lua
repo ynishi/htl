@@ -44,6 +44,9 @@
 --                    variant never tested and no `else`; the members come from the checker.
 --   class-record     record declaring metamethods (a class): its metatable is not part of
 --                    the value, so serialization and the Rust boundary drop it.   [allow]
+--   trait-impl       a record that `is` an interface marked `---@trait` and neither defines
+--                    one of its methods nor has `trait.impl` copy in the default the
+--                    interface's `---@defaults` table holds.   [deny]
 --
 -- Suppress per line with a trailing comment:  -- htl: allow(nil-index, shadow-local)
 
@@ -53,11 +56,12 @@ local L = {}
 -- Which rules are on is not decided here. The registry — every rule name there is, its
 -- default level, and which half of htl implements it — is `lint::RULES` in lint.rs, because
 -- the project layer reports under those names too and could not read a list kept in Lua.
--- What this file owns is the twenty-one implementations below (`RULES`), and `L.run` is handed
+-- What this file owns is the twenty-two implementations below (`RULES`), and `L.run` is handed
 -- the selection to run them under: a rule / on table, not a rule / level one. How much a
 -- finding matters is read where the run is judged, so a rule moving between `warn` and
--- `deny` changes nothing about the work done here. `struct-fields` and `sealed-record` are on and still say
--- nothing until a record carries `---@struct` / `---@sealed`, which someone had to write.
+-- `deny` changes nothing about the work done here. `struct-fields`, `sealed-record` and
+-- `trait-impl` are on and still say nothing until a record or an interface carries
+-- `---@struct` / `---@sealed` / `---@trait`, which someone had to write.
 
 local SKIP_KEYS = { if_parent = true, type = true, newtype = true, decltuple = true, expected = true }
 
@@ -1559,6 +1563,195 @@ local function lint_sealed_record(ast, report, extra)
    visit(ast, nil)
 end
 
+---------------------------------------------------------------- trait-impl
+
+-- A record that `is` a `---@trait` interface has to be complete: every method of the
+-- interface is defined by the record, or supplied by a `trait.impl` call that copies in the
+-- default the trait's `---@defaults` table holds. Why it is a lint at `deny` (a missing
+-- method is a nil call at run time, on a line other than the one that caused it), the two
+-- markers and the top-level rule are the rule's explanation (`lint::explain::TRAIT_IMPL`,
+-- what `htl check --explain trait-impl` prints), not restated here.
+--
+-- What comes from the checker is the type side, `extra.trait` (prelude.lua's
+-- `trait_resolver`): which interface an `is` clause names and what its methods and their
+-- defaults are, whether a callee is `htl/trait.d.tl`'s `impl`, and which table or record an
+-- argument is, all by position and none by name. What this adds is the site, read from the
+-- syntax tree: the record's declaration, the statements of the chunk that define one of its
+-- methods or call `impl` on it, and whether each is a statement of the chunk itself -- a
+-- definition inside a function or an `if` runs when that function does, or never, and a
+-- rule that counted it would pass a record that is incomplete at load time. Those that are
+-- not counted are named in the finding they would have prevented, with the reason, so a
+-- false report carries what to change.
+--
+-- The file that declares the trait is held to its own markers on the same pass: a second
+-- `---@defaults` table of one interface, one that is not a constructor, one in a file that
+-- does not declare the interface, and a `D.m = ...` after the constructor (not a default,
+-- because the keys of the constructor are, and the rule reads the keys there).
+local function lint_trait_impl(ast, report, extra)
+   local tr = extra and extra.trait
+   if not tr then return end
+   local tops = {}
+   for _, st in ipairs(ast) do tops[st] = true end
+
+   local canonical = {} -- annotation key -> the defaults table that carries it
+   for _, t in ipairs(tr.here()) do
+      if t.foreign then
+         report("trait-impl", t.y, t.x, "`---@defaults` is read in the file that declares the trait: `" ..
+            t.iface .. "` is declared in " .. t.file .. ", so `" .. t.name ..
+            "` is not its defaults; move the table there")
+      elseif t.first then
+         report("trait-impl", t.y, t.x, "`" .. t.iface .. "` already has a `---@defaults` table, `" ..
+            t.first.name .. "` at line " .. t.first.y .. ": a trait has at most one, and the keys of " ..
+            "this one are not defaults")
+      else
+         if t.literal == false then
+            report("trait-impl", t.y, t.x, "the `---@defaults` table of `" .. t.iface ..
+               "` is not a table constructor at the top level of the file: the defaults are the keys " ..
+               "of the constructor, so `" .. t.iface .. "` has none from this table")
+         end
+         for key in pairs(t.match) do canonical[key] = t end
+      end
+   end
+
+   -- Only records declared at the top level are checked, so they are read off the chunk's
+   -- own statements; a file with none, and with no defaults table of its own, has nothing
+   -- the walk below could report, and is not walked.
+   local records, defs, calls = {}, {}, {}
+   for _, n in ipairs(ast) do
+      if n.kind == "local_type" or n.kind == "global_type" then
+         local def = n.value and n.value.newtype and n.value.newtype.def
+         if def and def.typename == "record" and def.interface_list and is_node(n.var) and n.var.tk
+            and n.y and n.x then
+            records[#records + 1] = { name = n.var.tk, node = n, def = def }
+         end
+      end
+   end
+   if #records == 0 and next(canonical) == nil then return end
+   walk(ast, function(n)
+      local k = n.kind
+      if k == "record_function" then
+         local o = n.fn_owner
+         if is_node(o) and o.tk and (o.kind == "type_identifier" or o.kind == "variable" or o.kind == "identifier")
+            and is_node(n.name) and n.name.tk then
+            defs[#defs + 1] = {
+               rec = o.tk, method = n.name.tk, y = n.y, top = tops[n] or false,
+               how = "function " .. o.tk .. (n.is_method and ":" or ".") .. n.name.tk,
+            }
+         end
+      elseif k == "assignment" then
+         for _, v in ipairs(n.vars or {}) do
+            if is_node(v) and v.kind == "op" and v.op and v.op.op == "." and is_node(v.e1)
+               and v.e1.kind == "variable" and is_node(v.e2) and v.e2.tk then
+               defs[#defs + 1] = {
+                  rec = v.e1.tk, method = v.e2.tk, y = n.y, top = tops[n] or false,
+                  how = v.e1.tk .. "." .. v.e2.tk .. " = ...",
+               }
+               local table_of = v.e1.y and v.e1.x and canonical[tr.ann_at(v.e1.y, v.e1.x)]
+               if table_of then
+                  report("trait-impl", n.y, n.x, "`" .. v.e1.tk .. "." .. v.e2.tk .. " = ...` is not a " ..
+                     "default of `" .. table_of.iface .. "`: the defaults are the keys of the table " ..
+                     "constructor of its `---@defaults` table (line " .. table_of.y .. "), and a key " ..
+                     "added afterwards is applied by nothing the rule can see")
+               end
+            end
+         end
+      elseif k == "op" and n.op and n.op.op == "@funcall" and is_node(n.e1) and n.e1.y and n.e1.x
+         and tr.impl_at(n.e1.y, n.e1.x) then
+         local a1, a2 = n.e2 and n.e2[1], n.e2 and n.e2[2]
+         if is_node(a1) and is_node(a2) and a1.y and a1.x and a2.y and a2.x then
+            calls[#calls + 1] = {
+               y = n.y, top = tops[n] or false, ann = tr.ann_at(a1.y, a1.x), rec = tr.key_at(a2.y, a2.x),
+               text = (subject_key(n.e1) or "impl") .. "(" .. (subject_key(a1) or "?") .. ", " ..
+                  (subject_key(a2) or "?") .. ")",
+               d = subject_key(a1),
+            }
+         end
+      end
+   end)
+
+   for _, rec in ipairs(records) do
+      local rkey = tr.key_at(rec.node.y, rec.node.x)
+      local traits = {}
+      for _, il in ipairs(rec.def.interface_list) do
+         local s = il.y and il.x and tr.iface_at(il.y, il.x)
+         if s then traits[#traits + 1] = s end
+      end
+      -- A record whose own type cannot be named is one the calls cannot be matched to, and
+      -- a finding that follows would be wrong whatever the file says.
+      if rkey and #traits > 0 then
+         local parts, notes, noted, seen = {}, {}, {}, {}
+         local function note(text)
+            if not noted[text] then
+               noted[text] = true
+               notes[#notes + 1] = text
+            end
+         end
+         local from_elsewhere = false
+         for _, s in ipairs(traits) do
+            for _, m in ipairs(s.methods) do
+               if not seen[m.name] then
+                  seen[m.name] = true
+                  local defined, why = false, {}
+                  for _, d in ipairs(defs) do
+                     if d.rec == rec.name and d.method == m.name then
+                        if d.top then
+                           defined = true
+                        else
+                           why[#why + 1] = "`" .. d.how .. "` at line " .. d.y ..
+                              " is not counted because it is not a top-level statement"
+                        end
+                     end
+                  end
+                  if not defined then
+                     if not m.default then
+                        parts[#parts + 1] = "`" .. m.name .. "` is not defined, and `" .. m.owner ..
+                           "` has no default for it"
+                        for _, w in ipairs(why) do note(w) end
+                     else
+                        local applied = false
+                        for _, c in ipairs(calls) do
+                           if c.rec == rkey then
+                              if c.top and c.ann and m.default.match[c.ann] then
+                                 applied = true
+                              elseif not c.top then
+                                 why[#why + 1] = "`" .. c.text .. "` at line " .. c.y ..
+                                    " is not counted because it is not a top-level statement"
+                              else
+                                 why[#why + 1] = "`" .. c.text .. "` at line " .. c.y ..
+                                    " is not counted because " .. (c.d and ("`" .. c.d .. "`") or "its first argument") ..
+                                    " is not the `---@defaults` table of `" .. m.owner .. "`"
+                              end
+                           end
+                        end
+                        if not applied then
+                           from_elsewhere = true
+                           parts[#parts + 1] = "`" .. m.name .. "` is not defined, and no top-level " ..
+                              "`trait.impl` applies `" .. m.default.name .. "`, the `---@defaults` table of `" ..
+                              m.owner .. "`, to `" .. rec.name .. "`"
+                           for _, w in ipairs(why) do note(w) end
+                        end
+                     end
+                  end
+               end
+            end
+         end
+         if #parts > 0 then
+            local names = {}
+            for _, s in ipairs(traits) do names[#names + 1] = "`" .. s.name .. "`" end
+            local msg = "`" .. rec.name .. "` is " .. table.concat(names, ", ") ..
+               ", a `---@trait` interface, and is not complete: " .. table.concat(parts, "; ") .. "."
+            -- Each note says on its own that it is not counted, and why.
+            if #notes > 0 then msg = msg .. " " .. table.concat(notes, "; ") .. "." end
+            if from_elsewhere then
+               msg = msg .. " A `trait.impl` in another file is not followed; `-- htl: allow(trait-impl)` " ..
+                  "on this line says the defaults are applied there."
+            end
+            report("trait-impl", rec.node.y, rec.node.x, msg)
+         end
+      end
+   end
+end
+
 ---------------------------------------------------------------- await-missing / await-outside-async / await-non-async / task-escape / async-as-sync-callback
 
 -- The five rules that hold a program to the `async` / `await` syntax (`[lang] async`,
@@ -2172,6 +2365,7 @@ local RULES = {
    { "await-non-async", lint_await_non_async },
    { "task-escape", lint_task_escape },
    { "async-as-sync-callback", lint_async_as_sync_callback },
+   { "trait-impl", lint_trait_impl },
 }
 
 function L.rule_names()
